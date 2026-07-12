@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -152,6 +153,47 @@ def _database_checks(connection: sqlite3.Connection) -> None:
         raise MigrationError(f"foreign_key_check failed: {foreign_keys!r}")
 
 
+def _schema_rows(connection: sqlite3.Connection) -> list[tuple[str, str, str, str | None]]:
+    return connection.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name"
+    ).fetchall()
+
+
+def _expected_schema(migrations: tuple[Migration, ...]) -> list[tuple[str, str, str, str | None]]:
+    connection = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        for migration in migrations:
+            for statement in _statements(migration.path.read_text(encoding="utf-8")):
+                connection.execute(statement)
+        return _schema_rows(connection)
+    finally:
+        connection.close()
+
+
+def _verify_schema(
+    connection: sqlite3.Connection, migrations: tuple[Migration, ...]
+) -> None:
+    actual = _schema_rows(connection)
+    expected = _expected_schema(migrations)
+    if actual != expected:
+        actual_keys = {(row[0], row[1]) for row in actual}
+        expected_keys = {(row[0], row[1]) for row in expected}
+        missing = sorted(expected_keys - actual_keys)
+        extra = sorted(actual_keys - expected_keys)
+        changed = sorted(
+            (row[0], row[1])
+            for row in expected
+            if (row[0], row[1]) in actual_keys
+            and row != next(item for item in actual if item[0:2] == row[0:2])
+        )
+        raise MigrationHashDrift(
+            "database schema differs from pinned migrations: "
+            f"missing={missing}, extra={extra}, changed={changed}"
+        )
+
+
 def apply_migrations(
     database: Path,
     *,
@@ -165,15 +207,20 @@ def apply_migrations(
     """
 
     root = Path(repo_root or repository_root()).resolve()
-    assert_privacy_preflight(root)
-    migrations = load_migrations(migration_dir)
     path = Path(database).expanduser().resolve()
+    assert_privacy_preflight(root, database_paths=(path,))
+    migrations = load_migrations(migration_dir)
     parent_existed = path.parent.exists()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Never chmod a caller-owned shared directory such as /tmp. Directories
     # created for Agentic OS state are private from their first creation.
     if not parent_existed:
         os.chmod(path.parent, 0o700)
+    parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+    if parent_mode != 0o700:
+        raise MigrationError(
+            f"database directory must have mode 0700, found {parent_mode:04o}: {path.parent}"
+        )
 
     applied: list[int] = []
     connection = _connect(path)
@@ -205,6 +252,7 @@ def apply_migrations(
                 raise
             applied.append(migration.version)
         _verify_recorded(_recorded(connection), migrations)
+        _verify_schema(connection, migrations)
         _database_checks(connection)
     finally:
         connection.close()
@@ -249,6 +297,7 @@ def verify_database(
         if set(recorded) != expected:
             missing = sorted(expected - set(recorded))
             raise MigrationError(f"database is missing migrations: {missing}")
+        _verify_schema(connection, migrations)
         _database_checks(connection)
         return tuple(sorted(recorded))
     finally:

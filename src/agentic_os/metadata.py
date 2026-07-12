@@ -59,7 +59,19 @@ def _raw_json_object(raw_json: str) -> dict[str, Any]:
     if not isinstance(raw_json, str) or not raw_json:
         raise MetadataContractError("raw external metadata is required")
     try:
-        value = json.loads(raw_json)
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise MetadataContractError(
+                        f"raw external metadata contains duplicate key: {key}"
+                    )
+                value[key] = item
+            return value
+
+        value = json.loads(raw_json, object_pairs_hook=reject_duplicate_keys)
+    except MetadataContractError:
+        raise
     except (TypeError, json.JSONDecodeError) as exc:
         raise MetadataContractError("raw external metadata is invalid JSON") from exc
     if not isinstance(value, dict):

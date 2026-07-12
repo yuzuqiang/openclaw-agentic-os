@@ -163,6 +163,30 @@ class MetadataTests(unittest.TestCase):
                     metadata_contract_version="v1",
                 )
 
+    def test_duplicate_raw_metadata_keys_are_rejected(self) -> None:
+        local = values(SESSION_FIELDS)
+        pairs = [f'"{key}":{json.dumps(value)}' for key, value in local.items()]
+        pairs.append(f'"run_id":{json.dumps(local["run_id"])}')
+        raw = "{" + ",".join(pairs) + "}"
+        with self.assertRaisesRegex(MetadataContractError, "duplicate key: run_id"):
+            validate_session_observation(
+                local=local,
+                normalized=dict(local),
+                raw_json=raw,
+                metadata_contract_version="v1",
+            )
+
+        lease = allow_values()
+        lease_pairs = [f'"{key}":{json.dumps(value)}' for key, value in lease.items()]
+        lease_pairs.append(f'"ttl_ms":{lease["ttl_ms"]}')
+        with self.assertRaisesRegex(MetadataContractError, "duplicate key: ttl_ms"):
+            validate_allow_lease_observation(
+                local=lease,
+                normalized=dict(lease),
+                raw_json="{" + ",".join(lease_pairs) + "}",
+                metadata_contract_version="v1",
+            )
+
     def test_empty_field_is_rejected(self) -> None:
         local = values(SESSION_FIELDS)
         local["task_digest"] = ""

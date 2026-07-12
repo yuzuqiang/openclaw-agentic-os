@@ -66,12 +66,38 @@ def assert_paths_retrievable(
         raise PrivacyPreflightError(f"raw database state is denied: {denied}")
 
 
-def assert_privacy_preflight(repo_root: Path) -> PrivacyPreflightResult:
+def _repo_relative_paths(repo_root: Path, paths: Iterable[Path]) -> tuple[str, ...]:
+    relative: list[str] = []
+    for path in paths:
+        resolved = Path(path).expanduser().resolve()
+        try:
+            item = resolved.relative_to(repo_root).as_posix()
+        except ValueError:
+            continue
+        relative.extend((item, f"{item}-wal", f"{item}-shm", f"{item}-journal"))
+    return tuple(dict.fromkeys(relative))
+
+
+def assert_privacy_preflight(
+    repo_root: Path, *, database_paths: Iterable[Path] = ()
+) -> PrivacyPreflightResult:
     root = Path(repo_root).resolve()
     if not (root / ".git").exists():
         raise PrivacyPreflightError(f"not a Git worktree: {root}")
-    command = ["git", "check-ignore", "--no-index", "-v", *PREFLIGHT_PATHS]
+    checked_paths = tuple(
+        dict.fromkeys((*PREFLIGHT_PATHS, *_repo_relative_paths(root, database_paths)))
+    )
+    tracked_command = ["git", "ls-files", "--", *checked_paths]
+    command = ["git", "check-ignore", "-v", "--", *checked_paths]
     try:
+        tracked = subprocess.run(
+            tracked_command,
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
         result = subprocess.run(
             command,
             cwd=root,
@@ -82,20 +108,30 @@ def assert_privacy_preflight(repo_root: Path) -> PrivacyPreflightResult:
         )
     except OSError as exc:
         raise PrivacyPreflightError(f"cannot execute git check-ignore: {exc}") from exc
+    if tracked.returncode != 0:
+        raise PrivacyPreflightError(
+            "privacy preflight failed closed: cannot inspect tracked paths: "
+            f"{tracked.stderr.strip()}"
+        )
+    if tracked.stdout.strip():
+        raise PrivacyPreflightError(
+            "privacy preflight failed closed: tracked runtime paths: "
+            f"{tracked.stdout.splitlines()}"
+        )
     matched = {
         line.rsplit("\t", 1)[-1].strip()
         for line in result.stdout.splitlines()
         if "\t" in line
     }
-    missing = [path for path in PREFLIGHT_PATHS if path not in matched]
+    missing = [path for path in checked_paths if path not in matched]
     if result.returncode != 0 or missing:
         detail = result.stderr.strip() or f"not ignored: {missing}"
         raise PrivacyPreflightError(f"privacy preflight failed closed: {detail}")
     # The same paths must be rejected by packaging/retrieval. This is the
     # expected denylist outcome, not an attempt to retrieve them.
-    not_denied = [path for path in PREFLIGHT_PATHS if not is_raw_state_denied(path)]
+    not_denied = [path for path in checked_paths if not is_raw_state_denied(path)]
     if not_denied:
         raise PrivacyPreflightError(
             f"packaging/retrieval denylist is incomplete: {not_denied}"
         )
-    return PrivacyPreflightResult(root, tuple(PREFLIGHT_PATHS))
+    return PrivacyPreflightResult(root, checked_paths)

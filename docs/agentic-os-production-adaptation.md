@@ -190,7 +190,8 @@ CREATE TABLE schema_migrations (
   name TEXT NOT NULL,
   sha256 TEXT NOT NULL,
   applied_at TEXT NOT NULL,
-  CHECK (typeof(version)='integer' AND version > 0)
+  CHECK (typeof(version)='integer' AND version > 0),
+  UNIQUE(version,sha256)
 ) STRICT;
 
 CREATE TABLE gate_clock_context (
@@ -230,7 +231,15 @@ CREATE TABLE workflow_authority (
   last_parity_audit_hash TEXT,
   open_file_authority_runs ANY NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
-  CHECK (typeof(open_file_authority_runs)='integer' AND open_file_authority_runs >= 0)
+  CHECK (typeof(open_file_authority_runs)='integer' AND open_file_authority_runs >= 0),
+  CHECK (
+    mode NOT IN ('db_authority_canary','db_authority') OR (
+      cutover_approved_by IS NOT NULL AND cutover_approved_by <> ''
+      AND cutover_evidence_hash IS NOT NULL AND cutover_evidence_hash <> ''
+      AND rollback_deadline IS NOT NULL AND rollback_deadline <> ''
+      AND last_parity_audit_hash IS NOT NULL AND last_parity_audit_hash <> ''
+    )
+  )
 ) STRICT;
 
 CREATE TABLE runs (
@@ -269,7 +278,7 @@ CREATE TABLE transitions (
   risk_dominance TEXT NOT NULL,
   idempotency_key TEXT NOT NULL UNIQUE,
   guard_version_before ANY NOT NULL,
-  gate_run_id TEXT,
+  gate_run_id TEXT REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
   evidence_hash TEXT,
   created_at TEXT NOT NULL,
   CHECK (typeof(approval_required)='integer' AND approval_required IN (0,1)),
@@ -285,6 +294,7 @@ CREATE TABLE transitions (
       AND approval_channel IS NOT NULL AND approval_channel <> ''
       AND approval_source_digest IS NOT NULL AND approval_source_digest <> ''
       AND approval_text_digest IS NOT NULL AND approval_text_digest <> ''
+      AND gate_run_id IS NOT NULL AND gate_run_id <> ''
     )
   )
 ) STRICT;
@@ -404,7 +414,7 @@ CREATE TABLE leases (
   transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
   agent_id TEXT NOT NULL,
   requester_agent_id TEXT NOT NULL,
-  state TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('acquire_pending','acquired','release_pending','released','release_not_required','expired','human_review_required')),
   gateway_lease_id TEXT,
   client_lease_id TEXT NOT NULL UNIQUE,
   acquire_idempotency_key TEXT NOT NULL UNIQUE,
@@ -413,6 +423,14 @@ CREATE TABLE leases (
   metadata_contract_version TEXT,
   metadata_observed_at TEXT,
   external_metadata_json TEXT,
+  external_client_lease_id TEXT,
+  external_idempotency_key TEXT,
+  external_run_id TEXT,
+  external_phase TEXT,
+  external_transition_id TEXT,
+  external_agent_id TEXT,
+  external_requester_agent_id TEXT,
+  external_ttl_ms ANY,
   acquire_requested_at TEXT,
   acquired_at TEXT,
   release_requested_at TEXT,
@@ -421,7 +439,34 @@ CREATE TABLE leases (
   expires_at_epoch_ms ANY NOT NULL,
   reconciliation_status TEXT NOT NULL DEFAULT 'not_needed',
   CHECK (typeof(ttl_ms)='integer' AND ttl_ms BETWEEN 1 AND 31536000000),
-  CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999)
+  CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (external_ttl_ms IS NULL OR (typeof(external_ttl_ms)='integer' AND external_ttl_ms BETWEEN 1 AND 31536000000)),
+  CHECK (
+    state NOT IN ('acquired','release_pending','released') OR COALESCE((
+      gateway_lease_id IS NOT NULL AND gateway_lease_id <> ''
+      AND metadata_contract_version IS NOT NULL AND metadata_contract_version <> ''
+      AND metadata_observed_at IS NOT NULL AND metadata_observed_at <> ''
+      AND external_metadata_json IS NOT NULL
+      AND json_valid(external_metadata_json)=1
+      AND external_client_lease_id=client_lease_id
+      AND external_idempotency_key=acquire_idempotency_key
+      AND external_run_id=run_id
+      AND external_phase=phase
+      AND external_transition_id=transition_id
+      AND external_agent_id=agent_id
+      AND external_requester_agent_id=requester_agent_id
+      AND external_ttl_ms=ttl_ms
+      AND json_extract(external_metadata_json,'$.client_lease_id')=client_lease_id
+      AND json_extract(external_metadata_json,'$.idempotency_key')=acquire_idempotency_key
+      AND json_extract(external_metadata_json,'$.run_id')=run_id
+      AND json_extract(external_metadata_json,'$.phase')=phase
+      AND json_extract(external_metadata_json,'$.transition_id')=transition_id
+      AND json_extract(external_metadata_json,'$.agent_id')=agent_id
+      AND json_extract(external_metadata_json,'$.requester_agent_id')=requester_agent_id
+      AND typeof(json_extract(external_metadata_json,'$.ttl_ms'))='integer'
+      AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
+    ),0)=1
+  )
 ) STRICT;
 
 CREATE TABLE spawn_requests (
@@ -883,12 +928,16 @@ CREATE TABLE slo_queries (
   empty_db_expected_status TEXT NOT NULL,
   fixture_db_expected_status TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  CHECK (typeof(schema_version)='integer' AND schema_version > 0)
+  CHECK (typeof(schema_version)='integer' AND schema_version > 0),
+  CHECK (length(migration_sha256)=64 AND length(query_hash)=64 AND sql_text<>''),
+  UNIQUE(query_name,schema_version,migration_sha256,query_hash),
+  FOREIGN KEY(schema_version,migration_sha256)
+    REFERENCES schema_migrations(version,sha256)
 ) STRICT;
 
 CREATE TABLE slo_audits (
   slo_audit_id TEXT PRIMARY KEY,
-  query_name TEXT NOT NULL REFERENCES slo_queries(query_name),
+  query_name TEXT NOT NULL,
   schema_version ANY NOT NULL,
   migration_sha256 TEXT NOT NULL,
   query_hash TEXT NOT NULL,
@@ -899,7 +948,10 @@ CREATE TABLE slo_audits (
   evidence_hash TEXT,
   run_at TEXT NOT NULL,
   CHECK (typeof(schema_version)='integer' AND schema_version > 0),
-  CHECK (typeof(result_count)='integer' AND result_count >= 0)
+  CHECK (typeof(result_count)='integer' AND result_count >= 0),
+  CHECK (status<>'pass' OR (empty_db_status='pass' AND fixture_db_status='pass' AND evidence_hash IS NOT NULL AND evidence_hash<>'')),
+  FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
+    REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash)
 ) STRICT;
 ```
 
@@ -1122,7 +1174,7 @@ Example SLO query contracts:
 | Exact mutating approval binding | `SELECT t.transition_id FROM transitions t JOIN gate_runs g ON g.gate_run_id=t.gate_run_id LEFT JOIN gate_clock_context c ON c.clock_context_id=g.clock_context_id LEFT JOIN approvals a ON a.approval_id=t.approval_id LEFT JOIN risk_assessments ra ON ra.transition_id=t.transition_id WHERE g.decision='pass' AND t.approval_required=1 AND (g.run_id<>t.run_id OR g.transition_id<>t.transition_id OR c.clock_context_id IS NULL OR c.gate_run_id<>g.gate_run_id OR c.run_id<>g.run_id OR c.transition_id<>t.transition_id OR typeof(c.now_epoch_ms)<>'integer' OR c.now_epoch_ms<1 OR c.now_epoch_ms>253402300799999 OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms<>c.now_epoch_ms OR a.approval_id IS NULL OR a.run_id IS NULL OR a.run_id<>t.run_id OR a.run_id<>g.run_id OR typeof(a.expires_at_epoch_ms)<>'integer' OR a.expires_at_epoch_ms<1 OR a.expires_at_epoch_ms>253402300799999 OR a.expires_at_epoch_ms<=c.now_epoch_ms OR a.consumed_by_transition_id IS NULL OR a.consumed_by_transition_id<>t.transition_id OR a.consumed_by_gate_run_id IS NULL OR a.consumed_by_gate_run_id<>g.gate_run_id OR a.approved_action_type<>t.action_type OR a.target_type<>t.target_type OR a.target_id<>t.target_id OR a.target_hash<>t.target_hash OR a.target_scope<>t.target_scope OR a.channel<>t.approval_channel OR a.source_message_digest<>t.approval_source_digest OR a.approval_text_digest<>t.approval_text_digest OR ra.assessment_id IS NULL OR CASE a.approved_risk_ceiling WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1 END < CASE t.risk_dominance WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99 END);` |
 | Reused approval id | `SELECT approval_id FROM transitions WHERE approval_id IS NOT NULL GROUP BY approval_id HAVING COUNT(*)>1;` |
 | Non-independent verifier row | `SELECT verifier_run_id FROM judge_verifier_runs WHERE same_worker_context=1 OR verifier_agent_id=worker_agent_id OR prompt_hash=context_hash OR worker_run_id IS NULL OR independence_class IN ('self','same_worker','same_context','correlated','unknown');` |
-| SLO query fixture status | `SELECT query_name FROM slo_audits WHERE status<>'pass' OR empty_db_status<>'pass' OR fixture_db_status<>'pass';` |
+| SLO query fixture status | `WITH blocking(query_name) AS (SELECT q.query_name FROM slo_queries q LEFT JOIN slo_audits a ON a.slo_audit_id=(SELECT a2.slo_audit_id FROM slo_audits a2 WHERE a2.query_name=q.query_name AND a2.schema_version=q.schema_version AND a2.migration_sha256=q.migration_sha256 AND a2.query_hash=q.query_hash ORDER BY a2.run_at DESC,a2.slo_audit_id DESC LIMIT 1) WHERE a.slo_audit_id IS NULL OR a.status<>'pass' OR a.empty_db_status<>'pass' OR a.fixture_db_status<>'pass' OR a.schema_version<>q.schema_version OR a.migration_sha256<>q.migration_sha256 OR a.query_hash<>q.query_hash UNION ALL SELECT '__slo_registry_count__' WHERE (SELECT COUNT(*) FROM slo_queries)<>30) SELECT query_name FROM blocking;` |
 
 Lineage rule: every final decision packet includes `run_id`, `authority_mode`, `transition_id`, `external_rpc_intent_id`, `budget_event_id`, `verifier_run_id`, `gate_run_id`, evidence hashes, changed artifacts/projections, approval id if any, residual risks, and rollback path.
 

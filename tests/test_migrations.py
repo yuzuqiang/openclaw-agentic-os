@@ -41,7 +41,10 @@ class MigrationTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row[0:2], (1, "minimum_contract"))
             self.assertEqual(
-                row[2], "4d74e68c0b82af1156a7d414059c0c278ae129e173eac8c04af2c9d2b571fbab"
+                row[2],
+                hashlib.sha256(
+                    (repository_root() / "migrations/0001_minimum_contract.sql").read_bytes()
+                ).hexdigest(),
             )
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone(), ("ok",))
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
@@ -128,6 +131,163 @@ class MigrationTests(unittest.TestCase):
             connection.execute("UPDATE schema_migrations SET sha256=?", ("0" * 64,))
         with self.assertRaises(MigrationHashDrift):
             apply_migrations(self.database)
+
+    def test_forged_migration_ledger_without_schema_is_refused(self) -> None:
+        migration = json.loads(
+            (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
+        )["migrations"][0]
+        for operation in (verify_database, apply_migrations):
+            database = Path(self.temporary.name) / f"forged-{operation.__name__}.db"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "CREATE TABLE schema_migrations (version ANY PRIMARY KEY,name TEXT NOT NULL,"
+                    "sha256 TEXT NOT NULL,applied_at TEXT NOT NULL,"
+                    "CHECK(typeof(version)='integer' AND version>0)) STRICT"
+                )
+                connection.execute(
+                    "INSERT INTO schema_migrations VALUES(?,?,?,?)",
+                    (migration["version"], migration["name"], migration["sha256"], "now"),
+                )
+            with self.subTest(operation=operation.__name__), self.assertRaisesRegex(
+                MigrationHashDrift, "schema differs"
+            ):
+                operation(database)
+
+    def test_schema_object_definition_drift_is_refused(self) -> None:
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("ALTER TABLE workflow_authority ADD COLUMN forged TEXT")
+        verify_target = Path(self.temporary.name) / "schema-drift-readonly.db"
+        with sqlite3.connect(self.database) as source, sqlite3.connect(verify_target) as target:
+            source.backup(target)
+        with self.assertRaisesRegex(MigrationHashDrift, "schema differs"):
+            verify_database(verify_target)
+        with self.assertRaisesRegex(MigrationHashDrift, "schema differs"):
+            apply_migrations(self.database)
+
+    def test_database_authority_requires_cutover_evidence(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        for mode in ("db_authority_canary", "db_authority"):
+            with self.subTest(mode=mode), self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO workflow_authority(workflow,mode,updated_at) VALUES(?,?,?)",
+                    (mode, mode, "now"),
+                )
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+            "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,updated_at) "
+            "VALUES('valid','db_authority','river','evidence','deadline','parity','now')"
+        )
+
+    def test_approval_transition_requires_bound_gate_run(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) "
+            "VALUES('r','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        values = (
+            "t", "r", "before", "after", "mutate", "write", "file", "id", "hash",
+            "scope", 1, "approval", "channel", "source", "text", "R1", "idem", 0, None,
+            "now",
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,target_type,target_id,target_hash,target_scope,"
+                "approval_required,approval_id,approval_channel,approval_source_digest,"
+                "approval_text_digest,risk_dominance,idempotency_key,guard_version_before,"
+                "gate_run_id,created_at) VALUES(" + ",".join("?" for _ in values) + ")",
+                values,
+            )
+
+    def test_lease_external_metadata_is_required_and_exact(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        base = (
+            "lease", "run", "phase", "transition", "agent", "requester", "acquired",
+            "gateway", "client", "idem", 60000, "expires", 2000000000000,
+        )
+        statement = (
+            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,requester_agent_id,"
+            "state,gateway_lease_id,client_lease_id,acquire_idempotency_key,ttl_ms,expires_at,"
+            "expires_at_epoch_ms) VALUES(" + ",".join("?" for _ in base) + ")"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(statement, base)
+        metadata = {
+            "client_lease_id": "client",
+            "idempotency_key": "idem-valid",
+            "run_id": "run",
+            "phase": "phase",
+            "transition_id": "transition",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+            "ttl_ms": 60000,
+        }
+        valid = (
+            "lease-valid", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway", "client-valid", "idem-valid", 60000, "v1", "now",
+            json.dumps({**metadata, "client_lease_id": "client-valid"}), "client-valid",
+            "idem-valid", "run", "phase", "transition", "agent", "requester", 60000,
+            "expires", 2000000000000,
+        )
+        connection.execute(
+            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+            "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+            "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+            "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+            "external_idempotency_key,external_run_id,external_phase,"
+            "external_transition_id,external_agent_id,external_requester_agent_id,"
+            "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+            + ",".join("?" for _ in valid) + ")",
+            valid,
+        )
+
+    def test_slo_audit_must_match_current_query_identity(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        status_query = (
+            "WITH blocking(query_name) AS ("
+            "SELECT q.query_name FROM slo_queries q LEFT JOIN slo_audits a "
+            "ON a.query_name=q.query_name AND a.schema_version=q.schema_version "
+            "AND a.migration_sha256=q.migration_sha256 AND a.query_hash=q.query_hash "
+            "WHERE a.slo_audit_id IS NULL OR a.status<>'pass' "
+            "UNION ALL SELECT '__slo_registry_count__' "
+            "WHERE (SELECT COUNT(*) FROM slo_queries)<>30) "
+            "SELECT query_name FROM blocking"
+        )
+        self.assertEqual(
+            connection.execute(status_query).fetchall(),
+            [("__slo_registry_count__",)],
+        )
+        migration_hash = json.loads(
+            (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
+        )["migrations"][0]["sha256"]
+        query_hash = "c" * 64
+        connection.execute(
+            "INSERT INTO slo_queries VALUES('q',1,?,?,'SELECT 1','pass','pass','now')",
+            (migration_hash, query_hash),
+        )
+        blocking = connection.execute(status_query).fetchall()
+        self.assertEqual(blocking, [("q",), ("__slo_registry_count__",)])
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO slo_audits VALUES('a','q',1,?,?,0,'pass','pass','pass',?,"
+                "'now')",
+                (migration_hash, "d" * 64, "e" * 64),
+            )
 
     def test_type_preserving_money_bounds(self) -> None:
         apply_migrations(self.database)
