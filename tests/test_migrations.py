@@ -335,6 +335,27 @@ class MigrationTests(unittest.TestCase):
                 values,
             )
 
+    def test_high_risk_transition_requires_approval(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) "
+            "VALUES('r','prepare','w','file_authority','candidate','R4','R4','now','now')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES("
+                "'t','r','before','after','mutate','write','R4','idem',0,'now')"
+            )
+
     def test_approval_transition_must_match_authorized_run_and_target(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -990,6 +1011,77 @@ class MigrationTests(unittest.TestCase):
                 "'idem','{}','pending','now',1000)"
             )
 
+    def test_accepted_allow_lease_acquire_requires_exact_metadata(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) "
+            "VALUES('run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'transition','run','before','after','lease','acquire','R1','transition-idem',"
+            "0,'now')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,metadata_json,state,external_id,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'missing','run','transition','allow_lease_acquire','client','idem',"
+                "'{}','accepted','gateway','now',1000)"
+            )
+        bad_metadata = json.dumps(
+            {
+                "run_id": "other",
+                "transition_id": "transition",
+                "client_request_id": "client-bad",
+                "idempotency_key": "idem-bad",
+                "gateway_lease_id": "gateway-bad",
+            }
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_transition_id,"
+                "external_client_request_id,external_idempotency_key,state,external_id,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'bad','run','transition','allow_lease_acquire','client-bad','idem-bad',"
+                "'v1','{}',?,'run','transition','client-bad','idem-bad','accepted',"
+                "'gateway-bad','now',1000)",
+                (bad_metadata,),
+            )
+        metadata = json.dumps(
+            {
+                "run_id": "run",
+                "transition_id": "transition",
+                "client_request_id": "client-ok",
+                "idempotency_key": "idem-ok",
+                "gateway_lease_id": "gateway-ok",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_client_request_id,external_idempotency_key,state,external_id,"
+            "requested_at,requested_at_epoch_ms) VALUES("
+            "'ok','run','transition','allow_lease_acquire','client-ok','idem-ok',"
+            "'v1','{}',?,'run','transition','client-ok','idem-ok','accepted',"
+            "'gateway-ok','now',1000)",
+            (metadata,),
+        )
+
     def test_budget_event_transition_must_belong_to_same_run(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -1279,6 +1371,46 @@ class MigrationTests(unittest.TestCase):
                 "'goal-run','goal','R1','open','other-plugin',"
                 "'agentic_predicate_inproc_v1',1,'now')"
             )
+        connection.execute(
+            "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+            "schema_hash,sandbox_required,sandbox_enforced,created_at) VALUES("
+            "'sandbox-plugin','sandboxed','1','agentic_predicate_inproc_v1','schema',1,1,'now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,updated_at) "
+            "VALUES('sandbox-goal','owner','R1','manifest-sandbox','sandbox-plugin',"
+            "'agentic_predicate_inproc_v1',0,1,'now','now')"
+        )
+        for goal_run_id, enforced, proof in (
+            ("sandbox-not-enforced", 0, None),
+            ("sandbox-no-proof", 1, None),
+        ):
+            with self.subTest(goal_run_id=goal_run_id), self.assertRaises(
+                sqlite3.IntegrityError
+            ):
+                connection.execute(
+                    "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
+                    "predicate_plugin_hash,backend,sandbox_enforced,sandbox_proof_hash,"
+                    "created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        goal_run_id,
+                        "sandbox-goal",
+                        "R1",
+                        "open",
+                        "sandbox-plugin",
+                        "agentic_predicate_inproc_v1",
+                        enforced,
+                        proof,
+                        "now",
+                    ),
+                )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,sandbox_proof_hash,created_at) "
+            "VALUES('sandbox-ok','sandbox-goal','R1','open','sandbox-plugin',"
+            "'agentic_predicate_inproc_v1',1,'sandbox-proof','now')"
+        )
 
     def test_verifier_independence_class_is_allowlisted(self) -> None:
         apply_migrations(self.database)
@@ -1388,6 +1520,234 @@ class MigrationTests(unittest.TestCase):
                 "WHERE zero_reserve_policy_id='policy'"
             )
 
+    def test_budget_slos_count_reserved_plus_consumed_against_budget(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        for run_id in ("counter-run", "ledger-run"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES(?, ?, "
+                "'w','file_authority','candidate','R1','R1','now','now')",
+                (run_id, f"prepare-{run_id}"),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?, ?, 'before','after',"
+                "'budget','reserve','R1', ?, 0,'now')",
+                (f"transition-{run_id}", run_id, f"idem-{run_id}"),
+            )
+        statement = (
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,selected_cost_confidence,"
+            "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+            "output_token_budget,cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,consumed_input_tokens,usage_confidence,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                statement,
+                (
+                    "counter-run",
+                    "w",
+                    "capability",
+                    "provider",
+                    "model",
+                    "endpoint",
+                    "cost-row",
+                    "effective",
+                    "cost-hash",
+                    "known",
+                    "transition-counter-run",
+                    10,
+                    10,
+                    10,
+                    10,
+                    1,
+                    1,
+                    6,
+                    5,
+                    "known",
+                    "now",
+                ),
+            )
+        connection.execute("PRAGMA ignore_check_constraints=ON")
+        connection.execute(
+            statement,
+            (
+                "counter-run",
+                "w",
+                "capability",
+                "provider",
+                "model",
+                "endpoint",
+                "cost-row",
+                "effective",
+                "cost-hash",
+                "known",
+                "transition-counter-run",
+                10,
+                10,
+                10,
+                10,
+                1,
+                1,
+                6,
+                5,
+                "known",
+                "now",
+            ),
+        )
+        connection.execute(
+            statement,
+            (
+                "ledger-run",
+                "w",
+                "capability",
+                "provider",
+                "model",
+                "endpoint",
+                "cost-row",
+                "effective",
+                "cost-hash",
+                "known",
+                "transition-ledger-run",
+                10,
+                10,
+                10,
+                10,
+                1,
+                1,
+                10,
+                10,
+                "known",
+                "now",
+            ),
+        )
+        for event_id, sequence, event_type, amount in (
+            ("ledger-reserve-1", 1, "reserve", 10),
+            ("ledger-consume", 2, "consume", 10),
+            ("ledger-reserve-2", 3, "reserve", 10),
+        ):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+                "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,input_tokens,"
+                "usage_confidence,source,created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'ledger-run','transition-ledger-run','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known',?,?,'known',"
+                "'test','now',?)",
+                (
+                    event_id,
+                    f"idem-{event_id}",
+                    f"dedupe-{event_id}",
+                    sequence,
+                    event_type,
+                    amount,
+                    1000 + sequence,
+                ),
+            )
+        connection.execute("PRAGMA ignore_check_constraints=OFF")
+        counters_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget counters outside selected budget"
+        )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        self.assertIn(("counter-run",), connection.execute(counters_query).fetchall())
+        self.assertIn(("ledger-run",), connection.execute(ledger_query).fetchall())
+
+    def test_unknown_usage_blocks_promoted_run_states(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        for state in ("gate_passed", "release_pending", "finalized"):
+            run_id = f"run-{state}"
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES(?, ?, "
+                "'w','file_authority',?,'R1','R1','now','now')",
+                (run_id, f"prepare-{state}", state),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?, ?, 'before','after',"
+                "'budget','reserve','R1', ?, 0,'now')",
+                (f"transition-{state}", run_id, f"idem-{state}"),
+            )
+            connection.execute(
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+                "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+                "selected_cost_effective_at,selected_cost_registry_hash,"
+                "selected_cost_confidence,selected_reserve_transition_id,"
+                "time_budget_seconds,input_token_budget,output_token_budget,"
+                "cost_budget_microusd,retry_budget,human_attention_budget,"
+                "usage_confidence,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    "w",
+                    "capability",
+                    "provider",
+                    "model",
+                    "endpoint",
+                    "cost-row",
+                    "effective",
+                    "cost-hash",
+                    "known",
+                    f"transition-{state}",
+                    10,
+                    10,
+                    10,
+                    10,
+                    1,
+                    1,
+                    "unknown",
+                    "now",
+                ),
+            )
+        query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Unknown usage blocks auto-local"
+        )
+        self.assertEqual(
+            {row[0] for row in connection.execute(query).fetchall()},
+            {"run-gate_passed", "run-release_pending", "run-finalized"},
+        )
+
     def test_readme_migration_example_uses_private_test_database(self) -> None:
         readme = (repository_root() / "README.md").read_text(encoding="utf-8")
         self.assertIn("agentic_os.cli migrate --test-db", readme)
@@ -1424,10 +1784,16 @@ class MigrationTests(unittest.TestCase):
         }
         self.assertEqual(len(actual), SLO_QUERY_COUNT)
         self.assertEqual(actual, expected)
+        initial_blockers = {row[0] for row in connection.execute(status_query).fetchall()}
         self.assertEqual(
-            {row[0] for row in connection.execute(status_query).fetchall()},
-            {contract.query_name for contract in SLO_QUERY_CONTRACTS},
+            initial_blockers,
+            {
+                contract.query_name
+                for contract in SLO_QUERY_CONTRACTS
+                if contract.query_name != "SLO query fixture status"
+            },
         )
+        self.assertNotIn("SLO query fixture status", initial_blockers)
         contract = SLO_QUERY_CONTRACTS[0]
         query_hash = slo_query_hash(contract.sql_text)
         with self.assertRaises(sqlite3.IntegrityError):

@@ -173,6 +173,8 @@ CREATE TABLE transitions (
   created_at TEXT NOT NULL,
   CHECK (typeof(approval_required)='integer' AND approval_required IN (0,1)),
   CHECK (typeof(guard_version_before)='integer' AND guard_version_before >= 0),
+  CHECK (risk_dominance IN ('R0','R1','R2','R3','R4')),
+  CHECK (risk_dominance NOT IN ('R3','R4') OR approval_required=1),
   CHECK (
     approval_required = 0 OR (
       approval_id IS NOT NULL
@@ -301,6 +303,46 @@ CREATE TABLE external_rpc_intents (
           AND external_phase = phase
           AND external_agent_id = agent_id
           AND external_task_digest = task_digest
+        THEN 1 ELSE 0 END
+      ELSE 0 END
+  ),
+  CHECK (
+    rpc_kind <> 'allow_lease_acquire'
+    OR state IN ('pending','unknown','failed','human_review_required')
+    OR (
+      metadata_contract_version IS NOT NULL AND metadata_contract_version <> ''
+      AND external_metadata_json IS NOT NULL AND json_valid(external_metadata_json)
+      AND external_id IS NOT NULL AND external_id <> ''
+      AND external_run_id = run_id
+      AND external_transition_id = transition_id
+      AND external_client_request_id = client_request_id
+      AND external_idempotency_key = idempotency_key
+    )
+  ),
+  CHECK (
+    rpc_kind <> 'allow_lease_acquire'
+    OR external_metadata_json IS NULL
+    OR CASE
+      WHEN json_valid(external_metadata_json) THEN CASE
+        WHEN json_type(external_metadata_json,'$.run_id')='text'
+          AND json_type(external_metadata_json,'$.transition_id')='text'
+          AND json_type(external_metadata_json,'$.client_request_id')='text'
+          AND json_type(external_metadata_json,'$.idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
+          AND json_extract(external_metadata_json,'$.run_id') <> ''
+          AND json_extract(external_metadata_json,'$.transition_id') <> ''
+          AND json_extract(external_metadata_json,'$.client_request_id') <> ''
+          AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
+          AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
+          AND json_extract(external_metadata_json,'$.run_id') = run_id
+          AND json_extract(external_metadata_json,'$.transition_id') = transition_id
+          AND json_extract(external_metadata_json,'$.client_request_id') = client_request_id
+          AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.gateway_lease_id') = external_id
+          AND external_run_id = run_id
+          AND external_transition_id = transition_id
+          AND external_client_request_id = client_request_id
+          AND external_idempotency_key = idempotency_key
         THEN 1 ELSE 0 END
       ELSE 0 END
   ),
@@ -872,6 +914,12 @@ CREATE TABLE run_budgets (
   CHECK (typeof(consumed_cost_microusd)='integer' AND consumed_cost_microusd >= 0 AND consumed_cost_microusd <= cost_budget_microusd),
   CHECK (typeof(consumed_retries)='integer' AND consumed_retries >= 0 AND consumed_retries <= retry_budget),
   CHECK (typeof(consumed_human_attention)='integer' AND consumed_human_attention >= 0 AND consumed_human_attention <= human_attention_budget),
+  CHECK (reserved_time_seconds + consumed_time_seconds <= time_budget_seconds),
+  CHECK (reserved_input_tokens + consumed_input_tokens <= input_token_budget),
+  CHECK (reserved_output_tokens + consumed_output_tokens <= output_token_budget),
+  CHECK (reserved_cost_microusd + consumed_cost_microusd <= cost_budget_microusd),
+  CHECK (reserved_retries + consumed_retries <= retry_budget),
+  CHECK (reserved_human_attention + consumed_human_attention <= human_attention_budget),
   FOREIGN KEY(selected_reserve_transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
@@ -1223,6 +1271,56 @@ CREATE TABLE goal_runs (
   FOREIGN KEY(predicate_plugin_hash,backend)
     REFERENCES predicate_plugins(predicate_plugin_hash,backend)
 ) STRICT;
+
+CREATE TRIGGER goal_runs_validate_sandbox_insert
+AFTER INSERT ON goal_runs
+WHEN EXISTS (
+  SELECT 1 FROM predicate_plugins p
+  WHERE p.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND p.backend=NEW.backend
+    AND p.sandbox_required=1
+    AND (
+      NEW.sandbox_enforced<>1
+      OR NEW.sandbox_proof_hash IS NULL
+      OR NEW.sandbox_proof_hash=''
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'sandbox-required goal run requires enforced sandbox proof');
+END;
+
+CREATE TRIGGER goal_runs_validate_sandbox_update
+AFTER UPDATE OF predicate_plugin_hash, backend, sandbox_enforced, sandbox_proof_hash ON goal_runs
+WHEN EXISTS (
+  SELECT 1 FROM predicate_plugins p
+  WHERE p.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND p.backend=NEW.backend
+    AND p.sandbox_required=1
+    AND (
+      NEW.sandbox_enforced<>1
+      OR NEW.sandbox_proof_hash IS NULL
+      OR NEW.sandbox_proof_hash=''
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'sandbox-required goal run requires enforced sandbox proof');
+END;
+
+CREATE TRIGGER predicate_plugins_validate_referenced_goal_runs_update
+AFTER UPDATE OF sandbox_required, predicate_plugin_hash, backend ON predicate_plugins
+WHEN NEW.sandbox_required=1 AND EXISTS (
+  SELECT 1 FROM goal_runs gr
+  WHERE gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gr.backend=NEW.backend
+    AND (
+      gr.sandbox_enforced<>1
+      OR gr.sandbox_proof_hash IS NULL
+      OR gr.sandbox_proof_hash=''
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'sandbox-required plugin has goal runs without sandbox proof');
+END;
 
 CREATE TABLE approvals (
   approval_id TEXT PRIMARY KEY,
