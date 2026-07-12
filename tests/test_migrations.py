@@ -1224,6 +1224,13 @@ class MigrationTests(unittest.TestCase):
             "'verifier-b','run-b','worker','verifier','provider','model','prompt','context',"
             "'evidence-b','independent','{}','now')"
         )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES("
+            "'verifier-a','run-a','worker','verifier','provider','model','prompt','context',"
+            "'evidence-a','independent','{}','now')"
+        )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
@@ -1239,6 +1246,24 @@ class MigrationTests(unittest.TestCase):
                 "migration_sha256,risk_dominance,created_at) VALUES("
                 "'gate-transition','run-a','transition-run-b','clock-transition','fail','now',"
                 "1000,'v1','query','migration','R1','now')"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+                "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+                "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+                "VALUES('pass-bad-risk','run-a','transition-run-a','clock-pass-bad-risk',"
+                "'verifier-a','pass','now',1000,'v1','query','migration','evidence-a',"
+                "'NOT_A_RISK','now')"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "risk dominance"):
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+                "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+                "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+                "VALUES('pass-low-risk','run-a','transition-run-a','clock-pass-low-risk',"
+                "'verifier-a','pass','now',1000,'v1','query','migration','evidence-a',"
+                "'R2','now')"
             )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
