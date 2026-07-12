@@ -15,8 +15,12 @@ The initial design artifact has passed dual independent design acceptance. This 
 
 - `main` contains reviewed project state.
 - Implementation work should use focused branches and pull requests.
+- Every PR must wait for a completed GitHub Codex review; any P0/P1 finding blocks merge.
+- After Codex is clean, River performs the final audit and merges into `main`.
 - Design changes must preserve executable DDL/SLO validation and adversarial fixtures.
 - Production readiness must be backed by runtime evidence, not document-only acceptance.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for the enforced review workflow and review guidance.
 
 ## License
 
