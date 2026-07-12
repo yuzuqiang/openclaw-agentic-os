@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from importlib import resources
 import shutil
 import sqlite3
 import tempfile
@@ -13,6 +14,7 @@ from agentic_os.migrations import (
     MigrationError,
     MigrationHashDrift,
     apply_migrations,
+    load_migrations,
     repository_root,
     verify_database,
 )
@@ -63,6 +65,16 @@ class MigrationTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
                 (SLO_QUERY_COUNT,),
             )
+
+    def test_packaged_migration_assets_match_repository_assets(self) -> None:
+        asset_root = resources.files("agentic_os.migration_assets")
+        for filename in ("manifest.json", "0001_minimum_contract.sql"):
+            with self.subTest(filename=filename):
+                self.assertEqual(
+                    (asset_root / filename).read_bytes(),
+                    (repository_root() / "migrations" / filename).read_bytes(),
+                )
+        self.assertEqual(load_migrations()[0].sha256, load_migrations(repository_root() / "migrations")[0].sha256)
 
     def test_verify_is_read_only_and_creates_no_sidecars(self) -> None:
         apply_migrations(self.database)
@@ -1278,6 +1290,53 @@ class MigrationTests(unittest.TestCase):
             "'application/json','none','run','verifier','gate','now')"
         )
 
+    def test_gate_evidence_slo_requires_claimed_evidence_hash(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'transition','run','before','after','gate','check','R1','transition-idem',"
+            "0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES("
+            "'verifier','run','worker','verifier','provider','model','prompt','context',"
+            "'claimed','independent','{}','now')"
+        )
+        connection.execute(
+            "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+            "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+            "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+            "VALUES('gate','run','transition','clock','verifier','pass','now',1000,"
+            "'v1','query','migration','claimed','R1','now')"
+        )
+        connection.execute(
+            "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,size_bytes,"
+            "content_type,redaction_status,producer_run_id,verifier_run_id,gate_run_id,"
+            "captured_at) VALUES('other','run','other.json','sha-other',1,"
+            "'application/json','none','run','verifier','gate','now')"
+        )
+        query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Gate evidence bound to same run"
+        )
+        self.assertEqual(connection.execute(query).fetchall(), [("gate",)])
+
     def test_risk_assessment_transition_must_belong_to_same_run(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -1308,6 +1367,26 @@ class MigrationTests(unittest.TestCase):
                 "irreversibility_risk,risk_dominance,assessed_at) VALUES("
                 "'assessment','run-a','transition-run-b','R1','R1','R1','R1','R1','R1',"
                 "'R1','now')"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "risk assessment"):
+            connection.execute(
+                "INSERT INTO risk_assessments(assessment_id,run_id,transition_id,"
+                "action_risk,target_risk,data_risk,side_effect_risk,permission_risk,"
+                "irreversibility_risk,risk_dominance,assessed_at) VALUES("
+                "'high-assessment','run-a','transition-run-a','R4','R4','R4','R4',"
+                "'R4','R4','R4','now')"
+            )
+        connection.execute(
+            "INSERT INTO risk_assessments(assessment_id,run_id,transition_id,"
+            "action_risk,target_risk,data_risk,side_effect_risk,permission_risk,"
+            "irreversibility_risk,risk_dominance,assessed_at) VALUES("
+            "'matched-assessment','run-a','transition-run-a','R1','R1','R1','R1',"
+            "'R1','R1','R1','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "transition risk"):
+            connection.execute(
+                "UPDATE transitions SET risk_dominance='R2' "
+                "WHERE transition_id='transition-run-a'"
             )
 
     def test_predicate_backend_is_allowlisted(self) -> None:
@@ -1677,6 +1756,42 @@ class MigrationTests(unittest.TestCase):
         self.assertIn(("counter-run",), connection.execute(counters_query).fetchall())
         self.assertIn(("ledger-run",), connection.execute(ledger_query).fetchall())
 
+    def test_budget_ledger_slo_rejects_events_without_run_budget(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'missing-budget','prepare','w','file_authority','candidate','R1','R1',"
+            "'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition','missing-budget',"
+            "'before','after','budget','reserve','R1','transition-idem',0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+            "event_dedupe_hash,event_sequence,run_id,transition_id,capability_class,"
+            "event_type,human_attention_units,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('event','event-idem','event-dedupe',1,"
+            "'missing-budget','transition','capability','human_attention',1,'known',"
+            "'test','now',1000)"
+        )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        self.assertEqual(connection.execute(ledger_query).fetchall(), [("missing-budget",)])
+
     def test_unknown_usage_blocks_promoted_run_states(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -1738,6 +1853,40 @@ class MigrationTests(unittest.TestCase):
                     "now",
                 ),
             )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run-event-unknown','prepare-event-unknown','w','file_authority',"
+            "'release_pending','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition-event-unknown',"
+            "'run-event-unknown','before','after','budget','reserve','R1',"
+            "'idem-event-unknown',0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "usage_confidence,updated_at) VALUES('run-event-unknown','w','capability',"
+            "'provider','model','endpoint','cost-row','effective','cost-hash','known',"
+            "'transition-event-unknown',10,10,10,10,1,1,'known','now')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+            "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+            "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
+            "cost_registry_hash,cost_confidence,event_type,input_tokens,usage_confidence,"
+            "source,created_at,created_at_epoch_ms) VALUES('unknown-event','idem-unknown',"
+            "'dedupe-unknown',1,'run-event-unknown','transition-event-unknown','provider',"
+            "'model','endpoint','capability','cost-row','effective','cost-hash','known',"
+            "'reserve',1,'unknown','test','now',1000)"
+        )
         query = next(
             contract.sql_text
             for contract in SLO_QUERY_CONTRACTS
@@ -1745,7 +1894,12 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(
             {row[0] for row in connection.execute(query).fetchall()},
-            {"run-gate_passed", "run-release_pending", "run-finalized"},
+            {
+                "run-gate_passed",
+                "run-release_pending",
+                "run-finalized",
+                "run-event-unknown",
+            },
         )
 
     def test_readme_migration_example_uses_private_test_database(self) -> None:
@@ -1851,6 +2005,42 @@ class MigrationTests(unittest.TestCase):
                 "UPDATE slo_queries SET query_hash=? WHERE query_name=?",
                 ("f" * 64, contract.query_name),
             )
+
+    def test_slo_registry_allows_same_query_name_for_new_schema_version(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        contract = SLO_QUERY_CONTRACTS[0]
+        migration_sha = "2" * 64
+        query_hash = "3" * 64
+        connection.execute(
+            "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
+            "VALUES(2,'future_contract',?,'now')",
+            (migration_sha,),
+        )
+        connection.execute(
+            "INSERT INTO slo_queries(query_name,schema_version,migration_sha256,"
+            "query_hash,sql_text,empty_db_expected_status,fixture_db_expected_status,"
+            "created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                contract.query_name,
+                2,
+                migration_sha,
+                query_hash,
+                "SELECT 1;",
+                "pass",
+                "pass",
+                "now",
+            ),
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
+                (contract.query_name,),
+            ).fetchone(),
+            (2,),
+        )
 
     def test_slo_registry_delete_is_refused(self) -> None:
         apply_migrations(self.database)

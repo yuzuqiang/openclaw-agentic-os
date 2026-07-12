@@ -9,6 +9,8 @@ import sqlite3
 import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import resources
+from importlib.abc import Traversable
 from pathlib import Path
 from typing import Iterator
 
@@ -28,7 +30,7 @@ class MigrationHashDrift(MigrationError):
 class Migration:
     version: int
     name: str
-    path: Path
+    path: Path | Traversable
     sha256: str
 
 
@@ -36,7 +38,11 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _sha256(path: Path) -> str:
+def _default_migration_dir() -> Traversable:
+    return resources.files("agentic_os.migration_assets")
+
+
+def _sha256(path: Path | Traversable) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -45,7 +51,11 @@ def _sha256(path: Path) -> str:
 
 
 def load_migrations(migration_dir: Path | None = None) -> tuple[Migration, ...]:
-    directory = Path(migration_dir or repository_root() / "migrations")
+    directory: Path | Traversable
+    if migration_dir is None:
+        directory = _default_migration_dir()
+    else:
+        directory = Path(migration_dir)
     try:
         manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
         rows = manifest["migrations"]
@@ -195,14 +205,16 @@ def _verify_schema(
         )
 
 
-def _expected_slo_rows(migration: Migration) -> dict[str, tuple[object, ...]]:
+def _expected_slo_rows(migration: Migration) -> dict[tuple[object, ...], tuple[object, ...]]:
     if SLO_QUERY_COUNT != 30:
         raise MigrationError(f"expected 30 required SLO queries, found {SLO_QUERY_COUNT}")
     return {
-        contract.query_name: (
+        (
+            contract.query_name,
             migration.version,
             migration.sha256,
             slo_query_hash(contract.sql_text),
+        ): (
             contract.sql_text,
             contract.empty_db_expected_status,
             contract.fixture_db_expected_status,
@@ -236,14 +248,15 @@ def _verify_slo_queries(
 ) -> None:
     if not migrations:
         return
-    migration = migrations[0]
-    expected = _expected_slo_rows(migration)
+    expected: dict[tuple[object, ...], tuple[object, ...]] = {}
+    for migration in migrations:
+        expected.update(_expected_slo_rows(migration))
     rows = connection.execute(
         "SELECT query_name,schema_version,migration_sha256,query_hash,sql_text,"
         "empty_db_expected_status,fixture_db_expected_status FROM slo_queries "
-        "ORDER BY query_name"
+        "ORDER BY query_name,schema_version,migration_sha256,query_hash"
     ).fetchall()
-    actual = {row[0]: row[1:] for row in rows}
+    actual = {row[0:4]: row[4:] for row in rows}
     if actual != expected:
         missing = sorted(set(expected) - set(actual))
         extra = sorted(set(actual) - set(expected))
