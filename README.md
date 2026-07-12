@@ -7,7 +7,7 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 The initial design artifact has passed dual independent design acceptance. This does **not** prove production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
-- Accepted document SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
+- Current design-contract SHA-256: `6fc9b66175bdb622fce591fa096078bd50b3cc631eae5e9de67753bdea898e11`
 - Design contract: 27 SQLite tables, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -22,8 +22,8 @@ The package has no runtime dependencies outside Python's standard library.
 
 ```bash
 PYTHONPATH=src python3 -m agentic_os.cli preflight
-PYTHONPATH=src python3 -m agentic_os.cli migrate --db /tmp/agentic-os-test.db
-PYTHONPATH=src python3 -m agentic_os.cli verify --db /tmp/agentic-os-offline-snapshot.db
+PYTHONPATH=src python3 -m agentic_os.cli migrate --test-db
+PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 

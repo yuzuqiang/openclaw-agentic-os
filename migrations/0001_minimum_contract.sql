@@ -25,7 +25,8 @@ CREATE TABLE gate_clock_context (
   CHECK (typeof(consumed_at_epoch_ms)='integer' AND consumed_at_epoch_ms = now_epoch_ms),
   CHECK (gate_run_id = consumed_by_gate_run_id),
   CHECK (clock_context_id <> '' AND gate_run_id <> '' AND run_id <> '' AND transition_id <> ''),
-  CHECK (gate_nonce <> '' AND bound_by <> '' AND trusted_clock_source_hash <> '')
+  CHECK (gate_nonce <> '' AND bound_by <> '' AND trusted_clock_source_hash <> ''),
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
 CREATE TABLE workflow_authority (
@@ -52,7 +53,8 @@ CREATE TABLE workflow_authority (
       AND rollback_deadline IS NOT NULL AND rollback_deadline <> ''
       AND last_parity_audit_hash IS NOT NULL AND last_parity_audit_hash <> ''
     )
-  )
+  ),
+  UNIQUE(workflow,mode)
 ) STRICT;
 
 CREATE TABLE runs (
@@ -69,7 +71,8 @@ CREATE TABLE runs (
   finalized_at TEXT,
   finalized_at_epoch_ms ANY,
   CHECK (typeof(state_version)='integer' AND state_version >= 0),
-  CHECK (finalized_at_epoch_ms IS NULL OR (typeof(finalized_at_epoch_ms)='integer' AND finalized_at_epoch_ms BETWEEN 1 AND 253402300799999))
+  CHECK (finalized_at_epoch_ms IS NULL OR (typeof(finalized_at_epoch_ms)='integer' AND finalized_at_epoch_ms BETWEEN 1 AND 253402300799999)),
+  FOREIGN KEY(workflow,authority_mode) REFERENCES workflow_authority(workflow,mode)
 ) STRICT;
 
 CREATE TABLE transitions (
@@ -109,7 +112,8 @@ CREATE TABLE transitions (
       AND approval_text_digest IS NOT NULL AND approval_text_digest <> ''
       AND gate_run_id IS NOT NULL AND gate_run_id <> ''
     )
-  )
+  ),
+  UNIQUE(transition_id,run_id)
 ) STRICT;
 
 CREATE TABLE external_rpc_intents (
@@ -199,6 +203,7 @@ CREATE TABLE external_rpc_intents (
         THEN 1 ELSE 0 END
       ELSE 0 END
   ),
+  CHECK (external_metadata_json IS NULL OR json_valid(external_metadata_json)=1),
   FOREIGN KEY (
     spawn_request_id,
     run_id,
@@ -254,6 +259,7 @@ CREATE TABLE leases (
   CHECK (typeof(ttl_ms)='integer' AND ttl_ms BETWEEN 1 AND 31536000000),
   CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (external_ttl_ms IS NULL OR (typeof(external_ttl_ms)='integer' AND external_ttl_ms BETWEEN 1 AND 31536000000)),
+  CHECK (external_metadata_json IS NULL OR json_valid(external_metadata_json)=1),
   CHECK (
     state NOT IN ('acquired','release_pending','released') OR COALESCE((
       gateway_lease_id IS NOT NULL AND gateway_lease_id <> ''
@@ -281,6 +287,42 @@ CREATE TABLE leases (
     ),0)=1
   )
 ) STRICT;
+
+CREATE TRIGGER external_rpc_intents_reject_duplicate_metadata_insert
+BEFORE INSERT ON external_rpc_intents
+WHEN NEW.external_metadata_json IS NOT NULL AND EXISTS (
+  SELECT 1 FROM json_each(NEW.external_metadata_json) GROUP BY key HAVING COUNT(*) > 1
+)
+BEGIN
+  SELECT RAISE(ABORT,'duplicate external metadata key');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_duplicate_metadata_update
+BEFORE UPDATE OF external_metadata_json ON external_rpc_intents
+WHEN NEW.external_metadata_json IS NOT NULL AND EXISTS (
+  SELECT 1 FROM json_each(NEW.external_metadata_json) GROUP BY key HAVING COUNT(*) > 1
+)
+BEGIN
+  SELECT RAISE(ABORT,'duplicate external metadata key');
+END;
+
+CREATE TRIGGER leases_reject_duplicate_metadata_insert
+BEFORE INSERT ON leases
+WHEN NEW.external_metadata_json IS NOT NULL AND EXISTS (
+  SELECT 1 FROM json_each(NEW.external_metadata_json) GROUP BY key HAVING COUNT(*) > 1
+)
+BEGIN
+  SELECT RAISE(ABORT,'duplicate external metadata key');
+END;
+
+CREATE TRIGGER leases_reject_duplicate_metadata_update
+BEFORE UPDATE OF external_metadata_json ON leases
+WHEN NEW.external_metadata_json IS NOT NULL AND EXISTS (
+  SELECT 1 FROM json_each(NEW.external_metadata_json) GROUP BY key HAVING COUNT(*) > 1
+)
+BEGIN
+  SELECT RAISE(ABORT,'duplicate external metadata key');
+END;
 
 CREATE TABLE spawn_requests (
   spawn_request_id TEXT PRIMARY KEY,
@@ -311,6 +353,17 @@ CREATE TABLE spawn_requests (
     phase,
     agent_id,
     task_digest
+  ),
+  UNIQUE(
+    spawn_request_id,
+    run_id,
+    transition_id,
+    client_request_id,
+    spawn_idempotency_key,
+    phase,
+    agent_id,
+    task_digest,
+    session_key
   )
 ) STRICT;
 
@@ -342,7 +395,8 @@ CREATE TABLE sessions (
     spawn_idempotency_key,
     phase,
     agent_id,
-    task_digest
+    task_digest,
+    session_key
   ) REFERENCES spawn_requests(
     spawn_request_id,
     run_id,
@@ -351,7 +405,8 @@ CREATE TABLE sessions (
     spawn_idempotency_key,
     phase,
     agent_id,
-    task_digest
+    task_digest,
+    session_key
   ) ON DELETE CASCADE
 ) STRICT;
 
@@ -497,6 +552,7 @@ CREATE TABLE budget_events (
     )
   ),
   CHECK (zero_reserve_policy_id IS NULL OR (zero_reserve_policy_hash IS NOT NULL AND zero_reserve_policy_hash <> '')),
+  CHECK (zero_reserve_policy_id IS NULL OR event_type='reserve'),
   CHECK (zero_reserve_policy_id IS NULL OR (input_tokens=0 AND output_tokens=0 AND cost_microusd=0)),
   CHECK (
     event_type = 'human_attention' OR (
@@ -510,6 +566,51 @@ CREATE TABLE budget_events (
     )
   )
 ) STRICT;
+
+CREATE TRIGGER budget_events_validate_zero_reserve_insert
+BEFORE INSERT ON budget_events
+WHEN NEW.zero_reserve_policy_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM endpoint_zero_reserve_policies p
+  WHERE p.zero_reserve_policy_id=NEW.zero_reserve_policy_id
+    AND p.policy_hash=NEW.zero_reserve_policy_hash
+    AND p.endpoint_binding_id=NEW.endpoint_binding_id
+    AND p.capability_class=NEW.capability_class
+    AND p.enabled=1
+    AND NEW.created_at_epoch_ms BETWEEN p.effective_from_epoch_ms AND p.effective_until_epoch_ms
+    AND NEW.retry_units>=p.min_retry_units
+    AND NEW.time_seconds>=p.min_time_seconds
+    AND NEW.human_attention_units>=p.min_human_attention_units
+)
+BEGIN
+  SELECT RAISE(ABORT,'zero reserve policy mismatch or minima not met');
+END;
+
+CREATE TRIGGER budget_events_validate_zero_reserve_update
+BEFORE UPDATE ON budget_events
+WHEN NEW.zero_reserve_policy_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM endpoint_zero_reserve_policies p
+  WHERE p.zero_reserve_policy_id=NEW.zero_reserve_policy_id
+    AND p.policy_hash=NEW.zero_reserve_policy_hash
+    AND p.endpoint_binding_id=NEW.endpoint_binding_id
+    AND p.capability_class=NEW.capability_class
+    AND p.enabled=1
+    AND NEW.created_at_epoch_ms BETWEEN p.effective_from_epoch_ms AND p.effective_until_epoch_ms
+    AND NEW.retry_units>=p.min_retry_units
+    AND NEW.time_seconds>=p.min_time_seconds
+    AND NEW.human_attention_units>=p.min_human_attention_units
+)
+BEGIN
+  SELECT RAISE(ABORT,'zero reserve policy mismatch or minima not met');
+END;
+
+CREATE TRIGGER endpoint_zero_reserve_policies_reject_referenced_update
+BEFORE UPDATE ON endpoint_zero_reserve_policies
+WHEN EXISTS (
+  SELECT 1 FROM budget_events WHERE zero_reserve_policy_id=OLD.zero_reserve_policy_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced zero reserve policy is immutable');
+END;
 
 CREATE TABLE model_cost_registry (
   cost_registry_id TEXT PRIMARY KEY,
@@ -532,7 +633,7 @@ CREATE TABLE predicate_plugins (
   predicate_plugin_hash TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   version TEXT NOT NULL,
-  backend TEXT NOT NULL,
+  backend TEXT NOT NULL CHECK (backend='agentic_predicate_inproc_v1'),
   schema_hash TEXT NOT NULL,
   sandbox_required ANY NOT NULL,
   sandbox_enforced ANY NOT NULL,
@@ -542,7 +643,8 @@ CREATE TABLE predicate_plugins (
   created_at TEXT NOT NULL,
   CHECK (typeof(sandbox_required)='integer' AND sandbox_required IN (0,1)),
   CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
-  CHECK (typeof(sensitive)='integer' AND sensitive IN (0,1))
+  CHECK (typeof(sensitive)='integer' AND sensitive IN (0,1)),
+  UNIQUE(predicate_plugin_hash,backend)
 ) STRICT;
 
 CREATE TABLE goal_manifests (
@@ -557,7 +659,9 @@ CREATE TABLE goal_manifests (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   CHECK (typeof(approval_required)='integer' AND approval_required IN (0,1)),
-  CHECK (typeof(enabled)='integer' AND enabled IN (0,1))
+  CHECK (typeof(enabled)='integer' AND enabled IN (0,1)),
+  FOREIGN KEY(predicate_plugin_hash,backend)
+    REFERENCES predicate_plugins(predicate_plugin_hash,backend)
 ) STRICT;
 
 CREATE TABLE goal_runs (
@@ -574,7 +678,9 @@ CREATE TABLE goal_runs (
   approval_id TEXT,
   evidence_hash TEXT,
   created_at TEXT NOT NULL,
-  CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1))
+  CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
+  FOREIGN KEY(predicate_plugin_hash,backend)
+    REFERENCES predicate_plugins(predicate_plugin_hash,backend)
 ) STRICT;
 
 CREATE TABLE approvals (
@@ -621,7 +727,8 @@ CREATE TABLE judge_verifier_runs (
   independence_proof_json TEXT NOT NULL,
   same_worker_context ANY NOT NULL DEFAULT 0,
   completed_at TEXT NOT NULL,
-  CHECK (typeof(same_worker_context)='integer' AND same_worker_context IN (0,1))
+  CHECK (typeof(same_worker_context)='integer' AND same_worker_context IN (0,1)),
+  UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
 CREATE TABLE gate_runs (
@@ -629,7 +736,7 @@ CREATE TABLE gate_runs (
   run_id TEXT NOT NULL REFERENCES runs(run_id),
   transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
   clock_context_id TEXT NOT NULL UNIQUE REFERENCES gate_clock_context(clock_context_id) DEFERRABLE INITIALLY DEFERRED,
-  verifier_run_id TEXT REFERENCES judge_verifier_runs(verifier_run_id),
+  verifier_run_id TEXT,
   decision TEXT NOT NULL CHECK (decision IN ('pass','fail','human_review_required')),
   completed_at TEXT NOT NULL,
   completed_at_epoch_ms ANY NOT NULL,
@@ -642,7 +749,10 @@ CREATE TABLE gate_runs (
   created_at TEXT NOT NULL,
   CHECK (typeof(completed_at_epoch_ms)='integer' AND completed_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (typeof(requires_same_run)='integer' AND requires_same_run IN (0,1)),
-  CHECK (decision <> 'pass' OR verifier_run_id IS NOT NULL)
+  CHECK (decision <> 'pass' OR (verifier_run_id IS NOT NULL AND evidence_hash IS NOT NULL AND evidence_hash <> '')),
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
+  FOREIGN KEY(verifier_run_id,run_id,evidence_hash)
+    REFERENCES judge_verifier_runs(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
 CREATE TABLE risk_assessments (

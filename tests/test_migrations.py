@@ -181,6 +181,22 @@ class MigrationTests(unittest.TestCase):
             "VALUES('valid','db_authority','river','evidence','deadline','parity','now')"
         )
 
+    def test_run_authority_mode_must_match_workflow_authority(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) "
+                "VALUES('r','prepare','w','db_authority','candidate','R1','R1','now','now')"
+            )
+
     def test_approval_transition_requires_bound_gate_run(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -252,6 +268,167 @@ class MigrationTests(unittest.TestCase):
             + ",".join("?" for _ in valid) + ")",
             valid,
         )
+
+    def test_sqlite_boundary_rejects_duplicate_raw_metadata_keys(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        duplicate = '{"run_id":"expected","run_id":"other"}'
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "duplicate external metadata"):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,metadata_json,external_metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'intent','run','transition','allow_lease_acquire','client','idem','{}',?,"
+                "'pending','now',1)",
+                (duplicate,),
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "duplicate external metadata"):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,ttl_ms,"
+                "external_metadata_json,expires_at,expires_at_epoch_ms) VALUES("
+                "'lease','run','phase','transition','agent','requester','acquire_pending',"
+                "'client-lease','lease-idem',60000,?,'expires',2000000000000)",
+                (duplicate,),
+            )
+
+    def test_session_key_must_match_accepted_spawn_request(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) "
+            "VALUES('r','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'t','r','before','after','dispatch','spawn','R1','transition-idem',0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,transition_id,"
+            "client_request_id,spawn_idempotency_key,task_digest,state,session_key,created_at,"
+            "updated_at) VALUES('spawn','r','phase','agent','t','client','spawn-idem','task',"
+            "'accepted','accepted-session','now','now')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,phase,"
+                "agent_id,client_request_id,spawn_idempotency_key,session_key,task_digest,state) "
+                "VALUES('session','spawn','r','t','phase','agent','client','spawn-idem',"
+                "'wrong-session','task','running')"
+            )
+
+    def test_pass_gate_requires_same_run_transition_and_verifier_evidence(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        for run_id in ("run-a", "run-b"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+                "risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,"
+                "'w','file_authority','candidate','R1','R1','now','now')",
+                (run_id, f"prepare-{run_id}"),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,"
+                "'before','after','gate','check','R1',?,0,'now')",
+                (f"transition-{run_id}", run_id, f"transition-idem-{run_id}"),
+            )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES("
+            "'verifier-b','run-b','worker','verifier','provider','model','prompt','context',"
+            "'evidence-b','independent','{}','now')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+                "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+                "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+                "VALUES('gate-verifier','run-a','transition-run-a','clock-verifier',"
+                "'verifier-b','pass','now',1000,'v1','query','migration','evidence-b','R1','now')"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+                "decision,completed_at,completed_at_epoch_ms,gate_version,gate_query_hash,"
+                "migration_sha256,risk_dominance,created_at) VALUES("
+                "'gate-transition','run-a','transition-run-b','clock-transition','fail','now',"
+                "1000,'v1','query','migration','R1','now')"
+            )
+
+    def test_predicate_backend_is_allowlisted(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+                "schema_hash,sandbox_required,sandbox_enforced,created_at) "
+                "VALUES('plugin','unsafe','1','shell','schema',0,0,'now')"
+            )
+        connection.execute(
+            "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+            "schema_hash,sandbox_required,sandbox_enforced,created_at) VALUES("
+            "'safe-plugin','safe','1','agentic_predicate_inproc_v1','schema',0,1,'now')"
+        )
+
+    def test_zero_reserve_policy_minima_are_enforced_at_sqlite_boundary(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO endpoint_zero_reserve_policies(zero_reserve_policy_id,"
+            "endpoint_binding_id,capability_class,policy_hash,min_retry_units,"
+            "effective_from_epoch_ms,effective_until_epoch_ms) "
+            "VALUES('policy','endpoint','capability','policy-hash',1,1,2000)"
+        )
+
+        def insert_event(identifier: str, retry_units: int) -> None:
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+                "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,zero_reserve_policy_id,"
+                "zero_reserve_policy_hash,event_type,retry_units,usage_confidence,source,"
+                "created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'run','transition','provider','model','endpoint','capability','cost-row',"
+                "'effective','cost-hash','known','policy','policy-hash','reserve',?,'known',"
+                "'test','now',1000)",
+                (identifier, f"idem-{identifier}", f"dedupe-{identifier}", retry_units + 1,
+                 retry_units),
+            )
+
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "minima not met"):
+            insert_event("bad", 0)
+        insert_event("good", 1)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "UPDATE endpoint_zero_reserve_policies SET min_retry_units=2 "
+                "WHERE zero_reserve_policy_id='policy'"
+            )
+
+    def test_readme_migration_example_uses_private_test_database(self) -> None:
+        readme = (repository_root() / "README.md").read_text(encoding="utf-8")
+        self.assertIn("agentic_os.cli migrate --test-db", readme)
+        self.assertNotIn("agentic_os.cli migrate --db /tmp", readme)
 
     def test_slo_audit_must_match_current_query_identity(self) -> None:
         apply_migrations(self.database)
