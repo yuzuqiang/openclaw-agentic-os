@@ -52,6 +52,7 @@ CREATE TABLE workflow_authority (
       AND cutover_evidence_hash IS NOT NULL AND cutover_evidence_hash <> ''
       AND rollback_deadline IS NOT NULL AND rollback_deadline <> ''
       AND last_parity_audit_hash IS NOT NULL AND last_parity_audit_hash <> ''
+      AND open_file_authority_runs = 0
     )
   ),
   UNIQUE(workflow,mode)
@@ -94,6 +95,7 @@ WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
       AND w.cutover_evidence_hash IS NOT NULL AND w.cutover_evidence_hash <> ''
       AND w.rollback_deadline IS NOT NULL AND w.rollback_deadline <> ''
       AND w.last_parity_audit_hash IS NOT NULL AND w.last_parity_audit_hash <> ''
+      AND w.open_file_authority_runs = 0
   )
 BEGIN
   SELECT RAISE(ABORT,'db authority run requires active workflow cutover evidence');
@@ -110,6 +112,7 @@ WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
       AND w.cutover_evidence_hash IS NOT NULL AND w.cutover_evidence_hash <> ''
       AND w.rollback_deadline IS NOT NULL AND w.rollback_deadline <> ''
       AND w.last_parity_audit_hash IS NOT NULL AND w.last_parity_audit_hash <> ''
+      AND w.open_file_authority_runs = 0
   )
 BEGIN
   SELECT RAISE(ABORT,'db authority run requires active workflow cutover evidence');
@@ -159,7 +162,7 @@ CREATE TABLE transitions (
 CREATE TABLE external_rpc_intents (
   intent_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  transition_id TEXT NOT NULL,
   rpc_kind TEXT NOT NULL CHECK (rpc_kind IN ('allow_lease_acquire','allow_lease_release','sessions_spawn')),
   spawn_request_id TEXT,
   reserve_budget_event_id TEXT REFERENCES budget_events(budget_event_id),
@@ -244,6 +247,7 @@ CREATE TABLE external_rpc_intents (
       ELSE 0 END
   ),
   CHECK (external_metadata_json IS NULL OR json_valid(external_metadata_json)=1),
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
   FOREIGN KEY (
     spawn_request_id,
     run_id,
@@ -328,6 +332,10 @@ CREATE TABLE leases (
   ),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
+
+CREATE UNIQUE INDEX leases_live_gateway_lease_id_unique
+ON leases(gateway_lease_id)
+WHERE gateway_lease_id IS NOT NULL AND state IN ('acquired','release_pending');
 
 CREATE TRIGGER external_rpc_intents_reject_duplicate_metadata_insert
 BEFORE INSERT ON external_rpc_intents
@@ -531,7 +539,7 @@ CREATE TABLE budget_events (
   event_dedupe_hash TEXT NOT NULL UNIQUE,
   event_sequence ANY NOT NULL,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
-  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  transition_id TEXT NOT NULL,
   spawn_request_id TEXT REFERENCES spawn_requests(spawn_request_id),
   provider TEXT,
   model TEXT,
@@ -606,7 +614,8 @@ CREATE TABLE budget_events (
       AND cost_registry_hash IS NOT NULL AND cost_registry_hash <> ''
       AND cost_confidence IS NOT NULL AND cost_confidence <> 'unknown'
     )
-  )
+  ),
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
 CREATE TRIGGER budget_events_validate_zero_reserve_insert
@@ -789,6 +798,7 @@ CREATE TABLE judge_verifier_runs (
   completed_at TEXT NOT NULL,
   CHECK (typeof(same_worker_context)='integer' AND same_worker_context IN (0,1)),
   CHECK (independence_class='independent'),
+  CHECK (worker_agent_id <> verifier_agent_id AND same_worker_context=0),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -811,15 +821,82 @@ CREATE TABLE gate_runs (
   CHECK (typeof(completed_at_epoch_ms)='integer' AND completed_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (typeof(requires_same_run)='integer' AND requires_same_run IN (0,1)),
   CHECK (decision <> 'pass' OR (verifier_run_id IS NOT NULL AND evidence_hash IS NOT NULL AND evidence_hash <> '')),
+  UNIQUE(gate_run_id,evidence_hash),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
   FOREIGN KEY(verifier_run_id,run_id,evidence_hash)
     REFERENCES judge_verifier_runs(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
+CREATE TRIGGER gate_runs_validate_clock_context_insert
+AFTER INSERT ON gate_runs
+WHEN EXISTS (
+  SELECT 1 FROM gate_clock_context c WHERE c.clock_context_id=NEW.clock_context_id
+) AND NOT EXISTS (
+  SELECT 1 FROM gate_clock_context c
+  WHERE c.clock_context_id=NEW.clock_context_id
+    AND c.gate_run_id=NEW.gate_run_id
+    AND c.consumed_by_gate_run_id=NEW.gate_run_id
+    AND c.run_id=NEW.run_id
+    AND c.transition_id=NEW.transition_id
+    AND c.now_epoch_ms=NEW.completed_at_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'gate completion does not match clock context');
+END;
+
+CREATE TRIGGER gate_runs_validate_clock_context_update
+AFTER UPDATE OF run_id, transition_id, clock_context_id, completed_at_epoch_ms ON gate_runs
+WHEN EXISTS (
+  SELECT 1 FROM gate_clock_context c WHERE c.clock_context_id=NEW.clock_context_id
+) AND NOT EXISTS (
+  SELECT 1 FROM gate_clock_context c
+  WHERE c.clock_context_id=NEW.clock_context_id
+    AND c.gate_run_id=NEW.gate_run_id
+    AND c.consumed_by_gate_run_id=NEW.gate_run_id
+    AND c.run_id=NEW.run_id
+    AND c.transition_id=NEW.transition_id
+    AND c.now_epoch_ms=NEW.completed_at_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'gate completion does not match clock context');
+END;
+
+CREATE TRIGGER gate_clock_context_validate_gate_insert
+AFTER INSERT ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g WHERE g.gate_run_id=NEW.gate_run_id
+) AND NOT EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.gate_run_id=NEW.gate_run_id
+    AND g.clock_context_id=NEW.clock_context_id
+    AND g.run_id=NEW.run_id
+    AND g.transition_id=NEW.transition_id
+    AND g.completed_at_epoch_ms=NEW.now_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'clock context does not match gate completion');
+END;
+
+CREATE TRIGGER gate_clock_context_validate_gate_update
+AFTER UPDATE OF gate_run_id, consumed_by_gate_run_id, run_id, transition_id, now_epoch_ms ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g WHERE g.gate_run_id=NEW.gate_run_id
+) AND NOT EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.gate_run_id=NEW.gate_run_id
+    AND g.clock_context_id=NEW.clock_context_id
+    AND g.run_id=NEW.run_id
+    AND g.transition_id=NEW.transition_id
+    AND g.completed_at_epoch_ms=NEW.now_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'clock context does not match gate completion');
+END;
+
 CREATE TABLE risk_assessments (
   assessment_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id),
-  transition_id TEXT REFERENCES transitions(transition_id),
+  transition_id TEXT,
   action_risk TEXT NOT NULL,
   target_risk TEXT NOT NULL,
   data_risk TEXT NOT NULL,
@@ -827,7 +904,8 @@ CREATE TABLE risk_assessments (
   permission_risk TEXT NOT NULL,
   irreversibility_risk TEXT NOT NULL,
   risk_dominance TEXT NOT NULL,
-  assessed_at TEXT NOT NULL
+  assessed_at TEXT NOT NULL,
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
 CREATE TABLE trust_observations (
@@ -874,7 +952,8 @@ CREATE TABLE evidence_hashes (
       producer_run_id IS NOT NULL
       AND verifier_run_id IS NOT NULL
     )
-  )
+  ),
+  FOREIGN KEY(gate_run_id,evidence_hash) REFERENCES gate_runs(gate_run_id,evidence_hash)
 ) STRICT;
 
 CREATE TABLE reconciliation_jobs (

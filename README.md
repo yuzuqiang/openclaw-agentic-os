@@ -7,8 +7,8 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 The initial design artifact has passed dual independent design acceptance. This does **not** prove production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
-- Current design artifact SHA-256: `68a75d2fe4cd84ee72a265d3df4131d2dd343d5281560ba7c49b7ac33b76705f`
-- Current DDL/migration SHA-256: `b67a36bfa6437f31dd8327b7a9751ff51579b34a7ec9bf8d8422d223b84646c0`
+- Current design artifact SHA-256: `64bf8a982195a66abd2b485789171ac0a9c27e0e70bb1ac3d1291632cb2f50fd`
+- Current DDL/migration SHA-256: `0a4fab990947c4ae810be7da11607c3fd3c5024a5fcbc619d92af2cf9e579ec9`
 - Design contract: 27 SQLite tables, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 

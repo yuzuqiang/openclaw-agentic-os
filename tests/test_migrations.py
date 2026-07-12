@@ -175,6 +175,15 @@ class MigrationTests(unittest.TestCase):
                     "INSERT INTO workflow_authority(workflow,mode,updated_at) VALUES(?,?,?)",
                     (mode, mode, "now"),
                 )
+            with self.subTest(mode=f"{mode}-undrained"), self.assertRaises(
+                sqlite3.IntegrityError
+            ):
+                connection.execute(
+                    "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                    "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                    "open_file_authority_runs,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (f"{mode}-undrained", mode, "river", "evidence", "deadline", "parity", 1, "now"),
+                )
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
             "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,updated_at) "
@@ -204,10 +213,20 @@ class MigrationTests(unittest.TestCase):
                 "'R1','now','now')"
             )
         connection.execute(
+            "UPDATE workflow_authority SET open_file_authority_runs=1 WHERE workflow='w'"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE workflow_authority SET mode='db_authority_canary',"
+                "cutover_approved_by='river',cutover_evidence_hash='evidence',"
+                "rollback_deadline='deadline',last_parity_audit_hash='parity',"
+                "updated_at='later' WHERE workflow='w'"
+            )
+        connection.execute(
             "UPDATE workflow_authority SET mode='db_authority_canary',"
             "cutover_approved_by='river',cutover_evidence_hash='evidence',"
-            "rollback_deadline='deadline',last_parity_audit_hash='parity',updated_at='later' "
-            "WHERE workflow='w'"
+            "rollback_deadline='deadline',last_parity_audit_hash='parity',"
+            "open_file_authority_runs=0,updated_at='later' WHERE workflow='w'"
         )
         connection.execute(
             "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
@@ -309,6 +328,32 @@ class MigrationTests(unittest.TestCase):
             + ",".join("?" for _ in valid) + ")",
             valid,
         )
+        duplicate_gateway = (
+            "lease-valid-2", "run", "phase", "transition", "agent", "requester",
+            "release_pending", "gateway", "client-valid-2", "idem-valid-2", 60000,
+            "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-valid-2",
+                    "idempotency_key": "idem-valid-2",
+                }
+            ),
+            "client-valid-2", "idem-valid-2", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+                "external_idempotency_key,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in duplicate_gateway) + ")",
+                duplicate_gateway,
+            )
 
     def test_sqlite_boundary_rejects_duplicate_raw_metadata_keys(self) -> None:
         apply_migrations(self.database)
@@ -432,6 +477,71 @@ class MigrationTests(unittest.TestCase):
                 "'acquire_pending','client','lease-idem',60000,'expires',2000000000000)"
             )
 
+    def test_external_intent_transition_must_belong_to_same_run(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        for run_id in ("run-a", "run-b"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+                "risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,"
+                "'w','file_authority','candidate','R1','R1','now','now')",
+                (run_id, f"prepare-{run_id}"),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,"
+                "'before','after','lease','acquire','R1',?,0,'now')",
+                (f"transition-{run_id}", run_id, f"transition-idem-{run_id}"),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,metadata_json,state,requested_at,"
+                "requested_at_epoch_ms) VALUES("
+                "'intent','run-a','transition-run-b','allow_lease_acquire','client',"
+                "'idem','{}','pending','now',1000)"
+            )
+
+    def test_budget_event_transition_must_belong_to_same_run(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        for run_id in ("run-a", "run-b"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+                "risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,"
+                "'w','file_authority','candidate','R1','R1','now','now')",
+                (run_id, f"prepare-{run_id}"),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,"
+                "'before','after','budget','reserve','R1',?,0,'now')",
+                (f"transition-{run_id}", run_id, f"transition-idem-{run_id}"),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,capability_class,"
+                "event_type,human_attention_units,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES("
+                "'event','event-idem','event-dedupe',1,'run-a','transition-run-b',"
+                "'capability','human_attention',1,'known','test','now',1000)"
+            )
+
     def test_pass_gate_requires_same_run_transition_and_verifier_evidence(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -477,6 +587,106 @@ class MigrationTests(unittest.TestCase):
                 "migration_sha256,risk_dominance,created_at) VALUES("
                 "'gate-transition','run-a','transition-run-b','clock-transition','fail','now',"
                 "1000,'v1','query','migration','R1','now')"
+            )
+
+    def test_gate_clock_and_evidence_hash_must_match_exactly(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'transition','run','before','after','gate','check','R1','transition-idem',"
+            "0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES("
+            "'verifier','run','worker','verifier','provider','model','prompt','context',"
+            "'evidence-good','independent','{}','now')"
+        )
+        connection.execute(
+            "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+            "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+            "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+            "VALUES('gate','run','transition','clock','verifier','pass','now',1000,"
+            "'v1','query','migration','evidence-good','R1','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "clock context"):
+            connection.execute(
+                "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+                "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,now_epoch_ms,"
+                "bound_at_epoch_ms,bound_by,trusted_clock_source_hash,consumed_at_epoch_ms) "
+                "VALUES('clock','gate','gate','run','transition','nonce',999,999,"
+                "'clock','source',999)"
+            )
+        connection.execute(
+            "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+            "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,now_epoch_ms,"
+            "bound_at_epoch_ms,bound_by,trusted_clock_source_hash,consumed_at_epoch_ms) "
+            "VALUES('clock','gate','gate','run','transition','nonce',1000,1000,"
+            "'clock','source',1000)"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "clock context"):
+            connection.execute(
+                "UPDATE gate_runs SET completed_at_epoch_ms=1001 WHERE gate_run_id='gate'"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,size_bytes,"
+                "content_type,redaction_status,producer_run_id,verifier_run_id,gate_run_id,"
+                "captured_at) VALUES('other','run','other.json','sha',1,'application/json',"
+                "'none','run','verifier','gate','now')"
+            )
+        connection.execute(
+            "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,size_bytes,"
+            "content_type,redaction_status,producer_run_id,verifier_run_id,gate_run_id,"
+            "captured_at) VALUES('evidence-good','run','evidence.json','sha-good',1,"
+            "'application/json','none','run','verifier','gate','now')"
+        )
+
+    def test_risk_assessment_transition_must_belong_to_same_run(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        for run_id in ("run-a", "run-b"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+                "risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,"
+                "'w','file_authority','candidate','R1','R1','now','now')",
+                (run_id, f"prepare-{run_id}"),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,"
+                "'before','after','risk','assess','R1',?,0,'now')",
+                (f"transition-{run_id}", run_id, f"transition-idem-{run_id}"),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO risk_assessments(assessment_id,run_id,transition_id,"
+                "action_risk,target_risk,data_risk,side_effect_risk,permission_risk,"
+                "irreversibility_risk,risk_dominance,assessed_at) VALUES("
+                "'assessment','run-a','transition-run-b','R1','R1','R1','R1','R1','R1',"
+                "'R1','now')"
             )
 
     def test_predicate_backend_is_allowlisted(self) -> None:
@@ -561,6 +771,23 @@ class MigrationTests(unittest.TestCase):
                 "evidence_hash,independence_class,independence_proof_json,completed_at) "
                 "VALUES('verifier','run','worker','verifier','provider','model','prompt',"
                 "'context','evidence','bogus','{}','now')"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+                "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,context_hash,"
+                "evidence_hash,independence_class,independence_proof_json,completed_at) "
+                "VALUES('self-verifier','run','worker','worker','provider','model',"
+                "'prompt','context','evidence-self','independent','{}','now')"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+                "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,context_hash,"
+                "evidence_hash,independence_class,independence_proof_json,"
+                "same_worker_context,completed_at) VALUES('same-context','run','worker',"
+                "'verifier','provider','model','prompt','context','evidence-context',"
+                "'independent','{}',1,'now')"
             )
 
     def test_zero_reserve_policy_minima_are_enforced_at_sqlite_boundary(self) -> None:
