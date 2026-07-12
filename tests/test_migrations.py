@@ -338,6 +338,32 @@ class MigrationTests(unittest.TestCase):
             + ",".join("?" for _ in valid) + ")",
             valid,
         )
+        numeric_identity = (
+            "lease-numeric", "1", "phase", "transition", "agent", "requester",
+            "acquired", "gateway-numeric", "1", "idem-numeric", 60000, "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": 1,
+                    "idempotency_key": "idem-numeric",
+                    "run_id": 1,
+                }
+            ),
+            "1", "idem-numeric", "1", "phase", "transition", "agent", "requester",
+            60000, "expires", 2000000000000,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+                "external_idempotency_key,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in numeric_identity) + ")",
+                numeric_identity,
+            )
         duplicate_gateway = (
             "lease-valid-2", "run", "phase", "transition", "agent", "requester",
             "acquired", "gateway", "client-valid-2", "idem-valid-2", 60000,
@@ -569,13 +595,32 @@ class MigrationTests(unittest.TestCase):
             "'effective','cost-hash')"
         )
         connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,selected_cost_confidence,"
+            "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+            "output_token_budget,cost_budget_microusd,retry_budget,human_attention_budget,"
+            "usage_confidence,updated_at) VALUES('r','w','capability','provider','model',"
+            "'endpoint','cost-row','effective','cost-hash','known','t',10,10,10,10,1,1,"
+            "'known','now')"
+        )
+        connection.execute(
             "INSERT INTO budget_events(budget_event_id,event_idempotency_key,event_dedupe_hash,"
-            "event_sequence,run_id,transition_id,provider,model,endpoint_binding_id,"
+            "event_sequence,run_id,transition_id,spawn_request_id,provider,model,endpoint_binding_id,"
             "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
             "cost_confidence,event_type,input_tokens,usage_confidence,source,created_at,"
             "created_at_epoch_ms) VALUES('reserve','reserve-idem','reserve-dedupe',1,'r',"
-            "'t','provider','model','endpoint','capability','cost-row','effective',"
+            "'t','spawn','provider','model','endpoint','capability','cost-row','effective',"
             "'cost-hash','known','reserve',1,'known','test','now',1000)"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,event_dedupe_hash,"
+            "event_sequence,run_id,transition_id,spawn_request_id,provider,model,endpoint_binding_id,"
+            "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
+            "cost_confidence,event_type,input_tokens,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('consume','consume-idem','consume-dedupe',2,'r',"
+            "'t','spawn','provider','model','endpoint','capability','cost-row','effective',"
+            "'cost-hash','known','consume',1,'known','test','now',1000)"
         )
         external_metadata = json.dumps(
             {
@@ -588,6 +633,46 @@ class MigrationTests(unittest.TestCase):
                 "task_digest": "task",
             }
         )
+        for identifier, reserve_id, requested_at_epoch_ms in (
+            ("intent-consume", "consume", 1001),
+            ("intent-late-reserve", "reserve", 1000),
+        ):
+            with self.subTest(identifier=identifier), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "strict prior reserve"
+            ):
+                connection.execute(
+                    "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                    "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                    "idempotency_key,phase,agent_id,task_digest,metadata_contract_version,"
+                    "metadata_json,external_metadata_json,external_run_id,"
+                    "external_transition_id,external_client_request_id,"
+                    "external_idempotency_key,external_phase,external_agent_id,"
+                    "external_task_digest,state,external_id,requested_at,"
+                    "requested_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'r','t',"
+                    "?,?,?,?,?,'accepted','bad-session','now',?)",
+                    (
+                        identifier,
+                        "r",
+                        "t",
+                        "sessions_spawn",
+                        "spawn",
+                        reserve_id,
+                        f"client-{identifier}",
+                        f"spawn-idem-{identifier}",
+                        "phase",
+                        "agent",
+                        "task",
+                        "v1",
+                        "{}",
+                        external_metadata,
+                        f"client-{identifier}",
+                        f"spawn-idem-{identifier}",
+                        "phase",
+                        "agent",
+                        "task",
+                        requested_at_epoch_ms,
+                    ),
+                )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
             "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
@@ -805,6 +890,54 @@ class MigrationTests(unittest.TestCase):
                 "'gate-transition','run-a','transition-run-b','clock-transition','fail','now',"
                 "1000,'v1','query','migration','R1','now')"
             )
+
+    def test_pass_gate_requires_gate_bound_evidence_row(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'transition','run','before','after','gate','check','R1','transition-idem',"
+            "0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES("
+            "'verifier','run','worker','verifier','provider','model','prompt','context',"
+            "'evidence','independent','{}','now')"
+        )
+        connection.commit()
+        connection.execute("BEGIN")
+        connection.execute(
+            "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+            "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+            "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+            "VALUES('gate','run','transition','clock','verifier','pass','now',1000,"
+            "'v1','query','migration','evidence','R1','now')"
+        )
+        connection.execute(
+            "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+            "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,now_epoch_ms,"
+            "bound_at_epoch_ms,bound_by,trusted_clock_source_hash,consumed_at_epoch_ms) "
+            "VALUES('clock','gate','gate','run','transition','nonce',1000,1000,"
+            "'clock','source',1000)"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.commit()
+        connection.rollback()
 
     def test_gate_clock_and_evidence_hash_must_match_exactly(self) -> None:
         apply_migrations(self.database)

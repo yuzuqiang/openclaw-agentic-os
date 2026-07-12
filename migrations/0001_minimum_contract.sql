@@ -331,6 +331,14 @@ CREATE TABLE leases (
       AND external_agent_id=agent_id
       AND external_requester_agent_id=requester_agent_id
       AND external_ttl_ms=ttl_ms
+      AND json_type(external_metadata_json,'$.client_lease_id')='text'
+      AND json_type(external_metadata_json,'$.idempotency_key')='text'
+      AND json_type(external_metadata_json,'$.run_id')='text'
+      AND json_type(external_metadata_json,'$.phase')='text'
+      AND json_type(external_metadata_json,'$.transition_id')='text'
+      AND json_type(external_metadata_json,'$.agent_id')='text'
+      AND json_type(external_metadata_json,'$.requester_agent_id')='text'
+      AND json_type(external_metadata_json,'$.ttl_ms')='integer'
       AND json_extract(external_metadata_json,'$.client_lease_id')=client_lease_id
       AND json_extract(external_metadata_json,'$.idempotency_key')=acquire_idempotency_key
       AND json_extract(external_metadata_json,'$.run_id')=run_id
@@ -338,7 +346,6 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.transition_id')=transition_id
       AND json_extract(external_metadata_json,'$.agent_id')=agent_id
       AND json_extract(external_metadata_json,'$.requester_agent_id')=requester_agent_id
-      AND typeof(json_extract(external_metadata_json,'$.ttl_ms'))='integer'
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
     ),0)=1
   ),
@@ -905,6 +912,92 @@ BEGIN
   SELECT RAISE(ABORT,'zero reserve policy mismatch or minima not met');
 END;
 
+CREATE TRIGGER external_rpc_intents_validate_prior_reserve_insert
+BEFORE INSERT ON external_rpc_intents
+WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
+  SELECT 1
+  FROM budget_events b
+  JOIN run_budgets rb ON rb.run_id=NEW.run_id
+  WHERE b.budget_event_id=NEW.reserve_budget_event_id
+    AND b.event_type='reserve'
+    AND b.run_id=NEW.run_id
+    AND b.transition_id=NEW.transition_id
+    AND b.spawn_request_id=NEW.spawn_request_id
+    AND b.created_at_epoch_ms < NEW.requested_at_epoch_ms
+    AND b.provider=rb.selected_provider
+    AND b.model=rb.selected_model
+    AND b.endpoint_binding_id=rb.selected_endpoint_binding_id
+    AND b.capability_class=rb.capability_class
+    AND b.cost_registry_id=rb.selected_cost_registry_id
+    AND b.cost_effective_at=rb.selected_cost_effective_at
+    AND b.cost_registry_hash=rb.selected_cost_registry_hash
+    AND b.cost_confidence=rb.selected_cost_confidence
+)
+BEGIN
+  SELECT RAISE(ABORT,'sessions_spawn requires strict prior reserve budget event');
+END;
+
+CREATE TRIGGER external_rpc_intents_validate_prior_reserve_update
+BEFORE UPDATE OF rpc_kind, reserve_budget_event_id, run_id, transition_id, spawn_request_id, requested_at_epoch_ms ON external_rpc_intents
+WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
+  SELECT 1
+  FROM budget_events b
+  JOIN run_budgets rb ON rb.run_id=NEW.run_id
+  WHERE b.budget_event_id=NEW.reserve_budget_event_id
+    AND b.event_type='reserve'
+    AND b.run_id=NEW.run_id
+    AND b.transition_id=NEW.transition_id
+    AND b.spawn_request_id=NEW.spawn_request_id
+    AND b.created_at_epoch_ms < NEW.requested_at_epoch_ms
+    AND b.provider=rb.selected_provider
+    AND b.model=rb.selected_model
+    AND b.endpoint_binding_id=rb.selected_endpoint_binding_id
+    AND b.capability_class=rb.capability_class
+    AND b.cost_registry_id=rb.selected_cost_registry_id
+    AND b.cost_effective_at=rb.selected_cost_effective_at
+    AND b.cost_registry_hash=rb.selected_cost_registry_hash
+    AND b.cost_confidence=rb.selected_cost_confidence
+)
+BEGIN
+  SELECT RAISE(ABORT,'sessions_spawn requires strict prior reserve budget event');
+END;
+
+CREATE TRIGGER budget_events_preserve_spawn_prior_reserve_delete
+BEFORE DELETE ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM external_rpc_intents i
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.reserve_budget_event_id=OLD.budget_event_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve is immutable');
+END;
+
+CREATE TRIGGER budget_events_preserve_spawn_prior_reserve_update
+BEFORE UPDATE OF budget_event_id, event_type, run_id, transition_id, spawn_request_id, provider, model, endpoint_binding_id, capability_class, cost_registry_id, cost_effective_at, cost_registry_hash, cost_confidence, created_at_epoch_ms ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM external_rpc_intents i
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.reserve_budget_event_id=OLD.budget_event_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve is immutable');
+END;
+
+CREATE TRIGGER run_budgets_preserve_spawn_prior_reserve_update
+BEFORE UPDATE OF selected_provider, selected_model, selected_endpoint_binding_id, capability_class, selected_cost_registry_id, selected_cost_effective_at, selected_cost_registry_hash, selected_cost_confidence ON run_budgets
+WHEN EXISTS (
+  SELECT 1
+  FROM external_rpc_intents i
+  JOIN budget_events b ON b.budget_event_id=i.reserve_budget_event_id
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.run_id=OLD.run_id
+    AND b.run_id=OLD.run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve cost binding is immutable');
+END;
+
 CREATE TRIGGER endpoint_zero_reserve_policies_reject_referenced_update
 BEFORE UPDATE ON endpoint_zero_reserve_policies
 WHEN EXISTS (
@@ -1073,7 +1166,10 @@ CREATE TABLE gate_runs (
   UNIQUE(gate_run_id,evidence_hash),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
   FOREIGN KEY(verifier_run_id,run_id,evidence_hash)
-    REFERENCES judge_verifier_runs(verifier_run_id,worker_run_id,evidence_hash)
+    REFERENCES judge_verifier_runs(verifier_run_id,worker_run_id,evidence_hash),
+  FOREIGN KEY(gate_run_id,evidence_hash,run_id,verifier_run_id)
+    REFERENCES evidence_hashes(gate_run_id,evidence_hash,run_id,verifier_run_id)
+    DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 
 CREATE TRIGGER gate_runs_validate_clock_context_insert
@@ -1195,11 +1291,13 @@ CREATE TABLE evidence_hashes (
   gate_run_id TEXT REFERENCES gate_runs(gate_run_id),
   captured_at TEXT NOT NULL,
   UNIQUE(path, sha256),
+  UNIQUE(gate_run_id,evidence_hash,run_id,verifier_run_id),
   CHECK (typeof(size_bytes)='integer' AND size_bytes >= 0),
   CHECK (
     gate_run_id IS NULL OR (
       producer_run_id IS NOT NULL
       AND verifier_run_id IS NOT NULL
+      AND run_id=producer_run_id
     )
   ),
   FOREIGN KEY(gate_run_id,evidence_hash) REFERENCES gate_runs(gate_run_id,evidence_hash)

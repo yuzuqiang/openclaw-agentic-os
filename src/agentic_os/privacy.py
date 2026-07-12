@@ -40,12 +40,22 @@ RAW_STATE_PATTERNS = (
 )
 
 COMPRESSED_STATE_SUFFIXES = (
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tar.zst",
+    ".tgz",
+    ".tbz",
+    ".tbz2",
+    ".txz",
+    ".tzst",
     ".gz",
     ".zip",
     ".zst",
     ".xz",
     ".bz2",
     ".lz4",
+    ".tar",
 )
 
 
