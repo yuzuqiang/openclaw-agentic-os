@@ -1,0 +1,716 @@
+CREATE TABLE schema_migrations (
+  version ANY PRIMARY KEY,
+  name TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  applied_at TEXT NOT NULL,
+  CHECK (typeof(version)='integer' AND version > 0)
+) STRICT;
+
+CREATE TABLE gate_clock_context (
+  clock_context_id TEXT PRIMARY KEY,
+  gate_run_id TEXT NOT NULL UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
+  consumed_by_gate_run_id TEXT NOT NULL UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  gate_nonce TEXT NOT NULL UNIQUE,
+  now_epoch_ms ANY NOT NULL,
+  bound_at_epoch_ms ANY NOT NULL,
+  bound_by TEXT NOT NULL,
+  trusted_clock_source_hash TEXT NOT NULL,
+  consumed_at_epoch_ms ANY NOT NULL,
+  CHECK (typeof(now_epoch_ms)='integer' AND now_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (typeof(bound_at_epoch_ms)='integer' AND bound_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (bound_at_epoch_ms = now_epoch_ms),
+  CHECK (typeof(consumed_at_epoch_ms)='integer' AND consumed_at_epoch_ms = now_epoch_ms),
+  CHECK (gate_run_id = consumed_by_gate_run_id),
+  CHECK (clock_context_id <> '' AND gate_run_id <> '' AND run_id <> '' AND transition_id <> ''),
+  CHECK (gate_nonce <> '' AND bound_by <> '' AND trusted_clock_source_hash <> '')
+) STRICT;
+
+CREATE TABLE workflow_authority (
+  workflow TEXT PRIMARY KEY,
+  mode TEXT NOT NULL CHECK (mode IN (
+    'file_authority',
+    'file_authority_shadow',
+    'dual_write_shadow',
+    'db_authority_canary',
+    'db_authority',
+    'rollback_to_file_authority'
+  )),
+  cutover_approved_by TEXT,
+  cutover_evidence_hash TEXT,
+  rollback_deadline TEXT,
+  last_parity_audit_hash TEXT,
+  open_file_authority_runs ANY NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  CHECK (typeof(open_file_authority_runs)='integer' AND open_file_authority_runs >= 0)
+) STRICT;
+
+CREATE TABLE runs (
+  run_id TEXT PRIMARY KEY,
+  prepare_idempotency_key TEXT NOT NULL UNIQUE,
+  workflow TEXT NOT NULL REFERENCES workflow_authority(workflow),
+  authority_mode TEXT NOT NULL,
+  state TEXT NOT NULL,
+  state_version ANY NOT NULL DEFAULT 0,
+  risk_class TEXT NOT NULL,
+  risk_dominance TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  finalized_at TEXT,
+  finalized_at_epoch_ms ANY,
+  CHECK (typeof(state_version)='integer' AND state_version >= 0),
+  CHECK (finalized_at_epoch_ms IS NULL OR (typeof(finalized_at_epoch_ms)='integer' AND finalized_at_epoch_ms BETWEEN 1 AND 253402300799999))
+) STRICT;
+
+CREATE TABLE transitions (
+  transition_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  state_before TEXT NOT NULL,
+  state_after TEXT NOT NULL,
+  transition_type TEXT NOT NULL,
+  action_type TEXT NOT NULL,
+  target_type TEXT,
+  target_id TEXT,
+  target_hash TEXT,
+  target_scope TEXT,
+  approval_required ANY NOT NULL DEFAULT 0,
+  approval_id TEXT UNIQUE REFERENCES approvals(approval_id),
+  approval_channel TEXT,
+  approval_source_digest TEXT,
+  approval_text_digest TEXT,
+  risk_dominance TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  guard_version_before ANY NOT NULL,
+  gate_run_id TEXT,
+  evidence_hash TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (typeof(approval_required)='integer' AND approval_required IN (0,1)),
+  CHECK (typeof(guard_version_before)='integer' AND guard_version_before >= 0),
+  CHECK (
+    approval_required = 0 OR (
+      approval_id IS NOT NULL
+      AND action_type <> ''
+      AND target_type IS NOT NULL AND target_type <> ''
+      AND target_id IS NOT NULL AND target_id <> ''
+      AND target_hash IS NOT NULL AND target_hash <> ''
+      AND target_scope IS NOT NULL AND target_scope <> ''
+      AND approval_channel IS NOT NULL AND approval_channel <> ''
+      AND approval_source_digest IS NOT NULL AND approval_source_digest <> ''
+      AND approval_text_digest IS NOT NULL AND approval_text_digest <> ''
+    )
+  )
+) STRICT;
+
+CREATE TABLE external_rpc_intents (
+  intent_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  rpc_kind TEXT NOT NULL CHECK (rpc_kind IN ('allow_lease_acquire','allow_lease_release','sessions_spawn')),
+  spawn_request_id TEXT,
+  reserve_budget_event_id TEXT REFERENCES budget_events(budget_event_id),
+  client_request_id TEXT NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  phase TEXT,
+  agent_id TEXT,
+  task_digest TEXT,
+  metadata_contract_version TEXT,
+  metadata_json TEXT NOT NULL,
+  external_metadata_json TEXT,
+  external_run_id TEXT,
+  external_transition_id TEXT,
+  external_client_request_id TEXT,
+  external_idempotency_key TEXT,
+  external_phase TEXT,
+  external_agent_id TEXT,
+  external_task_digest TEXT,
+  state TEXT NOT NULL CHECK (state IN ('pending','accepted','unknown','failed','reconciled','human_review_required')),
+  external_id TEXT,
+  requested_at TEXT NOT NULL,
+  requested_at_epoch_ms ANY NOT NULL,
+  accepted_at TEXT,
+  accepted_at_epoch_ms ANY,
+  resolved_at TEXT,
+  resolved_at_epoch_ms ANY,
+  CHECK (typeof(requested_at_epoch_ms)='integer' AND requested_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (accepted_at_epoch_ms IS NULL OR (typeof(accepted_at_epoch_ms)='integer' AND accepted_at_epoch_ms BETWEEN 1 AND 253402300799999)),
+  CHECK (resolved_at_epoch_ms IS NULL OR (typeof(resolved_at_epoch_ms)='integer' AND resolved_at_epoch_ms BETWEEN 1 AND 253402300799999)),
+  CHECK (
+    rpc_kind <> 'sessions_spawn' OR (
+      spawn_request_id IS NOT NULL
+      AND reserve_budget_event_id IS NOT NULL
+      AND phase IS NOT NULL AND phase <> ''
+      AND agent_id IS NOT NULL AND agent_id <> ''
+      AND task_digest IS NOT NULL AND task_digest <> ''
+    )
+  ),
+  CHECK (
+    rpc_kind <> 'sessions_spawn'
+    OR state IN ('pending','unknown','failed','human_review_required')
+    OR (
+      metadata_contract_version IS NOT NULL AND metadata_contract_version <> ''
+      AND external_metadata_json IS NOT NULL AND json_valid(external_metadata_json)
+      AND external_id IS NOT NULL AND external_id <> ''
+      AND external_run_id = run_id
+      AND external_transition_id = transition_id
+      AND external_client_request_id = client_request_id
+      AND external_idempotency_key = idempotency_key
+      AND external_phase = phase
+      AND external_agent_id = agent_id
+      AND external_task_digest = task_digest
+    )
+  ),
+  CHECK (
+    rpc_kind <> 'sessions_spawn'
+    OR external_metadata_json IS NULL
+    OR CASE
+      WHEN json_valid(external_metadata_json) THEN CASE
+        WHEN json_type(external_metadata_json,'$.run_id')='text'
+          AND json_type(external_metadata_json,'$.transition_id')='text'
+          AND json_type(external_metadata_json,'$.client_request_id')='text'
+          AND json_type(external_metadata_json,'$.idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.phase')='text'
+          AND json_type(external_metadata_json,'$.agent_id')='text'
+          AND json_type(external_metadata_json,'$.task_digest')='text'
+          AND json_extract(external_metadata_json,'$.run_id') = run_id
+          AND json_extract(external_metadata_json,'$.transition_id') = transition_id
+          AND json_extract(external_metadata_json,'$.client_request_id') = client_request_id
+          AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.phase') = phase
+          AND json_extract(external_metadata_json,'$.agent_id') = agent_id
+          AND json_extract(external_metadata_json,'$.task_digest') = task_digest
+          AND external_run_id = run_id
+          AND external_transition_id = transition_id
+          AND external_client_request_id = client_request_id
+          AND external_idempotency_key = idempotency_key
+          AND external_phase = phase
+          AND external_agent_id = agent_id
+          AND external_task_digest = task_digest
+        THEN 1 ELSE 0 END
+      ELSE 0 END
+  ),
+  FOREIGN KEY (
+    spawn_request_id,
+    run_id,
+    transition_id,
+    client_request_id,
+    idempotency_key,
+    phase,
+    agent_id,
+    task_digest
+  ) REFERENCES spawn_requests(
+    spawn_request_id,
+    run_id,
+    transition_id,
+    client_request_id,
+    spawn_idempotency_key,
+    phase,
+    agent_id,
+    task_digest
+  )
+) STRICT;
+
+CREATE TABLE leases (
+  lease_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  phase TEXT NOT NULL,
+  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  agent_id TEXT NOT NULL,
+  requester_agent_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  gateway_lease_id TEXT,
+  client_lease_id TEXT NOT NULL UNIQUE,
+  acquire_idempotency_key TEXT NOT NULL UNIQUE,
+  release_idempotency_key TEXT UNIQUE,
+  ttl_ms ANY NOT NULL,
+  metadata_contract_version TEXT,
+  metadata_observed_at TEXT,
+  external_metadata_json TEXT,
+  acquire_requested_at TEXT,
+  acquired_at TEXT,
+  release_requested_at TEXT,
+  released_at TEXT,
+  expires_at TEXT NOT NULL,
+  expires_at_epoch_ms ANY NOT NULL,
+  reconciliation_status TEXT NOT NULL DEFAULT 'not_needed',
+  CHECK (typeof(ttl_ms)='integer' AND ttl_ms BETWEEN 1 AND 31536000000),
+  CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999)
+) STRICT;
+
+CREATE TABLE spawn_requests (
+  spawn_request_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  phase TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  client_request_id TEXT NOT NULL UNIQUE,
+  spawn_idempotency_key TEXT NOT NULL UNIQUE,
+  task_digest TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','accepted','unknown','failed','human_review_required','completed')),
+  session_key TEXT,
+  dispatch_run_id TEXT,
+  metadata_contract_version TEXT,
+  metadata_observed_at TEXT,
+  external_metadata_json TEXT,
+  ambiguity_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(session_key),
+  CHECK (state NOT IN ('accepted','completed') OR (session_key IS NOT NULL AND session_key <> '')),
+  UNIQUE(
+    spawn_request_id,
+    run_id,
+    transition_id,
+    client_request_id,
+    spawn_idempotency_key,
+    phase,
+    agent_id,
+    task_digest
+  )
+) STRICT;
+
+CREATE TABLE sessions (
+  session_id TEXT PRIMARY KEY,
+  spawn_request_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  transition_id TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  client_request_id TEXT NOT NULL UNIQUE,
+  spawn_idempotency_key TEXT NOT NULL,
+  session_key TEXT NOT NULL UNIQUE,
+  task_digest TEXT NOT NULL,
+  status_metadata_json TEXT,
+  first_output_hash TEXT,
+  state TEXT NOT NULL,
+  spawned_at TEXT,
+  first_output_at TEXT,
+  completed_at TEXT,
+  CHECK (session_id <> '' AND spawn_request_id <> '' AND run_id <> '' AND transition_id <> ''),
+  CHECK (phase <> '' AND agent_id <> '' AND client_request_id <> '' AND spawn_idempotency_key <> ''),
+  CHECK (session_key <> '' AND task_digest <> ''),
+  FOREIGN KEY (
+    spawn_request_id,
+    run_id,
+    transition_id,
+    client_request_id,
+    spawn_idempotency_key,
+    phase,
+    agent_id,
+    task_digest
+  ) REFERENCES spawn_requests(
+    spawn_request_id,
+    run_id,
+    transition_id,
+    client_request_id,
+    spawn_idempotency_key,
+    phase,
+    agent_id,
+    task_digest
+  ) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE run_budgets (
+  run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+  workflow TEXT NOT NULL,
+  capability_class TEXT NOT NULL,
+  selected_provider TEXT NOT NULL,
+  selected_model TEXT NOT NULL,
+  selected_endpoint_binding_id TEXT NOT NULL,
+  selected_cost_registry_id TEXT NOT NULL REFERENCES model_cost_registry(cost_registry_id),
+  selected_cost_effective_at TEXT NOT NULL,
+  selected_cost_registry_hash TEXT NOT NULL,
+  selected_cost_confidence TEXT NOT NULL CHECK (selected_cost_confidence IN ('known','estimated','unknown')),
+  selected_reserve_transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  time_budget_seconds ANY NOT NULL,
+  input_token_budget ANY NOT NULL,
+  output_token_budget ANY NOT NULL,
+  cost_budget_microusd ANY NOT NULL,
+  retry_budget ANY NOT NULL,
+  human_attention_budget ANY NOT NULL,
+  reserved_time_seconds ANY NOT NULL DEFAULT 0,
+  reserved_input_tokens ANY NOT NULL DEFAULT 0,
+  reserved_output_tokens ANY NOT NULL DEFAULT 0,
+  reserved_cost_microusd ANY NOT NULL DEFAULT 0,
+  reserved_retries ANY NOT NULL DEFAULT 0,
+  reserved_human_attention ANY NOT NULL DEFAULT 0,
+  consumed_time_seconds ANY NOT NULL DEFAULT 0,
+  consumed_input_tokens ANY NOT NULL DEFAULT 0,
+  consumed_output_tokens ANY NOT NULL DEFAULT 0,
+  consumed_cost_microusd ANY NOT NULL DEFAULT 0,
+  consumed_retries ANY NOT NULL DEFAULT 0,
+  consumed_human_attention ANY NOT NULL DEFAULT 0,
+  usage_confidence TEXT NOT NULL CHECK (usage_confidence IN ('known','estimated','unknown')),
+  updated_at TEXT NOT NULL,
+  CHECK (typeof(time_budget_seconds)='integer' AND time_budget_seconds BETWEEN 0 AND 31536000),
+  CHECK (typeof(input_token_budget)='integer' AND input_token_budget BETWEEN 0 AND 1000000000),
+  CHECK (typeof(output_token_budget)='integer' AND output_token_budget BETWEEN 0 AND 1000000000),
+  CHECK (typeof(cost_budget_microusd)='integer' AND cost_budget_microusd BETWEEN 0 AND 100000000000),
+  CHECK (typeof(retry_budget)='integer' AND retry_budget BETWEEN 0 AND 1000000),
+  CHECK (typeof(human_attention_budget)='integer' AND human_attention_budget BETWEEN 0 AND 1000000),
+  CHECK (typeof(reserved_time_seconds)='integer' AND reserved_time_seconds >= 0 AND reserved_time_seconds <= time_budget_seconds),
+  CHECK (typeof(reserved_input_tokens)='integer' AND reserved_input_tokens >= 0 AND reserved_input_tokens <= input_token_budget),
+  CHECK (typeof(reserved_output_tokens)='integer' AND reserved_output_tokens >= 0 AND reserved_output_tokens <= output_token_budget),
+  CHECK (typeof(reserved_cost_microusd)='integer' AND reserved_cost_microusd >= 0 AND reserved_cost_microusd <= cost_budget_microusd),
+  CHECK (typeof(reserved_retries)='integer' AND reserved_retries >= 0 AND reserved_retries <= retry_budget),
+  CHECK (typeof(reserved_human_attention)='integer' AND reserved_human_attention >= 0 AND reserved_human_attention <= human_attention_budget),
+  CHECK (typeof(consumed_time_seconds)='integer' AND consumed_time_seconds >= 0 AND consumed_time_seconds <= time_budget_seconds),
+  CHECK (typeof(consumed_input_tokens)='integer' AND consumed_input_tokens >= 0 AND consumed_input_tokens <= input_token_budget),
+  CHECK (typeof(consumed_output_tokens)='integer' AND consumed_output_tokens >= 0 AND consumed_output_tokens <= output_token_budget),
+  CHECK (typeof(consumed_cost_microusd)='integer' AND consumed_cost_microusd >= 0 AND consumed_cost_microusd <= cost_budget_microusd),
+  CHECK (typeof(consumed_retries)='integer' AND consumed_retries >= 0 AND consumed_retries <= retry_budget),
+  CHECK (typeof(consumed_human_attention)='integer' AND consumed_human_attention >= 0 AND consumed_human_attention <= human_attention_budget)
+) STRICT;
+
+CREATE TABLE endpoint_zero_reserve_policies (
+  zero_reserve_policy_id TEXT PRIMARY KEY,
+  endpoint_binding_id TEXT NOT NULL,
+  capability_class TEXT NOT NULL,
+  policy_hash TEXT NOT NULL UNIQUE,
+  enabled ANY NOT NULL DEFAULT 1,
+  min_retry_units ANY NOT NULL DEFAULT 0,
+  min_time_seconds ANY NOT NULL DEFAULT 0,
+  min_human_attention_units ANY NOT NULL DEFAULT 0,
+  effective_from_epoch_ms ANY NOT NULL,
+  effective_until_epoch_ms ANY NOT NULL DEFAULT 253402300799999,
+  CHECK (endpoint_binding_id <> '' AND capability_class <> '' AND policy_hash <> ''),
+  CHECK (typeof(enabled)='integer' AND enabled IN (0,1)),
+  CHECK (typeof(min_retry_units)='integer' AND min_retry_units BETWEEN 0 AND 1000000),
+  CHECK (typeof(min_time_seconds)='integer' AND min_time_seconds BETWEEN 0 AND 31536000),
+  CHECK (typeof(min_human_attention_units)='integer' AND min_human_attention_units BETWEEN 0 AND 1000000),
+  CHECK (min_retry_units > 0 OR min_time_seconds > 0 OR min_human_attention_units > 0),
+  CHECK (typeof(effective_from_epoch_ms)='integer' AND effective_from_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (typeof(effective_until_epoch_ms)='integer' AND effective_until_epoch_ms > effective_from_epoch_ms AND effective_until_epoch_ms <= 253402300799999)
+) STRICT;
+
+CREATE TABLE budget_events (
+  budget_event_id TEXT PRIMARY KEY,
+  event_idempotency_key TEXT NOT NULL UNIQUE,
+  event_dedupe_hash TEXT NOT NULL UNIQUE,
+  event_sequence ANY NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  spawn_request_id TEXT REFERENCES spawn_requests(spawn_request_id),
+  provider TEXT,
+  model TEXT,
+  endpoint_binding_id TEXT,
+  capability_class TEXT NOT NULL,
+  cost_registry_id TEXT REFERENCES model_cost_registry(cost_registry_id),
+  cost_effective_at TEXT,
+  cost_registry_hash TEXT,
+  cost_confidence TEXT CHECK (cost_confidence IN ('known','estimated','unknown')),
+  zero_reserve_policy_id TEXT REFERENCES endpoint_zero_reserve_policies(zero_reserve_policy_id),
+  zero_reserve_policy_hash TEXT,
+  event_type TEXT NOT NULL CHECK (event_type IN ('reserve','consume','release','retry_decrement','retry_restore','human_attention')),
+  time_seconds ANY DEFAULT 0,
+  input_tokens ANY DEFAULT 0,
+  output_tokens ANY DEFAULT 0,
+  cost_microusd ANY DEFAULT 0,
+  human_attention_units ANY DEFAULT 0,
+  retry_units ANY NOT NULL DEFAULT 0,
+  usage_confidence TEXT NOT NULL CHECK (usage_confidence IN ('known','estimated','unknown')),
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  created_at_epoch_ms ANY NOT NULL,
+  UNIQUE(run_id, event_sequence),
+  CHECK (typeof(event_sequence)='integer' AND event_sequence BETWEEN 1 AND 1000000),
+  CHECK (typeof(created_at_epoch_ms)='integer' AND created_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (typeof(time_seconds)='integer' AND time_seconds BETWEEN 0 AND 31536000),
+  CHECK (typeof(input_tokens)='integer' AND input_tokens BETWEEN 0 AND 1000000000),
+  CHECK (typeof(output_tokens)='integer' AND output_tokens BETWEEN 0 AND 1000000000),
+  CHECK (typeof(cost_microusd)='integer' AND cost_microusd BETWEEN 0 AND 100000000000),
+  CHECK (typeof(human_attention_units)='integer' AND human_attention_units BETWEEN 0 AND 1000000),
+  CHECK (typeof(retry_units)='integer' AND retry_units BETWEEN 0 AND 1000000),
+  CHECK (
+    event_type <> 'reserve'
+    OR input_tokens > 0 OR output_tokens > 0 OR cost_microusd > 0
+    OR time_seconds > 0 OR human_attention_units > 0 OR retry_units > 0
+    OR zero_reserve_policy_id IS NOT NULL
+  ),
+  CHECK (event_type <> 'retry_decrement' OR retry_units > 0),
+  CHECK (event_type <> 'retry_restore' OR retry_units > 0),
+  CHECK (event_type <> 'consume' OR (retry_units = 0 AND human_attention_units = 0)),
+  CHECK (
+    event_type <> 'human_attention'
+    OR (
+      time_seconds = 0
+      AND input_tokens = 0
+      AND output_tokens = 0
+      AND cost_microusd = 0
+      AND retry_units = 0
+      AND human_attention_units > 0
+    )
+  ),
+  CHECK (
+    event_type NOT IN ('retry_decrement','retry_restore')
+    OR (
+      time_seconds = 0
+      AND input_tokens = 0
+      AND output_tokens = 0
+      AND cost_microusd = 0
+      AND human_attention_units = 0
+    )
+  ),
+  CHECK (zero_reserve_policy_id IS NULL OR (zero_reserve_policy_hash IS NOT NULL AND zero_reserve_policy_hash <> '')),
+  CHECK (zero_reserve_policy_id IS NULL OR (input_tokens=0 AND output_tokens=0 AND cost_microusd=0)),
+  CHECK (
+    event_type = 'human_attention' OR (
+      provider IS NOT NULL AND provider <> ''
+      AND model IS NOT NULL AND model <> ''
+      AND endpoint_binding_id IS NOT NULL AND endpoint_binding_id <> ''
+      AND cost_registry_id IS NOT NULL AND cost_registry_id <> ''
+      AND cost_effective_at IS NOT NULL AND cost_effective_at <> ''
+      AND cost_registry_hash IS NOT NULL AND cost_registry_hash <> ''
+      AND cost_confidence IS NOT NULL AND cost_confidence <> 'unknown'
+    )
+  )
+) STRICT;
+
+CREATE TABLE model_cost_registry (
+  cost_registry_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  endpoint_binding_id TEXT NOT NULL,
+  capability_class TEXT NOT NULL,
+  input_cost_microusd_per_million ANY NOT NULL,
+  output_cost_microusd_per_million ANY NOT NULL,
+  confidence TEXT NOT NULL CHECK (confidence IN ('known','estimated','unknown')),
+  effective_at TEXT NOT NULL,
+  registry_row_hash TEXT NOT NULL UNIQUE,
+  CHECK (provider <> '' AND model <> '' AND endpoint_binding_id <> '' AND capability_class <> ''),
+  CHECK (typeof(input_cost_microusd_per_million)='integer' AND input_cost_microusd_per_million BETWEEN 0 AND 100000000000),
+  CHECK (typeof(output_cost_microusd_per_million)='integer' AND output_cost_microusd_per_million BETWEEN 0 AND 100000000000),
+  UNIQUE(provider, model, endpoint_binding_id, capability_class, effective_at)
+) STRICT;
+
+CREATE TABLE predicate_plugins (
+  predicate_plugin_hash TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  backend TEXT NOT NULL,
+  schema_hash TEXT NOT NULL,
+  sandbox_required ANY NOT NULL,
+  sandbox_enforced ANY NOT NULL,
+  sensitive ANY NOT NULL DEFAULT 0,
+  approved_at TEXT,
+  disabled_at TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (typeof(sandbox_required)='integer' AND sandbox_required IN (0,1)),
+  CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
+  CHECK (typeof(sensitive)='integer' AND sensitive IN (0,1))
+) STRICT;
+
+CREATE TABLE goal_manifests (
+  goal_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  predicate_plugin_hash TEXT NOT NULL REFERENCES predicate_plugins(predicate_plugin_hash),
+  backend TEXT NOT NULL,
+  approval_required ANY NOT NULL,
+  enabled ANY NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (typeof(approval_required)='integer' AND approval_required IN (0,1)),
+  CHECK (typeof(enabled)='integer' AND enabled IN (0,1))
+) STRICT;
+
+CREATE TABLE goal_runs (
+  goal_run_id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL REFERENCES goal_manifests(goal_id),
+  run_id TEXT REFERENCES runs(run_id),
+  severity TEXT NOT NULL,
+  state TEXT NOT NULL,
+  triaged_at TEXT,
+  predicate_plugin_hash TEXT NOT NULL REFERENCES predicate_plugins(predicate_plugin_hash),
+  backend TEXT NOT NULL,
+  sandbox_enforced ANY NOT NULL,
+  sandbox_proof_hash TEXT,
+  approval_id TEXT,
+  evidence_hash TEXT,
+  created_at TEXT NOT NULL,
+  CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1))
+) STRICT;
+
+CREATE TABLE approvals (
+  approval_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  approver TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  source_message_id TEXT,
+  source_message_digest TEXT NOT NULL,
+  approval_text_digest TEXT NOT NULL,
+  approved_action_type TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  target_hash TEXT NOT NULL,
+  target_scope TEXT NOT NULL,
+  approved_risk_ceiling TEXT NOT NULL,
+  expires_at_epoch_ms ANY NOT NULL,
+  expires_at_display TEXT,
+  single_use ANY NOT NULL DEFAULT 1,
+  approval_hash TEXT NOT NULL UNIQUE,
+  consumed_by_transition_id TEXT UNIQUE REFERENCES transitions(transition_id),
+  consumed_by_gate_run_id TEXT UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
+  approved_at TEXT NOT NULL,
+  CHECK (run_id <> ''),
+  CHECK (approved_action_type <> ''),
+  CHECK (target_type <> '' AND target_id <> '' AND target_hash <> '' AND target_scope <> ''),
+  CHECK (approved_risk_ceiling IN ('R0','R1','R2','R3','R4')),
+  CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (typeof(single_use)='integer' AND single_use IN (0,1))
+) STRICT;
+
+CREATE TABLE judge_verifier_runs (
+  verifier_run_id TEXT PRIMARY KEY,
+  worker_run_id TEXT NOT NULL REFERENCES runs(run_id),
+  worker_agent_id TEXT NOT NULL,
+  verifier_agent_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  model_version TEXT,
+  prompt_hash TEXT NOT NULL,
+  context_hash TEXT NOT NULL,
+  evidence_hash TEXT NOT NULL,
+  independence_class TEXT NOT NULL,
+  independence_proof_json TEXT NOT NULL,
+  same_worker_context ANY NOT NULL DEFAULT 0,
+  completed_at TEXT NOT NULL,
+  CHECK (typeof(same_worker_context)='integer' AND same_worker_context IN (0,1))
+) STRICT;
+
+CREATE TABLE gate_runs (
+  gate_run_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  clock_context_id TEXT NOT NULL UNIQUE REFERENCES gate_clock_context(clock_context_id) DEFERRABLE INITIALLY DEFERRED,
+  verifier_run_id TEXT REFERENCES judge_verifier_runs(verifier_run_id),
+  decision TEXT NOT NULL CHECK (decision IN ('pass','fail','human_review_required')),
+  completed_at TEXT NOT NULL,
+  completed_at_epoch_ms ANY NOT NULL,
+  requires_same_run ANY NOT NULL DEFAULT 1,
+  gate_version TEXT NOT NULL,
+  gate_query_hash TEXT NOT NULL,
+  migration_sha256 TEXT NOT NULL,
+  evidence_hash TEXT,
+  risk_dominance TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (typeof(completed_at_epoch_ms)='integer' AND completed_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (typeof(requires_same_run)='integer' AND requires_same_run IN (0,1)),
+  CHECK (decision <> 'pass' OR verifier_run_id IS NOT NULL)
+) STRICT;
+
+CREATE TABLE risk_assessments (
+  assessment_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  transition_id TEXT REFERENCES transitions(transition_id),
+  action_risk TEXT NOT NULL,
+  target_risk TEXT NOT NULL,
+  data_risk TEXT NOT NULL,
+  side_effect_risk TEXT NOT NULL,
+  permission_risk TEXT NOT NULL,
+  irreversibility_risk TEXT NOT NULL,
+  risk_dominance TEXT NOT NULL,
+  assessed_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE trust_observations (
+  observation_id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  status TEXT NOT NULL,
+  effective_group_id TEXT NOT NULL,
+  verifier_run_id TEXT REFERENCES judge_verifier_runs(verifier_run_id),
+  gate_run_id TEXT REFERENCES gate_runs(gate_run_id),
+  usage_confidence TEXT NOT NULL,
+  bounded_at TEXT,
+  invalidated_at TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE artifact_projections (
+  projection_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
+  generated_from_transition_id TEXT REFERENCES transitions(transition_id),
+  generated_at TEXT NOT NULL,
+  UNIQUE(path, sha256)
+) STRICT;
+
+CREATE TABLE evidence_hashes (
+  evidence_hash TEXT PRIMARY KEY,
+  run_id TEXT REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size_bytes ANY NOT NULL,
+  content_type TEXT NOT NULL,
+  redaction_status TEXT NOT NULL,
+  producer_run_id TEXT REFERENCES runs(run_id),
+  verifier_run_id TEXT REFERENCES judge_verifier_runs(verifier_run_id),
+  gate_run_id TEXT REFERENCES gate_runs(gate_run_id),
+  captured_at TEXT NOT NULL,
+  UNIQUE(path, sha256),
+  CHECK (typeof(size_bytes)='integer' AND size_bytes >= 0),
+  CHECK (
+    gate_run_id IS NULL OR (
+      producer_run_id IS NOT NULL
+      AND verifier_run_id IS NOT NULL
+    )
+  )
+) STRICT;
+
+CREATE TABLE reconciliation_jobs (
+  job_id TEXT PRIMARY KEY,
+  run_id TEXT REFERENCES runs(run_id),
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  external_contract_status TEXT NOT NULL CHECK (external_contract_status IN ('metadata_present','metadata_missing','ambiguous','expired','human_review_required')),
+  reason TEXT NOT NULL,
+  attempts ANY NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (typeof(attempts)='integer' AND attempts >= 0)
+) STRICT;
+
+CREATE TABLE outbox_events (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+  transition_id TEXT REFERENCES transitions(transition_id),
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE slo_queries (
+  query_name TEXT PRIMARY KEY,
+  schema_version ANY NOT NULL REFERENCES schema_migrations(version),
+  migration_sha256 TEXT NOT NULL,
+  query_hash TEXT NOT NULL,
+  sql_text TEXT NOT NULL,
+  empty_db_expected_status TEXT NOT NULL,
+  fixture_db_expected_status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (typeof(schema_version)='integer' AND schema_version > 0)
+) STRICT;
+
+CREATE TABLE slo_audits (
+  slo_audit_id TEXT PRIMARY KEY,
+  query_name TEXT NOT NULL REFERENCES slo_queries(query_name),
+  schema_version ANY NOT NULL,
+  migration_sha256 TEXT NOT NULL,
+  query_hash TEXT NOT NULL,
+  result_count ANY NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pass','fail','compile_error','not_run')),
+  empty_db_status TEXT NOT NULL,
+  fixture_db_status TEXT NOT NULL,
+  evidence_hash TEXT,
+  run_at TEXT NOT NULL,
+  CHECK (typeof(schema_version)='integer' AND schema_version > 0),
+  CHECK (typeof(result_count)='integer' AND result_count >= 0)
+) STRICT;
