@@ -551,7 +551,8 @@ CREATE TABLE spawn_requests (
     agent_id,
     task_digest,
     session_key
-  )
+  ),
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
 CREATE TABLE sessions (
@@ -763,7 +764,8 @@ WHEN NEW.zero_reserve_policy_id IS NOT NULL AND NOT EXISTS (
     AND p.endpoint_binding_id=NEW.endpoint_binding_id
     AND p.capability_class=NEW.capability_class
     AND p.enabled=1
-    AND NEW.created_at_epoch_ms BETWEEN p.effective_from_epoch_ms AND p.effective_until_epoch_ms
+    AND NEW.created_at_epoch_ms >= p.effective_from_epoch_ms
+    AND NEW.created_at_epoch_ms < p.effective_until_epoch_ms
     AND NEW.retry_units>=p.min_retry_units
     AND NEW.time_seconds>=p.min_time_seconds
     AND NEW.human_attention_units>=p.min_human_attention_units
@@ -781,7 +783,8 @@ WHEN NEW.zero_reserve_policy_id IS NOT NULL AND NOT EXISTS (
     AND p.endpoint_binding_id=NEW.endpoint_binding_id
     AND p.capability_class=NEW.capability_class
     AND p.enabled=1
-    AND NEW.created_at_epoch_ms BETWEEN p.effective_from_epoch_ms AND p.effective_until_epoch_ms
+    AND NEW.created_at_epoch_ms >= p.effective_from_epoch_ms
+    AND NEW.created_at_epoch_ms < p.effective_until_epoch_ms
     AND NEW.retry_units>=p.min_retry_units
     AND NEW.time_seconds>=p.min_time_seconds
     AND NEW.human_attention_units>=p.min_human_attention_units
@@ -815,6 +818,17 @@ CREATE TABLE model_cost_registry (
   CHECK (typeof(output_cost_microusd_per_million)='integer' AND output_cost_microusd_per_million BETWEEN 0 AND 100000000000),
   UNIQUE(provider, model, endpoint_binding_id, capability_class, effective_at)
 ) STRICT;
+
+CREATE TRIGGER model_cost_registry_reject_referenced_update
+BEFORE UPDATE ON model_cost_registry
+WHEN EXISTS (
+  SELECT 1 FROM run_budgets WHERE selected_cost_registry_id=OLD.cost_registry_id
+) OR EXISTS (
+  SELECT 1 FROM budget_events WHERE cost_registry_id=OLD.cost_registry_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced model cost registry row is immutable');
+END;
 
 CREATE TABLE predicate_plugins (
   predicate_plugin_hash TEXT PRIMARY KEY,
@@ -1063,6 +1077,20 @@ CREATE TABLE slo_audits (
   FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
     REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash)
 ) STRICT;
+
+CREATE TRIGGER slo_queries_reject_pass_audited_update
+BEFORE UPDATE ON slo_queries
+WHEN EXISTS (
+  SELECT 1 FROM slo_audits
+  WHERE query_name=OLD.query_name
+    AND schema_version=OLD.schema_version
+    AND migration_sha256=OLD.migration_sha256
+    AND query_hash=OLD.query_hash
+    AND status='pass'
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-audited SLO query is immutable');
+END;
 ```
 
 Gate-critical time authority:

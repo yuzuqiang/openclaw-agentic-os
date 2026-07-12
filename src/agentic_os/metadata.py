@@ -69,7 +69,16 @@ def _raw_json_object(raw_json: str) -> dict[str, Any]:
                 value[key] = item
             return value
 
-        value = json.loads(raw_json, object_pairs_hook=reject_duplicate_keys)
+        def reject_nonstandard_constant(constant: str) -> None:
+            raise MetadataContractError(
+                f"raw external metadata contains non-standard JSON constant: {constant}"
+            )
+
+        value = json.loads(
+            raw_json,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonstandard_constant,
+        )
     except MetadataContractError:
         raise
     except (TypeError, json.JSONDecodeError) as exc:

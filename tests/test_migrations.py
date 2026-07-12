@@ -327,6 +327,38 @@ class MigrationTests(unittest.TestCase):
                 "'wrong-session','task','running')"
             )
 
+    def test_spawn_request_transition_must_belong_to_same_run(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        for run_id in ("run-a", "run-b"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+                "risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,"
+                "'w','file_authority','candidate','R1','R1','now','now')",
+                (run_id, f"prepare-{run_id}"),
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,"
+                "'before','after','dispatch','spawn','R1',?,0,'now')",
+                (f"transition-{run_id}", run_id, f"transition-idem-{run_id}"),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES("
+                "'spawn','run-a','phase','agent','transition-run-b','client','spawn-idem',"
+                "'task','pending','now','now')"
+            )
+
     def test_pass_gate_requires_same_run_transition_and_verifier_evidence(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -401,7 +433,9 @@ class MigrationTests(unittest.TestCase):
             "VALUES('policy','endpoint','capability','policy-hash',1,1,2000)"
         )
 
-        def insert_event(identifier: str, retry_units: int) -> None:
+        def insert_event(
+            identifier: str, retry_units: int, sequence: int, created_at_epoch_ms: int = 1000
+        ) -> None:
             connection.execute(
                 "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
                 "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
@@ -411,14 +445,27 @@ class MigrationTests(unittest.TestCase):
                 "created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
                 "'run','transition','provider','model','endpoint','capability','cost-row',"
                 "'effective','cost-hash','known','policy','policy-hash','reserve',?,'known',"
-                "'test','now',1000)",
-                (identifier, f"idem-{identifier}", f"dedupe-{identifier}", retry_units + 1,
-                 retry_units),
+                "'test','now',?)",
+                (
+                    identifier,
+                    f"idem-{identifier}",
+                    f"dedupe-{identifier}",
+                    sequence,
+                    retry_units,
+                    created_at_epoch_ms,
+                ),
             )
 
         with self.assertRaisesRegex(sqlite3.IntegrityError, "minima not met"):
-            insert_event("bad", 0)
-        insert_event("good", 1)
+            insert_event("bad", 0, 1)
+        insert_event("good", 1, 2)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "mismatch"):
+            insert_event("expired-boundary", 1, 3, 2000)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "mismatch"):
+            connection.execute(
+                "UPDATE budget_events SET created_at_epoch_ms=2000 "
+                "WHERE budget_event_id='good'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
             connection.execute(
                 "UPDATE endpoint_zero_reserve_policies SET min_retry_units=2 "
@@ -465,6 +512,20 @@ class MigrationTests(unittest.TestCase):
                 "'now')",
                 (migration_hash, "d" * 64, "e" * 64),
             )
+        connection.execute(
+            "INSERT INTO slo_audits VALUES('a-valid','q',1,?,?,0,'pass','pass','pass',?,"
+            "'now')",
+            (migration_hash, query_hash, "e" * 64),
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "UPDATE slo_queries SET sql_text='SELECT 2' WHERE query_name='q'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "UPDATE slo_queries SET query_hash=? WHERE query_name='q'",
+                ("f" * 64,),
+            )
 
     def test_type_preserving_money_bounds(self) -> None:
         apply_migrations(self.database)
@@ -490,6 +551,71 @@ class MigrationTests(unittest.TestCase):
         ):
             with self.subTest(value=value), self.assertRaises(sqlite3.IntegrityError):
                 insert(identifier, value, 0)
+
+    def test_referenced_model_cost_registry_is_immutable(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'transition','run','before','after','dispatch','spawn','R1','transition-idem',"
+            "0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,selected_cost_confidence,"
+            "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+            "output_token_budget,cost_budget_microusd,retry_budget,human_attention_budget,"
+            "usage_confidence,updated_at) VALUES("
+            "'run','w','capability','provider','model','endpoint','cost-row','effective',"
+            "'cost-hash','known','transition',10,10,10,10,1,1,'known','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "UPDATE model_cost_registry SET input_cost_microusd_per_million=2 "
+                "WHERE cost_registry_id='cost-row'"
+            )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row-event','provider','model','endpoint','capability',1,1,'known',"
+            "'effective-2','cost-hash-event')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,event_dedupe_hash,"
+            "event_sequence,run_id,transition_id,provider,model,endpoint_binding_id,"
+            "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
+            "cost_confidence,event_type,input_tokens,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('event','event-idem','event-dedupe',1,'run',"
+            "'transition','provider','model','endpoint','capability','cost-row-event',"
+            "'effective-2','cost-hash-event','known','consume',1,'known','test','now',1000)"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "UPDATE model_cost_registry SET output_cost_microusd_per_million=2 "
+                "WHERE cost_registry_id='cost-row-event'"
+            )
 
     def test_manifest_is_machine_readable_and_has_one_pinned_migration(self) -> None:
         manifest = json.loads(

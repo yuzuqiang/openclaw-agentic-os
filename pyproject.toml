@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "openclaw-agentic-os"
 version = "0.1.0"
 description = "Fail-closed Agentic OS control-plane foundations for OpenClaw"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]

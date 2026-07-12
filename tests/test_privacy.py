@@ -66,6 +66,21 @@ class PrivacyTests(unittest.TestCase):
             with self.assertRaisesRegex(PrivacyPreflightError, "tracked runtime paths"):
                 assert_privacy_preflight(root)
 
+    def test_any_tracked_raw_state_path_is_rejected_even_outside_sentinels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / ".gitignore").write_text(
+                (repository_root() / ".gitignore").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            tracked = root / "state/agentic-os/secret.db"
+            tracked.parent.mkdir(parents=True)
+            tracked.write_bytes(b"tracked")
+            subprocess.run(["git", "add", "-f", str(tracked)], cwd=root, check=True)
+            with self.assertRaisesRegex(PrivacyPreflightError, "secret.db"):
+                assert_privacy_preflight(root)
+
     def test_existing_database_directory_must_be_private(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -95,6 +110,12 @@ class PrivacyTests(unittest.TestCase):
             "state/agentic-os/control.db.bak1",
             "cache.sqlite",
             "cache.sqlite-backup",
+            "cache.sqlite.backup",
+            "cache.sqlite.bak",
+            "cache.sqlite3",
+            "cache.sqlite3-wal",
+            "cache.sqlite3-shm",
+            "cache.sqlite3.backup",
             "state/agentic-os/backups/redacted.txt",
         )
         for path in denied:

@@ -30,6 +30,12 @@ RAW_STATE_PATTERNS = (
     "*.db.bak*",
     "*.sqlite",
     "*.sqlite-*",
+    "*.sqlite.backup*",
+    "*.sqlite.bak*",
+    "*.sqlite3",
+    "*.sqlite3-*",
+    "*.sqlite3.backup*",
+    "*.sqlite3.bak*",
 )
 
 
@@ -87,7 +93,7 @@ def assert_privacy_preflight(
     checked_paths = tuple(
         dict.fromkeys((*PREFLIGHT_PATHS, *_repo_relative_paths(root, database_paths)))
     )
-    tracked_command = ["git", "ls-files", "--", *checked_paths]
+    tracked_command = ["git", "ls-files", "-z"]
     command = ["git", "check-ignore", "-v", "--", *checked_paths]
     try:
         tracked = subprocess.run(
@@ -113,10 +119,13 @@ def assert_privacy_preflight(
             "privacy preflight failed closed: cannot inspect tracked paths: "
             f"{tracked.stderr.strip()}"
         )
-    if tracked.stdout.strip():
+    tracked_runtime_paths = [
+        path for path in tracked.stdout.split("\0") if path and is_raw_state_denied(path)
+    ]
+    if tracked_runtime_paths:
         raise PrivacyPreflightError(
             "privacy preflight failed closed: tracked runtime paths: "
-            f"{tracked.stdout.splitlines()}"
+            f"{tracked_runtime_paths}"
         )
     matched = {
         line.rsplit("\t", 1)[-1].strip()

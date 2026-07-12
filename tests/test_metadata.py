@@ -187,6 +187,23 @@ class MetadataTests(unittest.TestCase):
                 metadata_contract_version="v1",
             )
 
+    def test_raw_metadata_rejects_nonstandard_json_constants(self) -> None:
+        local = values(SESSION_FIELDS)
+        raw = dict(local)
+        raw["nonstandard"] = "placeholder"
+        pairs = [
+            f'"{key}":{json.dumps(value)}' for key, value in raw.items()
+            if key != "nonstandard"
+        ]
+        pairs.append('"nonstandard":NaN')
+        with self.assertRaisesRegex(MetadataContractError, "non-standard JSON constant"):
+            validate_session_observation(
+                local=local,
+                normalized=dict(local),
+                raw_json="{" + ",".join(pairs) + "}",
+                metadata_contract_version="v1",
+            )
+
     def test_empty_field_is_rejected(self) -> None:
         local = values(SESSION_FIELDS)
         local["task_digest"] = ""
