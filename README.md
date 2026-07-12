@@ -10,8 +10,8 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `a79fdef7062defe9adc4939a674328fe87ca2e8be71f2fb55f7b68049258a353`
-- Current DDL/migration SHA-256: `8cea4f1e0a7c869989a07640f4c28f5d57e136d1e64f16170284976b665ff1b0`
+- Current design artifact SHA-256: `bc17a4a796b6e545475b0d1ba5b68104a50a46f8709ff10fa9c422c4e353d45c`
+- Current DDL/migration SHA-256: `f03c97cfb0145e7a1be416aa3fe33f1a2ee9fd6c831606bf06fb39cbbcb23f10`
 - Design contract: 27 SQLite tables, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 

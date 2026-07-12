@@ -400,6 +400,87 @@ class MigrationTests(unittest.TestCase):
                 + ")",
                 released_without_proof,
             )
+        released_fields = (
+            f"{acquire_fields},release_idempotency_key,release_requested_at,released_at"
+        )
+        released_with_fake_local_proof = (
+            "released-fake-proof", "run", "phase", "transition", "agent", "requester",
+            "released", "gateway-fake", "client-fake", "idem-fake", 60000, "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-fake",
+                    "idempotency_key": "idem-fake",
+                }
+            ),
+            "client-fake", "idem-fake", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000, "release-idem-fake",
+            "release-requested", "released-at",
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
+            connection.execute(
+                f"INSERT INTO leases({released_fields}) VALUES("
+                + ",".join("?" for _ in released_with_fake_local_proof)
+                + ")",
+                released_with_fake_local_proof,
+            )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_idempotency_key,state,external_id,requested_at,requested_at_epoch_ms) "
+            "VALUES('release-intent','run','transition','allow_lease_release',"
+            "'release-client','release-idem','v1','{}','{}','run','transition',"
+            "'release-idem','accepted','gateway-released-ok','now',1000)"
+        )
+        released_with_external_proof = (
+            "released-ok", "run", "phase", "transition", "agent", "requester",
+            "released", "gateway-released-ok", "client-ok", "idem-ok", 60000, "v1",
+            "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-ok",
+                    "idempotency_key": "idem-ok",
+                }
+            ),
+            "client-ok", "idem-ok", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000, "release-idem",
+            "release-requested", "released-at",
+        )
+        connection.execute(
+            f"INSERT INTO leases({released_fields}) VALUES("
+            + ",".join("?" for _ in released_with_external_proof)
+            + ")",
+            released_with_external_proof,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
+            connection.execute(
+                "UPDATE external_rpc_intents SET external_id='other-gateway' "
+                "WHERE intent_id='release-intent'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
+            connection.execute("DELETE FROM external_rpc_intents WHERE intent_id='release-intent'")
+        acquired_live = (
+            "acquired-live", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway-live", "client-live", "idem-live", 60000, "v1", "now",
+            json.dumps(
+                {**metadata, "client_lease_id": "client-live", "idempotency_key": "idem-live"}
+            ),
+            "client-live", "idem-live", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000,
+        )
+        connection.execute(
+            f"INSERT INTO leases({acquire_fields}) VALUES("
+            + ",".join("?" for _ in acquired_live)
+            + ")",
+            acquired_live,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "live lease"):
+            connection.execute(
+                "UPDATE leases SET state='release_not_required', gateway_lease_id=NULL "
+                "WHERE lease_id='acquired-live'"
+            )
         release_not_required_with_gateway = (
             "release-not-required", "run", "phase", "transition", "agent", "requester",
             "release_not_required", "gateway-hidden", "client-hidden", "idem-hidden",
@@ -529,6 +610,20 @@ class MigrationTests(unittest.TestCase):
         connection.execute(
             "UPDATE spawn_requests SET state='accepted' WHERE spawn_request_id='spawn'"
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "session proof"):
+            connection.execute(
+                "UPDATE sessions SET session_key='other-session' "
+                "WHERE session_id='session-good'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "session proof"):
+            connection.execute("DELETE FROM sessions WHERE session_id='session-good'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "external intent proof"):
+            connection.execute(
+                "UPDATE external_rpc_intents SET external_id='other-session' "
+                "WHERE intent_id='intent'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "external intent proof"):
+            connection.execute("DELETE FROM external_rpc_intents WHERE intent_id='intent'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "accepted spawn request"):
             connection.execute(
                 "UPDATE spawn_requests SET session_key='other-session' "

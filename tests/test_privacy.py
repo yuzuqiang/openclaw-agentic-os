@@ -21,6 +21,10 @@ class PrivacyTests(unittest.TestCase):
         result = assert_privacy_preflight(repository_root())
         self.assertEqual(result.ignored_paths, PREFLIGHT_PATHS)
 
+    def test_preflight_contract_includes_rollback_journal_sentinel(self) -> None:
+        self.assertIn("state/agentic-os/control.db-journal", PREFLIGHT_PATHS)
+        self.assertTrue(is_raw_state_denied("state/agentic-os/control.db-journal"))
+
     def test_preflight_fails_closed_when_rules_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

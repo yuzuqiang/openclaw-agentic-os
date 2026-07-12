@@ -246,6 +246,18 @@ CREATE TABLE external_rpc_intents (
         THEN 1 ELSE 0 END
       ELSE 0 END
   ),
+  CHECK (
+    rpc_kind <> 'allow_lease_release'
+    OR state IN ('pending','unknown','failed','human_review_required')
+    OR (
+      metadata_contract_version IS NOT NULL AND metadata_contract_version <> ''
+      AND external_metadata_json IS NOT NULL AND json_valid(external_metadata_json)
+      AND external_id IS NOT NULL AND external_id <> ''
+      AND external_run_id = run_id
+      AND external_transition_id = transition_id
+      AND external_idempotency_key = idempotency_key
+    )
+  ),
   CHECK (external_metadata_json IS NULL OR json_valid(external_metadata_json)=1),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
   FOREIGN KEY (
@@ -390,6 +402,38 @@ WHEN NEW.external_metadata_json IS NOT NULL AND EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'duplicate external metadata key');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_released_lease_delete
+BEFORE DELETE ON external_rpc_intents
+WHEN OLD.rpc_kind='allow_lease_release'
+  AND OLD.state IN ('accepted','reconciled')
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='released'
+      AND l.run_id=OLD.run_id
+      AND l.transition_id=OLD.transition_id
+      AND l.release_idempotency_key=OLD.idempotency_key
+      AND l.gateway_lease_id=OLD.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'released lease requires release intent proof');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_released_lease_update
+BEFORE UPDATE OF rpc_kind, state, run_id, transition_id, idempotency_key, external_id ON external_rpc_intents
+WHEN OLD.rpc_kind='allow_lease_release'
+  AND OLD.state IN ('accepted','reconciled')
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='released'
+      AND l.run_id=OLD.run_id
+      AND l.transition_id=OLD.transition_id
+      AND l.release_idempotency_key=OLD.idempotency_key
+      AND l.gateway_lease_id=OLD.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'released lease requires release intent proof');
 END;
 
 CREATE TABLE spawn_requests (
@@ -545,6 +589,125 @@ WHEN NEW.state IN ('accepted','completed') AND (
 )
 BEGIN
   SELECT RAISE(ABORT,'accepted spawn request requires external intent and session proof');
+END;
+
+CREATE TRIGGER sessions_preserve_spawn_acceptance_delete
+BEFORE DELETE ON sessions
+WHEN EXISTS (
+  SELECT 1 FROM spawn_requests sr
+  WHERE sr.state IN ('accepted','completed')
+    AND sr.spawn_request_id=OLD.spawn_request_id
+    AND sr.run_id=OLD.run_id
+    AND sr.transition_id=OLD.transition_id
+    AND sr.client_request_id=OLD.client_request_id
+    AND sr.spawn_idempotency_key=OLD.spawn_idempotency_key
+    AND sr.phase=OLD.phase
+    AND sr.agent_id=OLD.agent_id
+    AND sr.task_digest=OLD.task_digest
+    AND sr.session_key=OLD.session_key
+)
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires session proof');
+END;
+
+CREATE TRIGGER sessions_preserve_spawn_acceptance_update
+BEFORE UPDATE OF spawn_request_id, run_id, transition_id, client_request_id, spawn_idempotency_key, phase, agent_id, task_digest, session_key ON sessions
+WHEN EXISTS (
+  SELECT 1 FROM spawn_requests sr
+  WHERE sr.state IN ('accepted','completed')
+    AND sr.spawn_request_id=OLD.spawn_request_id
+    AND sr.run_id=OLD.run_id
+    AND sr.transition_id=OLD.transition_id
+    AND sr.client_request_id=OLD.client_request_id
+    AND sr.spawn_idempotency_key=OLD.spawn_idempotency_key
+    AND sr.phase=OLD.phase
+    AND sr.agent_id=OLD.agent_id
+    AND sr.task_digest=OLD.task_digest
+    AND sr.session_key=OLD.session_key
+)
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires session proof');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_spawn_acceptance_delete
+BEFORE DELETE ON external_rpc_intents
+WHEN OLD.rpc_kind='sessions_spawn'
+  AND OLD.state IN ('accepted','reconciled')
+  AND EXISTS (
+    SELECT 1 FROM spawn_requests sr
+    WHERE sr.state IN ('accepted','completed')
+      AND sr.spawn_request_id=OLD.spawn_request_id
+      AND sr.run_id=OLD.run_id
+      AND sr.transition_id=OLD.transition_id
+      AND sr.client_request_id=OLD.client_request_id
+      AND sr.spawn_idempotency_key=OLD.idempotency_key
+      AND sr.phase=OLD.phase
+      AND sr.agent_id=OLD.agent_id
+      AND sr.task_digest=OLD.task_digest
+      AND sr.session_key=OLD.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires external intent proof');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_spawn_acceptance_update
+BEFORE UPDATE OF rpc_kind, state, spawn_request_id, run_id, transition_id, client_request_id, idempotency_key, phase, agent_id, task_digest, external_id ON external_rpc_intents
+WHEN OLD.rpc_kind='sessions_spawn'
+  AND OLD.state IN ('accepted','reconciled')
+  AND EXISTS (
+    SELECT 1 FROM spawn_requests sr
+    WHERE sr.state IN ('accepted','completed')
+      AND sr.spawn_request_id=OLD.spawn_request_id
+      AND sr.run_id=OLD.run_id
+      AND sr.transition_id=OLD.transition_id
+      AND sr.client_request_id=OLD.client_request_id
+      AND sr.spawn_idempotency_key=OLD.idempotency_key
+      AND sr.phase=OLD.phase
+      AND sr.agent_id=OLD.agent_id
+      AND sr.task_digest=OLD.task_digest
+      AND sr.session_key=OLD.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires external intent proof');
+END;
+
+CREATE TRIGGER leases_validate_release_proof_insert
+AFTER INSERT ON leases
+WHEN NEW.state='released' AND NOT EXISTS (
+  SELECT 1 FROM external_rpc_intents eri
+  WHERE eri.rpc_kind='allow_lease_release'
+    AND eri.state IN ('accepted','reconciled')
+    AND eri.run_id=NEW.run_id
+    AND eri.transition_id=NEW.transition_id
+    AND eri.idempotency_key=NEW.release_idempotency_key
+    AND eri.external_id=NEW.gateway_lease_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'released lease requires release intent proof');
+END;
+
+CREATE TRIGGER leases_validate_release_proof_update
+AFTER UPDATE OF state, run_id, transition_id, release_idempotency_key, gateway_lease_id ON leases
+WHEN NEW.state='released' AND NOT EXISTS (
+  SELECT 1 FROM external_rpc_intents eri
+  WHERE eri.rpc_kind='allow_lease_release'
+    AND eri.state IN ('accepted','reconciled')
+    AND eri.run_id=NEW.run_id
+    AND eri.transition_id=NEW.transition_id
+    AND eri.idempotency_key=NEW.release_idempotency_key
+    AND eri.external_id=NEW.gateway_lease_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'released lease requires release intent proof');
+END;
+
+CREATE TRIGGER leases_reject_live_release_not_required_update
+BEFORE UPDATE OF state, gateway_lease_id ON leases
+WHEN NEW.state='release_not_required'
+  AND (OLD.state IN ('acquired','release_pending','released')
+    OR (OLD.gateway_lease_id IS NOT NULL AND OLD.gateway_lease_id <> ''))
+BEGIN
+  SELECT RAISE(ABORT,'live lease cannot be marked release_not_required');
 END;
 
 CREATE TABLE run_budgets (
