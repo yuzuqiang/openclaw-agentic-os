@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .privacy import assert_privacy_preflight
+from .slo_contracts import SLO_QUERY_CONTRACTS, SLO_QUERY_COUNT, slo_query_hash
 
 
 class MigrationError(RuntimeError):
@@ -194,6 +195,69 @@ def _verify_schema(
         )
 
 
+def _expected_slo_rows(migration: Migration) -> dict[str, tuple[object, ...]]:
+    if SLO_QUERY_COUNT != 30:
+        raise MigrationError(f"expected 30 required SLO queries, found {SLO_QUERY_COUNT}")
+    return {
+        contract.query_name: (
+            migration.version,
+            migration.sha256,
+            slo_query_hash(contract.sql_text),
+            contract.sql_text,
+            contract.empty_db_expected_status,
+            contract.fixture_db_expected_status,
+        )
+        for contract in SLO_QUERY_CONTRACTS
+    }
+
+
+def _seed_slo_queries(connection: sqlite3.Connection, migration: Migration) -> None:
+    for contract in SLO_QUERY_CONTRACTS:
+        connection.execute(
+            "INSERT INTO slo_queries("
+            "query_name,schema_version,migration_sha256,query_hash,sql_text,"
+            "empty_db_expected_status,fixture_db_expected_status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?)",
+            (
+                contract.query_name,
+                migration.version,
+                migration.sha256,
+                slo_query_hash(contract.sql_text),
+                contract.sql_text,
+                contract.empty_db_expected_status,
+                contract.fixture_db_expected_status,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+
+def _verify_slo_queries(
+    connection: sqlite3.Connection, migrations: tuple[Migration, ...]
+) -> None:
+    if not migrations:
+        return
+    migration = migrations[0]
+    expected = _expected_slo_rows(migration)
+    rows = connection.execute(
+        "SELECT query_name,schema_version,migration_sha256,query_hash,sql_text,"
+        "empty_db_expected_status,fixture_db_expected_status FROM slo_queries "
+        "ORDER BY query_name"
+    ).fetchall()
+    actual = {row[0]: row[1:] for row in rows}
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        changed = sorted(
+            name
+            for name in set(expected) & set(actual)
+            if expected[name] != actual[name]
+        )
+        raise MigrationHashDrift(
+            "SLO registry differs from pinned query contracts: "
+            f"missing={missing}, extra={extra}, changed={changed}"
+        )
+
+
 def apply_migrations(
     database: Path,
     *,
@@ -245,6 +309,7 @@ def apply_migrations(
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
+                _seed_slo_queries(connection, migration)
                 _database_checks(connection)
                 connection.execute("COMMIT")
             except Exception:
@@ -253,6 +318,7 @@ def apply_migrations(
             applied.append(migration.version)
         _verify_recorded(_recorded(connection), migrations)
         _verify_schema(connection, migrations)
+        _verify_slo_queries(connection, migrations)
         _database_checks(connection)
     finally:
         connection.close()
@@ -298,6 +364,7 @@ def verify_database(
             missing = sorted(expected - set(recorded))
             raise MigrationError(f"database is missing migrations: {missing}")
         _verify_schema(connection, migrations)
+        _verify_slo_queries(connection, migrations)
         _database_checks(connection)
         return tuple(sorted(recorded))
     finally:

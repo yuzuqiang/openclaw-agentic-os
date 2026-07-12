@@ -73,6 +73,37 @@ CREATE TABLE runs (
   finalized_at_epoch_ms ANY,
   CHECK (typeof(state_version)='integer' AND state_version >= 0),
   CHECK (finalized_at_epoch_ms IS NULL OR (typeof(finalized_at_epoch_ms)='integer' AND finalized_at_epoch_ms BETWEEN 1 AND 253402300799999)),
+  CHECK (state IN (
+    'candidate',
+    'triaged',
+    'planned',
+    'prepared',
+    'dispatch_ready',
+    'lease_not_required',
+    'lease_acquire_pending',
+    'lease_acquired',
+    'lease_unavailable',
+    'spawn_pending',
+    'spawn_requested',
+    'spawn_unknown',
+    'dispatched',
+    'first_output_waiting',
+    'running',
+    'child_completed',
+    'child_failed',
+    'child_skipped',
+    'handshake_timeout',
+    'aggregation_completed',
+    'judge_verifier_completed',
+    'judge_verifier_failed',
+    'gate_passed',
+    'gate_failed',
+    'human_review_required',
+    'release_pending',
+    'finalized',
+    'rolled_back',
+    'rejected'
+  )),
   CHECK (authority_mode IN (
     'file_authority',
     'file_authority_shadow',
@@ -156,7 +187,34 @@ CREATE TABLE transitions (
       AND gate_run_id IS NOT NULL AND gate_run_id <> ''
     )
   ),
-  UNIQUE(transition_id,run_id)
+  UNIQUE(transition_id,run_id),
+  FOREIGN KEY(
+    approval_id,
+    run_id,
+    action_type,
+    target_type,
+    target_id,
+    target_hash,
+    target_scope,
+    approval_channel,
+    approval_source_digest,
+    approval_text_digest,
+    transition_id,
+    gate_run_id
+  ) REFERENCES approvals(
+    approval_id,
+    run_id,
+    approved_action_type,
+    target_type,
+    target_id,
+    target_hash,
+    target_scope,
+    channel,
+    source_message_digest,
+    approval_text_digest,
+    consumed_by_transition_id,
+    consumed_by_gate_run_id
+  ) DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 
 CREATE TABLE external_rpc_intents (
@@ -258,6 +316,29 @@ CREATE TABLE external_rpc_intents (
       AND external_idempotency_key = idempotency_key
     )
   ),
+  CHECK (
+    rpc_kind <> 'allow_lease_release'
+    OR external_metadata_json IS NULL
+    OR CASE
+      WHEN json_valid(external_metadata_json) THEN CASE
+        WHEN json_type(external_metadata_json,'$.run_id')='text'
+          AND json_type(external_metadata_json,'$.transition_id')='text'
+          AND json_type(external_metadata_json,'$.idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
+          AND json_extract(external_metadata_json,'$.run_id') <> ''
+          AND json_extract(external_metadata_json,'$.transition_id') <> ''
+          AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
+          AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
+          AND json_extract(external_metadata_json,'$.run_id') = run_id
+          AND json_extract(external_metadata_json,'$.transition_id') = transition_id
+          AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.gateway_lease_id') = external_id
+          AND external_run_id = run_id
+          AND external_transition_id = transition_id
+          AND external_idempotency_key = idempotency_key
+        THEN 1 ELSE 0 END
+      ELSE 0 END
+  ),
   CHECK (external_metadata_json IS NULL OR json_valid(external_metadata_json)=1),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
   FOREIGN KEY (
@@ -315,6 +396,16 @@ CREATE TABLE leases (
   CHECK (typeof(ttl_ms)='integer' AND ttl_ms BETWEEN 1 AND 31536000000),
   CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (external_ttl_ms IS NULL OR (typeof(external_ttl_ms)='integer' AND external_ttl_ms BETWEEN 1 AND 31536000000)),
+  CHECK (
+    lease_id <> ''
+    AND run_id <> ''
+    AND phase <> ''
+    AND transition_id <> ''
+    AND agent_id <> ''
+    AND requester_agent_id <> ''
+    AND client_lease_id <> ''
+    AND acquire_idempotency_key <> ''
+  ),
   CHECK (external_metadata_json IS NULL OR json_valid(external_metadata_json)=1),
   CHECK (
     state NOT IN ('acquired','release_pending','released') OR COALESCE((
@@ -323,6 +414,13 @@ CREATE TABLE leases (
       AND metadata_observed_at IS NOT NULL AND metadata_observed_at <> ''
       AND external_metadata_json IS NOT NULL
       AND json_valid(external_metadata_json)=1
+      AND external_client_lease_id IS NOT NULL AND external_client_lease_id <> ''
+      AND external_idempotency_key IS NOT NULL AND external_idempotency_key <> ''
+      AND external_run_id IS NOT NULL AND external_run_id <> ''
+      AND external_phase IS NOT NULL AND external_phase <> ''
+      AND external_transition_id IS NOT NULL AND external_transition_id <> ''
+      AND external_agent_id IS NOT NULL AND external_agent_id <> ''
+      AND external_requester_agent_id IS NOT NULL AND external_requester_agent_id <> ''
       AND external_client_lease_id=client_lease_id
       AND external_idempotency_key=acquire_idempotency_key
       AND external_run_id=run_id
@@ -339,6 +437,13 @@ CREATE TABLE leases (
       AND json_type(external_metadata_json,'$.agent_id')='text'
       AND json_type(external_metadata_json,'$.requester_agent_id')='text'
       AND json_type(external_metadata_json,'$.ttl_ms')='integer'
+      AND json_extract(external_metadata_json,'$.client_lease_id') <> ''
+      AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
+      AND json_extract(external_metadata_json,'$.run_id') <> ''
+      AND json_extract(external_metadata_json,'$.phase') <> ''
+      AND json_extract(external_metadata_json,'$.transition_id') <> ''
+      AND json_extract(external_metadata_json,'$.agent_id') <> ''
+      AND json_extract(external_metadata_json,'$.requester_agent_id') <> ''
       AND json_extract(external_metadata_json,'$.client_lease_id')=client_lease_id
       AND json_extract(external_metadata_json,'$.idempotency_key')=acquire_idempotency_key
       AND json_extract(external_metadata_json,'$.run_id')=run_id
@@ -728,7 +833,7 @@ CREATE TABLE run_budgets (
   selected_cost_effective_at TEXT NOT NULL,
   selected_cost_registry_hash TEXT NOT NULL,
   selected_cost_confidence TEXT NOT NULL CHECK (selected_cost_confidence IN ('known','estimated','unknown')),
-  selected_reserve_transition_id TEXT NOT NULL REFERENCES transitions(transition_id),
+  selected_reserve_transition_id TEXT NOT NULL,
   time_budget_seconds ANY NOT NULL,
   input_token_budget ANY NOT NULL,
   output_token_budget ANY NOT NULL,
@@ -766,7 +871,8 @@ CREATE TABLE run_budgets (
   CHECK (typeof(consumed_output_tokens)='integer' AND consumed_output_tokens >= 0 AND consumed_output_tokens <= output_token_budget),
   CHECK (typeof(consumed_cost_microusd)='integer' AND consumed_cost_microusd >= 0 AND consumed_cost_microusd <= cost_budget_microusd),
   CHECK (typeof(consumed_retries)='integer' AND consumed_retries >= 0 AND consumed_retries <= retry_budget),
-  CHECK (typeof(consumed_human_attention)='integer' AND consumed_human_attention >= 0 AND consumed_human_attention <= human_attention_budget)
+  CHECK (typeof(consumed_human_attention)='integer' AND consumed_human_attention >= 0 AND consumed_human_attention <= human_attention_budget),
+  FOREIGN KEY(selected_reserve_transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
 CREATE TABLE endpoint_zero_reserve_policies (
@@ -932,6 +1038,18 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
     AND b.cost_effective_at=rb.selected_cost_effective_at
     AND b.cost_registry_hash=rb.selected_cost_registry_hash
     AND b.cost_confidence=rb.selected_cost_confidence
+    AND b.time_seconds <= rb.time_budget_seconds
+    AND b.input_tokens <= rb.input_token_budget
+    AND b.output_tokens <= rb.output_token_budget
+    AND b.cost_microusd <= rb.cost_budget_microusd
+    AND b.retry_units <= rb.retry_budget
+    AND b.human_attention_units <= rb.human_attention_budget
+    AND rb.reserved_time_seconds >= b.time_seconds
+    AND rb.reserved_input_tokens >= b.input_tokens
+    AND rb.reserved_output_tokens >= b.output_tokens
+    AND rb.reserved_cost_microusd >= b.cost_microusd
+    AND rb.reserved_retries >= b.retry_units
+    AND rb.reserved_human_attention >= b.human_attention_units
 )
 BEGIN
   SELECT RAISE(ABORT,'sessions_spawn requires strict prior reserve budget event');
@@ -957,6 +1075,18 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
     AND b.cost_effective_at=rb.selected_cost_effective_at
     AND b.cost_registry_hash=rb.selected_cost_registry_hash
     AND b.cost_confidence=rb.selected_cost_confidence
+    AND b.time_seconds <= rb.time_budget_seconds
+    AND b.input_tokens <= rb.input_token_budget
+    AND b.output_tokens <= rb.output_token_budget
+    AND b.cost_microusd <= rb.cost_budget_microusd
+    AND b.retry_units <= rb.retry_budget
+    AND b.human_attention_units <= rb.human_attention_budget
+    AND rb.reserved_time_seconds >= b.time_seconds
+    AND rb.reserved_input_tokens >= b.input_tokens
+    AND rb.reserved_output_tokens >= b.output_tokens
+    AND rb.reserved_cost_microusd >= b.cost_microusd
+    AND rb.reserved_retries >= b.retry_units
+    AND rb.reserved_human_attention >= b.human_attention_units
 )
 BEGIN
   SELECT RAISE(ABORT,'sessions_spawn requires strict prior reserve budget event');
@@ -974,7 +1104,7 @@ BEGIN
 END;
 
 CREATE TRIGGER budget_events_preserve_spawn_prior_reserve_update
-BEFORE UPDATE OF budget_event_id, event_type, run_id, transition_id, spawn_request_id, provider, model, endpoint_binding_id, capability_class, cost_registry_id, cost_effective_at, cost_registry_hash, cost_confidence, created_at_epoch_ms ON budget_events
+BEFORE UPDATE OF budget_event_id, event_type, event_sequence, run_id, transition_id, spawn_request_id, provider, model, endpoint_binding_id, capability_class, cost_registry_id, cost_effective_at, cost_registry_hash, cost_confidence, zero_reserve_policy_id, zero_reserve_policy_hash, time_seconds, input_tokens, output_tokens, cost_microusd, human_attention_units, retry_units, usage_confidence, source, created_at, created_at_epoch_ms ON budget_events
 WHEN EXISTS (
   SELECT 1 FROM external_rpc_intents i
   WHERE i.rpc_kind='sessions_spawn'
@@ -1112,7 +1242,7 @@ CREATE TABLE approvals (
   expires_at_display TEXT,
   single_use ANY NOT NULL DEFAULT 1,
   approval_hash TEXT NOT NULL UNIQUE,
-  consumed_by_transition_id TEXT UNIQUE REFERENCES transitions(transition_id),
+  consumed_by_transition_id TEXT UNIQUE REFERENCES transitions(transition_id) DEFERRABLE INITIALLY DEFERRED,
   consumed_by_gate_run_id TEXT UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
   approved_at TEXT NOT NULL,
   CHECK (run_id <> ''),
@@ -1120,8 +1250,112 @@ CREATE TABLE approvals (
   CHECK (target_type <> '' AND target_id <> '' AND target_hash <> '' AND target_scope <> ''),
   CHECK (approved_risk_ceiling IN ('R0','R1','R2','R3','R4')),
   CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
-  CHECK (typeof(single_use)='integer' AND single_use IN (0,1))
+  CHECK (typeof(single_use)='integer' AND single_use IN (0,1)),
+  UNIQUE(
+    approval_id,
+    run_id,
+    approved_action_type,
+    target_type,
+    target_id,
+    target_hash,
+    target_scope,
+    channel,
+    source_message_digest,
+    approval_text_digest,
+    consumed_by_transition_id,
+    consumed_by_gate_run_id
+  )
 ) STRICT;
+
+CREATE TRIGGER transitions_validate_approval_insert
+AFTER INSERT ON transitions
+WHEN NEW.approval_required=1 AND NOT EXISTS (
+  SELECT 1 FROM approvals a
+  LEFT JOIN gate_clock_context c ON c.gate_run_id=NEW.gate_run_id
+  WHERE a.approval_id=NEW.approval_id
+    AND a.run_id=NEW.run_id
+    AND a.approved_action_type=NEW.action_type
+    AND a.target_type=NEW.target_type
+    AND a.target_id=NEW.target_id
+    AND a.target_hash=NEW.target_hash
+    AND a.target_scope=NEW.target_scope
+    AND a.channel=NEW.approval_channel
+    AND a.source_message_digest=NEW.approval_source_digest
+    AND a.approval_text_digest=NEW.approval_text_digest
+    AND a.consumed_by_transition_id=NEW.transition_id
+    AND a.consumed_by_gate_run_id=NEW.gate_run_id
+    AND CASE a.approved_risk_ceiling
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+    END >= CASE NEW.risk_dominance
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+    END
+    AND (c.clock_context_id IS NULL OR a.expires_at_epoch_ms > c.now_epoch_ms)
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval does not exactly authorize transition');
+END;
+
+CREATE TRIGGER transitions_validate_approval_update
+AFTER UPDATE OF approval_required, approval_id, run_id, action_type, target_type, target_id, target_hash, target_scope, approval_channel, approval_source_digest, approval_text_digest, transition_id, gate_run_id, risk_dominance ON transitions
+WHEN NEW.approval_required=1 AND NOT EXISTS (
+  SELECT 1 FROM approvals a
+  LEFT JOIN gate_clock_context c ON c.gate_run_id=NEW.gate_run_id
+  WHERE a.approval_id=NEW.approval_id
+    AND a.run_id=NEW.run_id
+    AND a.approved_action_type=NEW.action_type
+    AND a.target_type=NEW.target_type
+    AND a.target_id=NEW.target_id
+    AND a.target_hash=NEW.target_hash
+    AND a.target_scope=NEW.target_scope
+    AND a.channel=NEW.approval_channel
+    AND a.source_message_digest=NEW.approval_source_digest
+    AND a.approval_text_digest=NEW.approval_text_digest
+    AND a.consumed_by_transition_id=NEW.transition_id
+    AND a.consumed_by_gate_run_id=NEW.gate_run_id
+    AND CASE a.approved_risk_ceiling
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+    END >= CASE NEW.risk_dominance
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+    END
+    AND (c.clock_context_id IS NULL OR a.expires_at_epoch_ms > c.now_epoch_ms)
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval does not exactly authorize transition');
+END;
+
+CREATE TRIGGER approvals_reject_expired_binding_insert
+AFTER INSERT ON approvals
+WHEN EXISTS (
+  SELECT 1
+  FROM transitions t
+  JOIN gate_clock_context c ON c.gate_run_id=NEW.consumed_by_gate_run_id
+  WHERE t.approval_required=1
+    AND t.transition_id=NEW.consumed_by_transition_id
+    AND t.gate_run_id=NEW.consumed_by_gate_run_id
+    AND NEW.expires_at_epoch_ms <= c.now_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval expired before gate clock');
+END;
+
+CREATE TRIGGER approvals_reject_expired_binding_update
+AFTER UPDATE OF expires_at_epoch_ms, consumed_by_transition_id, consumed_by_gate_run_id ON approvals
+WHEN EXISTS (
+  SELECT 1
+  FROM transitions t
+  JOIN gate_clock_context c ON c.gate_run_id=NEW.consumed_by_gate_run_id
+  WHERE t.approval_required=1
+    AND t.transition_id=NEW.consumed_by_transition_id
+    AND t.gate_run_id=NEW.consumed_by_gate_run_id
+    AND NEW.expires_at_epoch_ms <= c.now_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval expired before gate clock');
+END;
 
 CREATE TABLE judge_verifier_runs (
   verifier_run_id TEXT PRIMARY KEY,
@@ -1141,6 +1375,7 @@ CREATE TABLE judge_verifier_runs (
   CHECK (typeof(same_worker_context)='integer' AND same_worker_context IN (0,1)),
   CHECK (independence_class='independent'),
   CHECK (worker_agent_id <> verifier_agent_id AND same_worker_context=0),
+  CHECK (prompt_hash <> context_hash),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -1236,6 +1471,42 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'clock context does not match gate completion');
+END;
+
+CREATE TRIGGER gate_clock_context_reject_expired_approval_insert
+AFTER INSERT ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1
+  FROM transitions t
+  JOIN approvals a ON a.approval_id=t.approval_id
+  WHERE t.approval_required=1
+    AND t.gate_run_id=NEW.gate_run_id
+    AND t.transition_id=NEW.transition_id
+    AND t.run_id=NEW.run_id
+    AND a.consumed_by_transition_id=t.transition_id
+    AND a.consumed_by_gate_run_id=NEW.gate_run_id
+    AND a.expires_at_epoch_ms <= NEW.now_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval expired before gate clock');
+END;
+
+CREATE TRIGGER gate_clock_context_reject_expired_approval_update
+AFTER UPDATE OF gate_run_id, consumed_by_gate_run_id, run_id, transition_id, now_epoch_ms ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1
+  FROM transitions t
+  JOIN approvals a ON a.approval_id=t.approval_id
+  WHERE t.approval_required=1
+    AND t.gate_run_id=NEW.gate_run_id
+    AND t.transition_id=NEW.transition_id
+    AND t.run_id=NEW.run_id
+    AND a.consumed_by_transition_id=t.transition_id
+    AND a.consumed_by_gate_run_id=NEW.gate_run_id
+    AND a.expires_at_epoch_ms <= NEW.now_epoch_ms
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval expired before gate clock');
 END;
 
 CREATE TABLE risk_assessments (
@@ -1357,8 +1628,10 @@ CREATE TABLE slo_audits (
   fixture_db_status TEXT NOT NULL,
   evidence_hash TEXT,
   run_at TEXT NOT NULL,
+  run_at_epoch_ms ANY NOT NULL,
   CHECK (typeof(schema_version)='integer' AND schema_version > 0),
   CHECK (typeof(result_count)='integer' AND result_count >= 0),
+  CHECK (typeof(run_at_epoch_ms)='integer' AND run_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (status<>'pass' OR (
     result_count=0
     AND empty_db_status='pass'
@@ -1368,6 +1641,18 @@ CREATE TABLE slo_audits (
   FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
     REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash)
 ) STRICT;
+
+CREATE TRIGGER slo_queries_reject_update
+BEFORE UPDATE ON slo_queries
+BEGIN
+  SELECT RAISE(ABORT,'SLO query registry is immutable');
+END;
+
+CREATE TRIGGER slo_queries_reject_delete
+BEFORE DELETE ON slo_queries
+BEGIN
+  SELECT RAISE(ABORT,'SLO query registry is immutable');
+END;
 
 CREATE TRIGGER slo_queries_reject_pass_audited_update
 BEFORE UPDATE ON slo_queries
