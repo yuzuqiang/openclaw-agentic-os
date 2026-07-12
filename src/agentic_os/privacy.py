@@ -69,7 +69,9 @@ class PrivacyPreflightResult:
 
 
 def is_raw_state_denied(path: str | Path) -> bool:
-    normalized = str(path).replace("\\", "/").lstrip("./")
+    normalized = str(path).replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
     pure = PurePosixPath(normalized)
     for name in pure.parts:
         candidate_names = [name]
@@ -101,7 +103,7 @@ def is_raw_state_denied(path: str | Path) -> bool:
 
 
 def assert_paths_retrievable(
-    paths: Iterable[str | Path], *, local_recovery: bool = False
+    paths: str | Path | Iterable[str | Path], *, local_recovery: bool = False
 ) -> None:
     """Fail if packaging/retrieval includes raw state.
 
@@ -109,7 +111,8 @@ def assert_paths_retrievable(
     never use it for packaging, reporting, upload, or remote retrieval.
     """
 
-    denied = [str(path) for path in paths if is_raw_state_denied(path)]
+    targets = (paths,) if isinstance(paths, (str, Path)) else tuple(paths)
+    denied = [str(path) for path in targets if is_raw_state_denied(path)]
     if denied and not local_recovery:
         raise PrivacyPreflightError(f"raw database state is denied: {denied}")
 

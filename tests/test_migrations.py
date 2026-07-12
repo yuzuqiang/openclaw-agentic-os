@@ -482,6 +482,52 @@ class MigrationTests(unittest.TestCase):
             "requester_agent_id": "requester",
             "ttl_ms": 60000,
         }
+        missing_acquire_proof = (
+            "lease-no-proof", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway-no-proof", "client-no-proof", "idem-no-proof", 60000,
+            "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-no-proof",
+                    "idempotency_key": "idem-no-proof",
+                }
+            ),
+            "client-no-proof", "idem-no-proof", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+                "external_idempotency_key,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in missing_acquire_proof) + ")",
+                missing_acquire_proof,
+            )
+        acquire_metadata = json.dumps(
+            {
+                "run_id": "run",
+                "transition_id": "transition",
+                "client_request_id": "client-valid",
+                "idempotency_key": "idem-valid",
+                "gateway_lease_id": "gateway",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_client_request_id,external_idempotency_key,state,external_id,"
+            "requested_at,requested_at_epoch_ms) VALUES('acquire-valid','run',"
+            "'transition','allow_lease_acquire','client-valid','idem-valid','v1','{}',"
+            "?,'run','transition','client-valid','idem-valid','accepted','gateway',"
+            "'now',1000)",
+            (acquire_metadata,),
+        )
         valid = (
             "lease-valid", "run", "phase", "transition", "agent", "requester",
             "acquired", "gateway", "client-valid", "idem-valid", 60000, "v1", "now",
@@ -702,6 +748,26 @@ class MigrationTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
             connection.execute("DELETE FROM external_rpc_intents WHERE intent_id='release-intent'")
+        acquire_live_metadata = json.dumps(
+            {
+                "run_id": "run",
+                "transition_id": "transition",
+                "client_request_id": "client-live",
+                "idempotency_key": "idem-live",
+                "gateway_lease_id": "gateway-live",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_client_request_id,external_idempotency_key,state,external_id,"
+            "requested_at,requested_at_epoch_ms) VALUES('acquire-live','run',"
+            "'transition','allow_lease_acquire','client-live','idem-live','v1','{}',"
+            "?,'run','transition','client-live','idem-live','accepted','gateway-live',"
+            "'now',1000)",
+            (acquire_live_metadata,),
+        )
         acquired_live = (
             "acquired-live", "run", "phase", "transition", "agent", "requester",
             "acquired", "gateway-live", "client-live", "idem-live", 60000, "v1", "now",
@@ -717,6 +783,13 @@ class MigrationTests(unittest.TestCase):
             + ")",
             acquired_live,
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
+            connection.execute(
+                "UPDATE external_rpc_intents SET external_id='gateway-other' "
+                "WHERE intent_id='acquire-live'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
+            connection.execute("DELETE FROM external_rpc_intents WHERE intent_id='acquire-live'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "live lease"):
             connection.execute(
                 "UPDATE leases SET state='release_not_required', gateway_lease_id=NULL "
@@ -846,6 +919,27 @@ class MigrationTests(unittest.TestCase):
             "3,'r','t','spawn','provider','model','endpoint','capability','cost-row',"
             "'effective','cost-hash','known','reserve',11,'known','test','now',1000)"
         )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-forged','other-provider','model','endpoint','capability',1,1,"
+            "'known','effective','forged-hash')"
+        )
+        connection.execute(
+            "UPDATE run_budgets SET selected_cost_registry_id='cost-forged',"
+            "selected_cost_registry_hash='forged-hash' WHERE run_id='r'"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,event_dedupe_hash,"
+            "event_sequence,run_id,transition_id,spawn_request_id,provider,model,endpoint_binding_id,"
+            "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
+            "cost_confidence,event_type,input_tokens,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('forged-cost-row','forged-cost-row-idem',"
+            "'forged-cost-row-dedupe',4,'r','t','spawn','provider','model','endpoint',"
+            "'capability','cost-forged','effective','forged-hash','known','reserve',1,"
+            "'known','test','now',1000)"
+        )
         external_metadata = json.dumps(
             {
                 "run_id": "r",
@@ -861,6 +955,7 @@ class MigrationTests(unittest.TestCase):
             ("intent-consume", "consume", 1001),
             ("intent-late-reserve", "reserve", 1000),
             ("intent-over-budget", "over-budget", 1001),
+            ("intent-forged-cost-row", "forged-cost-row", 1001),
         ):
             with self.subTest(identifier=identifier), self.assertRaisesRegex(
                 sqlite3.IntegrityError, "strict prior reserve"
@@ -898,6 +993,10 @@ class MigrationTests(unittest.TestCase):
                         requested_at_epoch_ms,
                     ),
                 )
+        connection.execute(
+            "UPDATE run_budgets SET selected_cost_registry_id='cost-row',"
+            "selected_cost_registry_hash='cost-hash' WHERE run_id='r'"
+        )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
             "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
@@ -1384,6 +1483,17 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE gate_runs SET completed_at_epoch_ms=1001 WHERE gate_run_id='gate'"
             )
+        for assignment in (
+            "gate_nonce='nonce-rewritten'",
+            "trusted_clock_source_hash='source-rewritten'",
+        ):
+            with self.subTest(assignment=assignment), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "immutable"
+            ):
+                connection.execute(
+                    f"UPDATE gate_clock_context SET {assignment} "
+                    "WHERE clock_context_id='clock'"
+                )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,size_bytes,"
@@ -2071,6 +2181,27 @@ class MigrationTests(unittest.TestCase):
                 "run-event-unknown",
             },
         )
+
+    def test_completion_gate_slo_blocks_finalized_r2_without_finalized_time(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'finalized-r2','prepare','w','file_authority','finalized','R2','R2',"
+            "'now','now')"
+        )
+        query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Completion gate before done for R2+"
+        )
+        self.assertEqual(connection.execute(query).fetchall(), [("finalized-r2",)])
 
     def test_readme_migration_example_uses_private_test_database(self) -> None:
         readme = (repository_root() / "README.md").read_text(encoding="utf-8")

@@ -1046,6 +1046,72 @@ BEGIN
   SELECT RAISE(ABORT,'accepted spawn request requires external intent proof');
 END;
 
+CREATE TRIGGER leases_validate_acquire_proof_insert
+AFTER INSERT ON leases
+WHEN NEW.state IN ('acquired','release_pending') AND NOT EXISTS (
+  SELECT 1 FROM external_rpc_intents eri
+  WHERE eri.rpc_kind='allow_lease_acquire'
+    AND eri.state IN ('accepted','reconciled')
+    AND eri.run_id=NEW.run_id
+    AND eri.transition_id=NEW.transition_id
+    AND eri.client_request_id=NEW.client_lease_id
+    AND eri.idempotency_key=NEW.acquire_idempotency_key
+    AND eri.external_id=NEW.gateway_lease_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires acquire intent proof');
+END;
+
+CREATE TRIGGER leases_validate_acquire_proof_update
+AFTER UPDATE OF state, run_id, transition_id, client_lease_id, acquire_idempotency_key, gateway_lease_id ON leases
+WHEN NEW.state IN ('acquired','release_pending') AND NOT EXISTS (
+  SELECT 1 FROM external_rpc_intents eri
+  WHERE eri.rpc_kind='allow_lease_acquire'
+    AND eri.state IN ('accepted','reconciled')
+    AND eri.run_id=NEW.run_id
+    AND eri.transition_id=NEW.transition_id
+    AND eri.client_request_id=NEW.client_lease_id
+    AND eri.idempotency_key=NEW.acquire_idempotency_key
+    AND eri.external_id=NEW.gateway_lease_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires acquire intent proof');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_live_lease_acquire_delete
+BEFORE DELETE ON external_rpc_intents
+WHEN OLD.rpc_kind='allow_lease_acquire'
+  AND OLD.state IN ('accepted','reconciled')
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state IN ('acquired','release_pending')
+      AND l.run_id=OLD.run_id
+      AND l.transition_id=OLD.transition_id
+      AND l.client_lease_id=OLD.client_request_id
+      AND l.acquire_idempotency_key=OLD.idempotency_key
+      AND l.gateway_lease_id=OLD.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires acquire intent proof');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_live_lease_acquire_update
+BEFORE UPDATE OF rpc_kind, state, run_id, transition_id, client_request_id, idempotency_key, external_id ON external_rpc_intents
+WHEN OLD.rpc_kind='allow_lease_acquire'
+  AND OLD.state IN ('accepted','reconciled')
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state IN ('acquired','release_pending')
+      AND l.run_id=OLD.run_id
+      AND l.transition_id=OLD.transition_id
+      AND l.client_lease_id=OLD.client_request_id
+      AND l.acquire_idempotency_key=OLD.idempotency_key
+      AND l.gateway_lease_id=OLD.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires acquire intent proof');
+END;
+
 CREATE TRIGGER leases_validate_release_proof_insert
 AFTER INSERT ON leases
 WHEN NEW.state='released' AND NOT EXISTS (
@@ -1293,12 +1359,21 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
   SELECT 1
   FROM budget_events b
   JOIN run_budgets rb ON rb.run_id=NEW.run_id
+  JOIN model_cost_registry m ON m.cost_registry_id=rb.selected_cost_registry_id
   WHERE b.budget_event_id=NEW.reserve_budget_event_id
     AND b.event_type='reserve'
     AND b.run_id=NEW.run_id
     AND b.transition_id=NEW.transition_id
     AND b.spawn_request_id=NEW.spawn_request_id
     AND b.created_at_epoch_ms < NEW.requested_at_epoch_ms
+    AND rb.selected_provider=m.provider
+    AND rb.selected_model=m.model
+    AND rb.selected_endpoint_binding_id=m.endpoint_binding_id
+    AND rb.capability_class=m.capability_class
+    AND rb.selected_cost_effective_at=m.effective_at
+    AND rb.selected_cost_registry_hash=m.registry_row_hash
+    AND rb.selected_cost_confidence=m.confidence
+    AND m.confidence<>'unknown'
     AND b.provider=rb.selected_provider
     AND b.model=rb.selected_model
     AND b.endpoint_binding_id=rb.selected_endpoint_binding_id
@@ -1307,6 +1382,14 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
     AND b.cost_effective_at=rb.selected_cost_effective_at
     AND b.cost_registry_hash=rb.selected_cost_registry_hash
     AND b.cost_confidence=rb.selected_cost_confidence
+    AND b.provider=m.provider
+    AND b.model=m.model
+    AND b.endpoint_binding_id=m.endpoint_binding_id
+    AND b.capability_class=m.capability_class
+    AND b.cost_registry_id=m.cost_registry_id
+    AND b.cost_effective_at=m.effective_at
+    AND b.cost_registry_hash=m.registry_row_hash
+    AND b.cost_confidence=m.confidence
     AND b.time_seconds <= rb.time_budget_seconds
     AND b.input_tokens <= rb.input_token_budget
     AND b.output_tokens <= rb.output_token_budget
@@ -1330,12 +1413,21 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
   SELECT 1
   FROM budget_events b
   JOIN run_budgets rb ON rb.run_id=NEW.run_id
+  JOIN model_cost_registry m ON m.cost_registry_id=rb.selected_cost_registry_id
   WHERE b.budget_event_id=NEW.reserve_budget_event_id
     AND b.event_type='reserve'
     AND b.run_id=NEW.run_id
     AND b.transition_id=NEW.transition_id
     AND b.spawn_request_id=NEW.spawn_request_id
     AND b.created_at_epoch_ms < NEW.requested_at_epoch_ms
+    AND rb.selected_provider=m.provider
+    AND rb.selected_model=m.model
+    AND rb.selected_endpoint_binding_id=m.endpoint_binding_id
+    AND rb.capability_class=m.capability_class
+    AND rb.selected_cost_effective_at=m.effective_at
+    AND rb.selected_cost_registry_hash=m.registry_row_hash
+    AND rb.selected_cost_confidence=m.confidence
+    AND m.confidence<>'unknown'
     AND b.provider=rb.selected_provider
     AND b.model=rb.selected_model
     AND b.endpoint_binding_id=rb.selected_endpoint_binding_id
@@ -1344,6 +1436,14 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
     AND b.cost_effective_at=rb.selected_cost_effective_at
     AND b.cost_registry_hash=rb.selected_cost_registry_hash
     AND b.cost_confidence=rb.selected_cost_confidence
+    AND b.provider=m.provider
+    AND b.model=m.model
+    AND b.endpoint_binding_id=m.endpoint_binding_id
+    AND b.capability_class=m.capability_class
+    AND b.cost_registry_id=m.cost_registry_id
+    AND b.cost_effective_at=m.effective_at
+    AND b.cost_registry_hash=m.registry_row_hash
+    AND b.cost_confidence=m.confidence
     AND b.time_seconds <= rb.time_budget_seconds
     AND b.input_tokens <= rb.input_token_budget
     AND b.output_tokens <= rb.output_token_budget
@@ -1838,7 +1938,7 @@ BEGIN
 END;
 
 CREATE TRIGGER gate_clock_context_validate_gate_update
-AFTER UPDATE OF gate_run_id, consumed_by_gate_run_id, run_id, transition_id, now_epoch_ms ON gate_clock_context
+AFTER UPDATE OF gate_run_id, consumed_by_gate_run_id, run_id, transition_id, now_epoch_ms, bound_at_epoch_ms, consumed_at_epoch_ms, gate_nonce, trusted_clock_source_hash ON gate_clock_context
 WHEN EXISTS (
   SELECT 1 FROM gate_runs g WHERE g.gate_run_id=NEW.gate_run_id
 ) AND NOT EXISTS (
@@ -1851,6 +1951,15 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'clock context does not match gate completion');
+END;
+
+CREATE TRIGGER gate_clock_context_preserve_consumed_identity_update
+BEFORE UPDATE OF gate_nonce, trusted_clock_source_hash ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g WHERE g.gate_run_id=OLD.gate_run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'consumed gate clock identity is immutable');
 END;
 
 CREATE TRIGGER gate_clock_context_reject_expired_approval_insert

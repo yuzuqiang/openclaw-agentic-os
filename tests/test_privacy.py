@@ -146,6 +146,10 @@ class PrivacyTests(unittest.TestCase):
             "cache.sqlite3-wal",
             "cache.sqlite3-shm",
             "cache.sqlite3.backup",
+            ".db",
+            ".sqlite",
+            ".sqlite3",
+            "./.db",
             "state/agentic-os/backups/redacted.txt",
         )
         for path in denied:
@@ -154,6 +158,10 @@ class PrivacyTests(unittest.TestCase):
         self.assertFalse(is_raw_state_denied("reports/summary.json"))
         with self.assertRaises(PrivacyPreflightError):
             assert_paths_retrievable(denied)
+        with self.assertRaises(PrivacyPreflightError):
+            assert_paths_retrievable("control.db")
+        with self.assertRaises(PrivacyPreflightError):
+            assert_paths_retrievable(Path("control.db"))
         assert_paths_retrievable(denied, local_recovery=True)
 
 
