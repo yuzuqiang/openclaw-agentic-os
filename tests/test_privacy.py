@@ -51,6 +51,19 @@ class PrivacyTests(unittest.TestCase):
                 apply_migrations(target, repo_root=root)
             self.assertFalse(target.exists())
 
+    def test_database_target_outside_repo_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as other:
+            root = Path(repo)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / ".gitignore").write_text(
+                (repository_root() / ".gitignore").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            target = Path(other) / "control.db"
+            with self.assertRaisesRegex(PrivacyPreflightError, "outside checked worktree"):
+                apply_migrations(target, repo_root=root)
+            self.assertFalse(target.exists())
+
     def test_tracked_runtime_database_is_rejected_even_when_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -106,6 +119,12 @@ class PrivacyTests(unittest.TestCase):
             "export/control.db",
             "control.db-wal",
             "control.db-shm",
+            "control.db-journal",
+            "state/agentic-os/control.db.gz",
+            "dump.sqlite.zip",
+            "cache.sqlite3.zst",
+            "control.db-wal.xz",
+            "control.db.backup.zst",
             "state/agentic-os/control.db.backup123",
             "state/agentic-os/control.db.bak1",
             "cache.sqlite",

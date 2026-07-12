@@ -330,6 +330,25 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
     ),0)=1
   ),
+  CHECK (
+    state NOT IN ('release_pending','released') OR (
+      release_idempotency_key IS NOT NULL AND release_idempotency_key <> ''
+      AND release_requested_at IS NOT NULL AND release_requested_at <> ''
+    )
+  ),
+  CHECK (
+    state <> 'released' OR (
+      released_at IS NOT NULL AND released_at <> ''
+    )
+  ),
+  CHECK (
+    state <> 'release_not_required' OR (
+      gateway_lease_id IS NULL
+      AND release_idempotency_key IS NULL
+      AND release_requested_at IS NULL
+      AND released_at IS NULL
+    )
+  ),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
@@ -460,6 +479,74 @@ CREATE TABLE sessions (
   ) ON DELETE CASCADE
 ) STRICT;
 
+CREATE TRIGGER spawn_requests_validate_acceptance_insert
+AFTER INSERT ON spawn_requests
+WHEN NEW.state IN ('accepted','completed') AND (
+  NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='sessions_spawn'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.spawn_request_id=NEW.spawn_request_id
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.client_request_id=NEW.client_request_id
+      AND eri.idempotency_key=NEW.spawn_idempotency_key
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.task_digest=NEW.task_digest
+      AND eri.external_id=NEW.session_key
+  )
+  OR NOT EXISTS (
+    SELECT 1 FROM sessions s
+    WHERE s.spawn_request_id=NEW.spawn_request_id
+      AND s.run_id=NEW.run_id
+      AND s.transition_id=NEW.transition_id
+      AND s.client_request_id=NEW.client_request_id
+      AND s.spawn_idempotency_key=NEW.spawn_idempotency_key
+      AND s.phase=NEW.phase
+      AND s.agent_id=NEW.agent_id
+      AND s.task_digest=NEW.task_digest
+      AND s.session_key=NEW.session_key
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires external intent and session proof');
+END;
+
+CREATE TRIGGER spawn_requests_validate_acceptance_update
+AFTER UPDATE OF state, session_key, run_id, transition_id, client_request_id, spawn_idempotency_key, phase, agent_id, task_digest ON spawn_requests
+WHEN NEW.state IN ('accepted','completed') AND (
+  NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='sessions_spawn'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.spawn_request_id=NEW.spawn_request_id
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.client_request_id=NEW.client_request_id
+      AND eri.idempotency_key=NEW.spawn_idempotency_key
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.task_digest=NEW.task_digest
+      AND eri.external_id=NEW.session_key
+  )
+  OR NOT EXISTS (
+    SELECT 1 FROM sessions s
+    WHERE s.spawn_request_id=NEW.spawn_request_id
+      AND s.run_id=NEW.run_id
+      AND s.transition_id=NEW.transition_id
+      AND s.client_request_id=NEW.client_request_id
+      AND s.spawn_idempotency_key=NEW.spawn_idempotency_key
+      AND s.phase=NEW.phase
+      AND s.agent_id=NEW.agent_id
+      AND s.task_digest=NEW.task_digest
+      AND s.session_key=NEW.session_key
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires external intent and session proof');
+END;
+
 CREATE TABLE run_budgets (
   run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
   workflow TEXT NOT NULL,
@@ -574,7 +661,6 @@ CREATE TABLE budget_events (
   CHECK (
     event_type <> 'reserve'
     OR input_tokens > 0 OR output_tokens > 0 OR cost_microusd > 0
-    OR time_seconds > 0 OR human_attention_units > 0 OR retry_units > 0
     OR zero_reserve_policy_id IS NOT NULL
   ),
   CHECK (event_type <> 'retry_decrement' OR retry_units > 0),

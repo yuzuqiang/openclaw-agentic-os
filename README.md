@@ -4,15 +4,18 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 
 ## Current status
 
-The initial design artifact has passed dual independent design acceptance. This does **not** prove production runtime behavior.
+The initial design artifact passed dual independent design acceptance. The
+current corrected design artifact has **not** yet passed fresh independent
+revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
-- Current design artifact SHA-256: `64bf8a982195a66abd2b485789171ac0a9c27e0e70bb1ac3d1291632cb2f50fd`
-- Current DDL/migration SHA-256: `0a4fab990947c4ae810be7da11607c3fd3c5024a5fcbc619d92af2cf9e579ec9`
+- Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
+- Current design artifact SHA-256: `a79fdef7062defe9adc4939a674328fe87ca2e8be71f2fb55f7b68049258a353`
+- Current DDL/migration SHA-256: `8cea4f1e0a7c869989a07640f4c28f5d57e136d1e64f16170284976b665ff1b0`
 - Design contract: 27 SQLite tables, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
-The current P0 foundation materializes the accepted schema and supplies
+The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
 disabled (`agentic_os.DB_AUTHORITY_ENABLED is False`), and no OpenClaw runtime
 adapter is implemented yet.

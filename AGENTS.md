@@ -1,6 +1,8 @@
 # Repository guidance
 
-This repository implements the accepted Agentic OS production design for OpenClaw.
+This repository implements the current Agentic OS production design contract for OpenClaw.
+README tracks the last independently accepted design hash separately from the
+current corrected artifact hash.
 
 ## Working rules
 

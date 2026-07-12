@@ -23,6 +23,9 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
+  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; live lease terminal states require release proof or no external gateway lease; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive.
+  - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
 - 2026-07-12: Applied Round 11 single-writer correction after Round 10 independent review found unresolved High gaps:
   - Frozen Round 10 input SHA-256 before this correction: `a6b93a7bc1357cf037833b75ffc09938ca1d1d4b0ababab129ea5595a666ffdc`.
   - `/Users/zuqiangyu/clawd/artifacts/agentic-os-dual-review/round10-main-independent.md` found wrong-run approval authorization and `consume`-carried human-attention accounting loopholes. `/Users/zuqiangyu/clawd/artifacts/agentic-os-dual-review/round10-ai-engineer.md` returned a conflicting PASS, so this revision treats the concrete failing fixtures as mandatory corrections.
@@ -150,10 +153,11 @@ state/agentic-os/backups/
 git check-ignore -v state/agentic-os/control.db
 git check-ignore -v state/agentic-os/control.db-wal
 git check-ignore -v state/agentic-os/control.db-shm
+git check-ignore -v state/agentic-os/control.db-journal
 git check-ignore -v state/agentic-os/backups/example.db
 ```
 
-- Packaging/reporting denylist refuses raw `*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`, `*.sqlite-*`, and `state/agentic-os/backups/**` unless an explicit local recovery mode is used.
+- Packaging/reporting denylist refuses raw `*.db`, `*.db-wal`, `*.db-shm`, `*.db-journal`, `*.sqlite`, `*.sqlite-*`, `*.sqlite3`, SQLite sidecars/backups, compressed SQLite snapshots such as `.gz`, `.zip`, and `.zst`, and `state/agentic-os/backups/**` unless an explicit local recovery mode is used.
 
 External runtime metadata contract is a P0 prerequisite:
 
@@ -161,6 +165,7 @@ External runtime metadata contract is a P0 prerequisite:
 - Duplicate allowLease acquire with the same idempotency key must return the same live lease identity and must not create another lease.
 - `subagents.allowLease.status` must expose all caller metadata for every live lease.
 - `subagents.allowLease.release` must be idempotent on `release_idempotency_key` and must refuse to release a lease whose owner metadata does not match the caller, except through explicit human review.
+- A local lease row cannot move to `released` or `release_pending` without a non-empty release idempotency key and release request evidence; `release_not_required` is valid only when no external Gateway lease identity exists.
 - `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
 - Session list/status/result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
 - For `sessions_spawn`, SQLite authority is normalized and raw evidence must agree with it: `external_rpc_intents.spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest` must match one concrete `spawn_requests` row through foreign keys. Whenever a `sessions_spawn` row carries `external_metadata_json`, DDL requires `json_valid(...)` and requires `json_extract(...,'$.run_id')`, `$.transition_id`, `$.client_request_id`, `$.idempotency_key`, `$.phase`, `$.agent_id`, and `$.task_digest` to match both the normalized observed fields and the local intent fields exactly. Accepted/reconciled rows additionally require a non-empty accepted external session identity in `external_id`. Pre-RPC `pending` rows may exist without external JSON because the external call has not returned; the blocking SLO rejects pending/unknown/accepted/reconciled rows from auto-repair or gate trust unless the raw JSON, normalized observed fields, and local intent fields are an exact triple match.
@@ -517,6 +522,25 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
     ),0)=1
   ),
+  CHECK (
+    state NOT IN ('release_pending','released') OR (
+      release_idempotency_key IS NOT NULL AND release_idempotency_key <> ''
+      AND release_requested_at IS NOT NULL AND release_requested_at <> ''
+    )
+  ),
+  CHECK (
+    state <> 'released' OR (
+      released_at IS NOT NULL AND released_at <> ''
+    )
+  ),
+  CHECK (
+    state <> 'release_not_required' OR (
+      gateway_lease_id IS NULL
+      AND release_idempotency_key IS NULL
+      AND release_requested_at IS NULL
+      AND released_at IS NULL
+    )
+  ),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
@@ -647,6 +671,74 @@ CREATE TABLE sessions (
   ) ON DELETE CASCADE
 ) STRICT;
 
+CREATE TRIGGER spawn_requests_validate_acceptance_insert
+AFTER INSERT ON spawn_requests
+WHEN NEW.state IN ('accepted','completed') AND (
+  NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='sessions_spawn'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.spawn_request_id=NEW.spawn_request_id
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.client_request_id=NEW.client_request_id
+      AND eri.idempotency_key=NEW.spawn_idempotency_key
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.task_digest=NEW.task_digest
+      AND eri.external_id=NEW.session_key
+  )
+  OR NOT EXISTS (
+    SELECT 1 FROM sessions s
+    WHERE s.spawn_request_id=NEW.spawn_request_id
+      AND s.run_id=NEW.run_id
+      AND s.transition_id=NEW.transition_id
+      AND s.client_request_id=NEW.client_request_id
+      AND s.spawn_idempotency_key=NEW.spawn_idempotency_key
+      AND s.phase=NEW.phase
+      AND s.agent_id=NEW.agent_id
+      AND s.task_digest=NEW.task_digest
+      AND s.session_key=NEW.session_key
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires external intent and session proof');
+END;
+
+CREATE TRIGGER spawn_requests_validate_acceptance_update
+AFTER UPDATE OF state, session_key, run_id, transition_id, client_request_id, spawn_idempotency_key, phase, agent_id, task_digest ON spawn_requests
+WHEN NEW.state IN ('accepted','completed') AND (
+  NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='sessions_spawn'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.spawn_request_id=NEW.spawn_request_id
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.client_request_id=NEW.client_request_id
+      AND eri.idempotency_key=NEW.spawn_idempotency_key
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.task_digest=NEW.task_digest
+      AND eri.external_id=NEW.session_key
+  )
+  OR NOT EXISTS (
+    SELECT 1 FROM sessions s
+    WHERE s.spawn_request_id=NEW.spawn_request_id
+      AND s.run_id=NEW.run_id
+      AND s.transition_id=NEW.transition_id
+      AND s.client_request_id=NEW.client_request_id
+      AND s.spawn_idempotency_key=NEW.spawn_idempotency_key
+      AND s.phase=NEW.phase
+      AND s.agent_id=NEW.agent_id
+      AND s.task_digest=NEW.task_digest
+      AND s.session_key=NEW.session_key
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request requires external intent and session proof');
+END;
+
 CREATE TABLE run_budgets (
   run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
   workflow TEXT NOT NULL,
@@ -761,7 +853,6 @@ CREATE TABLE budget_events (
   CHECK (
     event_type <> 'reserve'
     OR input_tokens > 0 OR output_tokens > 0 OR cost_microusd > 0
-    OR time_seconds > 0 OR human_attention_units > 0 OR retry_units > 0
     OR zero_reserve_policy_id IS NOT NULL
   ),
   CHECK (event_type <> 'retry_decrement' OR retry_units > 0),

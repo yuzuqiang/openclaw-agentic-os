@@ -20,9 +20,19 @@ from agentic_os.migrations import (
 
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
+        self.state_root = repository_root() / "state/agentic-os"
+        self.state_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._cleanup_state_root)
+        self.temporary = tempfile.TemporaryDirectory(dir=self.state_root)
         self.addCleanup(self.temporary.cleanup)
         self.database = Path(self.temporary.name) / "control.db"
+
+    def _cleanup_state_root(self) -> None:
+        try:
+            self.state_root.rmdir()
+            self.state_root.parent.rmdir()
+        except OSError:
+            pass
 
     def test_authority_remains_disabled(self) -> None:
         self.assertIs(DB_AUTHORITY_ENABLED, False)
@@ -330,7 +340,7 @@ class MigrationTests(unittest.TestCase):
         )
         duplicate_gateway = (
             "lease-valid-2", "run", "phase", "transition", "agent", "requester",
-            "release_pending", "gateway", "client-valid-2", "idem-valid-2", 60000,
+            "acquired", "gateway", "client-valid-2", "idem-valid-2", 60000,
             "v1", "now",
             json.dumps(
                 {
@@ -353,6 +363,56 @@ class MigrationTests(unittest.TestCase):
                 "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
                 + ",".join("?" for _ in duplicate_gateway) + ")",
                 duplicate_gateway,
+            )
+
+    def test_live_lease_release_states_require_release_proof(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        metadata = {
+            "client_lease_id": "client",
+            "idempotency_key": "idem",
+            "run_id": "run",
+            "phase": "phase",
+            "transition_id": "transition",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+            "ttl_ms": 60000,
+        }
+        acquire_fields = (
+            "lease_id,run_id,phase,transition_id,agent_id,requester_agent_id,state,"
+            "gateway_lease_id,client_lease_id,acquire_idempotency_key,ttl_ms,"
+            "metadata_contract_version,metadata_observed_at,external_metadata_json,"
+            "external_client_lease_id,external_idempotency_key,external_run_id,"
+            "external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,expires_at,expires_at_epoch_ms"
+        )
+        released_without_proof = (
+            "released-no-proof", "run", "phase", "transition", "agent", "requester",
+            "released", "gateway-released", "client", "idem", 60000, "v1", "now",
+            json.dumps(metadata), "client", "idem", "run", "phase", "transition",
+            "agent", "requester", 60000, "expires", 2000000000000,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                f"INSERT INTO leases({acquire_fields}) VALUES("
+                + ",".join("?" for _ in released_without_proof)
+                + ")",
+                released_without_proof,
+            )
+        release_not_required_with_gateway = (
+            "release-not-required", "run", "phase", "transition", "agent", "requester",
+            "release_not_required", "gateway-hidden", "client-hidden", "idem-hidden",
+            60000, "expires", 2000000000000,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in release_not_required_with_gateway)
+                + ")",
+                release_not_required_with_gateway,
             )
 
     def test_sqlite_boundary_rejects_duplicate_raw_metadata_keys(self) -> None:
@@ -399,11 +459,19 @@ class MigrationTests(unittest.TestCase):
             "guard_version_before,created_at) VALUES("
             "'t','r','before','after','dispatch','spawn','R1','transition-idem',0,'now')"
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "accepted spawn request"):
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "session_key,created_at,updated_at) VALUES('spawn-bad','r','phase',"
+                "'agent','t','client-bad','spawn-idem-bad','task','accepted',"
+                "'accepted-session','now','now')"
+            )
         connection.execute(
             "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,transition_id,"
             "client_request_id,spawn_idempotency_key,task_digest,state,session_key,created_at,"
             "updated_at) VALUES('spawn','r','phase','agent','t','client','spawn-idem','task',"
-            "'accepted','accepted-session','now','now')"
+            "'pending','accepted-session','now','now')"
         )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
@@ -411,6 +479,60 @@ class MigrationTests(unittest.TestCase):
                 "agent_id,client_request_id,spawn_idempotency_key,session_key,task_digest,state) "
                 "VALUES('session','spawn','r','t','phase','agent','client','spawn-idem',"
                 "'wrong-session','task','running')"
+            )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,event_dedupe_hash,"
+            "event_sequence,run_id,transition_id,provider,model,endpoint_binding_id,"
+            "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
+            "cost_confidence,event_type,input_tokens,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('reserve','reserve-idem','reserve-dedupe',1,'r',"
+            "'t','provider','model','endpoint','capability','cost-row','effective',"
+            "'cost-hash','known','reserve',1,'known','test','now',1000)"
+        )
+        external_metadata = json.dumps(
+            {
+                "run_id": "r",
+                "transition_id": "t",
+                "client_request_id": "client",
+                "idempotency_key": "spawn-idem",
+                "phase": "phase",
+                "agent_id": "agent",
+                "task_digest": "task",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+            "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_client_request_id,external_idempotency_key,external_phase,"
+            "external_agent_id,external_task_digest,state,external_id,requested_at,"
+            "requested_at_epoch_ms) VALUES('intent','r','t','sessions_spawn','spawn',"
+            "'reserve','client','spawn-idem','phase','agent','task','v1','{}',?,"
+            "'r','t','client','spawn-idem','phase','agent','task','accepted',"
+            "'accepted-session','now',1001)",
+            (external_metadata,),
+        )
+        connection.execute(
+            "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,phase,"
+            "agent_id,client_request_id,spawn_idempotency_key,session_key,task_digest,state) "
+            "VALUES('session-good','spawn','r','t','phase','agent','client','spawn-idem',"
+            "'accepted-session','task','running')"
+        )
+        connection.execute(
+            "UPDATE spawn_requests SET state='accepted' WHERE spawn_request_id='spawn'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "accepted spawn request"):
+            connection.execute(
+                "UPDATE spawn_requests SET session_key='other-session' "
+                "WHERE spawn_request_id='spawn'"
             )
 
     def test_spawn_request_transition_must_belong_to_same_run(self) -> None:
@@ -826,6 +948,17 @@ class MigrationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(sqlite3.IntegrityError, "minima not met"):
             insert_event("bad", 0, 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+                "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,retry_units,usage_confidence,"
+                "source,created_at,created_at_epoch_ms) VALUES('no-policy','idem-no-policy',"
+                "'dedupe-no-policy',99,'run','transition','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known','reserve',1,"
+                "'known','test','now',1000)"
+            )
         insert_event("good", 1, 2)
         with self.assertRaisesRegex(sqlite3.IntegrityError, "mismatch"):
             insert_event("expired-boundary", 1, 3, 2000)
@@ -1006,6 +1139,13 @@ class MigrationTests(unittest.TestCase):
         migration_digest = hashlib.sha256(
             (repository_root() / "migrations/0001_minimum_contract.sql").read_bytes()
         ).hexdigest()
+        self.assertIn("has **not** yet passed fresh independent", readme)
+        self.assertIn("revalidation", readme)
+        self.assertIn(
+            "Last independently accepted design artifact SHA-256: "
+            "`fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`",
+            readme,
+        )
         self.assertIn(f"Current design artifact SHA-256: `{design_digest}`", readme)
         self.assertIn(f"Current DDL/migration SHA-256: `{migration_digest}`", readme)
 

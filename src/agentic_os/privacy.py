@@ -17,6 +17,7 @@ PREFLIGHT_PATHS = (
     "state/agentic-os/control.db",
     "state/agentic-os/control.db-wal",
     "state/agentic-os/control.db-shm",
+    "state/agentic-os/control.db-journal",
     "state/agentic-os/backups/example.db",
 )
 
@@ -38,6 +39,15 @@ RAW_STATE_PATTERNS = (
     "*.sqlite3.bak*",
 )
 
+COMPRESSED_STATE_SUFFIXES = (
+    ".gz",
+    ".zip",
+    ".zst",
+    ".xz",
+    ".bz2",
+    ".lz4",
+)
+
 
 @dataclass(frozen=True)
 class PrivacyPreflightResult:
@@ -49,7 +59,26 @@ def is_raw_state_denied(path: str | Path) -> bool:
     normalized = str(path).replace("\\", "/").lstrip("./")
     pure = PurePosixPath(normalized)
     name = pure.name
-    if any(fnmatch.fnmatchcase(name, pattern) for pattern in RAW_STATE_PATTERNS):
+    candidate_names = [name]
+    stripped = name
+    while True:
+        suffix = next(
+            (
+                suffix
+                for suffix in COMPRESSED_STATE_SUFFIXES
+                if stripped.endswith(suffix) and stripped != suffix
+            ),
+            None,
+        )
+        if suffix is None:
+            break
+        stripped = stripped[: -len(suffix)]
+        candidate_names.append(stripped)
+    if any(
+        fnmatch.fnmatchcase(candidate, pattern)
+        for candidate in candidate_names
+        for pattern in RAW_STATE_PATTERNS
+    ):
         return True
     parts = pure.parts
     return any(
@@ -79,7 +108,9 @@ def _repo_relative_paths(repo_root: Path, paths: Iterable[Path]) -> tuple[str, .
         try:
             item = resolved.relative_to(repo_root).as_posix()
         except ValueError:
-            continue
+            raise PrivacyPreflightError(
+                f"database path is outside checked worktree: {resolved}"
+            ) from None
         relative.extend((item, f"{item}-wal", f"{item}-shm", f"{item}-journal"))
     return tuple(dict.fromkeys(relative))
 
