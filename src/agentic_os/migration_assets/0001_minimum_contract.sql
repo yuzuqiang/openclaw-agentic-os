@@ -219,6 +219,28 @@ CREATE TABLE transitions (
   ) DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
 
+CREATE TRIGGER transitions_bind_run_risk_insert
+AFTER INSERT ON transitions
+WHEN NOT EXISTS (
+  SELECT 1 FROM runs r
+  WHERE r.run_id=NEW.run_id
+    AND r.risk_dominance=NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'transition risk dominance must match run risk dominance');
+END;
+
+CREATE TRIGGER transitions_bind_run_risk_update
+AFTER UPDATE OF run_id, risk_dominance ON transitions
+WHEN NOT EXISTS (
+  SELECT 1 FROM runs r
+  WHERE r.run_id=NEW.run_id
+    AND r.risk_dominance=NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'transition risk dominance must match run risk dominance');
+END;
+
 CREATE TABLE external_rpc_intents (
   intent_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
@@ -1647,6 +1669,28 @@ BEGIN
   SELECT RAISE(ABORT,'risk assessment must match transition risk dominance');
 END;
 
+CREATE TRIGGER risk_assessments_bind_run_risk_insert
+AFTER INSERT ON risk_assessments
+WHEN NOT EXISTS (
+  SELECT 1 FROM runs r
+  WHERE r.run_id=NEW.run_id
+    AND r.risk_dominance=NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'risk assessment must match run risk dominance');
+END;
+
+CREATE TRIGGER risk_assessments_bind_run_risk_update
+AFTER UPDATE OF run_id, risk_dominance ON risk_assessments
+WHEN NOT EXISTS (
+  SELECT 1 FROM runs r
+  WHERE r.run_id=NEW.run_id
+    AND r.risk_dominance=NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'risk assessment must match run risk dominance');
+END;
+
 CREATE TRIGGER transitions_bind_existing_risk_assessment_insert
 AFTER INSERT ON transitions
 WHEN EXISTS (
@@ -1669,6 +1713,21 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'transition risk dominance must match assessment');
+END;
+
+CREATE TRIGGER runs_bind_existing_risk_records_update
+AFTER UPDATE OF risk_dominance ON runs
+WHEN EXISTS (
+  SELECT 1 FROM transitions t
+  WHERE t.run_id=NEW.run_id
+    AND t.risk_dominance<>NEW.risk_dominance
+) OR EXISTS (
+  SELECT 1 FROM risk_assessments r
+  WHERE r.run_id=NEW.run_id
+    AND r.risk_dominance<>NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'run risk dominance must match transition risk records');
 END;
 
 CREATE TABLE trust_observations (

@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from agentic_os import DB_AUTHORITY_ENABLED
@@ -75,6 +76,19 @@ class MigrationTests(unittest.TestCase):
                     (repository_root() / "migrations" / filename).read_bytes(),
                 )
         self.assertEqual(load_migrations()[0].sha256, load_migrations(repository_root() / "migrations")[0].sha256)
+
+    def test_default_migration_loader_uses_package_resources(self) -> None:
+        asset_root = resources.files("agentic_os.migration_assets")
+        with mock.patch(
+            "agentic_os.migrations.repository_root",
+            side_effect=AssertionError("source-tree migrations must not be required"),
+        ):
+            migration = load_migrations()[0]
+        self.assertEqual(migration.name, "minimum_contract")
+        self.assertEqual(
+            migration.sha256,
+            hashlib.sha256((asset_root / "0001_minimum_contract.sql").read_bytes()).hexdigest(),
+        )
 
     def test_verify_is_read_only_and_creates_no_sidecars(self) -> None:
         apply_migrations(self.database)
@@ -366,6 +380,13 @@ class MigrationTests(unittest.TestCase):
                 "transition_type,action_type,risk_dominance,idempotency_key,"
                 "guard_version_before,created_at) VALUES("
                 "'t','r','before','after','mutate','write','R4','idem',0,'now')"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "run risk dominance"):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES("
+                "'low-copy','r','before','after','mutate','write','R1','low-idem',0,'now')"
             )
 
     def test_approval_transition_must_match_authorized_run_and_target(self) -> None:
@@ -1387,6 +1408,10 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE transitions SET risk_dominance='R2' "
                 "WHERE transition_id='transition-run-a'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "run risk dominance"):
+            connection.execute(
+                "UPDATE runs SET risk_dominance='R2' WHERE run_id='run-a'"
             )
 
     def test_predicate_backend_is_allowlisted(self) -> None:
