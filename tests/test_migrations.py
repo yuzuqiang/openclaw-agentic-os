@@ -1044,6 +1044,52 @@ class MigrationTests(unittest.TestCase):
                 "'idem','{}','pending','now',1000)"
             )
 
+    def test_external_intent_rpc_identity_must_be_non_empty(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'transition','run','before','after','lease','acquire','R1','transition-idem',"
+            "0,'now')"
+        )
+        for intent_id, client_request_id, idempotency_key in (
+            ("empty-client", "", "idem"),
+            ("empty-idempotency", "client", ""),
+        ):
+            with self.subTest(intent_id=intent_id), self.assertRaises(
+                sqlite3.IntegrityError
+            ):
+                connection.execute(
+                    "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                    "rpc_kind,client_request_id,idempotency_key,metadata_json,state,"
+                    "requested_at,requested_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        intent_id,
+                        "run",
+                        "transition",
+                        "allow_lease_acquire",
+                        client_request_id,
+                        idempotency_key,
+                        "{}",
+                        "pending",
+                        "now",
+                        1000,
+                    ),
+                )
+
     def test_accepted_allow_lease_acquire_requires_exact_metadata(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -1193,6 +1239,22 @@ class MigrationTests(unittest.TestCase):
                 "migration_sha256,risk_dominance,created_at) VALUES("
                 "'gate-transition','run-a','transition-run-b','clock-transition','fail','now',"
                 "1000,'v1','query','migration','R1','now')"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+                "decision,completed_at,completed_at_epoch_ms,gate_version,gate_query_hash,"
+                "migration_sha256,risk_dominance,created_at) VALUES("
+                "'gate-bad-risk','run-a','transition-run-a','clock-bad-risk','fail','now',"
+                "1000,'v1','query','migration','NOT_A_RISK','now')"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "risk dominance"):
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+                "decision,completed_at,completed_at_epoch_ms,gate_version,gate_query_hash,"
+                "migration_sha256,risk_dominance,created_at) VALUES("
+                "'gate-low-risk','run-a','transition-run-a','clock-low-risk','fail','now',"
+                "1000,'v1','query','migration','R2','now')"
             )
 
     def test_pass_gate_requires_gate_bound_evidence_row(self) -> None:
@@ -1515,6 +1577,64 @@ class MigrationTests(unittest.TestCase):
             "VALUES('sandbox-ok','sandbox-goal','R1','open','sandbox-plugin',"
             "'agentic_predicate_inproc_v1',1,'sandbox-proof','now')"
         )
+
+    def test_approval_required_goal_run_requires_exact_approval(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+            "schema_hash,sandbox_required,sandbox_enforced,created_at) VALUES("
+            "'plugin','safe','1','agentic_predicate_inproc_v1','schema',0,1,'now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,updated_at) "
+            "VALUES('goal','owner','R1','manifest','plugin','agentic_predicate_inproc_v1',"
+            "1,1,'now','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,created_at) VALUES("
+                "'missing-approval','goal','run','R1','open','plugin',"
+                "'agentic_predicate_inproc_v1',1,'now')"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at) "
+                "VALUES('fake-approval','goal','run','R1','open','plugin',"
+                "'agentic_predicate_inproc_v1',1,'missing','now')"
+            )
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,approval_hash,approved_at) VALUES('approval','run',"
+            "'river','telegram','source','text','goal_run','goal','goal','manifest',"
+            "'scope','R1',2000,'approval-hash','now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at) "
+            "VALUES('approved','goal','run','R1','open','plugin',"
+            "'agentic_predicate_inproc_v1',1,'approval','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "UPDATE goal_runs SET approval_id=NULL WHERE goal_run_id='approved'"
+            )
 
     def test_verifier_independence_class_is_allowlisted(self) -> None:
         apply_migrations(self.database)

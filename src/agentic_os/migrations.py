@@ -10,12 +10,16 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import resources
-from importlib.abc import Traversable
 from pathlib import Path
 from typing import Iterator
 
 from .privacy import assert_privacy_preflight
 from .slo_contracts import SLO_QUERY_CONTRACTS, SLO_QUERY_COUNT, slo_query_hash
+
+try:
+    from importlib.resources.abc import Traversable
+except ImportError:  # Python 3.9 test runners still expose only the deprecated alias.
+    from importlib.abc import Traversable
 
 
 class MigrationError(RuntimeError):

@@ -71,28 +71,28 @@ class PrivacyPreflightResult:
 def is_raw_state_denied(path: str | Path) -> bool:
     normalized = str(path).replace("\\", "/").lstrip("./")
     pure = PurePosixPath(normalized)
-    name = pure.name
-    candidate_names = [name]
-    stripped = name
-    while True:
-        suffix = next(
-            (
-                suffix
-                for suffix in COMPRESSED_STATE_SUFFIXES
-                if stripped.endswith(suffix) and stripped != suffix
-            ),
-            None,
-        )
-        if suffix is None:
-            break
-        stripped = stripped[: -len(suffix)]
-        candidate_names.append(stripped)
-    if any(
-        fnmatch.fnmatchcase(candidate, pattern)
-        for candidate in candidate_names
-        for pattern in RAW_STATE_PATTERNS
-    ):
-        return True
+    for name in pure.parts:
+        candidate_names = [name]
+        stripped = name
+        while True:
+            suffix = next(
+                (
+                    suffix
+                    for suffix in COMPRESSED_STATE_SUFFIXES
+                    if stripped.endswith(suffix) and stripped != suffix
+                ),
+                None,
+            )
+            if suffix is None:
+                break
+            stripped = stripped[: -len(suffix)]
+            candidate_names.append(stripped)
+        if any(
+            fnmatch.fnmatchcase(candidate, pattern)
+            for candidate in candidate_names
+            for pattern in RAW_STATE_PATTERNS
+        ):
+            return True
     parts = pure.parts
     return any(
         parts[index : index + 3] == ("state", "agentic-os", "backups")

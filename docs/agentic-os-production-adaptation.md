@@ -467,8 +467,15 @@ CREATE TABLE external_rpc_intents (
   CHECK (accepted_at_epoch_ms IS NULL OR (typeof(accepted_at_epoch_ms)='integer' AND accepted_at_epoch_ms BETWEEN 1 AND 253402300799999)),
   CHECK (resolved_at_epoch_ms IS NULL OR (typeof(resolved_at_epoch_ms)='integer' AND resolved_at_epoch_ms BETWEEN 1 AND 253402300799999)),
   CHECK (
+    intent_id <> ''
+    AND run_id <> ''
+    AND transition_id <> ''
+    AND client_request_id <> ''
+    AND idempotency_key <> ''
+  ),
+  CHECK (
     rpc_kind <> 'sessions_spawn' OR (
-      spawn_request_id IS NOT NULL
+      spawn_request_id IS NOT NULL AND spawn_request_id <> ''
       AND reserve_budget_event_id IS NOT NULL
       AND phase IS NOT NULL AND phase <> ''
       AND agent_id IS NOT NULL AND agent_id <> ''
@@ -1476,7 +1483,7 @@ CREATE TABLE goal_runs (
   backend TEXT NOT NULL,
   sandbox_enforced ANY NOT NULL,
   sandbox_proof_hash TEXT,
-  approval_id TEXT,
+  approval_id TEXT REFERENCES approvals(approval_id),
   evidence_hash TEXT,
   created_at TEXT NOT NULL,
   CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
@@ -1669,6 +1676,42 @@ BEGIN
   SELECT RAISE(ABORT,'approval expired before gate clock');
 END;
 
+CREATE TRIGGER goal_runs_validate_required_approval_insert
+AFTER INSERT ON goal_runs
+WHEN EXISTS (
+  SELECT 1 FROM goal_manifests gm
+  WHERE gm.goal_id=NEW.goal_id
+    AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gm.backend=NEW.backend
+    AND gm.approval_required=1
+) AND NOT EXISTS (
+  SELECT 1 FROM approvals a
+  WHERE a.approval_id=NEW.approval_id
+    AND NEW.run_id IS NOT NULL
+    AND a.run_id=NEW.run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
+END;
+
+CREATE TRIGGER goal_runs_validate_required_approval_update
+AFTER UPDATE OF goal_id, run_id, predicate_plugin_hash, backend, approval_id ON goal_runs
+WHEN EXISTS (
+  SELECT 1 FROM goal_manifests gm
+  WHERE gm.goal_id=NEW.goal_id
+    AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gm.backend=NEW.backend
+    AND gm.approval_required=1
+) AND NOT EXISTS (
+  SELECT 1 FROM approvals a
+  WHERE a.approval_id=NEW.approval_id
+    AND NEW.run_id IS NOT NULL
+    AND a.run_id=NEW.run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
+END;
+
 CREATE TABLE judge_verifier_runs (
   verifier_run_id TEXT PRIMARY KEY,
   worker_run_id TEXT NOT NULL REFERENCES runs(run_id),
@@ -1709,6 +1752,7 @@ CREATE TABLE gate_runs (
   created_at TEXT NOT NULL,
   CHECK (typeof(completed_at_epoch_ms)='integer' AND completed_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (typeof(requires_same_run)='integer' AND requires_same_run IN (0,1)),
+  CHECK (risk_dominance IN ('R0','R1','R2','R3','R4')),
   CHECK (decision <> 'pass' OR (verifier_run_id IS NOT NULL AND evidence_hash IS NOT NULL AND evidence_hash <> '')),
   UNIQUE(gate_run_id,evidence_hash),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id),
@@ -1751,6 +1795,30 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'gate completion does not match clock context');
+END;
+
+CREATE TRIGGER gate_runs_validate_risk_binding_insert
+AFTER INSERT ON gate_runs
+WHEN NOT EXISTS (
+  SELECT 1 FROM transitions t
+  WHERE t.transition_id=NEW.transition_id
+    AND t.run_id=NEW.run_id
+    AND t.risk_dominance=NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'gate risk dominance must match transition risk dominance');
+END;
+
+CREATE TRIGGER gate_runs_validate_risk_binding_update
+AFTER UPDATE OF run_id, transition_id, risk_dominance ON gate_runs
+WHEN NOT EXISTS (
+  SELECT 1 FROM transitions t
+  WHERE t.transition_id=NEW.transition_id
+    AND t.run_id=NEW.run_id
+    AND t.risk_dominance=NEW.risk_dominance
+)
+BEGIN
+  SELECT RAISE(ABORT,'gate risk dominance must match transition risk dominance');
 END;
 
 CREATE TRIGGER gate_clock_context_validate_gate_insert
