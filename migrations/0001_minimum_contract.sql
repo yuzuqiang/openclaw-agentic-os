@@ -72,8 +72,48 @@ CREATE TABLE runs (
   finalized_at_epoch_ms ANY,
   CHECK (typeof(state_version)='integer' AND state_version >= 0),
   CHECK (finalized_at_epoch_ms IS NULL OR (typeof(finalized_at_epoch_ms)='integer' AND finalized_at_epoch_ms BETWEEN 1 AND 253402300799999)),
-  FOREIGN KEY(workflow,authority_mode) REFERENCES workflow_authority(workflow,mode)
+  CHECK (authority_mode IN (
+    'file_authority',
+    'file_authority_shadow',
+    'dual_write_shadow',
+    'db_authority_canary',
+    'db_authority',
+    'rollback_to_file_authority'
+  )),
+  CHECK (risk_dominance IN ('R0','R1','R2','R3','R4'))
 ) STRICT;
+
+CREATE TRIGGER runs_validate_db_authority_insert
+BEFORE INSERT ON runs
+WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_authority w
+    WHERE w.workflow=NEW.workflow
+      AND w.mode=NEW.authority_mode
+      AND w.cutover_approved_by IS NOT NULL AND w.cutover_approved_by <> ''
+      AND w.cutover_evidence_hash IS NOT NULL AND w.cutover_evidence_hash <> ''
+      AND w.rollback_deadline IS NOT NULL AND w.rollback_deadline <> ''
+      AND w.last_parity_audit_hash IS NOT NULL AND w.last_parity_audit_hash <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'db authority run requires active workflow cutover evidence');
+END;
+
+CREATE TRIGGER runs_validate_db_authority_update
+BEFORE UPDATE OF workflow, authority_mode ON runs
+WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_authority w
+    WHERE w.workflow=NEW.workflow
+      AND w.mode=NEW.authority_mode
+      AND w.cutover_approved_by IS NOT NULL AND w.cutover_approved_by <> ''
+      AND w.cutover_evidence_hash IS NOT NULL AND w.cutover_evidence_hash <> ''
+      AND w.rollback_deadline IS NOT NULL AND w.rollback_deadline <> ''
+      AND w.last_parity_audit_hash IS NOT NULL AND w.last_parity_audit_hash <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'db authority run requires active workflow cutover evidence');
+END;
 
 CREATE TABLE transitions (
   transition_id TEXT PRIMARY KEY,
@@ -285,7 +325,8 @@ CREATE TABLE leases (
       AND typeof(json_extract(external_metadata_json,'$.ttl_ms'))='integer'
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
     ),0)=1
-  )
+  ),
+  FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
 
 CREATE TRIGGER external_rpc_intents_reject_duplicate_metadata_insert
@@ -658,6 +699,8 @@ CREATE TABLE predicate_plugins (
   CHECK (typeof(sandbox_required)='integer' AND sandbox_required IN (0,1)),
   CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
   CHECK (typeof(sensitive)='integer' AND sensitive IN (0,1)),
+  CHECK (sandbox_required=0 OR sandbox_enforced=1),
+  CHECK (sensitive=0 OR (approved_at IS NOT NULL AND approved_at <> '')),
   UNIQUE(predicate_plugin_hash,backend)
 ) STRICT;
 
@@ -674,6 +717,7 @@ CREATE TABLE goal_manifests (
   updated_at TEXT NOT NULL,
   CHECK (typeof(approval_required)='integer' AND approval_required IN (0,1)),
   CHECK (typeof(enabled)='integer' AND enabled IN (0,1)),
+  UNIQUE(goal_id,predicate_plugin_hash,backend),
   FOREIGN KEY(predicate_plugin_hash,backend)
     REFERENCES predicate_plugins(predicate_plugin_hash,backend)
 ) STRICT;
@@ -693,6 +737,8 @@ CREATE TABLE goal_runs (
   evidence_hash TEXT,
   created_at TEXT NOT NULL,
   CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
+  FOREIGN KEY(goal_id,predicate_plugin_hash,backend)
+    REFERENCES goal_manifests(goal_id,predicate_plugin_hash,backend),
   FOREIGN KEY(predicate_plugin_hash,backend)
     REFERENCES predicate_plugins(predicate_plugin_hash,backend)
 ) STRICT;
@@ -742,6 +788,7 @@ CREATE TABLE judge_verifier_runs (
   same_worker_context ANY NOT NULL DEFAULT 0,
   completed_at TEXT NOT NULL,
   CHECK (typeof(same_worker_context)='integer' AND same_worker_context IN (0,1)),
+  CHECK (independence_class='independent'),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -886,7 +933,12 @@ CREATE TABLE slo_audits (
   run_at TEXT NOT NULL,
   CHECK (typeof(schema_version)='integer' AND schema_version > 0),
   CHECK (typeof(result_count)='integer' AND result_count >= 0),
-  CHECK (status<>'pass' OR (empty_db_status='pass' AND fixture_db_status='pass' AND evidence_hash IS NOT NULL AND evidence_hash<>'')),
+  CHECK (status<>'pass' OR (
+    result_count=0
+    AND empty_db_status='pass'
+    AND fixture_db_status='pass'
+    AND evidence_hash IS NOT NULL AND evidence_hash<>''
+  )),
   FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
     REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash)
 ) STRICT;
