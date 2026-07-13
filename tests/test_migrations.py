@@ -376,6 +376,48 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             apply_migrations(self.database)
 
+    def test_v1_projection_identity_upgrade_rejects_tied_max_timestamp(self) -> None:
+        self._apply_v1_migration_only("v1-tied-max-timestamp")
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('shadow','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                "'run-a','prepare-run-a','shadow','file_authority_shadow',"
+                "'finalized','R1','R1','now','now','now',1)"
+            )
+            for projection_id, digest, generated_at in (
+                (
+                    "projection-a-old",
+                    "a" * 64,
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "projection-a-current-left",
+                    "b" * 64,
+                    "2026-01-02T00:00:00+00:00",
+                ),
+                (
+                    "projection-a-current-right",
+                    "c" * 64,
+                    "2026-01-02T00:00:00+00:00",
+                ),
+            ):
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                    "source_authority,generated_at) VALUES(?,?,"
+                    "'reports/summary.json',?,'file_authority_shadow',?)",
+                    (projection_id, "run-a", digest, generated_at),
+                )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
     def test_connect_fails_closed_when_wal_is_unavailable(self) -> None:
         connection = mock.Mock()
 
