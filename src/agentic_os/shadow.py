@@ -87,6 +87,39 @@ def _normalize_required_identity(name: str, value: str) -> str:
     return normalized
 
 
+def _run_is_finalized_shadow(
+    row: tuple[object, ...] | None,
+    *,
+    workflow: str,
+    prepare_idempotency_key: str | None = None,
+) -> bool:
+    if row is None:
+        return False
+    if prepare_idempotency_key is None:
+        expected = (workflow, "file_authority_shadow", "finalized", "R1", "R1")
+        identity = row[:5]
+        finalized_at = row[5]
+        finalized_epoch_ms = row[6]
+    else:
+        expected = (
+            workflow,
+            "file_authority_shadow",
+            prepare_idempotency_key,
+            "finalized",
+            "R1",
+            "R1",
+        )
+        identity = row[:6]
+        finalized_at = row[6]
+        finalized_epoch_ms = row[7]
+    return (
+        identity == expected
+        and isinstance(finalized_at, str)
+        and finalized_at.strip() != ""
+        and finalized_epoch_ms == 1
+    )
+
+
 def _normalize_artifacts(
     artifacts: Iterable[str | Path], *, repo_root_path: Path
 ) -> tuple[tuple[Path, str, str], ...]:
@@ -173,11 +206,16 @@ def _ensure_shadow_run(
         )
 
     existing_run = connection.execute(
-        "SELECT workflow,authority_mode,prepare_idempotency_key FROM runs WHERE run_id=?",
+        "SELECT workflow,authority_mode,prepare_idempotency_key,state,risk_class,"
+        "risk_dominance,finalized_at,finalized_at_epoch_ms FROM runs WHERE run_id=?",
         (run_id,),
     ).fetchone()
     if existing_run is not None:
-        if existing_run != (workflow, "file_authority_shadow", prepare_idempotency_key):
+        if not _run_is_finalized_shadow(
+            existing_run,
+            workflow=workflow,
+            prepare_idempotency_key=prepare_idempotency_key,
+        ):
             raise ShadowBackfillError(f"run {run_id!r} is not a matching shadow run")
         return
 
@@ -333,7 +371,7 @@ def audit_file_authority_shadow(
         )
     try:
         verify_database(database_path)
-    except MigrationError:
+    except (MigrationError, sqlite3.DatabaseError):
         issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
         return ShadowAuditResult(
             workflow=workflow,
@@ -346,9 +384,11 @@ def audit_file_authority_shadow(
     connection = _connect(database_path, existing=True)
     try:
         run = connection.execute(
-            "SELECT workflow,authority_mode FROM runs WHERE run_id=?", (run_id,)
+            "SELECT workflow,authority_mode,state,risk_class,risk_dominance,"
+            "finalized_at,finalized_at_epoch_ms FROM runs WHERE run_id=?",
+            (run_id,),
         ).fetchone()
-        if run != (workflow, "file_authority_shadow"):
+        if not _run_is_finalized_shadow(run, workflow=workflow):
             issues.append(ShadowAuditIssue(path="", reason="missing_shadow_run"))
         workflow_mode = connection.execute(
             "SELECT mode FROM workflow_authority WHERE workflow=?", (workflow,)

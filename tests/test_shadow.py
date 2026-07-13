@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agentic_os.migrations import repository_root
+from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.privacy import PrivacyPreflightError
 from agentic_os.shadow import (
     ShadowBackfillError,
@@ -202,6 +202,34 @@ class ShadowTests(unittest.TestCase):
                 ("prepare-one",),
             )
 
+    def test_shadow_backfill_rejects_nonterminal_existing_run(self) -> None:
+        artifact = self._artifact()
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'shadow-run','file-shadow:shadow-run','heartbeat','file_authority_shadow',"
+                "'running','R1','R1','now','now')"
+            )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "matching shadow run"):
+            backfill_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow="heartbeat",
+                run_id="shadow-run",
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM artifact_projections").fetchone(),
+                (0,),
+            )
+
     def test_shadow_backfill_records_same_artifact_for_each_run(self) -> None:
         artifact = self._artifact()
         backfill_file_authority_shadow(
@@ -348,6 +376,52 @@ class ShadowTests(unittest.TestCase):
         )
         self.assertEqual(audit.status, "fail")
         self.assertEqual(audit.issues[0].reason, "invalid_schema")
+
+    def test_shadow_audit_returns_invalid_schema_for_corrupt_sqlite(self) -> None:
+        artifact = self._artifact()
+        self.database.write_bytes(b"not sqlite")
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertEqual(audit.issues[0].reason, "invalid_schema")
+
+    def test_shadow_audit_rejects_nonterminal_shadow_run(self) -> None:
+        artifact = self._artifact()
+        relative = artifact.resolve().relative_to(repository_root()).as_posix()
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'shadow-run','file-shadow:shadow-run','heartbeat','file_authority_shadow',"
+                "'running','R1','R1','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection','shadow-run',?,?,"
+                "'file_authority_shadow','now')",
+                (relative, digest),
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertIn("missing_shadow_run", {issue.reason for issue in audit.issues})
 
     def test_shadow_audit_rejects_live_sqlite_sidecars(self) -> None:
         artifact = self._artifact()

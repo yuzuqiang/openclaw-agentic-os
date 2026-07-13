@@ -315,6 +315,13 @@ def apply_migrations(
     try:
         recorded = _recorded(connection)
         _verify_recorded(recorded, migrations)
+        if recorded:
+            recorded_migrations = tuple(
+                migration for migration in migrations if migration.version in recorded
+            )
+            _verify_schema(connection, recorded_migrations)
+            _verify_slo_queries(connection, recorded_migrations)
+            _database_checks(connection)
         for migration in migrations:
             if migration.version in recorded:
                 continue
@@ -397,6 +404,13 @@ def verify_database_connection(
     expected_migrations = migrations or load_migrations(migration_dir)
     recorded = _recorded(connection)
     _verify_recorded(recorded, expected_migrations)
+    if recorded:
+        recorded_migrations = tuple(
+            migration for migration in expected_migrations if migration.version in recorded
+        )
+        _verify_schema(connection, recorded_migrations)
+        _verify_slo_queries(connection, recorded_migrations)
+        _database_checks(connection)
     expected = {migration.version for migration in expected_migrations}
     if set(recorded) != expected:
         missing = sorted(expected - set(recorded))

@@ -2856,7 +2856,7 @@ CREATE TABLE artifact_projections (
   source_authority TEXT NOT NULL,
   generated_from_transition_id TEXT REFERENCES transitions(transition_id),
   generated_at TEXT NOT NULL,
-  UNIQUE(run_id, path, source_authority)
+  UNIQUE(path, sha256)
 ) STRICT;
 
 CREATE TABLE evidence_hashes (
@@ -3321,6 +3321,10 @@ Phase 1 - read-only shadow backfill:
 
 - Authority: files.
 - Create the `STRICT`/`ANY` type-preserving schema only after privacy preflight.
+- Apply a compatibility migration that changes `artifact_projections`
+  identity from content-level uniqueness to `UNIQUE(run_id, path,
+  source_authority)`, preserving version-1 databases instead of repinning
+  version 1.
 - Backfill current artifacts into rows marked `file_authority_shadow`.
 - No dispatch adapter reads from DB for decisions.
 - Parity audit compares semantic fields and content hashes.
