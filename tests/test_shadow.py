@@ -287,6 +287,33 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(audit.status, "fail")
         self.assertIn("missing_shadow_run", {issue.reason for issue in audit.issues})
 
+    def test_shadow_audit_rejects_finalization_timestamp_tamper(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+
+        for finalized_at in ("not-a-date", "1970-01-01T00:00:00+00:00"):
+            with self.subTest(finalized_at=finalized_at):
+                with sqlite3.connect(self.database) as connection:
+                    connection.execute(
+                        "UPDATE runs SET finalized_at=? WHERE run_id='shadow-run'",
+                        (finalized_at,),
+                    )
+                self._checkpoint_and_remove_sidecars()
+
+                audit = audit_file_authority_shadow(
+                    self.database,
+                    [artifact],
+                    workflow="heartbeat",
+                    run_id="shadow-run",
+                )
+                self.assertEqual(audit.status, "fail")
+                self.assertIn("missing_shadow_run", {issue.reason for issue in audit.issues})
+
     def test_shadow_backfill_rejects_nonterminal_existing_run(self) -> None:
         artifact = self._artifact()
         apply_migrations(self.database)

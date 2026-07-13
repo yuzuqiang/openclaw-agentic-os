@@ -280,6 +280,61 @@ class MigrationTests(unittest.TestCase):
                 (2,),
             )
 
+    def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
+        migration_dir = Path(self.temporary.name) / "v1-migrations"
+        migration_dir.mkdir()
+        shutil.copy(
+            repository_root() / "migrations/0001_minimum_contract.sql",
+            migration_dir / "0001_minimum_contract.sql",
+        )
+        v1_hash = hashlib.sha256(
+            (migration_dir / "0001_minimum_contract.sql").read_bytes()
+        ).hexdigest()
+        (migration_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "migrations": [
+                        {
+                            "version": 1,
+                            "name": "minimum_contract",
+                            "file": "0001_minimum_contract.sql",
+                            "sha256": v1_hash,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1,))
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('shadow','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                "'run-a','prepare-run-a','shadow','file_authority_shadow',"
+                "'finalized','R1','R1','now','now','now',1)"
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-old','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow','9')",
+                ("a" * 64,),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-new','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow','10')",
+                ("b" * 64,),
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
     def test_connect_fails_closed_when_wal_is_unavailable(self) -> None:
         connection = mock.Mock()
 
@@ -3868,6 +3923,14 @@ class MigrationTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(migration, ddl)
+
+    def test_design_contract_includes_shadow_projection_v2_overlay(self) -> None:
+        design = (repository_root() / "docs/agentic-os-production-adaptation.md").read_text(
+            encoding="utf-8"
+        )
+        overlay = design.split("Current migration v2 shadow projection overlay:", 1)[1]
+        self.assertIn("CREATE TABLE artifact_projection_history", overlay)
+        self.assertIn("UNIQUE(run_id, path, source_authority)", overlay)
 
     def test_schema_migration_version_preserves_numeric_type(self) -> None:
         apply_migrations(self.database)

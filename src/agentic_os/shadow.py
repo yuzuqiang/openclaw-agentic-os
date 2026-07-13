@@ -60,6 +60,21 @@ def _utc_now() -> tuple[str, int]:
     return now.isoformat(), int(now.timestamp() * 1000)
 
 
+def _utc_iso_epoch_ms(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -115,13 +130,13 @@ def _run_is_finalized_shadow(
         identity = row[:6]
         finalized_at = row[6]
         finalized_epoch_ms = row[7]
-    return (
-        identity == expected
-        and isinstance(finalized_at, str)
-        and finalized_at.strip() != ""
-        and type(finalized_epoch_ms) is int
-        and finalized_epoch_ms > 0
-    )
+    if (
+        identity != expected
+        or type(finalized_epoch_ms) is not int
+        or finalized_epoch_ms <= 0
+    ):
+        return False
+    return _utc_iso_epoch_ms(finalized_at) == finalized_epoch_ms
 
 
 def _normalize_artifacts(

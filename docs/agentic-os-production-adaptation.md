@@ -3067,6 +3067,38 @@ BEGIN
 END;
 ```
 
+Current migration v2 shadow projection overlay:
+
+The base SQL block above remains the accepted version-1 contract. After
+`0002_shadow_projection_identity.sql`, the accepted projection identity contract
+is:
+
+```sql
+CREATE TABLE artifact_projections (
+  projection_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
+  generated_from_transition_id TEXT REFERENCES transitions(transition_id),
+  generated_at TEXT NOT NULL,
+  UNIQUE(run_id, path, source_authority)
+) STRICT;
+
+CREATE TABLE artifact_projection_history (
+  projection_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
+  generated_from_transition_id TEXT REFERENCES transitions(transition_id),
+  generated_at TEXT NOT NULL,
+  retained_projection_id TEXT NOT NULL,
+  archived_at TEXT NOT NULL,
+  archive_reason TEXT NOT NULL
+) STRICT;
+```
+
 Gate-critical time authority:
 
 - Approval expiry authority is `approvals.expires_at_epoch_ms` only. It is stored in a `STRICT` table `ANY` column, must have integer storage class by `typeof(...)= 'integer'`, and is compared only to the trusted gate-context integer `gate_clock_context.now_epoch_ms`.
