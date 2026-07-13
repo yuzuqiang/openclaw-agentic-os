@@ -43,7 +43,7 @@ class MigrationTests(unittest.TestCase):
         connection: sqlite3.Connection,
         evidence_hash: str,
         suffix: str,
-    ) -> None:
+    ) -> tuple[str, str, str]:
         workflow = f"slo-workflow-{suffix}"
         run_id = f"slo-run-{suffix}"
         transition_id = f"slo-transition-{suffix}"
@@ -128,6 +128,7 @@ class MigrationTests(unittest.TestCase):
                 gate_id,
             ),
         )
+        return run_id, verifier_id, gate_id
 
     def test_authority_remains_disabled(self) -> None:
         self.assertIs(DB_AUTHORITY_ENABLED, False)
@@ -564,6 +565,61 @@ class MigrationTests(unittest.TestCase):
                 "'expired-transition','expired-nonce',1000,1000,'clock','source',1000)"
             )
         connection.rollback()
+
+    def test_approval_consumption_target_is_exclusive(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+
+        def insert_approval(
+            approval_id: str,
+            transition_id: str | None,
+            gate_run_id: str | None,
+            goal_run_id: str | None,
+        ) -> None:
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,consumed_by_transition_id,"
+                "consumed_by_gate_run_id,consumed_by_goal_run_id,approved_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    approval_id,
+                    f"run-{approval_id}",
+                    "river",
+                    "telegram",
+                    f"source-{approval_id}",
+                    f"text-{approval_id}",
+                    "action",
+                    "target",
+                    f"target-{approval_id}",
+                    f"hash-{approval_id}",
+                    "scope",
+                    "R1",
+                    2000,
+                    f"approval-hash-{approval_id}",
+                    transition_id,
+                    gate_run_id,
+                    goal_run_id,
+                    "now",
+                ),
+            )
+
+        insert_approval("unconsumed", None, None, None)
+        insert_approval("transition-gate", "transition", "gate", None)
+        insert_approval("goal-run", None, None, "goal")
+        for approval_id, transition_id, gate_run_id, goal_run_id in (
+            ("transition-only", "transition", None, None),
+            ("gate-only", None, "gate", None),
+            ("transition-goal", "transition", None, "goal"),
+            ("gate-goal", None, "gate", "goal"),
+            ("transition-gate-goal", "transition", "gate", "goal"),
+        ):
+            with self.subTest(approval_id=approval_id), self.assertRaises(
+                sqlite3.IntegrityError
+            ):
+                insert_approval(approval_id, transition_id, gate_run_id, goal_run_id)
 
     def test_lease_external_metadata_is_required_and_exact(self) -> None:
         apply_migrations(self.database)
@@ -2549,21 +2605,59 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
-                "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
-                "'a-synthetic-pass',?,1,?,?,0,'pass','pass','pass',?,'now',1000)",
-                (contract.query_name, migration_hash, query_hash, "synthetic-evidence"),
+                "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                "gate_run_id,run_at,run_at_epoch_ms) VALUES("
+                "'a-synthetic-pass',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+                "'now',1000)",
+                (
+                    contract.query_name,
+                    migration_hash,
+                    query_hash,
+                    "synthetic-evidence",
+                    "synthetic-run",
+                    "synthetic-verifier",
+                    "synthetic-gate",
+                ),
             )
-        self._insert_gate_bound_evidence(
+        stale_run_id, stale_verifier_id, stale_gate_id = self._insert_gate_bound_evidence(
             connection,
             evidence_hash="slo-evidence-stale",
             suffix="stale",
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
+            connection.execute(
+                "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                "gate_run_id,run_at,run_at_epoch_ms) VALUES("
+                "'a-wrong-evidence-binding',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+                "'now',1000)",
+                (
+                    contract.query_name,
+                    migration_hash,
+                    query_hash,
+                    "slo-evidence-stale",
+                    stale_run_id,
+                    stale_verifier_id,
+                    "wrong-gate",
+                ),
+            )
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
-            "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
-            "'a-stale-pass',?,1,?,?,0,'pass','pass','pass',?,'zzzz',1000)",
-            (contract.query_name, migration_hash, query_hash, "slo-evidence-stale"),
+            "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+            "gate_run_id,run_at,run_at_epoch_ms) VALUES("
+            "'a-stale-pass',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+            "'zzzz',1000)",
+            (
+                contract.query_name,
+                migration_hash,
+                query_hash,
+                "slo-evidence-stale",
+                stale_run_id,
+                stale_verifier_id,
+                stale_gate_id,
+            ),
         )
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
@@ -2576,7 +2670,7 @@ class MigrationTests(unittest.TestCase):
             (contract.query_name,),
             connection.execute(status_query).fetchall(),
         )
-        self._insert_gate_bound_evidence(
+        valid_run_id, valid_verifier_id, valid_gate_id = self._insert_gate_bound_evidence(
             connection,
             evidence_hash="slo-evidence-valid",
             suffix="valid",
@@ -2584,9 +2678,19 @@ class MigrationTests(unittest.TestCase):
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
-            "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
-            "'a-valid',?,1,?,?,0,'pass','pass','pass',?,'now',3000)",
-            (contract.query_name, migration_hash, query_hash, "slo-evidence-valid"),
+            "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+            "gate_run_id,run_at,run_at_epoch_ms) VALUES("
+            "'a-valid',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+            "'now',3000)",
+            (
+                contract.query_name,
+                migration_hash,
+                query_hash,
+                "slo-evidence-valid",
+                valid_run_id,
+                valid_verifier_id,
+                valid_gate_id,
+            ),
         )
         self.assertNotIn(
             (contract.query_name,),

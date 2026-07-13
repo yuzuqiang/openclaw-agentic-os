@@ -1667,12 +1667,21 @@ CREATE TABLE approvals (
   CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (typeof(single_use)='integer' AND single_use IN (0,1)),
   CHECK (
-    (consumed_by_transition_id IS NULL AND consumed_by_gate_run_id IS NULL)
-    OR (consumed_by_transition_id IS NOT NULL AND consumed_by_gate_run_id IS NOT NULL)
-  ),
-  CHECK (
-    consumed_by_goal_run_id IS NULL
-    OR (consumed_by_transition_id IS NULL AND consumed_by_gate_run_id IS NULL)
+    (
+      consumed_by_transition_id IS NULL
+      AND consumed_by_gate_run_id IS NULL
+      AND consumed_by_goal_run_id IS NULL
+    )
+    OR (
+      consumed_by_transition_id IS NOT NULL
+      AND consumed_by_gate_run_id IS NOT NULL
+      AND consumed_by_goal_run_id IS NULL
+    )
+    OR (
+      consumed_by_transition_id IS NULL
+      AND consumed_by_gate_run_id IS NULL
+      AND consumed_by_goal_run_id IS NOT NULL
+    )
   ),
   UNIQUE(
     approval_id,
@@ -2350,6 +2359,9 @@ CREATE TABLE slo_audits (
   empty_db_status TEXT NOT NULL,
   fixture_db_status TEXT NOT NULL,
   evidence_hash TEXT,
+  evidence_run_id TEXT,
+  verifier_run_id TEXT,
+  gate_run_id TEXT,
   run_at TEXT NOT NULL,
   run_at_epoch_ms ANY NOT NULL,
   CHECK (typeof(schema_version)='integer' AND schema_version > 0),
@@ -2360,34 +2372,39 @@ CREATE TABLE slo_audits (
     AND empty_db_status='pass'
     AND fixture_db_status='pass'
     AND evidence_hash IS NOT NULL AND evidence_hash<>''
+    AND evidence_run_id IS NOT NULL AND evidence_run_id<>''
+    AND verifier_run_id IS NOT NULL AND verifier_run_id<>''
+    AND gate_run_id IS NOT NULL AND gate_run_id<>''
   )),
   FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
-    REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash)
+    REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash),
+  FOREIGN KEY(gate_run_id,evidence_hash,evidence_run_id,verifier_run_id)
+    REFERENCES evidence_hashes(gate_run_id,evidence_hash,run_id,verifier_run_id)
 ) STRICT;
 
 CREATE TRIGGER slo_audits_validate_pass_evidence_insert
 AFTER INSERT ON slo_audits
 WHEN NEW.status='pass' AND NOT EXISTS (
   SELECT 1 FROM evidence_hashes e
-  WHERE e.evidence_hash=NEW.evidence_hash
-    AND e.run_id IS NOT NULL
-    AND e.producer_run_id=e.run_id
-    AND e.verifier_run_id IS NOT NULL
-    AND e.gate_run_id IS NOT NULL
+  WHERE e.gate_run_id=NEW.gate_run_id
+    AND e.evidence_hash=NEW.evidence_hash
+    AND e.run_id=NEW.evidence_run_id
+    AND e.producer_run_id=NEW.evidence_run_id
+    AND e.verifier_run_id=NEW.verifier_run_id
 )
 BEGIN
   SELECT RAISE(ABORT,'passing SLO audit requires gate-bound evidence');
 END;
 
 CREATE TRIGGER slo_audits_validate_pass_evidence_update
-AFTER UPDATE OF status, evidence_hash ON slo_audits
+AFTER UPDATE OF status, evidence_hash, evidence_run_id, verifier_run_id, gate_run_id ON slo_audits
 WHEN NEW.status='pass' AND NOT EXISTS (
   SELECT 1 FROM evidence_hashes e
-  WHERE e.evidence_hash=NEW.evidence_hash
-    AND e.run_id IS NOT NULL
-    AND e.producer_run_id=e.run_id
-    AND e.verifier_run_id IS NOT NULL
-    AND e.gate_run_id IS NOT NULL
+  WHERE e.gate_run_id=NEW.gate_run_id
+    AND e.evidence_hash=NEW.evidence_hash
+    AND e.run_id=NEW.evidence_run_id
+    AND e.producer_run_id=NEW.evidence_run_id
+    AND e.verifier_run_id=NEW.verifier_run_id
 )
 BEGIN
   SELECT RAISE(ABORT,'passing SLO audit requires gate-bound evidence');
