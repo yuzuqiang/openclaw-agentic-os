@@ -123,6 +123,54 @@ class ShadowTests(unittest.TestCase):
                 run_id="shadow-run",
             )
 
+    def test_shadow_backfill_records_same_artifact_for_each_run(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run-one",
+        )
+        result = backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run-two",
+        )
+        self.assertEqual(len(result.projections), 1)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections WHERE path=?",
+                    (result.projections[0].path,),
+                ).fetchone(),
+                (2,),
+            )
+
+    def test_shadow_schema_blocks_conflicting_projection_rows(self) -> None:
+        artifact = self._artifact()
+        result = backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        with sqlite3.connect(self.database) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO artifact_projections("
+                    "projection_id,run_id,path,sha256,source_authority,generated_at"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "manual-conflicting-projection",
+                        "shadow-run",
+                        result.projections[0].path,
+                        "0" * 64,
+                        "file_authority_shadow",
+                        "2026-01-01T00:00:00+00:00",
+                    ),
+                )
+
     def test_shadow_backfill_rejects_raw_state_artifact(self) -> None:
         raw = Path(self.temporary.name) / "control.db.old"
         with self.assertRaises(PrivacyPreflightError):
@@ -132,6 +180,68 @@ class ShadowTests(unittest.TestCase):
                 workflow="heartbeat",
                 run_id="shadow-run",
             )
+
+    def test_shadow_backfill_rejects_resolved_raw_state_symlink(self) -> None:
+        raw = Path(self.temporary.name) / "control.db"
+        raw.write_bytes(b"raw")
+        artifact = Path(self.temporary.name) / "reports" / "summary.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.symlink_to(raw)
+        with self.assertRaises(PrivacyPreflightError):
+            backfill_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow="heartbeat",
+                run_id="shadow-run",
+            )
+
+    def test_shadow_rejects_empty_workflow_and_run_id(self) -> None:
+        artifact = self._artifact()
+        with self.assertRaisesRegex(ShadowBackfillError, "workflow"):
+            backfill_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow=" ",
+                run_id="shadow-run",
+            )
+        with self.assertRaisesRegex(ShadowBackfillError, "run_id"):
+            audit_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow="heartbeat",
+                run_id="",
+            )
+
+    def test_shadow_audit_rejects_unpinned_schema(self) -> None:
+        artifact = self._artifact()
+        relative = artifact.resolve().relative_to(repository_root()).as_posix()
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        handbuilt = Path(self.temporary.name) / "handbuilt-control.db"
+        with sqlite3.connect(handbuilt) as connection:
+            connection.execute(
+                "CREATE TABLE runs (run_id TEXT, workflow TEXT, authority_mode TEXT)"
+            )
+            connection.execute(
+                "CREATE TABLE artifact_projections ("
+                "run_id TEXT,path TEXT,sha256 TEXT,source_authority TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO runs VALUES(?,?,?)",
+                ("shadow-run", "heartbeat", "file_authority_shadow"),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections VALUES(?,?,?,?)",
+                ("shadow-run", relative, digest, "file_authority_shadow"),
+            )
+
+        audit = audit_file_authority_shadow(
+            handbuilt,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertEqual(audit.issues[0].reason, "invalid_schema")
 
     def test_shadow_backfill_rejects_artifact_outside_repo(self) -> None:
         with tempfile.TemporaryDirectory() as outside:

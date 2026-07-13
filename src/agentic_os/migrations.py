@@ -381,15 +381,27 @@ def verify_database(
         )
     connection = _connect_read_only(path)
     try:
-        recorded = _recorded(connection)
-        _verify_recorded(recorded, migrations)
-        expected = {migration.version for migration in migrations}
-        if set(recorded) != expected:
-            missing = sorted(expected - set(recorded))
-            raise MigrationError(f"database is missing migrations: {missing}")
-        _verify_schema(connection, migrations)
-        _verify_slo_queries(connection, migrations)
-        _database_checks(connection)
-        return tuple(sorted(recorded))
+        return verify_database_connection(connection, migrations=migrations)
     finally:
         connection.close()
+
+
+def verify_database_connection(
+    connection: sqlite3.Connection,
+    *,
+    migrations: tuple[Migration, ...] | None = None,
+    migration_dir: Path | None = None,
+) -> tuple[int, ...]:
+    """Verify a live database connection against the pinned migration contract."""
+
+    expected_migrations = migrations or load_migrations(migration_dir)
+    recorded = _recorded(connection)
+    _verify_recorded(recorded, expected_migrations)
+    expected = {migration.version for migration in expected_migrations}
+    if set(recorded) != expected:
+        missing = sorted(expected - set(recorded))
+        raise MigrationError(f"database is missing migrations: {missing}")
+    _verify_schema(connection, expected_migrations)
+    _verify_slo_queries(connection, expected_migrations)
+    _database_checks(connection)
+    return tuple(sorted(recorded))

@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .migrations import apply_migrations, repository_root
+from .migrations import (
+    MigrationError,
+    apply_migrations,
+    repository_root,
+    verify_database_connection,
+)
 from .privacy import assert_paths_retrievable
 
 
@@ -75,6 +80,13 @@ def _projection_id(run_id: str, relative_path: str, digest: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _required_identity(name: str, value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ShadowBackfillError(f"{name} must be a non-empty identity")
+    return normalized
+
+
 def _normalize_artifacts(
     artifacts: Iterable[str | Path], *, repo_root_path: Path
 ) -> tuple[tuple[Path, str, str], ...]:
@@ -86,9 +98,10 @@ def _normalize_artifacts(
     seen: set[str] = set()
     for path in paths:
         resolved = path.resolve()
+        relative = _repo_relative(repo_root_path, resolved)
+        assert_paths_retrievable((resolved, relative))
         if not resolved.is_file():
             raise ShadowBackfillError(f"shadow artifact is not a file: {resolved}")
-        relative = _repo_relative(repo_root_path, resolved)
         if relative in seen:
             continue
         seen.add(relative)
@@ -96,8 +109,13 @@ def _normalize_artifacts(
     return tuple(normalized)
 
 
-def _connect(database: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(database, isolation_level=None)
+def _connect(database: Path, *, existing: bool = False) -> sqlite3.Connection:
+    if existing:
+        connection = sqlite3.connect(
+            f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
+        )
+    else:
+        connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA busy_timeout=10000")
     connection.execute("PRAGMA foreign_keys=ON")
     if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
@@ -162,11 +180,17 @@ def backfill_file_authority_shadow(
 ) -> ShadowBackfillResult:
     """Backfill explicit file artifacts as shadow evidence, never authority."""
 
+    workflow = _required_identity("workflow", workflow)
+    run_id = _required_identity("run_id", run_id)
     root = Path(repo_root_path or repository_root()).resolve()
     normalized = _normalize_artifacts(artifacts, repo_root_path=root)
     apply_migrations(database, repo_root=root)
     created_at = _utc_now()
-    prepare_key = prepare_idempotency_key or f"file-shadow:{run_id}"
+    prepare_key = (
+        _required_identity("prepare_idempotency_key", prepare_idempotency_key)
+        if prepare_idempotency_key is not None
+        else f"file-shadow:{run_id}"
+    )
     connection = _connect(Path(database).expanduser().resolve())
     projections: list[ShadowProjection] = []
     try:
@@ -181,33 +205,45 @@ def backfill_file_authority_shadow(
             )
             for _path, relative, digest in normalized:
                 rows = connection.execute(
-                    "SELECT sha256 FROM artifact_projections "
+                    "SELECT projection_id,sha256 FROM artifact_projections "
                     "WHERE run_id=? AND path=? AND source_authority='file_authority_shadow'",
                     (run_id, relative),
                 ).fetchall()
-                if rows and {row[0] for row in rows} != {digest}:
-                    raise ShadowBackfillError(
-                        "shadow projection drift for "
-                        f"{relative}; use a new run_id for a new snapshot"
-                    )
                 projection = ShadowProjection(
                     path=relative,
                     sha256=digest,
                     projection_id=_projection_id(run_id, relative, digest),
                 )
-                connection.execute(
-                    "INSERT OR IGNORE INTO artifact_projections("
-                    "projection_id,run_id,path,sha256,source_authority,"
-                    "generated_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        projection.projection_id,
-                        run_id,
-                        relative,
-                        digest,
-                        "file_authority_shadow",
-                        created_at,
-                    ),
-                )
+                if rows:
+                    existing_ids = {row[0] for row in rows}
+                    existing_digests = {row[1] for row in rows}
+                    if existing_ids != {projection.projection_id} or existing_digests != {
+                        digest
+                    }:
+                        raise ShadowBackfillError(
+                            "shadow projection drift for "
+                            f"{relative}; use a new run_id for a new snapshot"
+                        )
+                    projections.append(projection)
+                    continue
+                try:
+                    connection.execute(
+                        "INSERT INTO artifact_projections("
+                        "projection_id,run_id,path,sha256,source_authority,"
+                        "generated_at) VALUES(?,?,?,?,?,?)",
+                        (
+                            projection.projection_id,
+                            run_id,
+                            relative,
+                            digest,
+                            "file_authority_shadow",
+                            created_at,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ShadowBackfillError(
+                        f"shadow projection insert conflict for {relative}"
+                    ) from exc
                 projections.append(projection)
             connection.execute("COMMIT")
         except Exception:
@@ -216,6 +252,29 @@ def backfill_file_authority_shadow(
     finally:
         connection.close()
     return ShadowBackfillResult(workflow=workflow, run_id=run_id, projections=tuple(projections))
+
+
+def _projection_rows_by_path(
+    rows: Iterable[tuple[str, str]]
+) -> tuple[dict[str, str], tuple[ShadowAuditIssue, ...]]:
+    projected: dict[str, str] = {}
+    grouped: dict[str, list[str]] = {}
+    issues: list[ShadowAuditIssue] = []
+    for path, digest in rows:
+        grouped.setdefault(path, []).append(digest)
+    for path, digests in grouped.items():
+        unique_digests = tuple(dict.fromkeys(digests))
+        if len(digests) != 1 or len(unique_digests) != 1:
+            issues.append(
+                ShadowAuditIssue(
+                    path=path,
+                    reason="duplicate_projection",
+                    actual_sha256=",".join(unique_digests),
+                )
+            )
+            continue
+        projected[path] = unique_digests[0]
+    return projected, tuple(issues)
 
 
 def audit_file_authority_shadow(
@@ -228,12 +287,35 @@ def audit_file_authority_shadow(
 ) -> ShadowAuditResult:
     """Compare current artifact files with their shadow projections."""
 
+    workflow = _required_identity("workflow", workflow)
+    run_id = _required_identity("run_id", run_id)
     root = Path(repo_root_path or repository_root()).resolve()
     normalized = _normalize_artifacts(artifacts, repo_root_path=root)
     expected = {relative: digest for _path, relative, digest in normalized}
-    connection = _connect(Path(database).expanduser().resolve())
+    database_path = Path(database).expanduser().resolve()
     issues: list[ShadowAuditIssue] = []
+    if not database_path.is_file():
+        issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
+        return ShadowAuditResult(
+            workflow=workflow,
+            run_id=run_id,
+            status="fail",
+            checked_count=len(expected),
+            issues=tuple(issues),
+        )
+    connection = _connect(database_path, existing=True)
     try:
+        try:
+            verify_database_connection(connection)
+        except MigrationError:
+            issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
+            return ShadowAuditResult(
+                workflow=workflow,
+                run_id=run_id,
+                status="fail",
+                checked_count=len(expected),
+                issues=tuple(issues),
+            )
         run = connection.execute(
             "SELECT workflow,authority_mode FROM runs WHERE run_id=?", (run_id,)
         ).fetchone()
@@ -247,8 +329,11 @@ def audit_file_authority_shadow(
     finally:
         connection.close()
 
-    projected = {row[0]: row[1] for row in rows}
+    projected, projection_issues = _projection_rows_by_path(rows)
+    issues.extend(projection_issues)
     for path, digest in expected.items():
+        if any(issue.path == path and issue.reason == "duplicate_projection" for issue in issues):
+            continue
         actual = projected.get(path)
         if actual is None:
             issues.append(

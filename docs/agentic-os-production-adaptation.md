@@ -2856,7 +2856,7 @@ CREATE TABLE artifact_projections (
   source_authority TEXT NOT NULL,
   generated_from_transition_id TEXT REFERENCES transitions(transition_id),
   generated_at TEXT NOT NULL,
-  UNIQUE(path, sha256)
+  UNIQUE(run_id, path, source_authority)
 ) STRICT;
 
 CREATE TABLE evidence_hashes (
