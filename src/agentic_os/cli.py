@@ -46,6 +46,7 @@ def parser() -> argparse.ArgumentParser:
     shadow_audit.add_argument("--db", type=Path, required=True)
     shadow_audit.add_argument("--workflow", required=True)
     shadow_audit.add_argument("--run-id", required=True)
+    shadow_audit.add_argument("--prepare-idempotency-key")
     shadow_audit.add_argument("--artifact", type=Path, action="append", required=True)
     shadow_audit.add_argument("--repo-root", type=Path, default=repository_root())
     return result
@@ -90,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         args.artifact,
         workflow=args.workflow,
         run_id=args.run_id,
+        prepare_idempotency_key=args.prepare_idempotency_key,
         repo_root_path=args.repo_root,
     )
     print(

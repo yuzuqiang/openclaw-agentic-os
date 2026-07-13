@@ -12,9 +12,9 @@ revalidation, and neither artifact proves production runtime behavior.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `b17d4ac5821c3a6e2f56718a74a64a59e69d0fe3f1844d19564640e58641d3ff`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `9bf482c58a4c32f706fd8511fcc4cd649491d4ac91387d31424dff5c7aaf5e6b`
-- Current migration manifest SHA-256: `9b678e5d4dedde4626c5f54597a281b136d8262b44ca8b587fd569df8a226392`
-- Design contract: 27 SQLite tables, 30 executable SLO queries
+- Current latest migration SHA-256: `b4c3e4e964f60470d2e153fadf123589589704f4619bd4f5c35f313b79fa9010`
+- Current migration manifest SHA-256: `23323c5b09f6b187ff077a0ef6124bbe33a4e8a56431c01ff5d31d126d557782`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
@@ -30,7 +30,7 @@ The package has no runtime dependencies outside Python's standard library.
 PYTHONPATH=src python3 -m agentic_os.cli preflight
 PYTHONPATH=src python3 -m agentic_os.cli migrate --test-db
 PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
-PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
+PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --prepare-idempotency-key file-shadow:shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
@@ -41,8 +41,9 @@ test database. Tests use temporary directories and never create
 
 `shadow-backfill` and `shadow-audit` are offline P0.2 tools. They project only
 explicit file artifacts into `file_authority_shadow` rows and compare current
-file hashes back to those rows; they do not enable database authority or feed
-dispatch decisions.
+file hashes, prepare identity, workflow mode, and deterministic projection IDs
+back to those rows; they do not enable database authority or feed dispatch
+decisions.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

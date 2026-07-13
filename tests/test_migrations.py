@@ -147,7 +147,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 27)
+            self.assertEqual(len(tables), 28)
             rows = connection.execute(
                 "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -208,8 +208,16 @@ class MigrationTests(unittest.TestCase):
                 )
             connection.execute(
                 "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
-                "source_authority,generated_at) VALUES('projection-a','run-a',"
-                "'reports/summary.json',?,'file_authority_shadow','now')",
+                "source_authority,generated_at) VALUES('projection-a-stale','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow',"
+                "'2026-01-01T00:00:00+00:00')",
+                ("b" * 64,),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-current','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow',"
+                "'2026-01-02T00:00:00+00:00')",
                 ("a" * 64,),
             )
             with self.assertRaises(sqlite3.IntegrityError):
@@ -222,6 +230,25 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(apply_migrations(self.database), (2,))
         with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT projection_id,sha256 FROM artifact_projections "
+                    "WHERE run_id='run-a' AND path='reports/summary.json'"
+                ).fetchone(),
+                ("projection-a-current", "a" * 64),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT projection_id,sha256,retained_projection_id,archive_reason "
+                    "FROM artifact_projection_history WHERE run_id='run-a'"
+                ).fetchone(),
+                (
+                    "projection-a-stale",
+                    "b" * 64,
+                    "projection-a-current",
+                    "v1_identity_collapse",
+                ),
+            )
             connection.execute(
                 "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
                 "source_authority,generated_at) VALUES('projection-b','run-b',"

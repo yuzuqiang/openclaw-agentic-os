@@ -42,6 +42,8 @@ class ShadowAuditIssue:
     reason: str
     expected_sha256: str | None = None
     actual_sha256: str | None = None
+    expected_projection_id: str | None = None
+    actual_projection_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,8 +55,9 @@ class ShadowAuditResult:
     issues: tuple[ShadowAuditIssue, ...]
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _utc_now() -> tuple[str, int]:
+    now = datetime.now(timezone.utc)
+    return now.isoformat(), int(now.timestamp() * 1000)
 
 
 def _sha256(path: Path) -> str:
@@ -180,6 +183,7 @@ def _ensure_shadow_run(
     run_id: str,
     prepare_idempotency_key: str,
     created_at: str,
+    finalized_at_epoch_ms: int,
 ) -> None:
     workflow = _normalize_required_identity("workflow", workflow)
     run_id = _normalize_required_identity("run_id", run_id)
@@ -224,8 +228,16 @@ def _ensure_shadow_run(
         "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
         "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
         "finalized_at_epoch_ms) VALUES(?,?,?,'file_authority_shadow','finalized',"
-        "'R1','R1',?,?,?,1)",
-        (run_id, prepare_idempotency_key, workflow, created_at, created_at, created_at),
+        "'R1','R1',?,?,?,?)",
+        (
+            run_id,
+            prepare_idempotency_key,
+            workflow,
+            created_at,
+            created_at,
+            created_at,
+            finalized_at_epoch_ms,
+        ),
     )
 
 
@@ -250,7 +262,7 @@ def backfill_file_authority_shadow(
     root = Path(repo_root_path or repository_root()).resolve()
     normalized = _normalize_artifacts(artifacts, repo_root_path=root)
     apply_migrations(database, repo_root=root)
-    created_at = _utc_now()
+    created_at, finalized_at_epoch_ms = _utc_now()
     database_path = Path(database).expanduser().resolve()
     connection = _connect(database_path)
     checkpointed = False
@@ -264,6 +276,7 @@ def backfill_file_authority_shadow(
                 run_id=run_id,
                 prepare_idempotency_key=prepare_key,
                 created_at=created_at,
+                finalized_at_epoch_ms=finalized_at_epoch_ms,
             )
             for _path, relative, digest in normalized:
                 rows = connection.execute(
@@ -322,16 +335,16 @@ def backfill_file_authority_shadow(
 
 
 def _projection_rows_by_path(
-    rows: Iterable[tuple[str, str]]
+    rows: Iterable[tuple[str, str, str]], *, run_id: str
 ) -> tuple[dict[str, str], tuple[ShadowAuditIssue, ...]]:
     projected: dict[str, str] = {}
-    grouped: dict[str, list[str]] = {}
+    grouped: dict[str, list[tuple[str, str]]] = {}
     issues: list[ShadowAuditIssue] = []
-    for path, digest in rows:
-        grouped.setdefault(path, []).append(digest)
-    for path, digests in grouped.items():
-        unique_digests = tuple(dict.fromkeys(digests))
-        if len(digests) != 1 or len(unique_digests) != 1:
+    for projection_id, path, digest in rows:
+        grouped.setdefault(path, []).append((projection_id, digest))
+    for path, projections in grouped.items():
+        unique_digests = tuple(dict.fromkeys(digest for _projection_id, digest in projections))
+        if len(projections) != 1 or len(unique_digests) != 1:
             issues.append(
                 ShadowAuditIssue(
                     path=path,
@@ -340,7 +353,20 @@ def _projection_rows_by_path(
                 )
             )
             continue
-        projected[path] = unique_digests[0]
+        projection_id, digest = projections[0]
+        expected_projection_id = _projection_id(run_id, path, digest)
+        if projection_id != expected_projection_id:
+            issues.append(
+                ShadowAuditIssue(
+                    path=path,
+                    reason="projection_id_mismatch",
+                    expected_sha256=digest,
+                    actual_sha256=digest,
+                    expected_projection_id=expected_projection_id,
+                    actual_projection_id=projection_id,
+                )
+            )
+        projected[path] = digest
     return projected, tuple(issues)
 
 
@@ -350,12 +376,18 @@ def audit_file_authority_shadow(
     *,
     workflow: str,
     run_id: str,
+    prepare_idempotency_key: str | None = None,
     repo_root_path: Path | None = None,
 ) -> ShadowAuditResult:
     """Compare current artifact files with their shadow projections."""
 
     workflow = _normalize_required_identity("workflow", workflow)
     run_id = _normalize_required_identity("run_id", run_id)
+    prepare_key = (
+        _normalize_required_identity("prepare_idempotency_key", prepare_idempotency_key)
+        if prepare_idempotency_key is not None
+        else f"file-shadow:{run_id}"
+    )
     root = Path(repo_root_path or repository_root()).resolve()
     normalized = _normalize_artifacts(artifacts, repo_root_path=root)
     expected = {relative: digest for _path, relative, digest in normalized}
@@ -385,11 +417,14 @@ def audit_file_authority_shadow(
     connection = _connect(database_path, existing=True)
     try:
         run = connection.execute(
-            "SELECT workflow,authority_mode,state,risk_class,risk_dominance,"
+            "SELECT workflow,authority_mode,prepare_idempotency_key,state,"
+            "risk_class,risk_dominance,"
             "finalized_at,finalized_at_epoch_ms FROM runs WHERE run_id=?",
             (run_id,),
         ).fetchone()
-        if not _run_is_finalized_shadow(run, workflow=workflow):
+        if not _run_is_finalized_shadow(
+            run, workflow=workflow, prepare_idempotency_key=prepare_key
+        ):
             issues.append(ShadowAuditIssue(path="", reason="missing_shadow_run"))
         workflow_mode = connection.execute(
             "SELECT mode FROM workflow_authority WHERE workflow=?", (workflow,)
@@ -397,14 +432,14 @@ def audit_file_authority_shadow(
         if workflow_mode != ("file_authority_shadow",):
             issues.append(ShadowAuditIssue(path="", reason="workflow_not_shadow"))
         rows = connection.execute(
-            "SELECT path,sha256 FROM artifact_projections "
+            "SELECT projection_id,path,sha256 FROM artifact_projections "
             "WHERE run_id=? AND source_authority='file_authority_shadow'",
             (run_id,),
         ).fetchall()
     finally:
         connection.close()
 
-    projected, projection_issues = _projection_rows_by_path(rows)
+    projected, projection_issues = _projection_rows_by_path(rows, run_id=run_id)
     issues.extend(projection_issues)
     for path, digest in expected.items():
         if any(issue.path == path and issue.reason == "duplicate_projection" for issue in issues):

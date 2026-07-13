@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from agentic_os.migrations import apply_migrations, repository_root
@@ -71,6 +72,16 @@ class ShadowTests(unittest.TestCase):
                 ).fetchone(),
                 ("file_authority_shadow", "finalized"),
             )
+            finalized_at, finalized_epoch_ms = connection.execute(
+                "SELECT finalized_at,finalized_at_epoch_ms FROM runs "
+                "WHERE run_id='shadow-run'"
+            ).fetchone()
+            self.assertIsInstance(finalized_at, str)
+            self.assertEqual(
+                finalized_epoch_ms,
+                int(datetime.fromisoformat(finalized_at).timestamp() * 1000),
+            )
+            self.assertGreater(finalized_epoch_ms, 1_600_000_000_000)
             self.assertEqual(
                 connection.execute(
                     "SELECT sha256,source_authority FROM artifact_projections "
@@ -202,6 +213,56 @@ class ShadowTests(unittest.TestCase):
                 ("prepare-one",),
             )
 
+    def test_shadow_audit_rejects_prepare_key_mismatch(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+            prepare_idempotency_key="prepare-one",
+        )
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+            prepare_idempotency_key="prepare-one",
+        )
+        self.assertEqual(audit.status, "pass")
+
+        for prepare_key in (None, "prepare-two"):
+            with self.subTest(prepare_key=prepare_key):
+                audit = audit_file_authority_shadow(
+                    self.database,
+                    [artifact],
+                    workflow="heartbeat",
+                    run_id="shadow-run",
+                    prepare_idempotency_key=prepare_key,
+                )
+                self.assertEqual(audit.status, "fail")
+                self.assertIn("missing_shadow_run", {issue.reason for issue in audit.issues})
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE runs SET prepare_idempotency_key='prepare-tampered' "
+                "WHERE run_id='shadow-run'"
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        tampered_audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+            prepare_idempotency_key="prepare-one",
+        )
+        self.assertEqual(tampered_audit.status, "fail")
+        self.assertIn(
+            "missing_shadow_run", {issue.reason for issue in tampered_audit.issues}
+        )
+
     def test_shadow_backfill_rejects_nonterminal_existing_run(self) -> None:
         artifact = self._artifact()
         apply_migrations(self.database)
@@ -281,15 +342,40 @@ class ShadowTests(unittest.TestCase):
     def test_shadow_audit_rejects_duplicate_projection_rows(self) -> None:
         projected, issues = _projection_rows_by_path(
             (
-                ("reports/summary.json", "a" * 64),
-                ("reports/summary.json", "b" * 64),
-            )
+                ("projection-a", "reports/summary.json", "a" * 64),
+                ("projection-b", "reports/summary.json", "b" * 64),
+            ),
+            run_id="shadow-run",
         )
 
         self.assertEqual(projected, {})
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].path, "reports/summary.json")
         self.assertEqual(issues[0].reason, "duplicate_projection")
+
+    def test_shadow_audit_verifies_deterministic_projection_id(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE artifact_projections SET projection_id='manual-projection' "
+                "WHERE run_id='shadow-run'"
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertIn("projection_id_mismatch", {issue.reason for issue in audit.issues})
 
     def test_shadow_backfill_rejects_raw_state_artifact(self) -> None:
         raw = Path(self.temporary.name) / "control.db.old"
