@@ -38,6 +38,12 @@ class ShadowTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    def _checkpoint_and_remove_sidecars(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(f"{self.database}{suffix}").unlink(missing_ok=True)
+
     def test_backfill_file_authority_shadow_and_audit_pass(self) -> None:
         artifact = self._artifact()
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -72,6 +78,7 @@ class ShadowTests(unittest.TestCase):
                 ).fetchone(),
                 (digest, "file_authority_shadow"),
             )
+        self._checkpoint_and_remove_sidecars()
 
         audit = audit_file_authority_shadow(
             self.database,
@@ -145,6 +152,7 @@ class ShadowTests(unittest.TestCase):
                     "SELECT run_id FROM runs WHERE run_id=' shadow-run '"
                 ).fetchone()
             )
+        self._checkpoint_and_remove_sidecars()
 
         audit = audit_file_authority_shadow(
             self.database,
@@ -153,6 +161,46 @@ class ShadowTests(unittest.TestCase):
             run_id=" shadow-run ",
         )
         self.assertEqual(audit.status, "pass")
+
+    def test_shadow_rejects_empty_prepare_key_before_migration(self) -> None:
+        artifact = self._artifact()
+        with self.assertRaisesRegex(ShadowBackfillError, "prepare_idempotency_key"):
+            backfill_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow="heartbeat",
+                run_id="shadow-run",
+                prepare_idempotency_key=" ",
+            )
+        self.assertFalse(self.database.exists())
+        self.assertFalse(Path(f"{self.database}-wal").exists())
+        self.assertFalse(Path(f"{self.database}-shm").exists())
+
+    def test_shadow_backfill_rejects_prepare_key_mismatch_for_existing_run(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+            prepare_idempotency_key="prepare-one",
+        )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "matching shadow run"):
+            backfill_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow="heartbeat",
+                run_id="shadow-run",
+                prepare_idempotency_key="prepare-two",
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT prepare_idempotency_key FROM runs WHERE run_id='shadow-run'"
+                ).fetchone(),
+                ("prepare-one",),
+            )
 
     def test_shadow_backfill_records_same_artifact_for_each_run(self) -> None:
         artifact = self._artifact()
@@ -300,6 +348,53 @@ class ShadowTests(unittest.TestCase):
         )
         self.assertEqual(audit.status, "fail")
         self.assertEqual(audit.issues[0].reason, "invalid_schema")
+
+    def test_shadow_audit_rejects_live_sqlite_sidecars(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        sidecar = Path(f"{self.database}-wal")
+        sidecar.write_bytes(b"sidecar-sentinel")
+        sidecar_before = (sidecar.read_bytes(), sidecar.stat().st_mtime_ns)
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertEqual(audit.issues[0].reason, "invalid_schema")
+        self.assertEqual(
+            (sidecar.read_bytes(), sidecar.stat().st_mtime_ns), sidecar_before
+        )
+
+    def test_shadow_audit_requires_current_workflow_shadow_mode(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE workflow_authority SET mode='file_authority' WHERE workflow='heartbeat'"
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertIn("workflow_not_shadow", {issue.reason for issue in audit.issues})
 
     def test_shadow_backfill_rejects_artifact_outside_repo(self) -> None:
         with tempfile.TemporaryDirectory() as outside:

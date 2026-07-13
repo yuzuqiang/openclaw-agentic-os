@@ -13,7 +13,7 @@ from .migrations import (
     MigrationError,
     apply_migrations,
     repository_root,
-    verify_database_connection,
+    verify_database,
 )
 from .privacy import assert_paths_retrievable
 
@@ -111,8 +111,9 @@ def _normalize_artifacts(
 def _connect(database: Path, *, existing: bool = False) -> sqlite3.Connection:
     if existing:
         connection = sqlite3.connect(
-            f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
+            f"{database.as_uri()}?mode=ro&immutable=1", uri=True, isolation_level=None
         )
+        connection.execute("PRAGMA query_only=ON")
     else:
         connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA busy_timeout=10000")
@@ -121,6 +122,21 @@ def _connect(database: Path, *, existing: bool = False) -> sqlite3.Connection:
         connection.close()
         raise ShadowBackfillError("SQLite foreign key enforcement is unavailable")
     return connection
+
+
+def _checkpoint_offline_snapshot(connection: sqlite3.Connection) -> None:
+    result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if result is not None and result[0] != 0:
+        raise ShadowBackfillError("shadow database checkpoint failed")
+
+
+def _remove_checkpointed_sidecars(database: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{database}{suffix}")
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _ensure_shadow_run(
@@ -157,10 +173,11 @@ def _ensure_shadow_run(
         )
 
     existing_run = connection.execute(
-        "SELECT workflow,authority_mode FROM runs WHERE run_id=?", (run_id,)
+        "SELECT workflow,authority_mode,prepare_idempotency_key FROM runs WHERE run_id=?",
+        (run_id,),
     ).fetchone()
     if existing_run is not None:
-        if existing_run != (workflow, "file_authority_shadow"):
+        if existing_run != (workflow, "file_authority_shadow", prepare_idempotency_key):
             raise ShadowBackfillError(f"run {run_id!r} is not a matching shadow run")
         return
 
@@ -186,16 +203,18 @@ def backfill_file_authority_shadow(
 
     workflow = _normalize_required_identity("workflow", workflow)
     run_id = _normalize_required_identity("run_id", run_id)
-    root = Path(repo_root_path or repository_root()).resolve()
-    normalized = _normalize_artifacts(artifacts, repo_root_path=root)
-    apply_migrations(database, repo_root=root)
-    created_at = _utc_now()
     prepare_key = (
         _normalize_required_identity("prepare_idempotency_key", prepare_idempotency_key)
         if prepare_idempotency_key is not None
         else f"file-shadow:{run_id}"
     )
-    connection = _connect(Path(database).expanduser().resolve())
+    root = Path(repo_root_path or repository_root()).resolve()
+    normalized = _normalize_artifacts(artifacts, repo_root_path=root)
+    apply_migrations(database, repo_root=root)
+    created_at = _utc_now()
+    database_path = Path(database).expanduser().resolve()
+    connection = _connect(database_path)
+    checkpointed = False
     projections: list[ShadowProjection] = []
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -250,11 +269,16 @@ def backfill_file_authority_shadow(
                     ) from exc
                 projections.append(projection)
             connection.execute("COMMIT")
+            _checkpoint_offline_snapshot(connection)
+            checkpointed = True
         except Exception:
-            connection.execute("ROLLBACK")
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
             raise
     finally:
         connection.close()
+        if checkpointed:
+            _remove_checkpointed_sidecars(database_path)
     return ShadowBackfillResult(workflow=workflow, run_id=run_id, projections=tuple(projections))
 
 
@@ -307,24 +331,30 @@ def audit_file_authority_shadow(
             checked_count=len(expected),
             issues=tuple(issues),
         )
+    try:
+        verify_database(database_path)
+    except MigrationError:
+        issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
+        return ShadowAuditResult(
+            workflow=workflow,
+            run_id=run_id,
+            status="fail",
+            checked_count=len(expected),
+            issues=tuple(issues),
+        )
+
     connection = _connect(database_path, existing=True)
     try:
-        try:
-            verify_database_connection(connection)
-        except MigrationError:
-            issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
-            return ShadowAuditResult(
-                workflow=workflow,
-                run_id=run_id,
-                status="fail",
-                checked_count=len(expected),
-                issues=tuple(issues),
-            )
         run = connection.execute(
             "SELECT workflow,authority_mode FROM runs WHERE run_id=?", (run_id,)
         ).fetchone()
         if run != (workflow, "file_authority_shadow"):
             issues.append(ShadowAuditIssue(path="", reason="missing_shadow_run"))
+        workflow_mode = connection.execute(
+            "SELECT mode FROM workflow_authority WHERE workflow=?", (workflow,)
+        ).fetchone()
+        if workflow_mode != ("file_authority_shadow",):
+            issues.append(ShadowAuditIssue(path="", reason="workflow_not_shadow"))
         rows = connection.execute(
             "SELECT path,sha256 FROM artifact_projections "
             "WHERE run_id=? AND source_authority='file_authority_shadow'",
