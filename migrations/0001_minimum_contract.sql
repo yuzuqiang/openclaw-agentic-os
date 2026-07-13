@@ -139,8 +139,13 @@ BEGIN
 END;
 
 CREATE TRIGGER runs_validate_db_authority_update
-BEFORE UPDATE OF workflow, authority_mode ON runs
+BEFORE UPDATE OF workflow, authority_mode, state ON runs
 WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
+  AND (
+    NEW.state NOT IN ('finalized','rolled_back','rejected')
+    OR NEW.workflow<>OLD.workflow
+    OR NEW.authority_mode<>OLD.authority_mode
+  )
   AND NOT EXISTS (
     SELECT 1 FROM workflow_authority w
     WHERE w.workflow=NEW.workflow
@@ -185,6 +190,20 @@ WHEN NEW.mode IN ('db_authority_canary','db_authority')
   )
 BEGIN
   SELECT RAISE(ABORT,'db authority requires drained file-authority runs');
+END;
+
+CREATE TRIGGER workflow_authority_preserve_active_db_binding_update
+BEFORE UPDATE OF workflow, mode ON workflow_authority
+WHEN OLD.mode IN ('db_authority_canary','db_authority')
+  AND (NEW.workflow<>OLD.workflow OR NEW.mode<>OLD.mode)
+  AND EXISTS (
+    SELECT 1 FROM runs open_run
+    WHERE open_run.workflow=OLD.workflow
+      AND open_run.authority_mode=OLD.mode
+      AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'active db authority runs require active workflow authority binding');
 END;
 
 CREATE TRIGGER runs_reject_open_file_authority_during_db_insert
@@ -242,6 +261,7 @@ CREATE TABLE transitions (
   CHECK (
     approval_required = 0 OR (
       approval_id IS NOT NULL
+      AND approval_id <> ''
       AND action_type <> ''
       AND target_type IS NOT NULL AND target_type <> ''
       AND target_id IS NOT NULL AND target_id <> ''
@@ -602,6 +622,7 @@ CREATE TABLE leases (
       AND json_type(external_metadata_json,'$.agent_id')='text'
       AND json_type(external_metadata_json,'$.requester_agent_id')='text'
       AND json_type(external_metadata_json,'$.ttl_ms')='integer'
+      AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
       AND json_extract(external_metadata_json,'$.client_lease_id') <> ''
       AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
       AND json_extract(external_metadata_json,'$.run_id') <> ''
@@ -609,6 +630,7 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.transition_id') <> ''
       AND json_extract(external_metadata_json,'$.agent_id') <> ''
       AND json_extract(external_metadata_json,'$.requester_agent_id') <> ''
+      AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
       AND json_extract(external_metadata_json,'$.client_lease_id')=client_lease_id
       AND json_extract(external_metadata_json,'$.idempotency_key')=acquire_idempotency_key
       AND json_extract(external_metadata_json,'$.run_id')=run_id
@@ -617,6 +639,7 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.agent_id')=agent_id
       AND json_extract(external_metadata_json,'$.requester_agent_id')=requester_agent_id
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
+      AND json_extract(external_metadata_json,'$.gateway_lease_id')=gateway_lease_id
     ),0)=1
   ),
   CHECK (
@@ -1010,7 +1033,7 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state IN ('acquired','release_pending')
+    WHERE l.state IN ('acquire_pending','acquired','release_pending','release_not_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.phase=OLD.phase
@@ -1019,7 +1042,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
       AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
-      AND l.gateway_lease_id=OLD.external_id
+      AND (
+        l.state IN ('acquire_pending','release_not_required')
+        OR l.gateway_lease_id=OLD.external_id
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -1031,7 +1057,7 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state IN ('acquired','release_pending')
+    WHERE l.state IN ('acquire_pending','acquired','release_pending','release_not_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.phase=OLD.phase
@@ -1040,7 +1066,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
       AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
-      AND l.gateway_lease_id=OLD.external_id
+      AND (
+        l.state IN ('acquire_pending','release_not_required')
+        OR l.gateway_lease_id=OLD.external_id
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -1111,6 +1140,164 @@ BEGIN
   SELECT RAISE(ABORT,'terminal lease with gateway ownership requires release intent proof');
 END;
 
+CREATE TRIGGER leases_preserve_live_gateway_delete
+BEFORE DELETE ON leases
+WHEN OLD.state IN ('acquired','release_pending')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=OLD.run_id
+      AND eri.transition_id=OLD.transition_id
+      AND eri.idempotency_key=OLD.release_idempotency_key
+      AND eri.external_id=OLD.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live gateway lease requires release proof before deletion');
+END;
+
+CREATE TRIGGER leases_preserve_live_gateway_state_update
+BEFORE UPDATE OF state, run_id, transition_id, gateway_lease_id ON leases
+WHEN OLD.state IN ('acquired','release_pending')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND (
+    NEW.state NOT IN ('acquired','release_pending')
+    OR NEW.run_id<>OLD.run_id
+    OR NEW.transition_id<>OLD.transition_id
+    OR NEW.gateway_lease_id IS NULL
+    OR NEW.gateway_lease_id<>OLD.gateway_lease_id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=OLD.run_id
+      AND eri.transition_id=OLD.transition_id
+      AND eri.idempotency_key=OLD.release_idempotency_key
+      AND eri.external_id=OLD.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires release proof before leaving live state');
+END;
+
+CREATE TRIGGER leases_preserve_accepted_acquire_pending_delete
+BEFORE DELETE ON leases
+WHEN OLD.state='acquire_pending'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents acquire
+    WHERE acquire.rpc_kind='allow_lease_acquire'
+      AND acquire.state IN ('accepted','reconciled')
+      AND acquire.run_id=OLD.run_id
+      AND acquire.transition_id=OLD.transition_id
+      AND acquire.phase=OLD.phase
+      AND acquire.agent_id=OLD.agent_id
+      AND acquire.requester_agent_id=OLD.requester_agent_id
+      AND acquire.ttl_ms=OLD.ttl_ms
+      AND acquire.client_request_id=OLD.client_lease_id
+      AND acquire.idempotency_key=OLD.acquire_idempotency_key
+      AND acquire.external_id IS NOT NULL
+      AND acquire.external_id <> ''
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM external_rpc_intents release
+    JOIN external_rpc_intents acquire
+      ON acquire.rpc_kind='allow_lease_acquire'
+     AND acquire.state IN ('accepted','reconciled')
+     AND acquire.run_id=OLD.run_id
+     AND acquire.transition_id=OLD.transition_id
+     AND acquire.phase=OLD.phase
+     AND acquire.agent_id=OLD.agent_id
+     AND acquire.requester_agent_id=OLD.requester_agent_id
+     AND acquire.ttl_ms=OLD.ttl_ms
+     AND acquire.client_request_id=OLD.client_lease_id
+     AND acquire.idempotency_key=OLD.acquire_idempotency_key
+     AND acquire.external_id IS NOT NULL
+     AND acquire.external_id <> ''
+    WHERE release.rpc_kind='allow_lease_release'
+      AND release.state IN ('accepted','reconciled')
+      AND release.run_id=OLD.run_id
+      AND release.transition_id=OLD.transition_id
+      AND release.idempotency_key=OLD.release_idempotency_key
+      AND release.external_id=acquire.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire-pending lease requires release proof before deletion');
+END;
+
+CREATE TRIGGER leases_preserve_accepted_acquire_pending_state_update
+BEFORE UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, ttl_ms, gateway_lease_id ON leases
+WHEN OLD.state='acquire_pending'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents acquire
+    WHERE acquire.rpc_kind='allow_lease_acquire'
+      AND acquire.state IN ('accepted','reconciled')
+      AND acquire.run_id=OLD.run_id
+      AND acquire.transition_id=OLD.transition_id
+      AND acquire.phase=OLD.phase
+      AND acquire.agent_id=OLD.agent_id
+      AND acquire.requester_agent_id=OLD.requester_agent_id
+      AND acquire.ttl_ms=OLD.ttl_ms
+      AND acquire.client_request_id=OLD.client_lease_id
+      AND acquire.idempotency_key=OLD.acquire_idempotency_key
+      AND acquire.external_id IS NOT NULL
+      AND acquire.external_id <> ''
+  )
+  AND NOT (
+    NEW.state IN ('acquired','release_pending')
+    AND NEW.run_id=OLD.run_id
+    AND NEW.phase=OLD.phase
+    AND NEW.transition_id=OLD.transition_id
+    AND NEW.agent_id=OLD.agent_id
+    AND NEW.requester_agent_id=OLD.requester_agent_id
+    AND NEW.ttl_ms=OLD.ttl_ms
+    AND NEW.client_lease_id=OLD.client_lease_id
+    AND NEW.acquire_idempotency_key=OLD.acquire_idempotency_key
+    AND EXISTS (
+      SELECT 1 FROM external_rpc_intents acquire
+      WHERE acquire.rpc_kind='allow_lease_acquire'
+        AND acquire.state IN ('accepted','reconciled')
+        AND acquire.run_id=OLD.run_id
+        AND acquire.transition_id=OLD.transition_id
+        AND acquire.phase=OLD.phase
+        AND acquire.agent_id=OLD.agent_id
+        AND acquire.requester_agent_id=OLD.requester_agent_id
+        AND acquire.ttl_ms=OLD.ttl_ms
+        AND acquire.client_request_id=OLD.client_lease_id
+        AND acquire.idempotency_key=OLD.acquire_idempotency_key
+        AND acquire.external_id=NEW.gateway_lease_id
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM external_rpc_intents release
+    JOIN external_rpc_intents acquire
+      ON acquire.rpc_kind='allow_lease_acquire'
+     AND acquire.state IN ('accepted','reconciled')
+     AND acquire.run_id=OLD.run_id
+     AND acquire.transition_id=OLD.transition_id
+     AND acquire.phase=OLD.phase
+     AND acquire.agent_id=OLD.agent_id
+     AND acquire.requester_agent_id=OLD.requester_agent_id
+     AND acquire.ttl_ms=OLD.ttl_ms
+     AND acquire.client_request_id=OLD.client_lease_id
+     AND acquire.idempotency_key=OLD.acquire_idempotency_key
+     AND acquire.external_id IS NOT NULL
+     AND acquire.external_id <> ''
+    WHERE release.rpc_kind='allow_lease_release'
+      AND release.state IN ('accepted','reconciled')
+      AND release.run_id=OLD.run_id
+      AND release.transition_id=OLD.transition_id
+      AND release.idempotency_key=OLD.release_idempotency_key
+      AND release.external_id=acquire.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire-pending lease requires release proof before leaving pending ownership');
+END;
+
 CREATE TRIGGER leases_preserve_terminal_gateway_identity_update
 BEFORE UPDATE OF state, gateway_lease_id ON leases
 WHEN NEW.state IN ('expired','human_review_required')
@@ -1128,6 +1315,94 @@ WHEN NEW.state='release_not_required'
     OR (OLD.gateway_lease_id IS NOT NULL AND OLD.gateway_lease_id <> ''))
 BEGIN
   SELECT RAISE(ABORT,'live lease cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER leases_reject_acquired_release_not_required_insert
+AFTER INSERT ON leases
+WHEN NEW.state='release_not_required'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_acquire'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.requester_agent_id=NEW.requester_agent_id
+      AND eri.ttl_ms=NEW.ttl_ms
+      AND eri.client_request_id=NEW.client_lease_id
+      AND eri.idempotency_key=NEW.acquire_idempotency_key
+      AND eri.external_id IS NOT NULL
+      AND eri.external_id <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER leases_reject_acquired_release_not_required_update
+AFTER UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, ttl_ms ON leases
+WHEN NEW.state='release_not_required'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_acquire'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.requester_agent_id=NEW.requester_agent_id
+      AND eri.ttl_ms=NEW.ttl_ms
+      AND eri.client_request_id=NEW.client_lease_id
+      AND eri.idempotency_key=NEW.acquire_idempotency_key
+      AND eri.external_id IS NOT NULL
+      AND eri.external_id <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_release_not_required_acquire_insert
+AFTER INSERT ON external_rpc_intents
+WHEN NEW.rpc_kind='allow_lease_acquire'
+  AND NEW.state IN ('accepted','reconciled')
+  AND NEW.external_id IS NOT NULL
+  AND NEW.external_id <> ''
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='release_not_required'
+      AND l.run_id=NEW.run_id
+      AND l.transition_id=NEW.transition_id
+      AND l.phase=NEW.phase
+      AND l.agent_id=NEW.agent_id
+      AND l.requester_agent_id=NEW.requester_agent_id
+      AND l.ttl_ms=NEW.ttl_ms
+      AND l.client_lease_id=NEW.client_request_id
+      AND l.acquire_idempotency_key=NEW.idempotency_key
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot back release_not_required lease');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_release_not_required_acquire_update
+AFTER UPDATE OF rpc_kind, state, run_id, transition_id, phase, agent_id, requester_agent_id, ttl_ms, client_request_id, idempotency_key, external_id ON external_rpc_intents
+WHEN NEW.rpc_kind='allow_lease_acquire'
+  AND NEW.state IN ('accepted','reconciled')
+  AND NEW.external_id IS NOT NULL
+  AND NEW.external_id <> ''
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='release_not_required'
+      AND l.run_id=NEW.run_id
+      AND l.transition_id=NEW.transition_id
+      AND l.phase=NEW.phase
+      AND l.agent_id=NEW.agent_id
+      AND l.requester_agent_id=NEW.requester_agent_id
+      AND l.ttl_ms=NEW.ttl_ms
+      AND l.client_lease_id=NEW.client_request_id
+      AND l.acquire_idempotency_key=NEW.idempotency_key
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot back release_not_required lease');
 END;
 
 CREATE TABLE run_budgets (
@@ -1723,6 +1998,7 @@ CREATE TABLE approvals (
   consumed_by_gate_run_id TEXT UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
   consumed_by_goal_run_id TEXT UNIQUE REFERENCES goal_runs(goal_run_id) DEFERRABLE INITIALLY DEFERRED,
   approved_at TEXT NOT NULL,
+  CHECK (approval_id <> ''),
   CHECK (run_id <> ''),
   CHECK (approved_action_type <> ''),
   CHECK (target_type <> '' AND target_id <> '' AND target_hash <> '' AND target_scope <> ''),
@@ -2051,6 +2327,15 @@ CREATE TABLE judge_verifier_runs (
   CHECK (independence_class='independent'),
   CHECK (worker_agent_id <> verifier_agent_id AND same_worker_context=0),
   CHECK (prompt_hash <> context_hash),
+  CHECK (
+    independence_proof_json <> ''
+    AND CASE
+      WHEN json_valid(independence_proof_json)=1
+      THEN json_type(independence_proof_json)='object'
+        AND json(independence_proof_json) <> '{}'
+      ELSE 0
+    END
+  ),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -2139,6 +2424,44 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'gate risk dominance must match transition risk dominance');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_update
+BEFORE UPDATE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_delete
+BEFORE DELETE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_update
+BEFORE UPDATE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_delete
+BEFORE DELETE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
 END;
 
 CREATE TRIGGER gate_clock_context_validate_gate_insert

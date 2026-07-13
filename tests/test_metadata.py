@@ -4,7 +4,7 @@ import json
 import unittest
 
 from agentic_os.metadata import (
-    ALLOW_LEASE_FIELDS,
+    ALLOW_LEASE_OBSERVED_FIELDS,
     SESSION_FIELDS,
     MetadataContractError,
     validate_accepted_lease_identity,
@@ -19,7 +19,11 @@ def values(fields: tuple[str, ...]) -> dict[str, str]:
 
 
 def allow_values() -> dict[str, object]:
-    result: dict[str, object] = values(ALLOW_LEASE_FIELDS[:-1])
+    result: dict[str, object] = {
+        field: f"{field}-value"
+        for field in ALLOW_LEASE_OBSERVED_FIELDS
+        if field != "ttl_ms"
+    }
     result["ttl_ms"] = 60_000
     return result
 
@@ -65,6 +69,28 @@ class MetadataTests(unittest.TestCase):
                 local=local,
                 normalized=wrong,
                 raw_json=json.dumps(local),
+                metadata_contract_version="v1",
+            )
+
+    def test_allow_lease_gateway_id_is_required_and_exact(self) -> None:
+        local = allow_values()
+        missing = dict(local)
+        del missing["gateway_lease_id"]
+        with self.assertRaisesRegex(MetadataContractError, "gateway_lease_id"):
+            validate_allow_lease_observation(
+                local=local,
+                normalized=missing,
+                raw_json=json.dumps(local),
+                metadata_contract_version="v1",
+            )
+
+        wrong = dict(local)
+        wrong["gateway_lease_id"] = "other-gateway"
+        with self.assertRaisesRegex(MetadataContractError, "do not match"):
+            validate_allow_lease_observation(
+                local=local,
+                normalized=dict(local),
+                raw_json=json.dumps(wrong),
                 metadata_contract_version="v1",
             )
 

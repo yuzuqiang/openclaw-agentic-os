@@ -24,7 +24,7 @@ Non-goals:
 ## Delivery Change Log
 
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
-  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; live lease terminal states require release proof or no external gateway lease; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive.
+  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; accepted acquire-pending leases with Gateway ownership cannot be deleted or hidden before release proof; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive; pass gates and their referenced transitions are immutable; verifier independence proof evidence must be a non-empty JSON object; R2+ completion gates must bind to the finalizing transition.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
 - 2026-07-12: Applied Round 11 single-writer correction after Round 10 independent review found unresolved High gaps:
   - Frozen Round 10 input SHA-256 before this correction: `a6b93a7bc1357cf037833b75ffc09938ca1d1d4b0ababab129ea5595a666ffdc`.
@@ -331,8 +331,13 @@ BEGIN
 END;
 
 CREATE TRIGGER runs_validate_db_authority_update
-BEFORE UPDATE OF workflow, authority_mode ON runs
+BEFORE UPDATE OF workflow, authority_mode, state ON runs
 WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
+  AND (
+    NEW.state NOT IN ('finalized','rolled_back','rejected')
+    OR NEW.workflow<>OLD.workflow
+    OR NEW.authority_mode<>OLD.authority_mode
+  )
   AND NOT EXISTS (
     SELECT 1 FROM workflow_authority w
     WHERE w.workflow=NEW.workflow
@@ -377,6 +382,20 @@ WHEN NEW.mode IN ('db_authority_canary','db_authority')
   )
 BEGIN
   SELECT RAISE(ABORT,'db authority requires drained file-authority runs');
+END;
+
+CREATE TRIGGER workflow_authority_preserve_active_db_binding_update
+BEFORE UPDATE OF workflow, mode ON workflow_authority
+WHEN OLD.mode IN ('db_authority_canary','db_authority')
+  AND (NEW.workflow<>OLD.workflow OR NEW.mode<>OLD.mode)
+  AND EXISTS (
+    SELECT 1 FROM runs open_run
+    WHERE open_run.workflow=OLD.workflow
+      AND open_run.authority_mode=OLD.mode
+      AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'active db authority runs require active workflow authority binding');
 END;
 
 CREATE TRIGGER runs_reject_open_file_authority_during_db_insert
@@ -434,6 +453,7 @@ CREATE TABLE transitions (
   CHECK (
     approval_required = 0 OR (
       approval_id IS NOT NULL
+      AND approval_id <> ''
       AND action_type <> ''
       AND target_type IS NOT NULL AND target_type <> ''
       AND target_id IS NOT NULL AND target_id <> ''
@@ -794,6 +814,7 @@ CREATE TABLE leases (
       AND json_type(external_metadata_json,'$.agent_id')='text'
       AND json_type(external_metadata_json,'$.requester_agent_id')='text'
       AND json_type(external_metadata_json,'$.ttl_ms')='integer'
+      AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
       AND json_extract(external_metadata_json,'$.client_lease_id') <> ''
       AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
       AND json_extract(external_metadata_json,'$.run_id') <> ''
@@ -801,6 +822,7 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.transition_id') <> ''
       AND json_extract(external_metadata_json,'$.agent_id') <> ''
       AND json_extract(external_metadata_json,'$.requester_agent_id') <> ''
+      AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
       AND json_extract(external_metadata_json,'$.client_lease_id')=client_lease_id
       AND json_extract(external_metadata_json,'$.idempotency_key')=acquire_idempotency_key
       AND json_extract(external_metadata_json,'$.run_id')=run_id
@@ -809,6 +831,7 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.agent_id')=agent_id
       AND json_extract(external_metadata_json,'$.requester_agent_id')=requester_agent_id
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
+      AND json_extract(external_metadata_json,'$.gateway_lease_id')=gateway_lease_id
     ),0)=1
   ),
   CHECK (
@@ -1202,7 +1225,7 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state IN ('acquired','release_pending')
+    WHERE l.state IN ('acquire_pending','acquired','release_pending','release_not_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.phase=OLD.phase
@@ -1211,7 +1234,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
       AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
-      AND l.gateway_lease_id=OLD.external_id
+      AND (
+        l.state IN ('acquire_pending','release_not_required')
+        OR l.gateway_lease_id=OLD.external_id
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -1223,7 +1249,7 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state IN ('acquired','release_pending')
+    WHERE l.state IN ('acquire_pending','acquired','release_pending','release_not_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.phase=OLD.phase
@@ -1232,7 +1258,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
       AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
-      AND l.gateway_lease_id=OLD.external_id
+      AND (
+        l.state IN ('acquire_pending','release_not_required')
+        OR l.gateway_lease_id=OLD.external_id
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -1303,6 +1332,164 @@ BEGIN
   SELECT RAISE(ABORT,'terminal lease with gateway ownership requires release intent proof');
 END;
 
+CREATE TRIGGER leases_preserve_live_gateway_delete
+BEFORE DELETE ON leases
+WHEN OLD.state IN ('acquired','release_pending')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=OLD.run_id
+      AND eri.transition_id=OLD.transition_id
+      AND eri.idempotency_key=OLD.release_idempotency_key
+      AND eri.external_id=OLD.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live gateway lease requires release proof before deletion');
+END;
+
+CREATE TRIGGER leases_preserve_live_gateway_state_update
+BEFORE UPDATE OF state, run_id, transition_id, gateway_lease_id ON leases
+WHEN OLD.state IN ('acquired','release_pending')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND (
+    NEW.state NOT IN ('acquired','release_pending')
+    OR NEW.run_id<>OLD.run_id
+    OR NEW.transition_id<>OLD.transition_id
+    OR NEW.gateway_lease_id IS NULL
+    OR NEW.gateway_lease_id<>OLD.gateway_lease_id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=OLD.run_id
+      AND eri.transition_id=OLD.transition_id
+      AND eri.idempotency_key=OLD.release_idempotency_key
+      AND eri.external_id=OLD.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires release proof before leaving live state');
+END;
+
+CREATE TRIGGER leases_preserve_accepted_acquire_pending_delete
+BEFORE DELETE ON leases
+WHEN OLD.state='acquire_pending'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents acquire
+    WHERE acquire.rpc_kind='allow_lease_acquire'
+      AND acquire.state IN ('accepted','reconciled')
+      AND acquire.run_id=OLD.run_id
+      AND acquire.transition_id=OLD.transition_id
+      AND acquire.phase=OLD.phase
+      AND acquire.agent_id=OLD.agent_id
+      AND acquire.requester_agent_id=OLD.requester_agent_id
+      AND acquire.ttl_ms=OLD.ttl_ms
+      AND acquire.client_request_id=OLD.client_lease_id
+      AND acquire.idempotency_key=OLD.acquire_idempotency_key
+      AND acquire.external_id IS NOT NULL
+      AND acquire.external_id <> ''
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM external_rpc_intents release
+    JOIN external_rpc_intents acquire
+      ON acquire.rpc_kind='allow_lease_acquire'
+     AND acquire.state IN ('accepted','reconciled')
+     AND acquire.run_id=OLD.run_id
+     AND acquire.transition_id=OLD.transition_id
+     AND acquire.phase=OLD.phase
+     AND acquire.agent_id=OLD.agent_id
+     AND acquire.requester_agent_id=OLD.requester_agent_id
+     AND acquire.ttl_ms=OLD.ttl_ms
+     AND acquire.client_request_id=OLD.client_lease_id
+     AND acquire.idempotency_key=OLD.acquire_idempotency_key
+     AND acquire.external_id IS NOT NULL
+     AND acquire.external_id <> ''
+    WHERE release.rpc_kind='allow_lease_release'
+      AND release.state IN ('accepted','reconciled')
+      AND release.run_id=OLD.run_id
+      AND release.transition_id=OLD.transition_id
+      AND release.idempotency_key=OLD.release_idempotency_key
+      AND release.external_id=acquire.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire-pending lease requires release proof before deletion');
+END;
+
+CREATE TRIGGER leases_preserve_accepted_acquire_pending_state_update
+BEFORE UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, ttl_ms, gateway_lease_id ON leases
+WHEN OLD.state='acquire_pending'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents acquire
+    WHERE acquire.rpc_kind='allow_lease_acquire'
+      AND acquire.state IN ('accepted','reconciled')
+      AND acquire.run_id=OLD.run_id
+      AND acquire.transition_id=OLD.transition_id
+      AND acquire.phase=OLD.phase
+      AND acquire.agent_id=OLD.agent_id
+      AND acquire.requester_agent_id=OLD.requester_agent_id
+      AND acquire.ttl_ms=OLD.ttl_ms
+      AND acquire.client_request_id=OLD.client_lease_id
+      AND acquire.idempotency_key=OLD.acquire_idempotency_key
+      AND acquire.external_id IS NOT NULL
+      AND acquire.external_id <> ''
+  )
+  AND NOT (
+    NEW.state IN ('acquired','release_pending')
+    AND NEW.run_id=OLD.run_id
+    AND NEW.phase=OLD.phase
+    AND NEW.transition_id=OLD.transition_id
+    AND NEW.agent_id=OLD.agent_id
+    AND NEW.requester_agent_id=OLD.requester_agent_id
+    AND NEW.ttl_ms=OLD.ttl_ms
+    AND NEW.client_lease_id=OLD.client_lease_id
+    AND NEW.acquire_idempotency_key=OLD.acquire_idempotency_key
+    AND EXISTS (
+      SELECT 1 FROM external_rpc_intents acquire
+      WHERE acquire.rpc_kind='allow_lease_acquire'
+        AND acquire.state IN ('accepted','reconciled')
+        AND acquire.run_id=OLD.run_id
+        AND acquire.transition_id=OLD.transition_id
+        AND acquire.phase=OLD.phase
+        AND acquire.agent_id=OLD.agent_id
+        AND acquire.requester_agent_id=OLD.requester_agent_id
+        AND acquire.ttl_ms=OLD.ttl_ms
+        AND acquire.client_request_id=OLD.client_lease_id
+        AND acquire.idempotency_key=OLD.acquire_idempotency_key
+        AND acquire.external_id=NEW.gateway_lease_id
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM external_rpc_intents release
+    JOIN external_rpc_intents acquire
+      ON acquire.rpc_kind='allow_lease_acquire'
+     AND acquire.state IN ('accepted','reconciled')
+     AND acquire.run_id=OLD.run_id
+     AND acquire.transition_id=OLD.transition_id
+     AND acquire.phase=OLD.phase
+     AND acquire.agent_id=OLD.agent_id
+     AND acquire.requester_agent_id=OLD.requester_agent_id
+     AND acquire.ttl_ms=OLD.ttl_ms
+     AND acquire.client_request_id=OLD.client_lease_id
+     AND acquire.idempotency_key=OLD.acquire_idempotency_key
+     AND acquire.external_id IS NOT NULL
+     AND acquire.external_id <> ''
+    WHERE release.rpc_kind='allow_lease_release'
+      AND release.state IN ('accepted','reconciled')
+      AND release.run_id=OLD.run_id
+      AND release.transition_id=OLD.transition_id
+      AND release.idempotency_key=OLD.release_idempotency_key
+      AND release.external_id=acquire.external_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire-pending lease requires release proof before leaving pending ownership');
+END;
+
 CREATE TRIGGER leases_preserve_terminal_gateway_identity_update
 BEFORE UPDATE OF state, gateway_lease_id ON leases
 WHEN NEW.state IN ('expired','human_review_required')
@@ -1320,6 +1507,94 @@ WHEN NEW.state='release_not_required'
     OR (OLD.gateway_lease_id IS NOT NULL AND OLD.gateway_lease_id <> ''))
 BEGIN
   SELECT RAISE(ABORT,'live lease cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER leases_reject_acquired_release_not_required_insert
+AFTER INSERT ON leases
+WHEN NEW.state='release_not_required'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_acquire'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.requester_agent_id=NEW.requester_agent_id
+      AND eri.ttl_ms=NEW.ttl_ms
+      AND eri.client_request_id=NEW.client_lease_id
+      AND eri.idempotency_key=NEW.acquire_idempotency_key
+      AND eri.external_id IS NOT NULL
+      AND eri.external_id <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER leases_reject_acquired_release_not_required_update
+AFTER UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, ttl_ms ON leases
+WHEN NEW.state='release_not_required'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_acquire'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.requester_agent_id=NEW.requester_agent_id
+      AND eri.ttl_ms=NEW.ttl_ms
+      AND eri.client_request_id=NEW.client_lease_id
+      AND eri.idempotency_key=NEW.acquire_idempotency_key
+      AND eri.external_id IS NOT NULL
+      AND eri.external_id <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_release_not_required_acquire_insert
+AFTER INSERT ON external_rpc_intents
+WHEN NEW.rpc_kind='allow_lease_acquire'
+  AND NEW.state IN ('accepted','reconciled')
+  AND NEW.external_id IS NOT NULL
+  AND NEW.external_id <> ''
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='release_not_required'
+      AND l.run_id=NEW.run_id
+      AND l.transition_id=NEW.transition_id
+      AND l.phase=NEW.phase
+      AND l.agent_id=NEW.agent_id
+      AND l.requester_agent_id=NEW.requester_agent_id
+      AND l.ttl_ms=NEW.ttl_ms
+      AND l.client_lease_id=NEW.client_request_id
+      AND l.acquire_idempotency_key=NEW.idempotency_key
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot back release_not_required lease');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_release_not_required_acquire_update
+AFTER UPDATE OF rpc_kind, state, run_id, transition_id, phase, agent_id, requester_agent_id, ttl_ms, client_request_id, idempotency_key, external_id ON external_rpc_intents
+WHEN NEW.rpc_kind='allow_lease_acquire'
+  AND NEW.state IN ('accepted','reconciled')
+  AND NEW.external_id IS NOT NULL
+  AND NEW.external_id <> ''
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='release_not_required'
+      AND l.run_id=NEW.run_id
+      AND l.transition_id=NEW.transition_id
+      AND l.phase=NEW.phase
+      AND l.agent_id=NEW.agent_id
+      AND l.requester_agent_id=NEW.requester_agent_id
+      AND l.ttl_ms=NEW.ttl_ms
+      AND l.client_lease_id=NEW.client_request_id
+      AND l.acquire_idempotency_key=NEW.idempotency_key
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot back release_not_required lease');
 END;
 
 CREATE TABLE run_budgets (
@@ -1915,6 +2190,7 @@ CREATE TABLE approvals (
   consumed_by_gate_run_id TEXT UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
   consumed_by_goal_run_id TEXT UNIQUE REFERENCES goal_runs(goal_run_id) DEFERRABLE INITIALLY DEFERRED,
   approved_at TEXT NOT NULL,
+  CHECK (approval_id <> ''),
   CHECK (run_id <> ''),
   CHECK (approved_action_type <> ''),
   CHECK (target_type <> '' AND target_id <> '' AND target_hash <> '' AND target_scope <> ''),
@@ -2243,6 +2519,15 @@ CREATE TABLE judge_verifier_runs (
   CHECK (independence_class='independent'),
   CHECK (worker_agent_id <> verifier_agent_id AND same_worker_context=0),
   CHECK (prompt_hash <> context_hash),
+  CHECK (
+    independence_proof_json <> ''
+    AND CASE
+      WHEN json_valid(independence_proof_json)=1
+      THEN json_type(independence_proof_json)='object'
+        AND json(independence_proof_json) <> '{}'
+      ELSE 0
+    END
+  ),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -2331,6 +2616,44 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'gate risk dominance must match transition risk dominance');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_update
+BEFORE UPDATE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_delete
+BEFORE DELETE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_update
+BEFORE UPDATE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_delete
+BEFORE DELETE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
 END;
 
 CREATE TRIGGER gate_clock_context_validate_gate_insert
@@ -2937,7 +3260,7 @@ Example SLO query contracts:
 | Metadata-missing external RPC not auto-repaired | `SELECT intent_id FROM external_rpc_intents WHERE state IN ('pending','unknown','accepted','reconciled') AND run_id NOT IN (SELECT run_id FROM runs WHERE state='human_review_required') AND (metadata_contract_version IS NULL OR metadata_contract_version='' OR external_metadata_json IS NULL OR json_valid(external_metadata_json)=0);` |
 | Duplicate live dispatch blocked | `SELECT run_id, phase, agent_id, COUNT(*) FROM spawn_requests WHERE state IN ('accepted','completed') GROUP BY run_id, phase, agent_id HAVING COUNT(*) > 1;` |
 | `sessions_spawn` intent without exact spawn request binding | `SELECT eri.intent_id FROM external_rpc_intents eri LEFT JOIN spawn_requests sr ON sr.spawn_request_id=eri.spawn_request_id AND sr.run_id=eri.run_id AND sr.transition_id=eri.transition_id AND sr.client_request_id=eri.client_request_id AND sr.spawn_idempotency_key=eri.idempotency_key AND sr.phase=eri.phase AND sr.agent_id=eri.agent_id AND sr.task_digest=eri.task_digest WHERE eri.rpc_kind='sessions_spawn' AND (eri.spawn_request_id IS NULL OR eri.phase IS NULL OR eri.phase='' OR eri.agent_id IS NULL OR eri.agent_id='' OR eri.task_digest IS NULL OR eri.task_digest='' OR sr.spawn_request_id IS NULL);` |
-| `sessions_spawn` external metadata exact match | `SELECT intent_id FROM external_rpc_intents WHERE rpc_kind='sessions_spawn' AND state IN ('pending','accepted','unknown','reconciled') AND CASE WHEN metadata_contract_version IS NULL OR metadata_contract_version='' OR external_metadata_json IS NULL OR json_valid(external_metadata_json)=0 THEN 1 WHEN json_type(external_metadata_json,'$.run_id')<>'text' OR json_type(external_metadata_json,'$.transition_id')<>'text' OR json_type(external_metadata_json,'$.client_request_id')<>'text' OR json_type(external_metadata_json,'$.idempotency_key')<>'text' OR json_type(external_metadata_json,'$.phase')<>'text' OR json_type(external_metadata_json,'$.agent_id')<>'text' OR json_type(external_metadata_json,'$.task_digest')<>'text' OR json_extract(external_metadata_json,'$.run_id') IS NOT run_id OR json_extract(external_metadata_json,'$.transition_id') IS NOT transition_id OR json_extract(external_metadata_json,'$.client_request_id') IS NOT client_request_id OR json_extract(external_metadata_json,'$.idempotency_key') IS NOT idempotency_key OR json_extract(external_metadata_json,'$.phase') IS NOT phase OR json_extract(external_metadata_json,'$.agent_id') IS NOT agent_id OR json_extract(external_metadata_json,'$.task_digest') IS NOT task_digest OR external_run_id IS NOT run_id OR external_transition_id IS NOT transition_id OR external_client_request_id IS NOT client_request_id OR external_idempotency_key IS NOT idempotency_key OR external_phase IS NOT phase OR external_agent_id IS NOT agent_id OR external_task_digest IS NOT task_digest OR (state IN ('accepted','reconciled') AND (external_id IS NULL OR external_id='')) THEN 1 ELSE 0 END;` |
+| `sessions_spawn` external metadata exact match | `SELECT intent_id FROM external_rpc_intents WHERE rpc_kind='sessions_spawn' AND state IN ('pending','accepted','unknown','reconciled') AND CASE WHEN metadata_contract_version IS NULL OR metadata_contract_version='' OR external_metadata_json IS NULL OR json_valid(external_metadata_json)=0 THEN 1 WHEN json_type(external_metadata_json,'$.run_id') IS NOT 'text' OR json_type(external_metadata_json,'$.transition_id') IS NOT 'text' OR json_type(external_metadata_json,'$.client_request_id') IS NOT 'text' OR json_type(external_metadata_json,'$.idempotency_key') IS NOT 'text' OR json_type(external_metadata_json,'$.phase') IS NOT 'text' OR json_type(external_metadata_json,'$.agent_id') IS NOT 'text' OR json_type(external_metadata_json,'$.task_digest') IS NOT 'text' OR json_extract(external_metadata_json,'$.run_id') IS NOT run_id OR json_extract(external_metadata_json,'$.transition_id') IS NOT transition_id OR json_extract(external_metadata_json,'$.client_request_id') IS NOT client_request_id OR json_extract(external_metadata_json,'$.idempotency_key') IS NOT idempotency_key OR json_extract(external_metadata_json,'$.phase') IS NOT phase OR json_extract(external_metadata_json,'$.agent_id') IS NOT agent_id OR json_extract(external_metadata_json,'$.task_digest') IS NOT task_digest OR external_run_id IS NOT run_id OR external_transition_id IS NOT transition_id OR external_client_request_id IS NOT client_request_id OR external_idempotency_key IS NOT idempotency_key OR external_phase IS NOT phase OR external_agent_id IS NOT agent_id OR external_task_digest IS NOT task_digest OR (state IN ('accepted','reconciled') AND (external_id IS NULL OR external_id='')) THEN 1 ELSE 0 END;` |
 | Accepted `sessions_spawn` without exact accepted session identity | `SELECT eri.intent_id FROM external_rpc_intents eri LEFT JOIN spawn_requests sr ON sr.spawn_request_id=eri.spawn_request_id AND sr.run_id=eri.run_id AND sr.transition_id=eri.transition_id AND sr.client_request_id=eri.client_request_id AND sr.spawn_idempotency_key=eri.idempotency_key AND sr.phase=eri.phase AND sr.agent_id=eri.agent_id AND sr.task_digest=eri.task_digest LEFT JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id AND s.client_request_id=sr.client_request_id AND s.spawn_idempotency_key=sr.spawn_idempotency_key AND s.phase=sr.phase AND s.agent_id=sr.agent_id AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key AND s.session_key=eri.external_id WHERE eri.rpc_kind='sessions_spawn' AND eri.state IN ('accepted','reconciled') AND (eri.external_id IS NULL OR eri.external_id='' OR sr.spawn_request_id IS NULL OR sr.state NOT IN ('accepted','completed') OR sr.session_key IS NULL OR sr.session_key='' OR sr.session_key<>eri.external_id OR s.session_id IS NULL);` |
 | `sessions` row without exact spawn request same-row binding | `SELECT s.session_id FROM sessions s LEFT JOIN spawn_requests sr ON sr.spawn_request_id=s.spawn_request_id AND sr.run_id=s.run_id AND sr.transition_id=s.transition_id AND sr.client_request_id=s.client_request_id AND sr.spawn_idempotency_key=s.spawn_idempotency_key AND sr.phase=s.phase AND sr.agent_id=s.agent_id AND sr.task_digest=s.task_digest AND sr.session_key=s.session_key WHERE sr.spawn_request_id IS NULL OR s.session_key IS NULL OR s.session_key='';` |
 | Lease leak after terminal state | `SELECT l.lease_id FROM leases l JOIN runs r USING(run_id) WHERE r.state IN ('finalized','rolled_back','rejected') AND l.state NOT IN ('released','release_not_required');` |
@@ -2954,15 +3277,15 @@ Example SLO query contracts:
 | Budget prefix over-release or over-restore | `WITH ordered AS (SELECT budget_event_id, run_id, event_sequence, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type='release' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_human FROM budget_events) SELECT budget_event_id FROM ordered WHERE net_time<0 OR net_input<0 OR net_output<0 OR net_cost<0 OR net_reserved_retry<0 OR net_retry_consumed<0 OR net_human<0;` |
 | Duplicate or replayed budget events | `SELECT event_dedupe_hash FROM budget_events GROUP BY event_dedupe_hash HAVING COUNT(*)>1;` |
 | Budget event count bounded for SUM safety | `SELECT run_id FROM budget_events GROUP BY run_id HAVING COUNT(*)>1000000 OR MIN(event_sequence)<1 OR MAX(event_sequence)>1000000;` |
-| Completion gate before done for R2+ | `SELECT r.run_id FROM runs r LEFT JOIN gate_runs g ON g.run_id=r.run_id AND g.decision='pass' WHERE r.risk_dominance IN ('R2','R3','R4') AND r.state='finalized' AND (r.finalized_at IS NULL OR r.finalized_at='' OR r.finalized_at_epoch_ms IS NULL OR typeof(r.finalized_at_epoch_ms)<>'integer' OR r.finalized_at_epoch_ms<1 OR r.finalized_at_epoch_ms>253402300799999 OR g.gate_run_id IS NULL OR g.completed_at_epoch_ms IS NULL OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms > r.finalized_at_epoch_ms);` |
+| Completion gate before done for R2+ | `SELECT r.run_id FROM runs r WHERE r.risk_dominance IN ('R2','R3','R4') AND r.state='finalized' AND (r.finalized_at IS NULL OR r.finalized_at='' OR r.finalized_at_epoch_ms IS NULL OR typeof(r.finalized_at_epoch_ms)<>'integer' OR r.finalized_at_epoch_ms<1 OR r.finalized_at_epoch_ms>253402300799999 OR NOT EXISTS (SELECT 1 FROM transitions t JOIN gate_runs g ON g.run_id=t.run_id AND g.transition_id=t.transition_id AND g.decision='pass' WHERE t.run_id=r.run_id AND t.state_after='finalized' AND g.completed_at_epoch_ms IS NOT NULL AND typeof(g.completed_at_epoch_ms)='integer' AND g.completed_at_epoch_ms BETWEEN 1 AND 253402300799999 AND g.completed_at_epoch_ms <= r.finalized_at_epoch_ms));` |
 | Passing gate without verifier row | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (g.verifier_run_id IS NULL OR v.verifier_run_id IS NULL);` |
-| Passing gate wrong-run or non-independent verifier | `SELECT g.gate_run_id FROM gate_runs g JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (v.worker_run_id<>g.run_id OR v.same_worker_context=1 OR v.verifier_agent_id=v.worker_agent_id OR v.prompt_hash=v.context_hash OR v.independence_class IN ('self','same_worker','same_context','correlated','unknown'));` |
+| Passing gate wrong-run or non-independent verifier | `SELECT g.gate_run_id FROM gate_runs g JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (v.worker_run_id<>g.run_id OR v.same_worker_context=1 OR v.verifier_agent_id=v.worker_agent_id OR v.prompt_hash=v.context_hash OR v.independence_class IN ('self','same_worker','same_context','correlated','unknown') OR json_valid(v.independence_proof_json)<>1 OR json_type(v.independence_proof_json)<>'object' OR json(v.independence_proof_json)='{}');` |
 | Gate evidence bound to same run | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN evidence_hashes e ON e.gate_run_id=g.gate_run_id AND e.evidence_hash=g.evidence_hash AND e.run_id=g.run_id AND e.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND g.requires_same_run=1 AND (e.evidence_hash IS NULL OR e.producer_run_id IS NULL OR e.producer_run_id<>g.run_id OR e.verifier_run_id IS NULL OR e.verifier_run_id<>g.verifier_run_id);` |
 | Gate clock context exact one-use binding | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN gate_clock_context c ON c.clock_context_id=g.clock_context_id WHERE g.decision='pass' AND (c.clock_context_id IS NULL OR c.gate_run_id<>g.gate_run_id OR c.consumed_by_gate_run_id<>g.gate_run_id OR c.run_id<>g.run_id OR c.transition_id<>g.transition_id OR typeof(c.now_epoch_ms)<>'integer' OR c.now_epoch_ms<1 OR c.now_epoch_ms>253402300799999 OR typeof(c.bound_at_epoch_ms)<>'integer' OR c.bound_at_epoch_ms<1 OR c.bound_at_epoch_ms>253402300799999 OR c.bound_at_epoch_ms<>c.now_epoch_ms OR typeof(c.consumed_at_epoch_ms)<>'integer' OR c.consumed_at_epoch_ms<1 OR c.consumed_at_epoch_ms>253402300799999 OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms<>c.now_epoch_ms OR c.consumed_at_epoch_ms<>c.now_epoch_ms OR c.trusted_clock_source_hash IS NULL OR c.trusted_clock_source_hash='' OR c.gate_nonce IS NULL OR c.gate_nonce='');` |
 | Broad or expired approvals | `SELECT a.approval_id FROM transitions t JOIN gate_runs g ON g.gate_run_id=t.gate_run_id LEFT JOIN gate_clock_context c ON c.clock_context_id=g.clock_context_id LEFT JOIN approvals a ON a.approval_id=t.approval_id WHERE g.decision='pass' AND t.approval_required=1 AND (c.clock_context_id IS NULL OR typeof(c.now_epoch_ms)<>'integer' OR c.now_epoch_ms<1 OR c.now_epoch_ms>253402300799999 OR a.approval_id IS NULL OR typeof(a.expires_at_epoch_ms)<>'integer' OR a.expires_at_epoch_ms<1 OR a.expires_at_epoch_ms>253402300799999 OR a.expires_at_epoch_ms<=c.now_epoch_ms OR a.approved_action_type='' OR a.approved_risk_ceiling='' OR a.target_type IS NULL OR a.target_type='' OR a.target_id IS NULL OR a.target_id='' OR a.target_hash IS NULL OR a.target_hash='' OR a.target_scope IS NULL OR a.target_scope='');` |
 | Exact mutating approval binding | `SELECT t.transition_id FROM transitions t JOIN gate_runs g ON g.gate_run_id=t.gate_run_id LEFT JOIN gate_clock_context c ON c.clock_context_id=g.clock_context_id LEFT JOIN approvals a ON a.approval_id=t.approval_id LEFT JOIN risk_assessments ra ON ra.transition_id=t.transition_id AND ra.run_id=t.run_id WHERE g.decision='pass' AND t.approval_required=1 AND (g.run_id<>t.run_id OR g.transition_id<>t.transition_id OR c.clock_context_id IS NULL OR c.gate_run_id<>g.gate_run_id OR c.run_id<>g.run_id OR c.transition_id<>t.transition_id OR typeof(c.now_epoch_ms)<>'integer' OR c.now_epoch_ms<1 OR c.now_epoch_ms>253402300799999 OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms<>c.now_epoch_ms OR a.approval_id IS NULL OR a.run_id IS NULL OR a.run_id<>t.run_id OR a.run_id<>g.run_id OR typeof(a.expires_at_epoch_ms)<>'integer' OR a.expires_at_epoch_ms<1 OR a.expires_at_epoch_ms>253402300799999 OR a.expires_at_epoch_ms<=c.now_epoch_ms OR a.single_use<>1 OR a.consumed_by_transition_id IS NULL OR a.consumed_by_transition_id<>t.transition_id OR a.consumed_by_gate_run_id IS NULL OR a.consumed_by_gate_run_id<>g.gate_run_id OR a.approved_action_type<>t.action_type OR a.target_type<>t.target_type OR a.target_id<>t.target_id OR a.target_hash<>t.target_hash OR a.target_scope<>t.target_scope OR a.channel<>t.approval_channel OR a.source_message_digest<>t.approval_source_digest OR a.approval_text_digest<>t.approval_text_digest OR ra.assessment_id IS NULL OR ra.risk_dominance<>t.risk_dominance OR CASE a.approved_risk_ceiling WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1 END < CASE t.risk_dominance WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99 END);` |
 | Reused approval id | `SELECT approval_id FROM transitions WHERE approval_id IS NOT NULL GROUP BY approval_id HAVING COUNT(*)>1;` |
-| Non-independent verifier row | `SELECT verifier_run_id FROM judge_verifier_runs WHERE same_worker_context=1 OR verifier_agent_id=worker_agent_id OR prompt_hash=context_hash OR worker_run_id IS NULL OR independence_class IN ('self','same_worker','same_context','correlated','unknown');` |
+| Non-independent verifier row | `SELECT verifier_run_id FROM judge_verifier_runs WHERE same_worker_context=1 OR verifier_agent_id=worker_agent_id OR prompt_hash=context_hash OR worker_run_id IS NULL OR independence_class IN ('self','same_worker','same_context','correlated','unknown') OR json_valid(independence_proof_json)<>1 OR json_type(independence_proof_json)<>'object' OR json(independence_proof_json)='{}';` |
 | SLO query fixture status | `WITH required(query_name) AS (VALUES ('Metadata-missing external RPC not auto-repaired'),('Duplicate live dispatch blocked'),('`sessions_spawn` intent without exact spawn request binding'),('`sessions_spawn` external metadata exact match'),('Accepted `sessions_spawn` without exact accepted session identity'),('`sessions` row without exact spawn request same-row binding'),('Lease leak after terminal state'),('Unknown usage blocks auto-local'),('Model cost registry numeric bounds'),('Endpoint-bound budget event cost row blocks dispatch'),('Run budget selected cost row mismatch'),('`sessions_spawn` intent without exact strict prior reserve'),('Invalid zero-reserve policy'),('Meaningless `sessions_spawn` reserve'),('Budget event amount malformed or out of range'),('Budget counters outside selected budget'),('Budget ledger reconciles to counters and budgets'),('Budget prefix over-release or over-restore'),('Duplicate or replayed budget events'),('Budget event count bounded for SUM safety'),('Completion gate before done for R2+'),('Passing gate without verifier row'),('Passing gate wrong-run or non-independent verifier'),('Gate evidence bound to same run'),('Gate clock context exact one-use binding'),('Broad or expired approvals'),('Exact mutating approval binding'),('Reused approval id'),('Non-independent verifier row'),('SLO query fixture status')), audit_required(query_name) AS (SELECT query_name FROM required WHERE query_name<>'SLO query fixture status'), current_schema(schema_version,migration_sha256) AS (SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1), blocking(query_name) AS (SELECT r.query_name FROM audit_required r CROSS JOIN current_schema cs LEFT JOIN slo_queries q ON q.query_name=r.query_name AND q.schema_version=cs.schema_version AND q.migration_sha256=cs.migration_sha256 LEFT JOIN slo_audits a ON a.slo_audit_id=(SELECT a2.slo_audit_id FROM slo_audits a2 WHERE a2.query_name=q.query_name AND a2.schema_version=q.schema_version AND a2.migration_sha256=q.migration_sha256 AND a2.query_hash=q.query_hash ORDER BY a2.run_at_epoch_ms DESC,a2.slo_audit_id DESC LIMIT 1) LEFT JOIN evidence_hashes e ON e.gate_run_id=a.gate_run_id AND e.evidence_hash=a.evidence_hash AND e.run_id=a.evidence_run_id AND e.verifier_run_id=a.verifier_run_id LEFT JOIN gate_runs g ON g.gate_run_id=a.gate_run_id AND g.evidence_hash=a.evidence_hash AND g.run_id=a.evidence_run_id AND g.verifier_run_id=a.verifier_run_id AND g.decision='pass' WHERE q.query_name IS NULL OR a.slo_audit_id IS NULL OR a.status<>'pass' OR a.empty_db_status<>'pass' OR a.fixture_db_status<>'pass' OR a.schema_version<>q.schema_version OR a.migration_sha256<>q.migration_sha256 OR a.query_hash<>q.query_hash OR a.evidence_hash IS NULL OR a.evidence_run_id IS NULL OR a.verifier_run_id IS NULL OR a.gate_run_id IS NULL OR e.evidence_hash IS NULL OR e.producer_run_id<>a.evidence_run_id OR e.run_id<>a.evidence_run_id OR e.verifier_run_id<>a.verifier_run_id OR e.gate_run_id<>a.gate_run_id OR g.gate_run_id IS NULL UNION ALL SELECT q.query_name FROM slo_queries q JOIN current_schema cs ON q.schema_version=cs.schema_version AND q.migration_sha256=cs.migration_sha256 LEFT JOIN required r ON r.query_name=q.query_name WHERE r.query_name IS NULL UNION ALL SELECT '__slo_registry_count__' WHERE (SELECT COUNT(*) FROM slo_queries q JOIN current_schema cs ON q.schema_version=cs.schema_version AND q.migration_sha256=cs.migration_sha256)<>(SELECT COUNT(*) FROM required)) SELECT query_name FROM blocking;` |
 
 
