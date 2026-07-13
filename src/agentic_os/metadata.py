@@ -36,6 +36,7 @@ ALLOW_LEASE_IDENTITY_FIELDS = (
 )
 
 ALLOW_LEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("ttl_ms",)
+ALLOW_LEASE_OBSERVED_FIELDS = ALLOW_LEASE_FIELDS + ("gateway_lease_id",)
 MAX_LEASE_TTL_MS = 31_536_000_000
 
 
@@ -139,11 +140,11 @@ def validate_allow_lease_observation(**kwargs: Any) -> dict[str, Any]:
         raise MetadataContractError("normalized and raw external metadata are required")
 
     def allow_values(value: Mapping[str, Any], label: str, *, exact: bool) -> dict[str, Any]:
-        if exact and set(value) != set(ALLOW_LEASE_FIELDS):
+        if exact and set(value) != set(ALLOW_LEASE_OBSERVED_FIELDS):
             raise MetadataContractError(
-                f"{label} must contain exactly {list(ALLOW_LEASE_FIELDS)}"
+                f"{label} must contain exactly {list(ALLOW_LEASE_OBSERVED_FIELDS)}"
             )
-        missing = [field for field in ALLOW_LEASE_FIELDS if field not in value]
+        missing = [field for field in ALLOW_LEASE_OBSERVED_FIELDS if field not in value]
         if missing:
             raise MetadataContractError(f"{label} is missing required fields: {missing}")
         identity = _exact_nonempty_fields(
@@ -156,7 +157,10 @@ def validate_allow_lease_observation(**kwargs: Any) -> dict[str, Any]:
             raise MetadataContractError(
                 f"{label}.ttl_ms must be an integer in [1,{MAX_LEASE_TTL_MS}]"
             )
-        return {**identity, "ttl_ms": ttl_ms}
+        gateway_lease_id = value["gateway_lease_id"]
+        if not isinstance(gateway_lease_id, str) or not gateway_lease_id:
+            raise MetadataContractError(f"{label}.gateway_lease_id must be a non-empty string")
+        return {**identity, "ttl_ms": ttl_ms, "gateway_lease_id": gateway_lease_id}
 
     local_values = allow_values(local, "local intent", exact=True)
     observed_values = allow_values(normalized, "normalized metadata", exact=True)

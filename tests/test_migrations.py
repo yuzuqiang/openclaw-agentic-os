@@ -3136,6 +3136,21 @@ class MigrationTests(unittest.TestCase):
                 ("f" * 64, contract.query_name),
             )
 
+    def test_sessions_spawn_metadata_slo_uses_null_safe_json_type_checks(self) -> None:
+        contract = next(
+            item
+            for item in SLO_QUERY_CONTRACTS
+            if item.query_name == "`sessions_spawn` external metadata exact match"
+        )
+        self.assertIn(
+            "json_type(external_metadata_json,'$.run_id') IS NOT 'text'",
+            contract.sql_text,
+        )
+        self.assertNotIn(
+            "json_type(external_metadata_json,'$.run_id')<>'text'",
+            contract.sql_text,
+        )
+
     def test_slo_registry_allows_same_query_name_for_new_schema_version(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
