@@ -91,11 +91,11 @@ class PrivacyTests(unittest.TestCase):
                 (repository_root() / ".gitignore").read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
-            tracked = root / "state/agentic-os/secret.db"
+            tracked = root / "state/agentic-os/SECRET.DB.gz"
             tracked.parent.mkdir(parents=True)
             tracked.write_bytes(b"tracked")
             subprocess.run(["git", "add", "-f", str(tracked)], cwd=root, check=True)
-            with self.assertRaisesRegex(PrivacyPreflightError, "secret.db"):
+            with self.assertRaisesRegex(PrivacyPreflightError, "SECRET.DB.gz"):
                 assert_privacy_preflight(root)
 
     def test_existing_database_directory_must_be_private(self) -> None:
@@ -146,6 +146,11 @@ class PrivacyTests(unittest.TestCase):
             "cache.sqlite3-wal",
             "cache.sqlite3-shm",
             "cache.sqlite3.backup",
+            "export/CONTROL.DB",
+            "CONTROL.SQLITE3",
+            "foo.DB.gz",
+            "control.DB-WAL",
+            "State/Agentic-OS/Backups/redacted.txt",
             ".db",
             ".sqlite",
             ".sqlite3",

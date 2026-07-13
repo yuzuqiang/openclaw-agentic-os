@@ -43,6 +43,7 @@ class MigrationTests(unittest.TestCase):
         connection: sqlite3.Connection,
         evidence_hash: str,
         suffix: str,
+        decision: str = "pass",
     ) -> tuple[str, str, str]:
         workflow = f"slo-workflow-{suffix}"
         run_id = f"slo-run-{suffix}"
@@ -87,13 +88,14 @@ class MigrationTests(unittest.TestCase):
             "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
             "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
             "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
-            "VALUES(?,?,?,?,?,'pass','now',1000,'v1',?,?,?,'R1','now')",
+            "VALUES(?,?,?,?,?,?,'now',1000,'v1',?,?,?,'R1','now')",
             (
                 gate_id,
                 run_id,
                 transition_id,
                 clock_id,
                 verifier_id,
+                decision,
                 f"query-{suffix}",
                 f"migration-{suffix}",
                 evidence_hash,
@@ -962,6 +964,11 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "terminal lease"):
             connection.execute(
                 "UPDATE leases SET state='expired' WHERE lease_id='acquired-live'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "gateway lease identity"):
+            connection.execute(
+                "UPDATE leases SET state='human_review_required', gateway_lease_id=NULL "
+                "WHERE lease_id='acquired-live'"
             )
         release_not_required_with_gateway = (
             "release-not-required", "run", "phase", "transition", "agent", "requester",
@@ -2642,6 +2649,37 @@ class MigrationTests(unittest.TestCase):
                     "wrong-gate",
                 ),
             )
+        for decision in ("fail", "human_review_required"):
+            (
+                non_pass_run_id,
+                non_pass_verifier_id,
+                non_pass_gate_id,
+            ) = self._insert_gate_bound_evidence(
+                connection,
+                evidence_hash=f"slo-evidence-{decision}",
+                suffix=f"non-pass-{decision}",
+                decision=decision,
+            )
+            with self.subTest(decision=decision), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "pass-gate evidence"
+            ):
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms) VALUES("
+                    f"'a-non-pass-{decision}',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+                    "'now',1000)",
+                    (
+                        contract.query_name,
+                        migration_hash,
+                        query_hash,
+                        f"slo-evidence-{decision}",
+                        non_pass_run_id,
+                        non_pass_verifier_id,
+                        non_pass_gate_id,
+                    ),
+                )
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -2693,6 +2731,14 @@ class MigrationTests(unittest.TestCase):
             ),
         )
         self.assertNotIn(
+            (contract.query_name,),
+            connection.execute(status_query).fetchall(),
+        )
+        connection.execute(
+            "UPDATE gate_runs SET decision='fail' WHERE gate_run_id=?",
+            (valid_gate_id,),
+        )
+        self.assertIn(
             (contract.query_name,),
             connection.execute(status_query).fetchall(),
         )

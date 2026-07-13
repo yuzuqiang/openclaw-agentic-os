@@ -1043,8 +1043,7 @@ END;
 CREATE TRIGGER leases_validate_terminal_gateway_release_proof_update
 AFTER UPDATE OF state, run_id, transition_id, release_idempotency_key, gateway_lease_id ON leases
 WHEN NEW.state IN ('expired','human_review_required')
-  AND NEW.gateway_lease_id IS NOT NULL
-  AND NEW.gateway_lease_id <> ''
+  AND COALESCE(NULLIF(OLD.gateway_lease_id,''), NULLIF(NEW.gateway_lease_id,'')) IS NOT NULL
   AND NOT EXISTS (
     SELECT 1 FROM external_rpc_intents eri
     WHERE eri.rpc_kind='allow_lease_release'
@@ -1052,10 +1051,20 @@ WHEN NEW.state IN ('expired','human_review_required')
       AND eri.run_id=NEW.run_id
       AND eri.transition_id=NEW.transition_id
       AND eri.idempotency_key=NEW.release_idempotency_key
-      AND eri.external_id=NEW.gateway_lease_id
+      AND eri.external_id=COALESCE(NULLIF(OLD.gateway_lease_id,''), NULLIF(NEW.gateway_lease_id,''))
   )
 BEGIN
   SELECT RAISE(ABORT,'terminal lease with gateway ownership requires release intent proof');
+END;
+
+CREATE TRIGGER leases_preserve_terminal_gateway_identity_update
+BEFORE UPDATE OF state, gateway_lease_id ON leases
+WHEN NEW.state IN ('expired','human_review_required')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND (NEW.gateway_lease_id IS NULL OR NEW.gateway_lease_id <> OLD.gateway_lease_id)
+BEGIN
+  SELECT RAISE(ABORT,'terminal lease must preserve gateway lease identity');
 END;
 
 CREATE TRIGGER leases_reject_live_release_not_required_update
@@ -2385,29 +2394,43 @@ CREATE TABLE slo_audits (
 CREATE TRIGGER slo_audits_validate_pass_evidence_insert
 AFTER INSERT ON slo_audits
 WHEN NEW.status='pass' AND NOT EXISTS (
-  SELECT 1 FROM evidence_hashes e
+  SELECT 1
+  FROM evidence_hashes e
+  JOIN gate_runs g
+    ON g.gate_run_id=e.gate_run_id
+   AND g.evidence_hash=e.evidence_hash
+   AND g.run_id=e.run_id
+   AND g.verifier_run_id=e.verifier_run_id
   WHERE e.gate_run_id=NEW.gate_run_id
     AND e.evidence_hash=NEW.evidence_hash
     AND e.run_id=NEW.evidence_run_id
     AND e.producer_run_id=NEW.evidence_run_id
     AND e.verifier_run_id=NEW.verifier_run_id
+    AND g.decision='pass'
 )
 BEGIN
-  SELECT RAISE(ABORT,'passing SLO audit requires gate-bound evidence');
+  SELECT RAISE(ABORT,'passing SLO audit requires pass-gate evidence');
 END;
 
 CREATE TRIGGER slo_audits_validate_pass_evidence_update
 AFTER UPDATE OF status, evidence_hash, evidence_run_id, verifier_run_id, gate_run_id ON slo_audits
 WHEN NEW.status='pass' AND NOT EXISTS (
-  SELECT 1 FROM evidence_hashes e
+  SELECT 1
+  FROM evidence_hashes e
+  JOIN gate_runs g
+    ON g.gate_run_id=e.gate_run_id
+   AND g.evidence_hash=e.evidence_hash
+   AND g.run_id=e.run_id
+   AND g.verifier_run_id=e.verifier_run_id
   WHERE e.gate_run_id=NEW.gate_run_id
     AND e.evidence_hash=NEW.evidence_hash
     AND e.run_id=NEW.evidence_run_id
     AND e.producer_run_id=NEW.evidence_run_id
     AND e.verifier_run_id=NEW.verifier_run_id
+    AND g.decision='pass'
 )
 BEGIN
-  SELECT RAISE(ABORT,'passing SLO audit requires gate-bound evidence');
+  SELECT RAISE(ABORT,'passing SLO audit requires pass-gate evidence');
 END;
 
 CREATE TRIGGER slo_queries_reject_update

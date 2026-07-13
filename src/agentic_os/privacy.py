@@ -74,8 +74,8 @@ def is_raw_state_denied(path: str | Path) -> bool:
         normalized = normalized[2:]
     pure = PurePosixPath(normalized)
     for name in pure.parts:
-        candidate_names = [name]
-        stripped = name
+        stripped = name.casefold()
+        candidate_names = [stripped]
         while True:
             suffix = next(
                 (
@@ -95,7 +95,7 @@ def is_raw_state_denied(path: str | Path) -> bool:
             for pattern in RAW_STATE_PATTERNS
         ):
             return True
-    parts = pure.parts
+    parts = tuple(part.casefold() for part in pure.parts)
     return any(
         parts[index : index + 3] == ("state", "agentic-os", "backups")
         for index in range(max(0, len(parts) - 2))
