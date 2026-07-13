@@ -263,6 +263,16 @@ class MigrationTests(unittest.TestCase):
                 "rollback_deadline='deadline',last_parity_audit_hash='parity',"
                 "updated_at='later' WHERE workflow='w'"
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "drained"):
+            connection.execute(
+                "UPDATE workflow_authority SET mode='db_authority_canary',"
+                "cutover_approved_by='river',cutover_evidence_hash='evidence',"
+                "rollback_deadline='deadline',last_parity_audit_hash='parity',"
+                "open_file_authority_runs=0,updated_at='later' WHERE workflow='w'"
+            )
+        connection.execute(
+            "UPDATE runs SET state='finalized' WHERE run_id='file-run'"
+        )
         connection.execute(
             "UPDATE workflow_authority SET mode='db_authority_canary',"
             "cutover_approved_by='river',cutover_evidence_hash='evidence',"
@@ -275,6 +285,13 @@ class MigrationTests(unittest.TestCase):
             "VALUES('db-run','prepare-db','w','db_authority_canary','candidate','R1',"
             "'R1','now','now')"
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "conflicts"):
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) "
+                "VALUES('late-file-run','prepare-late-file','w','file_authority',"
+                "'candidate','R1','R1','now','now')"
+            )
         self.assertEqual(
             connection.execute(
                 "SELECT authority_mode FROM runs WHERE run_id='file-run'"
@@ -795,6 +812,10 @@ class MigrationTests(unittest.TestCase):
                 "UPDATE leases SET state='release_not_required', gateway_lease_id=NULL "
                 "WHERE lease_id='acquired-live'"
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "terminal lease"):
+            connection.execute(
+                "UPDATE leases SET state='expired' WHERE lease_id='acquired-live'"
+            )
         release_not_required_with_gateway = (
             "release-not-required", "run", "phase", "transition", "agent", "requester",
             "release_not_required", "gateway-hidden", "client-hidden", "idem-hidden",
@@ -1010,6 +1031,10 @@ class MigrationTests(unittest.TestCase):
             "'accepted-session','now',1001)",
             (external_metadata,),
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
+            connection.execute("DELETE FROM run_budgets WHERE run_id='r'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
+            connection.execute("UPDATE run_budgets SET run_id='other' WHERE run_id='r'")
         for assignment in ("input_tokens=2", "event_sequence=99"):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
                 sqlite3.IntegrityError, "immutable"
@@ -1045,6 +1070,15 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE spawn_requests SET session_key='other-session' "
                 "WHERE spawn_request_id='spawn'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "state is immutable"):
+            connection.execute(
+                "UPDATE spawn_requests SET state='pending' WHERE spawn_request_id='spawn'"
+            )
+        connection.execute("UPDATE spawn_requests SET state='completed' WHERE spawn_request_id='spawn'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "state is immutable"):
+            connection.execute(
+                "UPDATE spawn_requests SET state='accepted' WHERE spawn_request_id='spawn'"
             )
 
     def test_spawn_request_transition_must_belong_to_same_run(self) -> None:
@@ -1756,9 +1790,27 @@ class MigrationTests(unittest.TestCase):
             "INSERT INTO approvals(approval_id,run_id,approver,channel,"
             "source_message_digest,approval_text_digest,approved_action_type,"
             "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
-            "expires_at_epoch_ms,approval_hash,approved_at) VALUES('approval','run',"
+            "expires_at_epoch_ms,approval_hash,consumed_by_goal_run_id,approved_at) "
+            "VALUES('wrong-approval','run','river','telegram','source-wrong',"
+            "'text-wrong','other_action','goal','other-goal','manifest','owner','R1',"
+            "2000,'wrong-approval-hash','wrong-approved','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at) "
+                "VALUES('wrong-approved','goal','run','R1','open','plugin',"
+                "'agentic_predicate_inproc_v1',1,'wrong-approval','now')"
+            )
+        connection.execute("DELETE FROM approvals WHERE approval_id='wrong-approval'")
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,approval_hash,consumed_by_goal_run_id,approved_at) "
+            "VALUES('approval','run',"
             "'river','telegram','source','text','goal_run','goal','goal','manifest',"
-            "'scope','R1',2000,'approval-hash','now')"
+            "'owner','R1',2000,'approval-hash','approved','now')"
         )
         connection.execute(
             "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
@@ -1770,6 +1822,17 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE goal_runs SET approval_id=NULL WHERE goal_run_id='approved'"
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "UPDATE goal_runs SET severity='R2' WHERE goal_run_id='approved'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "UPDATE approvals SET expires_at_epoch_ms=1999 "
+                "WHERE approval_id='approval'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute("DELETE FROM approvals WHERE approval_id='approval'")
 
     def test_verifier_independence_class_is_allowlisted(self) -> None:
         apply_migrations(self.database)
@@ -2202,6 +2265,10 @@ class MigrationTests(unittest.TestCase):
             if contract.query_name == "Completion gate before done for R2+"
         )
         self.assertEqual(connection.execute(query).fetchall(), [("finalized-r2",)])
+        design = (
+            repository_root() / "docs/agentic-os-production-adaptation.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f"| Completion gate before done for R2+ | `{query}` |", design)
 
     def test_readme_migration_example_uses_private_test_database(self) -> None:
         readme = (repository_root() / "README.md").read_text(encoding="utf-8")

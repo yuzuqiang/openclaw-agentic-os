@@ -319,6 +319,12 @@ WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
       AND w.rollback_deadline IS NOT NULL AND w.rollback_deadline <> ''
       AND w.last_parity_audit_hash IS NOT NULL AND w.last_parity_audit_hash <> ''
       AND w.open_file_authority_runs = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM runs open_run
+        WHERE open_run.workflow=NEW.workflow
+          AND open_run.authority_mode='file_authority'
+          AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'db authority run requires active workflow cutover evidence');
@@ -336,9 +342,67 @@ WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
       AND w.rollback_deadline IS NOT NULL AND w.rollback_deadline <> ''
       AND w.last_parity_audit_hash IS NOT NULL AND w.last_parity_audit_hash <> ''
       AND w.open_file_authority_runs = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM runs open_run
+        WHERE open_run.workflow=NEW.workflow
+          AND open_run.authority_mode='file_authority'
+          AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'db authority run requires active workflow cutover evidence');
+END;
+
+CREATE TRIGGER workflow_authority_validate_db_drain_insert
+BEFORE INSERT ON workflow_authority
+WHEN NEW.mode IN ('db_authority_canary','db_authority')
+  AND EXISTS (
+    SELECT 1 FROM runs open_run
+    WHERE open_run.workflow=NEW.workflow
+      AND open_run.authority_mode='file_authority'
+      AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'db authority requires drained file-authority runs');
+END;
+
+CREATE TRIGGER workflow_authority_validate_db_drain_update
+BEFORE UPDATE OF workflow, mode ON workflow_authority
+WHEN NEW.mode IN ('db_authority_canary','db_authority')
+  AND EXISTS (
+    SELECT 1 FROM runs open_run
+    WHERE open_run.workflow=NEW.workflow
+      AND open_run.authority_mode='file_authority'
+      AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'db authority requires drained file-authority runs');
+END;
+
+CREATE TRIGGER runs_reject_open_file_authority_during_db_insert
+BEFORE INSERT ON runs
+WHEN NEW.authority_mode='file_authority'
+  AND NEW.state NOT IN ('finalized','rolled_back','rejected')
+  AND EXISTS (
+    SELECT 1 FROM workflow_authority w
+    WHERE w.workflow=NEW.workflow
+      AND w.mode IN ('db_authority_canary','db_authority')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'open file authority run conflicts with db authority');
+END;
+
+CREATE TRIGGER runs_reject_open_file_authority_during_db_update
+BEFORE UPDATE OF workflow, authority_mode, state ON runs
+WHEN NEW.authority_mode='file_authority'
+  AND NEW.state NOT IN ('finalized','rolled_back','rejected')
+  AND EXISTS (
+    SELECT 1 FROM workflow_authority w
+    WHERE w.workflow=NEW.workflow
+      AND w.mode IN ('db_authority_canary','db_authority')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'open file authority run conflicts with db authority');
 END;
 
 CREATE TABLE transitions (
@@ -785,7 +849,7 @@ WHEN OLD.rpc_kind='allow_lease_release'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state='released'
+    WHERE l.state IN ('released','expired','human_review_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.release_idempotency_key=OLD.idempotency_key
@@ -801,7 +865,7 @@ WHEN OLD.rpc_kind='allow_lease_release'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state='released'
+    WHERE l.state IN ('released','expired','human_review_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.release_idempotency_key=OLD.idempotency_key
@@ -964,6 +1028,14 @@ WHEN NEW.state IN ('accepted','completed') AND (
 )
 BEGIN
   SELECT RAISE(ABORT,'accepted spawn request requires external intent and session proof');
+END;
+
+CREATE TRIGGER spawn_requests_preserve_accepted_state_update
+BEFORE UPDATE OF state ON spawn_requests
+WHEN (OLD.state='accepted' AND NEW.state NOT IN ('accepted','completed'))
+  OR (OLD.state='completed' AND NEW.state<>'completed')
+BEGIN
+  SELECT RAISE(ABORT,'accepted spawn request state is immutable');
 END;
 
 CREATE TRIGGER sessions_preserve_spawn_acceptance_delete
@@ -1140,6 +1212,42 @@ WHEN NEW.state='released' AND NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'released lease requires release intent proof');
+END;
+
+CREATE TRIGGER leases_validate_terminal_gateway_release_proof_insert
+AFTER INSERT ON leases
+WHEN NEW.state IN ('expired','human_review_required')
+  AND NEW.gateway_lease_id IS NOT NULL
+  AND NEW.gateway_lease_id <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.idempotency_key=NEW.release_idempotency_key
+      AND eri.external_id=NEW.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'terminal lease with gateway ownership requires release intent proof');
+END;
+
+CREATE TRIGGER leases_validate_terminal_gateway_release_proof_update
+AFTER UPDATE OF state, run_id, transition_id, release_idempotency_key, gateway_lease_id ON leases
+WHEN NEW.state IN ('expired','human_review_required')
+  AND NEW.gateway_lease_id IS NOT NULL
+  AND NEW.gateway_lease_id <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.idempotency_key=NEW.release_idempotency_key
+      AND eri.external_id=NEW.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'terminal lease with gateway ownership requires release intent proof');
 END;
 
 CREATE TRIGGER leases_reject_live_release_not_required_update
@@ -1497,6 +1605,34 @@ BEGIN
   SELECT RAISE(ABORT,'referenced sessions_spawn reserve cost binding is immutable');
 END;
 
+CREATE TRIGGER run_budgets_preserve_spawn_prior_reserve_delete
+BEFORE DELETE ON run_budgets
+WHEN EXISTS (
+  SELECT 1
+  FROM external_rpc_intents i
+  JOIN budget_events b ON b.budget_event_id=i.reserve_budget_event_id
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.run_id=OLD.run_id
+    AND b.run_id=OLD.run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve budget row is immutable');
+END;
+
+CREATE TRIGGER run_budgets_preserve_spawn_prior_reserve_run_update
+BEFORE UPDATE OF run_id ON run_budgets
+WHEN EXISTS (
+  SELECT 1
+  FROM external_rpc_intents i
+  JOIN budget_events b ON b.budget_event_id=i.reserve_budget_event_id
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.run_id=OLD.run_id
+    AND b.run_id=OLD.run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve budget row is immutable');
+END;
+
 CREATE TRIGGER endpoint_zero_reserve_policies_reject_referenced_update
 BEFORE UPDATE ON endpoint_zero_reserve_policies
 WHEN EXISTS (
@@ -1663,6 +1799,7 @@ CREATE TABLE approvals (
   approval_hash TEXT NOT NULL UNIQUE,
   consumed_by_transition_id TEXT UNIQUE REFERENCES transitions(transition_id) DEFERRABLE INITIALLY DEFERRED,
   consumed_by_gate_run_id TEXT UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
+  consumed_by_goal_run_id TEXT UNIQUE REFERENCES goal_runs(goal_run_id) DEFERRABLE INITIALLY DEFERRED,
   approved_at TEXT NOT NULL,
   CHECK (run_id <> ''),
   CHECK (approved_action_type <> ''),
@@ -1785,17 +1922,37 @@ WHEN EXISTS (
     AND gm.backend=NEW.backend
     AND gm.approval_required=1
 ) AND NOT EXISTS (
-  SELECT 1 FROM approvals a
+  SELECT 1
+  FROM goal_manifests gm
+  JOIN approvals a ON a.approval_id=NEW.approval_id
   WHERE a.approval_id=NEW.approval_id
     AND NEW.run_id IS NOT NULL
     AND a.run_id=NEW.run_id
+    AND gm.goal_id=NEW.goal_id
+    AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gm.backend=NEW.backend
+    AND gm.approval_required=1
+    AND a.approved_action_type='goal_run'
+    AND a.target_type='goal'
+    AND a.target_id=NEW.goal_id
+    AND a.target_hash=gm.manifest_hash
+    AND a.target_scope=gm.owner
+    AND a.single_use=1
+    AND a.consumed_by_goal_run_id=NEW.goal_run_id
+    AND CASE a.approved_risk_ceiling
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+    END >= CASE NEW.severity
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+    END
 )
 BEGIN
   SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
 END;
 
 CREATE TRIGGER goal_runs_validate_required_approval_update
-AFTER UPDATE OF goal_id, run_id, predicate_plugin_hash, backend, approval_id ON goal_runs
+AFTER UPDATE OF goal_id, run_id, severity, predicate_plugin_hash, backend, approval_id ON goal_runs
 WHEN EXISTS (
   SELECT 1 FROM goal_manifests gm
   WHERE gm.goal_id=NEW.goal_id
@@ -1803,10 +1960,60 @@ WHEN EXISTS (
     AND gm.backend=NEW.backend
     AND gm.approval_required=1
 ) AND NOT EXISTS (
-  SELECT 1 FROM approvals a
+  SELECT 1
+  FROM goal_manifests gm
+  JOIN approvals a ON a.approval_id=NEW.approval_id
   WHERE a.approval_id=NEW.approval_id
     AND NEW.run_id IS NOT NULL
     AND a.run_id=NEW.run_id
+    AND gm.goal_id=NEW.goal_id
+    AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gm.backend=NEW.backend
+    AND gm.approval_required=1
+    AND a.approved_action_type='goal_run'
+    AND a.target_type='goal'
+    AND a.target_id=NEW.goal_id
+    AND a.target_hash=gm.manifest_hash
+    AND a.target_scope=gm.owner
+    AND a.single_use=1
+    AND a.consumed_by_goal_run_id=NEW.goal_run_id
+    AND CASE a.approved_risk_ceiling
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+    END >= CASE NEW.severity
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+    END
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
+END;
+
+CREATE TRIGGER approvals_preserve_goal_run_binding_delete
+BEFORE DELETE ON approvals
+WHEN EXISTS (
+  SELECT 1 FROM goal_runs gr
+  JOIN goal_manifests gm
+    ON gm.goal_id=gr.goal_id
+   AND gm.predicate_plugin_hash=gr.predicate_plugin_hash
+   AND gm.backend=gr.backend
+  WHERE gm.approval_required=1
+    AND gr.approval_id=OLD.approval_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
+END;
+
+CREATE TRIGGER approvals_preserve_goal_run_binding_update
+BEFORE UPDATE OF approval_id, run_id, approved_action_type, target_type, target_id, target_hash, target_scope, approved_risk_ceiling, expires_at_epoch_ms, single_use, consumed_by_goal_run_id ON approvals
+WHEN EXISTS (
+  SELECT 1 FROM goal_runs gr
+  JOIN goal_manifests gm
+    ON gm.goal_id=gr.goal_id
+   AND gm.predicate_plugin_hash=gr.predicate_plugin_hash
+   AND gm.backend=gr.backend
+  WHERE gm.approval_required=1
+    AND gr.approval_id=OLD.approval_id
 )
 BEGIN
   SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
@@ -2454,7 +2661,7 @@ Example SLO query contracts:
 | Budget prefix over-release or over-restore | `WITH ordered AS (SELECT budget_event_id, run_id, event_sequence, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type='release' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_human FROM budget_events) SELECT budget_event_id FROM ordered WHERE net_time<0 OR net_input<0 OR net_output<0 OR net_cost<0 OR net_reserved_retry<0 OR net_retry_consumed<0 OR net_human<0;` |
 | Duplicate or replayed budget events | `SELECT event_dedupe_hash FROM budget_events GROUP BY event_dedupe_hash HAVING COUNT(*)>1;` |
 | Budget event count bounded for SUM safety | `SELECT run_id FROM budget_events GROUP BY run_id HAVING COUNT(*)>1000000 OR MIN(event_sequence)<1 OR MAX(event_sequence)>1000000;` |
-| Completion gate before done for R2+ | `SELECT r.run_id FROM runs r LEFT JOIN gate_runs g ON g.run_id=r.run_id AND g.decision='pass' WHERE r.risk_dominance IN ('R2','R3','R4') AND r.finalized_at IS NOT NULL AND (r.finalized_at_epoch_ms IS NULL OR typeof(r.finalized_at_epoch_ms)<>'integer' OR r.finalized_at_epoch_ms<1 OR r.finalized_at_epoch_ms>253402300799999 OR g.gate_run_id IS NULL OR g.completed_at_epoch_ms IS NULL OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms > r.finalized_at_epoch_ms);` |
+| Completion gate before done for R2+ | `SELECT r.run_id FROM runs r LEFT JOIN gate_runs g ON g.run_id=r.run_id AND g.decision='pass' WHERE r.risk_dominance IN ('R2','R3','R4') AND r.state='finalized' AND (r.finalized_at IS NULL OR r.finalized_at='' OR r.finalized_at_epoch_ms IS NULL OR typeof(r.finalized_at_epoch_ms)<>'integer' OR r.finalized_at_epoch_ms<1 OR r.finalized_at_epoch_ms>253402300799999 OR g.gate_run_id IS NULL OR g.completed_at_epoch_ms IS NULL OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms > r.finalized_at_epoch_ms);` |
 | Passing gate without verifier row | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (g.verifier_run_id IS NULL OR v.verifier_run_id IS NULL);` |
 | Passing gate wrong-run or non-independent verifier | `SELECT g.gate_run_id FROM gate_runs g JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (v.worker_run_id<>g.run_id OR v.same_worker_context=1 OR v.verifier_agent_id=v.worker_agent_id OR v.prompt_hash=v.context_hash OR v.independence_class IN ('self','same_worker','same_context','correlated','unknown'));` |
 | Gate evidence bound to same run | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN evidence_hashes e ON e.gate_run_id=g.gate_run_id AND e.evidence_hash=g.evidence_hash AND e.run_id=g.run_id AND e.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND g.requires_same_run=1 AND (e.evidence_hash IS NULL OR e.producer_run_id IS NULL OR e.producer_run_id<>g.run_id OR e.verifier_run_id IS NULL OR e.verifier_run_id<>g.verifier_run_id);` |
