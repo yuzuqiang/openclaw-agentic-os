@@ -27,6 +27,8 @@ The package has no runtime dependencies outside Python's standard library.
 ```bash
 PYTHONPATH=src python3 -m agentic_os.cli preflight
 PYTHONPATH=src python3 -m agentic_os.cli migrate --test-db
+PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
+PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
@@ -34,6 +36,11 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 `migrate --test-db` is also available for a deliberately ignored repo-local
 test database. Tests use temporary directories and never create
 `state/agentic-os/control.db`.
+
+`shadow-backfill` and `shadow-audit` are offline P0.2 tools. They project only
+explicit file artifacts into `file_authority_shadow` rows and compare current
+file hashes back to those rows; they do not enable database authority or feed
+dispatch decisions.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API
