@@ -18,6 +18,12 @@ def slo_query_hash(sql_text: str) -> str:
     return hashlib.sha256(sql_text.encode("utf-8")).hexdigest()
 
 
+_BUDGET_LEDGER_RECONCILES_NAME = "Budget ledger reconciles to counters and budgets"
+_BUDGET_LEDGER_RECONCILES_LEGACY_V1_V2_HASH = (
+    "229ffe243ba24944c0da458e2d0986ea46de1471025cf95f9604bbe6a4dd9f7b"
+)
+
+
 SLO_QUERY_CONTRACTS: tuple[SloQueryContract, ...] = (
     SloQueryContract('Metadata-missing external RPC not auto-repaired', "SELECT intent_id FROM external_rpc_intents WHERE state IN ('pending','unknown','accepted','reconciled') AND run_id NOT IN (SELECT run_id FROM runs WHERE state='human_review_required') AND (metadata_contract_version IS NULL OR metadata_contract_version='' OR external_metadata_json IS NULL OR json_valid(external_metadata_json)=0);"),
     SloQueryContract('Duplicate live dispatch blocked', "SELECT run_id, phase, agent_id, COUNT(*) FROM spawn_requests WHERE state IN ('accepted','completed') GROUP BY run_id, phase, agent_id HAVING COUNT(*) > 1;"),
@@ -55,3 +61,75 @@ SLO_QUERY_CONTRACTS: tuple[SloQueryContract, ...] = (
 )
 
 SLO_QUERY_COUNT = len(SLO_QUERY_CONTRACTS)
+
+
+def _contract_by_name(query_name: str) -> SloQueryContract:
+    for contract in SLO_QUERY_CONTRACTS:
+        if contract.query_name == query_name:
+            return contract
+    raise RuntimeError(f"missing required SLO query contract: {query_name}")
+
+
+def _legacy_budget_ledger_reconciles_sql() -> str:
+    sql_text = _contract_by_name(_BUDGET_LEDGER_RECONCILES_NAME).sql_text
+    for column in (
+        "reserved_time_seconds",
+        "reserved_input_tokens",
+        "reserved_output_tokens",
+        "reserved_cost_microusd",
+        "reserved_retries",
+        "reserved_human_attention",
+    ):
+        stem = {
+            "reserved_time_seconds": "time",
+            "reserved_input_tokens": "input",
+            "reserved_output_tokens": "output",
+            "reserved_cost_microusd": "cost",
+            "reserved_retries": "retries",
+            "reserved_human_attention": "human",
+        }[column]
+        sql_text = sql_text.replace(
+            f"OR (COALESCE(s.net_reserved_{stem},0)>=0 "
+            f"AND COALESCE(s.net_reserved_{stem},0)<>rb.{column})",
+            f"OR COALESCE(s.net_reserved_{stem},0)<>rb.{column}",
+        )
+    actual_hash = slo_query_hash(sql_text)
+    if actual_hash != _BUDGET_LEDGER_RECONCILES_LEGACY_V1_V2_HASH:
+        raise RuntimeError(
+            "legacy v1/v2 budget ledger SLO hash drift: "
+            f"expected {_BUDGET_LEDGER_RECONCILES_LEGACY_V1_V2_HASH}, found {actual_hash}"
+        )
+    return sql_text
+
+
+def _replace_contract(
+    contracts: tuple[SloQueryContract, ...],
+    replacement: SloQueryContract,
+) -> tuple[SloQueryContract, ...]:
+    return tuple(
+        replacement if contract.query_name == replacement.query_name else contract
+        for contract in contracts
+    )
+
+
+_SLO_QUERY_CONTRACTS_V1_V2 = _replace_contract(
+    SLO_QUERY_CONTRACTS,
+    SloQueryContract(
+        _BUDGET_LEDGER_RECONCILES_NAME,
+        _legacy_budget_ledger_reconciles_sql(),
+    ),
+)
+
+_SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
+    1: _SLO_QUERY_CONTRACTS_V1_V2,
+    2: _SLO_QUERY_CONTRACTS_V1_V2,
+}
+
+
+def slo_query_contracts_for_schema_version(
+    schema_version: int,
+) -> tuple[SloQueryContract, ...]:
+    return _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION.get(
+        schema_version,
+        SLO_QUERY_CONTRACTS,
+    )

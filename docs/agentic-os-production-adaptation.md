@@ -3115,6 +3115,14 @@ CREATE TABLE artifact_projection_history (
 ) STRICT;
 ```
 
+Current migration v3 budget ledger SLO identity:
+
+`0003_budget_ledger_slo_identity.sql` records the revised
+`Budget ledger reconciles to counters and budgets` query as a new immutable
+schema-versioned SLO row. Schema versions 1 and 2 keep their historical query
+hashes; version 3 and later use the stricter negative-net ledger isolation
+contract.
+
 Gate-critical time authority:
 
 - Approval expiry authority is `approvals.expires_at_epoch_ms` only. It is stored in a `STRICT` table `ANY` column, must have integer storage class by `typeof(...)= 'integer'`, and is compared only to the trusted gate-context integer `gate_clock_context.now_epoch_ms`.

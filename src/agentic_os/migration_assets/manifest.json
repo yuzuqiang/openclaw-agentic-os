@@ -11,6 +11,12 @@
       "name": "shadow_projection_identity",
       "file": "0002_shadow_projection_identity.sql",
       "sha256": "44cada46292f8f631e06621267321792428a6289ec15ebdf7be4146de237d36e"
+    },
+    {
+      "version": 3,
+      "name": "budget_ledger_slo_identity",
+      "file": "0003_budget_ledger_slo_identity.sql",
+      "sha256": "77efaab7b2ba87aaef02a89dd8dc0aa78936abc56b23759b1218d8baee541a6e"
     }
   ]
 }
