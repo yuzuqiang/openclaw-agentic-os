@@ -109,7 +109,14 @@ def _statements(sql: str) -> Iterator[str]:
 def _connect(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
     connection.execute("PRAGMA busy_timeout=10000")
-    connection.execute("PRAGMA journal_mode=WAL")
+    journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    actual_journal_mode = journal_mode[0] if journal_mode else None
+    if str(actual_journal_mode).casefold() != "wal":
+        connection.close()
+        raise MigrationError(
+            "SQLite WAL journal mode is unavailable: "
+            f"requested WAL, got {actual_journal_mode!r}"
+        )
     connection.execute("PRAGMA foreign_keys=ON")
     if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
         connection.close()

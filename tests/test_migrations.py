@@ -14,6 +14,7 @@ from agentic_os import DB_AUTHORITY_ENABLED
 from agentic_os.migrations import (
     MigrationError,
     MigrationHashDrift,
+    _connect,
     apply_migrations,
     load_migrations,
     repository_root,
@@ -160,6 +161,25 @@ class MigrationTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
                 (SLO_QUERY_COUNT,),
             )
+
+    def test_connect_fails_closed_when_wal_is_unavailable(self) -> None:
+        connection = mock.Mock()
+
+        def execute(statement: str) -> mock.Mock:
+            cursor = mock.Mock()
+            if statement == "PRAGMA journal_mode=WAL":
+                cursor.fetchone.return_value = ("delete",)
+            elif statement == "PRAGMA foreign_keys":
+                cursor.fetchone.return_value = (1,)
+            else:
+                cursor.fetchone.return_value = None
+            return cursor
+
+        connection.execute.side_effect = execute
+        with mock.patch("agentic_os.migrations.sqlite3.connect", return_value=connection):
+            with self.assertRaisesRegex(MigrationError, "WAL journal mode is unavailable"):
+                _connect(self.database)
+        connection.close.assert_called_once_with()
 
     def test_packaged_migration_assets_match_repository_assets(self) -> None:
         asset_root = resources.files("agentic_os.migration_assets")
@@ -605,6 +625,47 @@ class MigrationTests(unittest.TestCase):
             )
         connection.rollback()
 
+    def test_consumed_transition_approval_ceiling_cannot_be_weakened(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R4','R4','now','now')"
+        )
+        connection.commit()
+        connection.execute("BEGIN")
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,single_use,approval_hash,consumed_by_transition_id,"
+            "consumed_by_gate_run_id,approved_at) VALUES('approval','run','river',"
+            "'telegram','source','text','write','file','id','hash','scope','R4',"
+            "2000,1,'approval-hash','transition','gate','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,target_type,target_id,target_hash,target_scope,"
+            "approval_required,approval_id,approval_channel,approval_source_digest,"
+            "approval_text_digest,risk_dominance,idempotency_key,guard_version_before,"
+            "gate_run_id,created_at) VALUES('transition','run','before','after',"
+            "'mutate','write','file','id','hash','scope',1,'approval','telegram',"
+            "'source','text','R4','idem',0,'gate','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "exact approval binding"):
+            connection.execute(
+                "UPDATE approvals SET approved_risk_ceiling='R0' "
+                "WHERE approval_id='approval'"
+            )
+        connection.rollback()
+
     def test_exact_mutating_approval_slo_rejects_reusable_consumed_approval(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -670,13 +731,8 @@ class MigrationTests(unittest.TestCase):
             "captured_at) VALUES('evidence','run','evidence.json','sha',1,"
             "'application/json','none','run','verifier','gate','now')"
         )
-        connection.execute("UPDATE approvals SET single_use=0 WHERE approval_id='approval'")
-        query = next(
-            contract.sql_text
-            for contract in SLO_QUERY_CONTRACTS
-            if contract.query_name == "Exact mutating approval binding"
-        )
-        self.assertEqual(connection.execute(query).fetchall(), [("transition",)])
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "exact approval binding"):
+            connection.execute("UPDATE approvals SET single_use=0 WHERE approval_id='approval'")
 
     def test_approval_consumption_target_is_exclusive(self) -> None:
         apply_migrations(self.database)
@@ -1313,6 +1369,13 @@ class MigrationTests(unittest.TestCase):
             connection.execute("DELETE FROM run_budgets WHERE run_id='r'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
             connection.execute("UPDATE run_budgets SET run_id='other' WHERE run_id='r'")
+        for assignment in ("reserved_input_tokens=0", "input_token_budget=0"):
+            with self.subTest(assignment=assignment), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "budget row is immutable"
+            ):
+                connection.execute(
+                    f"UPDATE run_budgets SET {assignment} WHERE run_id='r'"
+                )
         for assignment in ("input_tokens=2", "event_sequence=99"):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
                 sqlite3.IntegrityError, "immutable"
@@ -2955,6 +3018,20 @@ class MigrationTests(unittest.TestCase):
                 valid_gate_id,
             ),
         )
+        for assignment in (
+            "query_hash='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'",
+            "run_at_epoch_ms=4000",
+            "status='fail'",
+        ):
+            with self.subTest(assignment=assignment), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "SLO audit row is immutable"
+            ):
+                connection.execute(
+                    f"UPDATE slo_audits SET {assignment} "
+                    "WHERE slo_audit_id='a-valid'"
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "SLO audit row is immutable"):
+            connection.execute("DELETE FROM slo_audits WHERE slo_audit_id='a-valid'")
         self.assertNotIn(
             (contract.query_name,),
             connection.execute(status_query).fetchall(),

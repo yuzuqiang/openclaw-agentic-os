@@ -23,6 +23,7 @@ PREFLIGHT_PATHS = (
 
 RAW_STATE_PATTERNS = (
     "*.db",
+    "*.db.*",
     "*.db-wal",
     "*.db-shm",
     "*.db-journal",
@@ -31,11 +32,13 @@ RAW_STATE_PATTERNS = (
     "*.db.backup*",
     "*.db.bak*",
     "*.sqlite",
+    "*.sqlite.*",
     "*.sqlite-*",
     "*.sqlite.tar*",
     "*.sqlite.backup*",
     "*.sqlite.bak*",
     "*.sqlite3",
+    "*.sqlite3.*",
     "*.sqlite3-*",
     "*.sqlite3.tar*",
     "*.sqlite3.backup*",

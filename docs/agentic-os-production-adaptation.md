@@ -84,7 +84,7 @@ Current-vs-proposed truth:
 
 - Current file artifacts remain operational authority.
 - Current OpenClaw is below the required external runtime metadata contract. Gateway allowLease and session status do not yet prove exact run/idempotency ownership across post-RPC/pre-DB crashes.
-- Current design work does not create `control.db`, does not add migrations, does not update `.gitignore`, and does not enable DB-authority dispatch.
+- Current P0 foundation adds ignored migration artifacts and fail-closed probes, but does not create production `control.db`, does not enable DB-authority dispatch, and does not prove runtime adapter behavior.
 - Proposed DB authority begins only after privacy preflight, metadata contract probes, schema fixtures, shadow backfill, dual-write parity, one low-risk canary, drain, rollback drill, and per-workflow cutover.
 
 ## Design Principles and Operational Confidence Definition
@@ -157,7 +157,7 @@ git check-ignore -v state/agentic-os/control.db-journal
 git check-ignore -v state/agentic-os/backups/example.db
 ```
 
-- Packaging/reporting denylist refuses raw `*.db`, `*.db-wal`, `*.db-shm`, `*.db-journal`, `*.sqlite`, `*.sqlite-*`, `*.sqlite3`, SQLite sidecars/backups, compressed SQLite snapshots such as `.gz`, `.zip`, and `.zst`, and `state/agentic-os/backups/**` unless an explicit local recovery mode is used.
+- Packaging/reporting denylist refuses raw `*.db`, `*.db-wal`, `*.db-shm`, `*.db-journal`, `*.sqlite`, `*.sqlite-*`, `*.sqlite3`, SQLite sidecars/backups, dot-suffixed database copies such as `.db.old` and `.sqlite.copy`, compressed SQLite snapshots such as `.gz`, `.zip`, and `.zst`, and `state/agentic-os/backups/**` unless an explicit local recovery mode is used.
 
 External runtime metadata contract is a P0 prerequisite:
 
@@ -1655,7 +1655,7 @@ BEGIN
 END;
 
 CREATE TRIGGER run_budgets_preserve_spawn_prior_reserve_update
-BEFORE UPDATE OF selected_provider, selected_model, selected_endpoint_binding_id, capability_class, selected_cost_registry_id, selected_cost_effective_at, selected_cost_registry_hash, selected_cost_confidence ON run_budgets
+BEFORE UPDATE OF selected_provider, selected_model, selected_endpoint_binding_id, capability_class, selected_cost_registry_id, selected_cost_effective_at, selected_cost_registry_hash, selected_cost_confidence, time_budget_seconds, input_token_budget, output_token_budget, cost_budget_microusd, retry_budget, human_attention_budget, reserved_time_seconds, reserved_input_tokens, reserved_output_tokens, reserved_cost_microusd, reserved_retries, reserved_human_attention ON run_budgets
 WHEN EXISTS (
   SELECT 1
   FROM external_rpc_intents i
@@ -1665,7 +1665,7 @@ WHEN EXISTS (
     AND b.run_id=OLD.run_id
 )
 BEGIN
-  SELECT RAISE(ABORT,'referenced sessions_spawn reserve cost binding is immutable');
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve budget row is immutable');
 END;
 
 CREATE TRIGGER run_budgets_preserve_spawn_prior_reserve_delete
@@ -2044,6 +2044,28 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'approval expired before gate clock');
+END;
+
+CREATE TRIGGER approvals_preserve_transition_binding_delete
+BEFORE DELETE ON approvals
+WHEN EXISTS (
+  SELECT 1 FROM transitions t
+  WHERE t.approval_required=1
+    AND t.approval_id=OLD.approval_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required transition requires exact approval binding');
+END;
+
+CREATE TRIGGER approvals_preserve_transition_binding_update
+BEFORE UPDATE OF approval_id, run_id, approved_action_type, target_type, target_id, target_hash, target_scope, channel, source_message_digest, approval_text_digest, approved_risk_ceiling, expires_at_epoch_ms, single_use, consumed_by_transition_id, consumed_by_gate_run_id ON approvals
+WHEN EXISTS (
+  SELECT 1 FROM transitions t
+  WHERE t.approval_required=1
+    AND t.approval_id=OLD.approval_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required transition requires exact approval binding');
 END;
 
 CREATE TRIGGER goal_runs_validate_required_approval_insert
@@ -2679,6 +2701,20 @@ WHEN NEW.status='pass' AND NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'passing SLO audit requires pass-gate evidence');
+END;
+
+CREATE TRIGGER slo_audits_preserve_pass_update
+BEFORE UPDATE ON slo_audits
+WHEN OLD.status='pass'
+BEGIN
+  SELECT RAISE(ABORT,'SLO audit row is immutable');
+END;
+
+CREATE TRIGGER slo_audits_preserve_pass_delete
+BEFORE DELETE ON slo_audits
+WHEN OLD.status='pass'
+BEGIN
+  SELECT RAISE(ABORT,'SLO audit row is immutable');
 END;
 
 CREATE TRIGGER slo_queries_reject_update

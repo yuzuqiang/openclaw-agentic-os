@@ -10,8 +10,8 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `dfd4ab3c0eb76bd112623f87c6a8c3d0d3bc387458a814aa5570ac04919f6915`
-- Current DDL/migration SHA-256: `fdb7fa6107c1495ff52ec28b78943f6052101c1a2ff23e66b41bb6c836c21f43`
+- Current design artifact SHA-256: `346f0d54b0842873188651e1f0107102385d04e87b75356e7867d05ad48e0a75`
+- Current DDL/migration SHA-256: `3e013265577cb020a0bf751c8d4e07f70865f3abac830bdeb48f9d99f311ab37`
 - Design contract: 27 SQLite tables, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -41,8 +41,9 @@ to produce the snapshot instead of copying a live database file.
 
 The packaging/retrieval boundary must call
 `agentic_os.privacy.assert_paths_retrievable`. Raw databases, WAL/SHM files,
-SQLite files, and backup trees are denied unless an explicit local-recovery
-caller opts in. External session and allow-lease integrations must pass the
+SQLite files, dot-suffixed database copies, and backup trees are denied unless
+an explicit local-recovery caller opts in. External session and allow-lease
+integrations must pass the
 validators in `agentic_os.metadata`; these validators are probes, not runtime
 integration proof.
 
