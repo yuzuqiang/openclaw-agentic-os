@@ -3373,6 +3373,12 @@ Phase 1 - read-only shadow backfill:
   identity from content-level uniqueness to `UNIQUE(run_id, path,
   source_authority)`, preserving version-1 databases instead of repinning
   version 1.
+- Treat the post-v2 `artifact_projections` and
+  `artifact_projection_history` DDL in `Minimum Database Contracts` as the
+  accepted schema contract; v1 duplicate run/path/source rows are collapsed only
+  with canonical timestamp evidence, archived with retained deterministic
+  projection IDs, or rejected fail-closed when the timestamp ordering is
+  ambiguous.
 - Backfill current artifacts into rows marked `file_authority_shadow`.
 - No dispatch adapter reads from DB for decisions.
 - Parity audit compares semantic fields and content hashes.

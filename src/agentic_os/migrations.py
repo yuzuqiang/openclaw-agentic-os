@@ -54,6 +54,22 @@ def _sha256(path: Path | Traversable) -> str:
     return digest.hexdigest()
 
 
+def _shadow_projection_id(run_id: object, relative_path: object, digest: object) -> str:
+    if not all(isinstance(item, str) and item for item in (run_id, relative_path, digest)):
+        raise sqlite3.OperationalError("shadow projection id inputs must be non-empty text")
+    payload = f"{run_id}\0{relative_path}\0{digest}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _register_migration_functions(connection: sqlite3.Connection) -> None:
+    connection.create_function(
+        "agentic_shadow_projection_id",
+        3,
+        _shadow_projection_id,
+        deterministic=True,
+    )
+
+
 def load_migrations(migration_dir: Path | None = None) -> tuple[Migration, ...]:
     directory: Path | Traversable
     if migration_dir is None:
@@ -108,6 +124,7 @@ def _statements(sql: str) -> Iterator[str]:
 
 def _connect(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path, isolation_level=None)
+    _register_migration_functions(connection)
     connection.execute("PRAGMA busy_timeout=10000")
     journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
     actual_journal_mode = journal_mode[0] if journal_mode else None
@@ -130,6 +147,7 @@ def _connect_read_only(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(
         f"{path.as_uri()}?mode=ro&immutable=1", uri=True, isolation_level=None
     )
+    _register_migration_functions(connection)
     connection.execute("PRAGMA busy_timeout=10000")
     connection.execute("PRAGMA query_only=ON")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -185,6 +203,7 @@ def _schema_rows(connection: sqlite3.Connection) -> list[tuple[str, str, str, st
 def _expected_schema(migrations: tuple[Migration, ...]) -> list[tuple[str, str, str, str | None]]:
     connection = sqlite3.connect(":memory:", isolation_level=None)
     try:
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         for migration in migrations:
             for statement in _statements(migration.path.read_text(encoding="utf-8")):

@@ -46,20 +46,27 @@ CREATE TEMP TABLE artifact_projection_timestamp_guard (
       )
     )
   ),
-  UNIQUE(run_id,path,source_authority,generated_at)
+  generated_at_sort_key TEXT NOT NULL,
+  UNIQUE(run_id,path,source_authority,generated_at_sort_key)
 ) STRICT;
 
 INSERT INTO artifact_projection_timestamp_guard(
   run_id,
   path,
   source_authority,
-  generated_at
+  generated_at,
+  generated_at_sort_key
 )
 SELECT
   run_id,
   path,
   source_authority,
-  generated_at
+  generated_at,
+  substr(generated_at,1,19) ||
+    CASE
+      WHEN length(generated_at)=25 THEN '.000000+00:00'
+      ELSE substr(generated_at,20)
+    END
 FROM artifact_projections
 WHERE (run_id, path, source_authority) IN (
   SELECT run_id, path, source_authority
@@ -70,7 +77,7 @@ WHERE (run_id, path, source_authority) IN (
 
 DROP TABLE artifact_projection_timestamp_guard;
 
-WITH ranked AS (
+WITH normalized AS (
   SELECT
     projection_id,
     run_id,
@@ -79,18 +86,36 @@ WITH ranked AS (
     source_authority,
     generated_from_transition_id,
     generated_at,
+    agentic_shadow_projection_id(run_id, path, sha256) AS deterministic_projection_id,
+    substr(generated_at,1,19) ||
+      CASE
+        WHEN length(generated_at)=25 THEN '.000000+00:00'
+        ELSE substr(generated_at,20)
+      END AS generated_at_sort_key
+  FROM artifact_projections
+),
+ranked AS (
+  SELECT
+    projection_id,
+    run_id,
+    path,
+    sha256,
+    source_authority,
+    generated_from_transition_id,
+    generated_at,
+    deterministic_projection_id,
     ROW_NUMBER() OVER (
       PARTITION BY run_id, path, source_authority
-      ORDER BY julianday(generated_at) DESC, generated_at DESC, projection_id DESC
+      ORDER BY generated_at_sort_key DESC
     ) AS projection_rank,
     COUNT(*) OVER (
       PARTITION BY run_id, path, source_authority
     ) AS projection_count,
-    FIRST_VALUE(projection_id) OVER (
+    FIRST_VALUE(deterministic_projection_id) OVER (
       PARTITION BY run_id, path, source_authority
-      ORDER BY julianday(generated_at) DESC, generated_at DESC, projection_id DESC
+      ORDER BY generated_at_sort_key DESC
     ) AS retained_projection_id
-  FROM artifact_projections
+  FROM normalized
 )
 INSERT INTO artifact_projection_history(
   projection_id,
@@ -119,7 +144,7 @@ FROM ranked
 WHERE projection_count > 1
   AND projection_rank > 1;
 
-WITH ranked AS (
+WITH normalized AS (
   SELECT
     projection_id,
     run_id,
@@ -128,11 +153,29 @@ WITH ranked AS (
     source_authority,
     generated_from_transition_id,
     generated_at,
+    agentic_shadow_projection_id(run_id, path, sha256) AS deterministic_projection_id,
+    substr(generated_at,1,19) ||
+      CASE
+        WHEN length(generated_at)=25 THEN '.000000+00:00'
+        ELSE substr(generated_at,20)
+      END AS generated_at_sort_key
+  FROM artifact_projections
+),
+ranked AS (
+  SELECT
+    projection_id,
+    run_id,
+    path,
+    sha256,
+    source_authority,
+    generated_from_transition_id,
+    generated_at,
+    deterministic_projection_id,
     ROW_NUMBER() OVER (
       PARTITION BY run_id, path, source_authority
-      ORDER BY julianday(generated_at) DESC, generated_at DESC, projection_id DESC
+      ORDER BY generated_at_sort_key DESC
     ) AS projection_rank
-  FROM artifact_projections
+  FROM normalized
 )
 INSERT INTO artifact_projections_v2(
   projection_id,
@@ -144,7 +187,7 @@ INSERT INTO artifact_projections_v2(
   generated_at
 )
 SELECT
-  projection_id,
+  deterministic_projection_id,
   run_id,
   path,
   sha256,

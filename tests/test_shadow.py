@@ -630,6 +630,46 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(audit.status, "fail")
         self.assertIn("workflow_not_shadow", {issue.reason for issue in audit.issues})
 
+    def test_shadow_preserves_explicit_symlink_artifact_paths(self) -> None:
+        target = self._artifact("target.json", b'{"target": true}\n')
+        reports = target.parent
+        link_a = reports / "link-a.json"
+        link_b = reports / "link-b.json"
+        link_a.symlink_to(target)
+        link_b.symlink_to(target)
+        expected_paths = {
+            link_a.relative_to(repository_root()).as_posix(),
+            link_b.relative_to(repository_root()).as_posix(),
+        }
+
+        result = backfill_file_authority_shadow(
+            self.database,
+            [link_a, link_b],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+
+        self.assertEqual({projection.path for projection in result.projections}, expected_paths)
+        self.assertEqual(len({projection.projection_id for projection in result.projections}), 2)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT path FROM artifact_projections WHERE run_id='shadow-run'"
+                    ).fetchall()
+                },
+                expected_paths,
+            )
+        self._checkpoint_and_remove_sidecars()
+        audit = audit_file_authority_shadow(
+            self.database,
+            [link_a, link_b],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "pass", audit.issues)
+
     def test_shadow_backfill_rejects_artifact_outside_repo(self) -> None:
         with tempfile.TemporaryDirectory() as outside:
             artifact = Path(outside) / "summary.json"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -83,13 +84,15 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _repo_relative(root: Path, path: Path) -> str:
-    resolved = path.expanduser().resolve()
+def _repo_relative(root: Path, path: Path, *, resolve: bool = True) -> str:
+    expanded = path.expanduser()
+    candidate = expanded if expanded.is_absolute() else root / expanded
+    normalized = candidate.resolve() if resolve else Path(os.path.abspath(candidate))
     try:
-        return resolved.relative_to(root).as_posix()
+        return normalized.relative_to(root).as_posix()
     except ValueError:
         raise ShadowBackfillError(
-            f"shadow artifact is outside repository root: {resolved}"
+            f"shadow artifact is outside repository root: {normalized}"
         ) from None
 
 
@@ -148,15 +151,16 @@ def _normalize_artifacts(
     normalized: list[tuple[Path, str, str]] = []
     seen: set[str] = set()
     for path in paths:
-        resolved = path.resolve()
-        relative = _repo_relative(repo_root_path, resolved)
-        assert_paths_retrievable((path, resolved, relative))
+        explicit_relative = _repo_relative(repo_root_path, path, resolve=False)
+        resolved = (path if path.is_absolute() else repo_root_path / path).resolve()
+        resolved_relative = _repo_relative(repo_root_path, resolved)
+        assert_paths_retrievable((path, explicit_relative, resolved, resolved_relative))
         if not resolved.is_file():
             raise ShadowBackfillError(f"shadow artifact is not a file: {resolved}")
-        if relative in seen:
+        if explicit_relative in seen:
             continue
-        seen.add(relative)
-        normalized.append((resolved, relative, _sha256(resolved)))
+        seen.add(explicit_relative)
+        normalized.append((resolved, explicit_relative, _sha256(resolved)))
     return tuple(normalized)
 
 

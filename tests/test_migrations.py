@@ -23,6 +23,11 @@ from agentic_os.migrations import (
 from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS, SLO_QUERY_COUNT, slo_query_hash
 
 
+def _shadow_projection_id(run_id: str, path: str, digest: str) -> str:
+    payload = f"{run_id}\0{path}\0{digest}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state_root = repository_root() / "state/agentic-os"
@@ -263,13 +268,16 @@ class MigrationTests(unittest.TestCase):
                 )
 
         self.assertEqual(apply_migrations(self.database), (2,))
+        retained_projection_id = _shadow_projection_id(
+            "run-a", "reports/summary.json", "a" * 64
+        )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT projection_id,sha256 FROM artifact_projections "
                     "WHERE run_id='run-a' AND path='reports/summary.json'"
                 ).fetchone(),
-                ("projection-a-current", "a" * 64),
+                (retained_projection_id, "a" * 64),
             )
             self.assertEqual(
                 connection.execute(
@@ -281,13 +289,13 @@ class MigrationTests(unittest.TestCase):
                     (
                         "projection-a-middle",
                         "c" * 64,
-                        "projection-a-current",
+                        retained_projection_id,
                         "v1_identity_collapse",
                     ),
                     (
                         "projection-a-stale",
                         "b" * 64,
-                        "projection-a-current",
+                        retained_projection_id,
                         "v1_identity_collapse",
                     ),
                 ],
