@@ -2373,6 +2373,80 @@ class MigrationTests(unittest.TestCase):
         self.assertIn(("counter-run",), connection.execute(counters_query).fetchall())
         self.assertIn(("ledger-run",), connection.execute(ledger_query).fetchall())
 
+    def test_budget_prefix_slo_bounds_retry_consumption_before_restore(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'retry-run','prepare-retry','w','file_authority','candidate','R1','R1',"
+            "'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition-retry','retry-run',"
+            "'before','after','budget','retry','R1','idem-retry',0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,consumed_retries,"
+            "usage_confidence,updated_at) VALUES('retry-run','w','capability','provider',"
+            "'model','endpoint','cost-row','effective','cost-hash','known',"
+            "'transition-retry',10,10,10,10,1,1,1,'known','now')"
+        )
+        for event_id, sequence, event_type, retry_units in (
+            ("retry-burst", 1, "retry_decrement", 2),
+            ("retry-restore", 2, "retry_restore", 1),
+        ):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+                "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,retry_units,"
+                "usage_confidence,source,created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'retry-run','transition-retry','provider','model','endpoint','capability',"
+                "'cost-row','effective','cost-hash','known',?,?,'known','test','now',?)",
+                (
+                    event_id,
+                    f"idem-{event_id}",
+                    f"dedupe-{event_id}",
+                    sequence,
+                    event_type,
+                    retry_units,
+                    1000 + sequence,
+                ),
+            )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        prefix_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        self.assertEqual(connection.execute(ledger_query).fetchall(), [])
+        self.assertEqual(connection.execute(prefix_query).fetchall(), [("retry-burst",)])
+
     def test_budget_ledger_slo_rejects_events_without_run_budget(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
