@@ -141,7 +141,11 @@ END;
 CREATE TRIGGER runs_validate_db_authority_update
 BEFORE UPDATE OF workflow, authority_mode, state ON runs
 WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
-  AND NEW.state NOT IN ('finalized','rolled_back','rejected')
+  AND (
+    NEW.state NOT IN ('finalized','rolled_back','rejected')
+    OR NEW.workflow<>OLD.workflow
+    OR NEW.authority_mode<>OLD.authority_mode
+  )
   AND NOT EXISTS (
     SELECT 1 FROM workflow_authority w
     WHERE w.workflow=NEW.workflow
@@ -618,6 +622,7 @@ CREATE TABLE leases (
       AND json_type(external_metadata_json,'$.agent_id')='text'
       AND json_type(external_metadata_json,'$.requester_agent_id')='text'
       AND json_type(external_metadata_json,'$.ttl_ms')='integer'
+      AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
       AND json_extract(external_metadata_json,'$.client_lease_id') <> ''
       AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
       AND json_extract(external_metadata_json,'$.run_id') <> ''
@@ -625,6 +630,7 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.transition_id') <> ''
       AND json_extract(external_metadata_json,'$.agent_id') <> ''
       AND json_extract(external_metadata_json,'$.requester_agent_id') <> ''
+      AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
       AND json_extract(external_metadata_json,'$.client_lease_id')=client_lease_id
       AND json_extract(external_metadata_json,'$.idempotency_key')=acquire_idempotency_key
       AND json_extract(external_metadata_json,'$.run_id')=run_id
@@ -633,6 +639,7 @@ CREATE TABLE leases (
       AND json_extract(external_metadata_json,'$.agent_id')=agent_id
       AND json_extract(external_metadata_json,'$.requester_agent_id')=requester_agent_id
       AND json_extract(external_metadata_json,'$.ttl_ms')=ttl_ms
+      AND json_extract(external_metadata_json,'$.gateway_lease_id')=gateway_lease_id
     ),0)=1
   ),
   CHECK (

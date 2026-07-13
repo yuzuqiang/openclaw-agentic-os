@@ -418,6 +418,22 @@ class MigrationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "active workflow cutover"):
             connection.execute(
+                "UPDATE runs SET authority_mode='db_authority',updated_at='terminal-db-claim' "
+                "WHERE run_id='file-run'"
+            )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) "
+            "VALUES('file-terminal-swap','prepare-terminal-swap','w','file_authority',"
+            "'candidate','R1','R1','now','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "active workflow cutover"):
+            connection.execute(
+                "UPDATE runs SET authority_mode='db_authority',state='finalized',"
+                "updated_at='terminal-swap' WHERE run_id='file-terminal-swap'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "active workflow cutover"):
+            connection.execute(
                 "UPDATE runs SET state='candidate',updated_at='reopened' "
                 "WHERE run_id='db-run'"
             )
@@ -878,6 +894,7 @@ class MigrationTests(unittest.TestCase):
                     **metadata,
                     "client_lease_id": "client-no-proof",
                     "idempotency_key": "idem-no-proof",
+                    "gateway_lease_id": "gateway-no-proof",
                 }
             ),
             "client-no-proof", "idem-no-proof", "run", "phase", "transition", "agent",
@@ -925,9 +942,61 @@ class MigrationTests(unittest.TestCase):
         valid = (
             "lease-valid", "run", "phase", "transition", "agent", "requester",
             "acquired", "gateway", "client-valid", "idem-valid", 60000, "v1", "now",
-            json.dumps({**metadata, "client_lease_id": "client-valid"}), "client-valid",
-            "idem-valid", "run", "phase", "transition", "agent", "requester", 60000,
-            "expires", 2000000000000,
+            json.dumps({**metadata, "client_lease_id": "client-valid"}),
+            "client-valid", "idem-valid", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+                "external_idempotency_key,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in valid)
+                + ")",
+                valid,
+            )
+        mismatched_gateway_metadata = (
+            "lease-mismatched-gateway", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway", "client-valid", "idem-valid", 60000, "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-valid",
+                    "gateway_lease_id": "other-gateway",
+                }
+            ),
+            "client-valid", "idem-valid", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+                "external_idempotency_key,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in mismatched_gateway_metadata)
+                + ")",
+                mismatched_gateway_metadata,
+            )
+        valid = (
+            "lease-valid", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway", "client-valid", "idem-valid", 60000, "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-valid",
+                    "gateway_lease_id": "gateway",
+                }
+            ),
+            "client-valid", "idem-valid", "run", "phase", "transition", "agent",
+            "requester", 60000, "expires", 2000000000000,
         )
         connection.execute(
             "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
@@ -949,6 +1018,7 @@ class MigrationTests(unittest.TestCase):
                     "client_lease_id": 1,
                     "idempotency_key": "idem-numeric",
                     "run_id": 1,
+                    "gateway_lease_id": "gateway-numeric",
                 }
             ),
             "1", "idem-numeric", "1", "phase", "transition", "agent", "requester",
@@ -974,6 +1044,7 @@ class MigrationTests(unittest.TestCase):
                     **metadata,
                     "client_lease_id": "",
                     "idempotency_key": "idem-empty",
+                    "gateway_lease_id": "gateway-empty",
                 }
             ),
             "", "idem-empty", "run", "phase", "transition", "agent", "requester",
@@ -1000,6 +1071,7 @@ class MigrationTests(unittest.TestCase):
                     **metadata,
                     "client_lease_id": "client-valid-2",
                     "idempotency_key": "idem-valid-2",
+                    "gateway_lease_id": "gateway",
                 }
             ),
             "client-valid-2", "idem-valid-2", "run", "phase", "transition", "agent",
@@ -1064,6 +1136,7 @@ class MigrationTests(unittest.TestCase):
                     **metadata,
                     "client_lease_id": "client-fake",
                     "idempotency_key": "idem-fake",
+                    "gateway_lease_id": "gateway-fake",
                 }
             ),
             "client-fake", "idem-fake", "run", "phase", "transition", "agent",
@@ -1123,6 +1196,7 @@ class MigrationTests(unittest.TestCase):
                     **metadata,
                     "client_lease_id": "client-ok",
                     "idempotency_key": "idem-ok",
+                    "gateway_lease_id": "gateway-released-ok",
                 }
             ),
             "client-ok", "idem-ok", "run", "phase", "transition", "agent",
@@ -1173,7 +1247,12 @@ class MigrationTests(unittest.TestCase):
             "acquired-live", "run", "phase", "transition", "agent", "requester",
             "acquired", "gateway-live", "client-live", "idem-live", 60000, "v1", "now",
             json.dumps(
-                {**metadata, "client_lease_id": "client-live", "idempotency_key": "idem-live"}
+                {
+                    **metadata,
+                    "client_lease_id": "client-live",
+                    "idempotency_key": "idem-live",
+                    "gateway_lease_id": "gateway-live",
+                }
             ),
             "client-live", "idem-live", "run", "phase", "transition", "agent",
             "requester", 60000, "expires", 2000000000000,
