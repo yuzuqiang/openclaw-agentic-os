@@ -10,6 +10,7 @@ from agentic_os.migrations import repository_root
 from agentic_os.privacy import PrivacyPreflightError
 from agentic_os.shadow import (
     ShadowBackfillError,
+    _projection_rows_by_path,
     audit_file_authority_shadow,
     backfill_file_authority_shadow,
 )
@@ -123,6 +124,36 @@ class ShadowTests(unittest.TestCase):
                 run_id="shadow-run",
             )
 
+    def test_shadow_normalizes_workflow_and_run_id(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow=" heartbeat ",
+            run_id=" shadow-run ",
+        )
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT workflow,authority_mode FROM runs WHERE run_id='shadow-run'"
+                ).fetchone(),
+                ("heartbeat", "file_authority_shadow"),
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT run_id FROM runs WHERE run_id=' shadow-run '"
+                ).fetchone()
+            )
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow=" heartbeat ",
+            run_id=" shadow-run ",
+        )
+        self.assertEqual(audit.status, "pass")
+
     def test_shadow_backfill_records_same_artifact_for_each_run(self) -> None:
         artifact = self._artifact()
         backfill_file_authority_shadow(
@@ -171,6 +202,19 @@ class ShadowTests(unittest.TestCase):
                     ),
                 )
 
+    def test_shadow_audit_rejects_duplicate_projection_rows(self) -> None:
+        projected, issues = _projection_rows_by_path(
+            (
+                ("reports/summary.json", "a" * 64),
+                ("reports/summary.json", "b" * 64),
+            )
+        )
+
+        self.assertEqual(projected, {})
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].path, "reports/summary.json")
+        self.assertEqual(issues[0].reason, "duplicate_projection")
+
     def test_shadow_backfill_rejects_raw_state_artifact(self) -> None:
         raw = Path(self.temporary.name) / "control.db.old"
         with self.assertRaises(PrivacyPreflightError):
@@ -189,6 +233,20 @@ class ShadowTests(unittest.TestCase):
         artifact.symlink_to(raw)
         with self.assertRaises(PrivacyPreflightError):
             backfill_file_authority_shadow(
+                self.database,
+                [artifact],
+                workflow="heartbeat",
+                run_id="shadow-run",
+            )
+
+    def test_shadow_audit_rejects_resolved_raw_state_symlink(self) -> None:
+        raw = Path(self.temporary.name) / "control.db"
+        raw.write_bytes(b"raw")
+        artifact = Path(self.temporary.name) / "reports" / "summary.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.symlink_to(raw)
+        with self.assertRaises(PrivacyPreflightError):
+            audit_file_authority_shadow(
                 self.database,
                 [artifact],
                 workflow="heartbeat",

@@ -80,7 +80,7 @@ def _projection_id(run_id: str, relative_path: str, digest: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _required_identity(name: str, value: str) -> str:
+def _normalize_required_identity(name: str, value: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ShadowBackfillError(f"{name} must be a non-empty identity")
@@ -93,13 +93,12 @@ def _normalize_artifacts(
     paths = tuple(Path(artifact).expanduser() for artifact in artifacts)
     if not paths:
         raise ShadowBackfillError("at least one artifact path is required")
-    assert_paths_retrievable(paths)
     normalized: list[tuple[Path, str, str]] = []
     seen: set[str] = set()
     for path in paths:
         resolved = path.resolve()
         relative = _repo_relative(repo_root_path, resolved)
-        assert_paths_retrievable((resolved, relative))
+        assert_paths_retrievable((path, resolved, relative))
         if not resolved.is_file():
             raise ShadowBackfillError(f"shadow artifact is not a file: {resolved}")
         if relative in seen:
@@ -132,6 +131,11 @@ def _ensure_shadow_run(
     prepare_idempotency_key: str,
     created_at: str,
 ) -> None:
+    workflow = _normalize_required_identity("workflow", workflow)
+    run_id = _normalize_required_identity("run_id", run_id)
+    prepare_idempotency_key = _normalize_required_identity(
+        "prepare_idempotency_key", prepare_idempotency_key
+    )
     existing_workflow = connection.execute(
         "SELECT mode FROM workflow_authority WHERE workflow=?", (workflow,)
     ).fetchone()
@@ -180,14 +184,14 @@ def backfill_file_authority_shadow(
 ) -> ShadowBackfillResult:
     """Backfill explicit file artifacts as shadow evidence, never authority."""
 
-    workflow = _required_identity("workflow", workflow)
-    run_id = _required_identity("run_id", run_id)
+    workflow = _normalize_required_identity("workflow", workflow)
+    run_id = _normalize_required_identity("run_id", run_id)
     root = Path(repo_root_path or repository_root()).resolve()
     normalized = _normalize_artifacts(artifacts, repo_root_path=root)
     apply_migrations(database, repo_root=root)
     created_at = _utc_now()
     prepare_key = (
-        _required_identity("prepare_idempotency_key", prepare_idempotency_key)
+        _normalize_required_identity("prepare_idempotency_key", prepare_idempotency_key)
         if prepare_idempotency_key is not None
         else f"file-shadow:{run_id}"
     )
@@ -287,8 +291,8 @@ def audit_file_authority_shadow(
 ) -> ShadowAuditResult:
     """Compare current artifact files with their shadow projections."""
 
-    workflow = _required_identity("workflow", workflow)
-    run_id = _required_identity("run_id", run_id)
+    workflow = _normalize_required_identity("workflow", workflow)
+    run_id = _normalize_required_identity("run_id", run_id)
     root = Path(repo_root_path or repository_root()).resolve()
     normalized = _normalize_artifacts(artifacts, repo_root_path=root)
     expected = {relative: digest for _path, relative, digest in normalized}
