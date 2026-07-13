@@ -263,6 +263,30 @@ class ShadowTests(unittest.TestCase):
             "missing_shadow_run", {issue.reason for issue in tampered_audit.issues}
         )
 
+    def test_shadow_audit_rejects_default_prepare_key_tamper(self) -> None:
+        artifact = self._artifact()
+        backfill_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE runs SET prepare_idempotency_key='prepare-tampered' "
+                "WHERE run_id='shadow-run'"
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_file_authority_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertIn("missing_shadow_run", {issue.reason for issue in audit.issues})
+
     def test_shadow_backfill_rejects_nonterminal_existing_run(self) -> None:
         artifact = self._artifact()
         apply_migrations(self.database)
