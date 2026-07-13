@@ -74,7 +74,7 @@ class MigrationTests(unittest.TestCase):
             "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES(?,?,?,?,"
-            "'provider','model',?,?,?,'independent','{}','now')",
+            "'provider','model',?,?,?,'independent','{\"reviewer_session\":\"fixture\"}','now')",
             (
                 verifier_id,
                 run_id,
@@ -758,7 +758,7 @@ class MigrationTests(unittest.TestCase):
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES("
             "'verifier','run','worker','verifier','provider','model','prompt','context',"
-            "'evidence','independent','{}','now')"
+            "'evidence','independent','{\"reviewer_session\":\"fixture\"}','now')"
         )
         connection.execute(
             "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
@@ -1252,18 +1252,55 @@ class MigrationTests(unittest.TestCase):
             "'idem-pending','accepted','gateway-pending','now',1000)",
             (pending_acquire_metadata,),
         )
-        connection.execute(
-            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
-            "requester_agent_id,state,client_lease_id,acquire_idempotency_key,ttl_ms,"
-            "expires_at,expires_at_epoch_ms) VALUES('acquire-pending','run','phase',"
-            "'transition','agent','requester','acquire_pending','client-pending',"
-            "'idem-pending',60000,'expires',2000000000000)"
+        pending_lease = (
+            "acquire-pending", "run", "phase", "transition", "agent", "requester",
+            "acquire_pending", None, "client-pending", "idem-pending", 60000, "v1",
+            "now", pending_acquire_metadata, "client-pending", "idem-pending", "run",
+            "phase", "transition", "agent", "requester", 60000, "expires",
+            2000000000000,
         )
+        connection.execute(
+            f"INSERT INTO leases({acquire_fields}) VALUES("
+            + ",".join("?" for _ in pending_lease)
+            + ")",
+            pending_lease,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release proof before deletion"):
+            connection.execute("DELETE FROM leases WHERE lease_id='acquire-pending'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving pending ownership"):
+            connection.execute(
+                "UPDATE leases SET state='expired' WHERE lease_id='acquire-pending'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving pending ownership"):
+            connection.execute(
+                "UPDATE leases SET state='human_review_required' "
+                "WHERE lease_id='acquire-pending'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving pending ownership"):
+            connection.execute(
+                "UPDATE leases SET state='release_not_required' "
+                "WHERE lease_id='acquire-pending'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving pending ownership"):
+            connection.execute(
+                "UPDATE leases SET client_lease_id='client-other' "
+                "WHERE lease_id='acquire-pending'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
             connection.execute(
                 "UPDATE external_rpc_intents SET state='pending' "
                 "WHERE intent_id='acquire-pending'"
             )
+        connection.execute(
+            "UPDATE leases SET state='acquired', gateway_lease_id='gateway-pending' "
+            "WHERE lease_id='acquire-pending'"
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT state,gateway_lease_id FROM leases WHERE lease_id='acquire-pending'"
+            ).fetchone(),
+            ("acquired", "gateway-pending"),
+        )
         hidden_acquire_metadata = json.dumps(
             {
                 "client_lease_id": "client-hidden",
@@ -1863,14 +1900,14 @@ class MigrationTests(unittest.TestCase):
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES("
             "'verifier-b','run-b','worker','verifier','provider','model','prompt','context',"
-            "'evidence-b','independent','{}','now')"
+            "'evidence-b','independent','{\"reviewer_session\":\"fixture-b\"}','now')"
         )
         connection.execute(
             "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES("
             "'verifier-a','run-a','worker','verifier','provider','model','prompt','context',"
-            "'evidence-a','independent','{}','now')"
+            "'evidence-a','independent','{\"reviewer_session\":\"fixture-a\"}','now')"
         )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
@@ -1936,7 +1973,13 @@ class MigrationTests(unittest.TestCase):
             "risk_class,risk_dominance,created_at,updated_at) VALUES("
             "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
         )
-        for suffix, proof in (("empty", ""), ("invalid", "not-json"), ("array", "[]")):
+        for suffix, proof in (
+            ("empty", ""),
+            ("invalid", "not-json"),
+            ("array", "[]"),
+            ("empty-object", "{}"),
+            ("empty-spaced-object", "{ }"),
+        ):
             with self.subTest(proof=suffix), self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
@@ -1961,7 +2004,7 @@ class MigrationTests(unittest.TestCase):
             "context_hash,evidence_hash,independence_class,independence_proof_json,"
             "completed_at) VALUES('verifier-valid','run','worker','verifier',"
             "'provider','model','prompt','context','evidence','independent',"
-            "'{}','now')"
+            "'{\"reviewer_session\":\"session-a\"}','now')"
         )
 
     def test_pass_gate_requires_gate_bound_evidence_row(self) -> None:
@@ -1990,7 +2033,7 @@ class MigrationTests(unittest.TestCase):
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES("
             "'verifier','run','worker','verifier','provider','model','prompt','context',"
-            "'evidence','independent','{}','now')"
+            "'evidence','independent','{\"reviewer_session\":\"fixture\"}','now')"
         )
         connection.commit()
         connection.execute("BEGIN")
@@ -2038,7 +2081,7 @@ class MigrationTests(unittest.TestCase):
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES("
             "'verifier','run','worker','verifier','provider','model','prompt','context',"
-            "'evidence-good','independent','{}','now')"
+            "'evidence-good','independent','{\"reviewer_session\":\"fixture-good\"}','now')"
         )
         connection.execute(
             "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
@@ -2138,7 +2181,7 @@ class MigrationTests(unittest.TestCase):
             "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
             "independence_class,independence_proof_json,completed_at) VALUES("
             "'verifier','run','worker','verifier','provider','model','prompt','context',"
-            "'claimed','independent','{}','now')"
+            "'claimed','independent','{\"reviewer_session\":\"fixture-claimed\"}','now')"
         )
         connection.execute(
             "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
