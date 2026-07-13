@@ -38,6 +38,97 @@ class MigrationTests(unittest.TestCase):
         except OSError:
             pass
 
+    def _insert_gate_bound_evidence(
+        self,
+        connection: sqlite3.Connection,
+        evidence_hash: str,
+        suffix: str,
+    ) -> None:
+        workflow = f"slo-workflow-{suffix}"
+        run_id = f"slo-run-{suffix}"
+        transition_id = f"slo-transition-{suffix}"
+        verifier_id = f"slo-verifier-{suffix}"
+        gate_id = f"slo-gate-{suffix}"
+        clock_id = f"slo-clock-{suffix}"
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES(?,'file_authority','now')",
+            (workflow,),
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,"
+            "?,'file_authority','candidate','R1','R1','now','now')",
+            (run_id, f"slo-prepare-{suffix}", workflow),
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES(?,?,"
+            "'before','after','gate','check','R1',?,0,'now')",
+            (transition_id, run_id, f"slo-transition-idem-{suffix}"),
+        )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES(?,?,?,?,"
+            "'provider','model',?,?,?,'independent','{}','now')",
+            (
+                verifier_id,
+                run_id,
+                f"worker-{suffix}",
+                f"verifier-{suffix}",
+                f"prompt-{suffix}",
+                f"context-{suffix}",
+                evidence_hash,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+            "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+            "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+            "VALUES(?,?,?,?,?,'pass','now',1000,'v1',?,?,?,'R1','now')",
+            (
+                gate_id,
+                run_id,
+                transition_id,
+                clock_id,
+                verifier_id,
+                f"query-{suffix}",
+                f"migration-{suffix}",
+                evidence_hash,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+            "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,now_epoch_ms,"
+            "bound_at_epoch_ms,bound_by,trusted_clock_source_hash,consumed_at_epoch_ms) "
+            "VALUES(?,?,?,?,?,?,1000,1000,'clock',?,1000)",
+            (
+                clock_id,
+                gate_id,
+                gate_id,
+                run_id,
+                transition_id,
+                f"nonce-{suffix}",
+                f"source-{suffix}",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,size_bytes,"
+            "content_type,redaction_status,producer_run_id,verifier_run_id,gate_run_id,"
+            "captured_at) VALUES(?,?,?,?,1,'application/json','none',?,?,?,'now')",
+            (
+                evidence_hash,
+                run_id,
+                f"slo-{suffix}.json",
+                f"sha-{suffix}",
+                run_id,
+                verifier_id,
+                gate_id,
+            ),
+        )
+
     def test_authority_remains_disabled(self) -> None:
         self.assertIs(DB_AUTHORITY_ENABLED, False)
 
@@ -1541,6 +1632,15 @@ class MigrationTests(unittest.TestCase):
             "captured_at) VALUES('evidence-good','run','evidence.json','sha-good',1,"
             "'application/json','none','run','verifier','gate','now')"
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "UPDATE evidence_hashes SET sha256='sha-rewritten' "
+                "WHERE evidence_hash='evidence-good'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            connection.execute(
+                "DELETE FROM evidence_hashes WHERE evidence_hash='evidence-good'"
+            )
 
     def test_gate_evidence_slo_requires_claimed_evidence_hash(self) -> None:
         apply_migrations(self.database)
@@ -1702,9 +1802,10 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
-                "predicate_plugin_hash,backend,sandbox_enforced,created_at) VALUES("
+                "predicate_plugin_hash,backend,sandbox_enforced,created_at,"
+                "created_at_epoch_ms) VALUES("
                 "'goal-run','goal','R1','open','other-plugin',"
-                "'agentic_predicate_inproc_v1',1,'now')"
+                "'agentic_predicate_inproc_v1',1,'now',1000)"
             )
         connection.execute(
             "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
@@ -1727,7 +1828,7 @@ class MigrationTests(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
                     "predicate_plugin_hash,backend,sandbox_enforced,sandbox_proof_hash,"
-                    "created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    "created_at,created_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (
                         goal_run_id,
                         "sandbox-goal",
@@ -1738,14 +1839,63 @@ class MigrationTests(unittest.TestCase):
                         enforced,
                         proof,
                         "now",
+                        1000,
                     ),
                 )
         connection.execute(
             "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
-            "predicate_plugin_hash,backend,sandbox_enforced,sandbox_proof_hash,created_at) "
+            "predicate_plugin_hash,backend,sandbox_enforced,sandbox_proof_hash,created_at,"
+            "created_at_epoch_ms) "
             "VALUES('sandbox-ok','sandbox-goal','R1','open','sandbox-plugin',"
-            "'agentic_predicate_inproc_v1',1,'sandbox-proof','now')"
+            "'agentic_predicate_inproc_v1',1,'sandbox-proof','now',1000)"
         )
+        for assignment in (
+            "enabled=0",
+            "severity='R2'",
+        ):
+            with self.subTest(assignment=assignment), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "referenced goal runs"
+            ):
+                connection.execute(
+                    f"UPDATE goal_manifests SET {assignment} WHERE goal_id='sandbox-goal'"
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "referenced predicate plugin"):
+            connection.execute(
+                "UPDATE predicate_plugins SET disabled_at='now' "
+                "WHERE predicate_plugin_hash='sandbox-plugin'"
+            )
+        connection.execute(
+            "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+            "schema_hash,sandbox_required,sandbox_enforced,disabled_at,created_at) "
+            "VALUES('disabled-plugin','disabled','1','agentic_predicate_inproc_v1',"
+            "'schema',0,1,'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,updated_at) "
+            "VALUES('disabled-plugin-goal','owner','R1','manifest-disabled-plugin',"
+            "'disabled-plugin','agentic_predicate_inproc_v1',0,1,'now','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "enabled manifest"):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,created_at,"
+                "created_at_epoch_ms) VALUES('disabled-plugin-run','disabled-plugin-goal',"
+                "'R1','open','disabled-plugin','agentic_predicate_inproc_v1',1,'now',1000)"
+            )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,updated_at) "
+            "VALUES('disabled-goal','owner','R1','manifest-disabled','manifest-plugin',"
+            "'agentic_predicate_inproc_v1',0,0,'now','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "enabled manifest"):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,created_at,"
+                "created_at_epoch_ms) VALUES('disabled-goal-run','disabled-goal',"
+                "'R1','open','manifest-plugin','agentic_predicate_inproc_v1',1,'now',1000)"
+            )
 
     def test_approval_required_goal_run_requires_exact_approval(self) -> None:
         apply_migrations(self.database)
@@ -1775,16 +1925,29 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
-                "predicate_plugin_hash,backend,sandbox_enforced,created_at) VALUES("
+                "predicate_plugin_hash,backend,sandbox_enforced,created_at,"
+                "created_at_epoch_ms) VALUES("
                 "'missing-approval','goal','run','R1','open','plugin',"
-                "'agentic_predicate_inproc_v1',1,'now')"
+                "'agentic_predicate_inproc_v1',1,'now',1000)"
             )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
-                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at) "
+                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at,"
+                "created_at_epoch_ms) "
                 "VALUES('fake-approval','goal','run','R1','open','plugin',"
-                "'agentic_predicate_inproc_v1',1,'missing','now')"
+                "'agentic_predicate_inproc_v1',1,'missing','now',1000)"
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,consumed_by_transition_id,"
+                "consumed_by_gate_run_id,consumed_by_goal_run_id,approved_at) "
+                "VALUES('double-consume','run','river','telegram','source-double',"
+                "'text-double','goal_run','goal','goal','manifest','owner','R1',"
+                "2000,'double-consume-hash','transition','gate','goal-run','now')"
             )
         connection.execute(
             "INSERT INTO approvals(approval_id,run_id,approver,channel,"
@@ -1798,11 +1961,30 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
-                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at) "
+                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at,"
+                "created_at_epoch_ms) "
                 "VALUES('wrong-approved','goal','run','R1','open','plugin',"
-                "'agentic_predicate_inproc_v1',1,'wrong-approval','now')"
+                "'agentic_predicate_inproc_v1',1,'wrong-approval','now',1000)"
             )
         connection.execute("DELETE FROM approvals WHERE approval_id='wrong-approval'")
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,approval_hash,consumed_by_goal_run_id,approved_at) "
+            "VALUES('expired-approval','run',"
+            "'river','telegram','source-expired','text-expired','goal_run','goal','goal',"
+            "'manifest','owner','R1',1000,'expired-approval-hash','expired','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at,"
+                "created_at_epoch_ms) "
+                "VALUES('expired','goal','run','R1','open','plugin',"
+                "'agentic_predicate_inproc_v1',1,'expired-approval','now',1000)"
+            )
+        connection.execute("DELETE FROM approvals WHERE approval_id='expired-approval'")
         connection.execute(
             "INSERT INTO approvals(approval_id,run_id,approver,channel,"
             "source_message_digest,approval_text_digest,approved_action_type,"
@@ -1814,17 +1996,46 @@ class MigrationTests(unittest.TestCase):
         )
         connection.execute(
             "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
-            "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at) "
+            "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at,"
+            "created_at_epoch_ms) "
             "VALUES('approved','goal','run','R1','open','plugin',"
-            "'agentic_predicate_inproc_v1',1,'approval','now')"
+            "'agentic_predicate_inproc_v1',1,'approval','now',1000)"
         )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
             connection.execute(
                 "UPDATE goal_runs SET approval_id=NULL WHERE goal_run_id='approved'"
             )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "enabled manifest"):
             connection.execute(
                 "UPDATE goal_runs SET severity='R2' WHERE goal_run_id='approved'"
+            )
+        for assignment in (
+            "severity='R2'",
+            "manifest_hash='new-manifest'",
+            "owner='new-owner'",
+        ):
+            with self.subTest(assignment=assignment), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "referenced goal runs"
+            ):
+                connection.execute(
+                    f"UPDATE goal_manifests SET {assignment} WHERE goal_id='goal'"
+                )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,updated_at) "
+            "VALUES('late-approval-goal','owner','R1','late-manifest','plugin',"
+            "'agentic_predicate_inproc_v1',0,1,'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,created_at,created_at_epoch_ms) "
+            "VALUES('late-approval-run','late-approval-goal','run','R1','open','plugin',"
+            "'agentic_predicate_inproc_v1',1,'now',1000)"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "referenced goal runs"):
+            connection.execute(
+                "UPDATE goal_manifests SET approval_required=1 "
+                "WHERE goal_id='late-approval-goal'"
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
             connection.execute(
@@ -2334,12 +2545,25 @@ class MigrationTests(unittest.TestCase):
                 "'a-nonzero',?,1,?,?,1,'pass','pass','pass',?,'now',1000)",
                 (contract.query_name, migration_hash, query_hash, "e" * 64),
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
+            connection.execute(
+                "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
+                "'a-synthetic-pass',?,1,?,?,0,'pass','pass','pass',?,'now',1000)",
+                (contract.query_name, migration_hash, query_hash, "synthetic-evidence"),
+            )
+        self._insert_gate_bound_evidence(
+            connection,
+            evidence_hash="slo-evidence-stale",
+            suffix="stale",
+        )
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
             "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
             "'a-stale-pass',?,1,?,?,0,'pass','pass','pass',?,'zzzz',1000)",
-            (contract.query_name, migration_hash, query_hash, "e-stale"),
+            (contract.query_name, migration_hash, query_hash, "slo-evidence-stale"),
         )
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
@@ -2352,12 +2576,17 @@ class MigrationTests(unittest.TestCase):
             (contract.query_name,),
             connection.execute(status_query).fetchall(),
         )
+        self._insert_gate_bound_evidence(
+            connection,
+            evidence_hash="slo-evidence-valid",
+            suffix="valid",
+        )
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
             "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
             "'a-valid',?,1,?,?,0,'pass','pass','pass',?,'now',3000)",
-            (contract.query_name, migration_hash, query_hash, "e-valid"),
+            (contract.query_name, migration_hash, query_hash, "slo-evidence-valid"),
         )
         self.assertNotIn(
             (contract.query_name,),

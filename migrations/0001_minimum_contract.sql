@@ -1530,7 +1530,9 @@ CREATE TABLE goal_runs (
   approval_id TEXT REFERENCES approvals(approval_id),
   evidence_hash TEXT,
   created_at TEXT NOT NULL,
+  created_at_epoch_ms ANY NOT NULL,
   CHECK (typeof(sandbox_enforced)='integer' AND sandbox_enforced IN (0,1)),
+  CHECK (typeof(created_at_epoch_ms)='integer' AND created_at_epoch_ms BETWEEN 1 AND 253402300799999),
   FOREIGN KEY(goal_id,predicate_plugin_hash,backend)
     REFERENCES goal_manifests(goal_id,predicate_plugin_hash,backend),
   FOREIGN KEY(predicate_plugin_hash,backend)
@@ -1571,6 +1573,44 @@ BEGIN
   SELECT RAISE(ABORT,'sandbox-required goal run requires enforced sandbox proof');
 END;
 
+CREATE TRIGGER goal_runs_validate_manifest_plugin_insert
+AFTER INSERT ON goal_runs
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM goal_manifests gm
+  JOIN predicate_plugins p
+    ON p.predicate_plugin_hash=gm.predicate_plugin_hash
+   AND p.backend=gm.backend
+  WHERE gm.goal_id=NEW.goal_id
+    AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gm.backend=NEW.backend
+    AND gm.severity=NEW.severity
+    AND gm.enabled=1
+    AND p.disabled_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'goal run requires enabled manifest and plugin with matching severity');
+END;
+
+CREATE TRIGGER goal_runs_validate_manifest_plugin_update
+AFTER UPDATE OF goal_id, severity, predicate_plugin_hash, backend ON goal_runs
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM goal_manifests gm
+  JOIN predicate_plugins p
+    ON p.predicate_plugin_hash=gm.predicate_plugin_hash
+   AND p.backend=gm.backend
+  WHERE gm.goal_id=NEW.goal_id
+    AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gm.backend=NEW.backend
+    AND gm.severity=NEW.severity
+    AND gm.enabled=1
+    AND p.disabled_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'goal run requires enabled manifest and plugin with matching severity');
+END;
+
 CREATE TRIGGER predicate_plugins_validate_referenced_goal_runs_update
 AFTER UPDATE OF sandbox_required, predicate_plugin_hash, backend ON predicate_plugins
 WHEN NEW.sandbox_required=1 AND EXISTS (
@@ -1585,6 +1625,17 @@ WHEN NEW.sandbox_required=1 AND EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'sandbox-required plugin has goal runs without sandbox proof');
+END;
+
+CREATE TRIGGER predicate_plugins_reject_disable_with_goal_runs_update
+AFTER UPDATE OF disabled_at, predicate_plugin_hash, backend ON predicate_plugins
+WHEN NEW.disabled_at IS NOT NULL AND EXISTS (
+  SELECT 1 FROM goal_runs gr
+  WHERE gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gr.backend=NEW.backend
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced predicate plugin cannot be disabled while goal runs exist');
 END;
 
 CREATE TABLE approvals (
@@ -1615,6 +1666,14 @@ CREATE TABLE approvals (
   CHECK (approved_risk_ceiling IN ('R0','R1','R2','R3','R4')),
   CHECK (typeof(expires_at_epoch_ms)='integer' AND expires_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (typeof(single_use)='integer' AND single_use IN (0,1)),
+  CHECK (
+    (consumed_by_transition_id IS NULL AND consumed_by_gate_run_id IS NULL)
+    OR (consumed_by_transition_id IS NOT NULL AND consumed_by_gate_run_id IS NOT NULL)
+  ),
+  CHECK (
+    consumed_by_goal_run_id IS NULL
+    OR (consumed_by_transition_id IS NULL AND consumed_by_gate_run_id IS NULL)
+  ),
   UNIQUE(
     approval_id,
     run_id,
@@ -1740,6 +1799,7 @@ WHEN EXISTS (
     AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
     AND gm.backend=NEW.backend
     AND gm.approval_required=1
+    AND gm.enabled=1
     AND a.approved_action_type='goal_run'
     AND a.target_type='goal'
     AND a.target_id=NEW.goal_id
@@ -1747,10 +1807,11 @@ WHEN EXISTS (
     AND a.target_scope=gm.owner
     AND a.single_use=1
     AND a.consumed_by_goal_run_id=NEW.goal_run_id
+    AND a.expires_at_epoch_ms > NEW.created_at_epoch_ms
     AND CASE a.approved_risk_ceiling
       WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
       WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
-    END >= CASE NEW.severity
+    END >= CASE gm.severity
       WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
       WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
     END
@@ -1760,7 +1821,7 @@ BEGIN
 END;
 
 CREATE TRIGGER goal_runs_validate_required_approval_update
-AFTER UPDATE OF goal_id, run_id, severity, predicate_plugin_hash, backend, approval_id ON goal_runs
+AFTER UPDATE OF goal_id, run_id, severity, predicate_plugin_hash, backend, approval_id, created_at_epoch_ms ON goal_runs
 WHEN EXISTS (
   SELECT 1 FROM goal_manifests gm
   WHERE gm.goal_id=NEW.goal_id
@@ -1778,6 +1839,7 @@ WHEN EXISTS (
     AND gm.predicate_plugin_hash=NEW.predicate_plugin_hash
     AND gm.backend=NEW.backend
     AND gm.approval_required=1
+    AND gm.enabled=1
     AND a.approved_action_type='goal_run'
     AND a.target_type='goal'
     AND a.target_id=NEW.goal_id
@@ -1785,16 +1847,63 @@ WHEN EXISTS (
     AND a.target_scope=gm.owner
     AND a.single_use=1
     AND a.consumed_by_goal_run_id=NEW.goal_run_id
+    AND a.expires_at_epoch_ms > NEW.created_at_epoch_ms
     AND CASE a.approved_risk_ceiling
       WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
       WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
-    END >= CASE NEW.severity
+    END >= CASE gm.severity
       WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
       WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
     END
 )
 BEGIN
   SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');
+END;
+
+CREATE TRIGGER goal_manifests_validate_referenced_goal_runs_update
+AFTER UPDATE OF owner, severity, manifest_hash, predicate_plugin_hash, backend, approval_required, enabled ON goal_manifests
+WHEN EXISTS (
+  SELECT 1
+  FROM goal_runs gr
+  LEFT JOIN predicate_plugins p
+    ON p.predicate_plugin_hash=NEW.predicate_plugin_hash
+   AND p.backend=NEW.backend
+  LEFT JOIN approvals a ON a.approval_id=gr.approval_id
+  WHERE gr.goal_id=NEW.goal_id
+    AND gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gr.backend=NEW.backend
+    AND (
+      NEW.enabled<>1
+      OR p.predicate_plugin_hash IS NULL
+      OR p.disabled_at IS NOT NULL
+      OR gr.severity<>NEW.severity
+      OR (
+        NEW.approval_required=1
+        AND (
+          gr.run_id IS NULL
+          OR a.approval_id IS NULL
+          OR a.run_id<>gr.run_id
+          OR a.approved_action_type<>'goal_run'
+          OR a.target_type<>'goal'
+          OR a.target_id<>gr.goal_id
+          OR a.target_hash<>NEW.manifest_hash
+          OR a.target_scope<>NEW.owner
+          OR a.single_use<>1
+          OR a.consumed_by_goal_run_id<>gr.goal_run_id
+          OR a.expires_at_epoch_ms<=gr.created_at_epoch_ms
+          OR CASE a.approved_risk_ceiling
+            WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+            WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+          END < CASE NEW.severity
+            WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+            WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+          END
+        )
+      )
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced goal runs must keep enabled manifest, plugin, severity, and approval binding');
 END;
 
 CREATE TRIGGER approvals_preserve_goal_run_binding_delete
@@ -2164,6 +2273,30 @@ CREATE TABLE evidence_hashes (
   FOREIGN KEY(gate_run_id,evidence_hash) REFERENCES gate_runs(gate_run_id,evidence_hash)
 ) STRICT;
 
+CREATE TRIGGER evidence_hashes_freeze_pass_gate_update
+BEFORE UPDATE ON evidence_hashes
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.gate_run_id=OLD.gate_run_id
+    AND g.evidence_hash=OLD.evidence_hash
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gate evidence is immutable');
+END;
+
+CREATE TRIGGER evidence_hashes_freeze_pass_gate_delete
+BEFORE DELETE ON evidence_hashes
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.gate_run_id=OLD.gate_run_id
+    AND g.evidence_hash=OLD.evidence_hash
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gate evidence is immutable');
+END;
+
 CREATE TABLE reconciliation_jobs (
   job_id TEXT PRIMARY KEY,
   run_id TEXT REFERENCES runs(run_id),
@@ -2231,6 +2364,34 @@ CREATE TABLE slo_audits (
   FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
     REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash)
 ) STRICT;
+
+CREATE TRIGGER slo_audits_validate_pass_evidence_insert
+AFTER INSERT ON slo_audits
+WHEN NEW.status='pass' AND NOT EXISTS (
+  SELECT 1 FROM evidence_hashes e
+  WHERE e.evidence_hash=NEW.evidence_hash
+    AND e.run_id IS NOT NULL
+    AND e.producer_run_id=e.run_id
+    AND e.verifier_run_id IS NOT NULL
+    AND e.gate_run_id IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'passing SLO audit requires gate-bound evidence');
+END;
+
+CREATE TRIGGER slo_audits_validate_pass_evidence_update
+AFTER UPDATE OF status, evidence_hash ON slo_audits
+WHEN NEW.status='pass' AND NOT EXISTS (
+  SELECT 1 FROM evidence_hashes e
+  WHERE e.evidence_hash=NEW.evidence_hash
+    AND e.run_id IS NOT NULL
+    AND e.producer_run_id=e.run_id
+    AND e.verifier_run_id IS NOT NULL
+    AND e.gate_run_id IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'passing SLO audit requires gate-bound evidence');
+END;
 
 CREATE TRIGGER slo_queries_reject_update
 BEFORE UPDATE ON slo_queries
