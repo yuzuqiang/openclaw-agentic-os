@@ -399,6 +399,11 @@ class MigrationTests(unittest.TestCase):
             "VALUES('db-run','prepare-db','w','db_authority_canary','candidate','R1',"
             "'R1','now','now')"
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "active db authority"):
+            connection.execute(
+                "UPDATE workflow_authority SET mode='rollback_to_file_authority',"
+                "updated_at='rollback' WHERE workflow='w'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "conflicts"):
             connection.execute(
                 "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
@@ -624,6 +629,40 @@ class MigrationTests(unittest.TestCase):
                 "'source','text','R1','idem',0,'gate','now')"
             )
         connection.rollback()
+
+    def test_approval_id_must_be_non_empty(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,approved_at) VALUES('',"
+                "'run','river','telegram','source','text','write','file','id','hash',"
+                "'scope','R1',2000,'approval-hash','now')"
+            )
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,target_type,target_id,target_hash,target_scope,"
+                "approval_required,approval_id,approval_channel,approval_source_digest,"
+                "approval_text_digest,risk_dominance,idempotency_key,guard_version_before,"
+                "gate_run_id,created_at) VALUES('transition','run','before','after',"
+                "'mutate','write','file','id','hash','scope',1,'','telegram',"
+                "'source','text','R1','idem',0,'gate','now')"
+            )
 
     def test_consumed_transition_approval_ceiling_cannot_be_weakened(self) -> None:
         apply_migrations(self.database)
@@ -1129,6 +1168,8 @@ class MigrationTests(unittest.TestCase):
             + ")",
             acquired_live,
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release proof before deletion"):
+            connection.execute("DELETE FROM leases WHERE lease_id='acquired-live'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
             connection.execute(
                 "UPDATE external_rpc_intents SET external_id='gateway-other' "
@@ -1163,6 +1204,46 @@ class MigrationTests(unittest.TestCase):
                 + ",".join("?" for _ in release_not_required_with_gateway)
                 + ")",
                 release_not_required_with_gateway,
+            )
+        hidden_acquire_metadata = json.dumps(
+            {
+                "client_lease_id": "client-hidden",
+                "idempotency_key": "idem-hidden",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
+                "gateway_lease_id": "gateway-hidden",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,external_id,requested_at,requested_at_epoch_ms) "
+            "VALUES('acquire-hidden','run','transition','allow_lease_acquire','phase',"
+            "'agent','requester',60000,'client-hidden','idem-hidden','v1','{}',?,"
+            "'run','phase','transition','agent','requester',60000,'client-hidden',"
+            "'idem-hidden','accepted','gateway-hidden','now',1000)",
+            (hidden_acquire_metadata,),
+        )
+        release_not_required_with_hidden_acquire = (
+            "release-not-required-hidden", "run", "phase", "transition", "agent",
+            "requester", "release_not_required", None, "client-hidden", "idem-hidden",
+            60000, "expires", 2000000000000,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release_not_required"):
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                + ",".join("?" for _ in release_not_required_with_hidden_acquire)
+                + ")",
+                release_not_required_with_hidden_acquire,
             )
 
     def test_sqlite_boundary_rejects_duplicate_raw_metadata_keys(self) -> None:

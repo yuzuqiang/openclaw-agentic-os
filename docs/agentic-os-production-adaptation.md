@@ -24,7 +24,7 @@ Non-goals:
 ## Delivery Change Log
 
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
-  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; live lease terminal states require release proof or no external gateway lease; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive.
+  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
 - 2026-07-12: Applied Round 11 single-writer correction after Round 10 independent review found unresolved High gaps:
   - Frozen Round 10 input SHA-256 before this correction: `a6b93a7bc1357cf037833b75ffc09938ca1d1d4b0ababab129ea5595a666ffdc`.
@@ -379,6 +379,20 @@ BEGIN
   SELECT RAISE(ABORT,'db authority requires drained file-authority runs');
 END;
 
+CREATE TRIGGER workflow_authority_preserve_active_db_binding_update
+BEFORE UPDATE OF workflow, mode ON workflow_authority
+WHEN OLD.mode IN ('db_authority_canary','db_authority')
+  AND (NEW.workflow<>OLD.workflow OR NEW.mode<>OLD.mode)
+  AND EXISTS (
+    SELECT 1 FROM runs open_run
+    WHERE open_run.workflow=OLD.workflow
+      AND open_run.authority_mode=OLD.mode
+      AND open_run.state NOT IN ('finalized','rolled_back','rejected')
+  )
+BEGIN
+  SELECT RAISE(ABORT,'active db authority runs require active workflow authority binding');
+END;
+
 CREATE TRIGGER runs_reject_open_file_authority_during_db_insert
 BEFORE INSERT ON runs
 WHEN NEW.authority_mode='file_authority'
@@ -434,6 +448,7 @@ CREATE TABLE transitions (
   CHECK (
     approval_required = 0 OR (
       approval_id IS NOT NULL
+      AND approval_id <> ''
       AND action_type <> ''
       AND target_type IS NOT NULL AND target_type <> ''
       AND target_id IS NOT NULL AND target_id <> ''
@@ -1303,6 +1318,24 @@ BEGIN
   SELECT RAISE(ABORT,'terminal lease with gateway ownership requires release intent proof');
 END;
 
+CREATE TRIGGER leases_preserve_live_gateway_delete
+BEFORE DELETE ON leases
+WHEN OLD.state IN ('acquired','release_pending')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=OLD.run_id
+      AND eri.transition_id=OLD.transition_id
+      AND eri.idempotency_key=OLD.release_idempotency_key
+      AND eri.external_id=OLD.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live gateway lease requires release proof before deletion');
+END;
+
 CREATE TRIGGER leases_preserve_terminal_gateway_identity_update
 BEFORE UPDATE OF state, gateway_lease_id ON leases
 WHEN NEW.state IN ('expired','human_review_required')
@@ -1320,6 +1353,94 @@ WHEN NEW.state='release_not_required'
     OR (OLD.gateway_lease_id IS NOT NULL AND OLD.gateway_lease_id <> ''))
 BEGIN
   SELECT RAISE(ABORT,'live lease cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER leases_reject_acquired_release_not_required_insert
+AFTER INSERT ON leases
+WHEN NEW.state='release_not_required'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_acquire'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.requester_agent_id=NEW.requester_agent_id
+      AND eri.ttl_ms=NEW.ttl_ms
+      AND eri.client_request_id=NEW.client_lease_id
+      AND eri.idempotency_key=NEW.acquire_idempotency_key
+      AND eri.external_id IS NOT NULL
+      AND eri.external_id <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER leases_reject_acquired_release_not_required_update
+AFTER UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, ttl_ms ON leases
+WHEN NEW.state='release_not_required'
+  AND EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_acquire'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=NEW.run_id
+      AND eri.transition_id=NEW.transition_id
+      AND eri.phase=NEW.phase
+      AND eri.agent_id=NEW.agent_id
+      AND eri.requester_agent_id=NEW.requester_agent_id
+      AND eri.ttl_ms=NEW.ttl_ms
+      AND eri.client_request_id=NEW.client_lease_id
+      AND eri.idempotency_key=NEW.acquire_idempotency_key
+      AND eri.external_id IS NOT NULL
+      AND eri.external_id <> ''
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot be marked release_not_required');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_release_not_required_acquire_insert
+AFTER INSERT ON external_rpc_intents
+WHEN NEW.rpc_kind='allow_lease_acquire'
+  AND NEW.state IN ('accepted','reconciled')
+  AND NEW.external_id IS NOT NULL
+  AND NEW.external_id <> ''
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='release_not_required'
+      AND l.run_id=NEW.run_id
+      AND l.transition_id=NEW.transition_id
+      AND l.phase=NEW.phase
+      AND l.agent_id=NEW.agent_id
+      AND l.requester_agent_id=NEW.requester_agent_id
+      AND l.ttl_ms=NEW.ttl_ms
+      AND l.client_lease_id=NEW.client_request_id
+      AND l.acquire_idempotency_key=NEW.idempotency_key
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot back release_not_required lease');
+END;
+
+CREATE TRIGGER external_rpc_intents_reject_release_not_required_acquire_update
+AFTER UPDATE OF rpc_kind, state, run_id, transition_id, phase, agent_id, requester_agent_id, ttl_ms, client_request_id, idempotency_key, external_id ON external_rpc_intents
+WHEN NEW.rpc_kind='allow_lease_acquire'
+  AND NEW.state IN ('accepted','reconciled')
+  AND NEW.external_id IS NOT NULL
+  AND NEW.external_id <> ''
+  AND EXISTS (
+    SELECT 1 FROM leases l
+    WHERE l.state='release_not_required'
+      AND l.run_id=NEW.run_id
+      AND l.transition_id=NEW.transition_id
+      AND l.phase=NEW.phase
+      AND l.agent_id=NEW.agent_id
+      AND l.requester_agent_id=NEW.requester_agent_id
+      AND l.ttl_ms=NEW.ttl_ms
+      AND l.client_lease_id=NEW.client_request_id
+      AND l.acquire_idempotency_key=NEW.idempotency_key
+  )
+BEGIN
+  SELECT RAISE(ABORT,'accepted acquire intent cannot back release_not_required lease');
 END;
 
 CREATE TABLE run_budgets (
@@ -1915,6 +2036,7 @@ CREATE TABLE approvals (
   consumed_by_gate_run_id TEXT UNIQUE REFERENCES gate_runs(gate_run_id) DEFERRABLE INITIALLY DEFERRED,
   consumed_by_goal_run_id TEXT UNIQUE REFERENCES goal_runs(goal_run_id) DEFERRABLE INITIALLY DEFERRED,
   approved_at TEXT NOT NULL,
+  CHECK (approval_id <> ''),
   CHECK (run_id <> ''),
   CHECK (approved_action_type <> ''),
   CHECK (target_type <> '' AND target_id <> '' AND target_hash <> '' AND target_scope <> ''),
