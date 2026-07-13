@@ -139,8 +139,9 @@ BEGIN
 END;
 
 CREATE TRIGGER runs_validate_db_authority_update
-BEFORE UPDATE OF workflow, authority_mode ON runs
+BEFORE UPDATE OF workflow, authority_mode, state ON runs
 WHEN NEW.authority_mode IN ('db_authority_canary','db_authority')
+  AND NEW.state NOT IN ('finalized','rolled_back','rejected')
   AND NOT EXISTS (
     SELECT 1 FROM workflow_authority w
     WHERE w.workflow=NEW.workflow
@@ -1025,7 +1026,7 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state IN ('acquired','release_pending')
+    WHERE l.state IN ('acquire_pending','acquired','release_pending','release_not_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.phase=OLD.phase
@@ -1034,7 +1035,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
       AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
-      AND l.gateway_lease_id=OLD.external_id
+      AND (
+        l.state IN ('acquire_pending','release_not_required')
+        OR l.gateway_lease_id=OLD.external_id
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -1046,7 +1050,7 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
     SELECT 1 FROM leases l
-    WHERE l.state IN ('acquired','release_pending')
+    WHERE l.state IN ('acquire_pending','acquired','release_pending','release_not_required')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
       AND l.phase=OLD.phase
@@ -1055,7 +1059,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
       AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
-      AND l.gateway_lease_id=OLD.external_id
+      AND (
+        l.state IN ('acquire_pending','release_not_required')
+        OR l.gateway_lease_id=OLD.external_id
+      )
   )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -1142,6 +1149,31 @@ WHEN OLD.state IN ('acquired','release_pending')
   )
 BEGIN
   SELECT RAISE(ABORT,'live gateway lease requires release proof before deletion');
+END;
+
+CREATE TRIGGER leases_preserve_live_gateway_state_update
+BEFORE UPDATE OF state, run_id, transition_id, gateway_lease_id ON leases
+WHEN OLD.state IN ('acquired','release_pending')
+  AND OLD.gateway_lease_id IS NOT NULL
+  AND OLD.gateway_lease_id <> ''
+  AND (
+    NEW.state NOT IN ('acquired','release_pending')
+    OR NEW.run_id<>OLD.run_id
+    OR NEW.transition_id<>OLD.transition_id
+    OR NEW.gateway_lease_id IS NULL
+    OR NEW.gateway_lease_id<>OLD.gateway_lease_id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM external_rpc_intents eri
+    WHERE eri.rpc_kind='allow_lease_release'
+      AND eri.state IN ('accepted','reconciled')
+      AND eri.run_id=OLD.run_id
+      AND eri.transition_id=OLD.transition_id
+      AND eri.idempotency_key=OLD.release_idempotency_key
+      AND eri.external_id=OLD.gateway_lease_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,'live lease requires release proof before leaving live state');
 END;
 
 CREATE TRIGGER leases_preserve_terminal_gateway_identity_update

@@ -411,6 +411,16 @@ class MigrationTests(unittest.TestCase):
                 "VALUES('late-file-run','prepare-late-file','w','file_authority',"
                 "'candidate','R1','R1','now','now')"
             )
+        connection.execute("UPDATE runs SET state='finalized' WHERE run_id='db-run'")
+        connection.execute(
+            "UPDATE workflow_authority SET mode='rollback_to_file_authority',"
+            "updated_at='rollback' WHERE workflow='w'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "active workflow cutover"):
+            connection.execute(
+                "UPDATE runs SET state='candidate',updated_at='reopened' "
+                "WHERE run_id='db-run'"
+            )
         self.assertEqual(
             connection.execute(
                 "SELECT authority_mode FROM runs WHERE run_id='file-run'"
@@ -1170,6 +1180,11 @@ class MigrationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "release proof before deletion"):
             connection.execute("DELETE FROM leases WHERE lease_id='acquired-live'")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
+            connection.execute(
+                "UPDATE leases SET state='acquire_pending' "
+                "WHERE lease_id='acquired-live'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
             connection.execute(
                 "UPDATE external_rpc_intents SET external_id='gateway-other' "
@@ -1182,7 +1197,7 @@ class MigrationTests(unittest.TestCase):
                 "UPDATE leases SET state='release_not_required', gateway_lease_id=NULL "
                 "WHERE lease_id='acquired-live'"
             )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "terminal lease"):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
             connection.execute(
                 "UPDATE leases SET state='expired' WHERE lease_id='acquired-live'"
             )
@@ -1204,6 +1219,44 @@ class MigrationTests(unittest.TestCase):
                 + ",".join("?" for _ in release_not_required_with_gateway)
                 + ")",
                 release_not_required_with_gateway,
+            )
+        pending_acquire_metadata = json.dumps(
+            {
+                "client_lease_id": "client-pending",
+                "idempotency_key": "idem-pending",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
+                "gateway_lease_id": "gateway-pending",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,external_id,requested_at,requested_at_epoch_ms) "
+            "VALUES('acquire-pending','run','transition','allow_lease_acquire','phase',"
+            "'agent','requester',60000,'client-pending','idem-pending','v1','{}',?,"
+            "'run','phase','transition','agent','requester',60000,'client-pending',"
+            "'idem-pending','accepted','gateway-pending','now',1000)",
+            (pending_acquire_metadata,),
+        )
+        connection.execute(
+            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+            "requester_agent_id,state,client_lease_id,acquire_idempotency_key,ttl_ms,"
+            "expires_at,expires_at_epoch_ms) VALUES('acquire-pending','run','phase',"
+            "'transition','agent','requester','acquire_pending','client-pending',"
+            "'idem-pending',60000,'expires',2000000000000)"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "acquire intent proof"):
+            connection.execute(
+                "UPDATE external_rpc_intents SET state='pending' "
+                "WHERE intent_id='acquire-pending'"
             )
         hidden_acquire_metadata = json.dumps(
             {
