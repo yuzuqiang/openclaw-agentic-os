@@ -568,6 +568,116 @@ class MigrationTests(unittest.TestCase):
             )
         connection.rollback()
 
+    def test_transition_approval_must_be_single_use(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.commit()
+        connection.execute("BEGIN")
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,single_use,approval_hash,consumed_by_transition_id,"
+            "consumed_by_gate_run_id,approved_at) VALUES('approval','run','river',"
+            "'telegram','source','text','write','file','id','hash','scope','R1',"
+            "2000,0,'approval-hash','transition','gate','now')"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "authorize transition"):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,target_type,target_id,target_hash,target_scope,"
+                "approval_required,approval_id,approval_channel,approval_source_digest,"
+                "approval_text_digest,risk_dominance,idempotency_key,guard_version_before,"
+                "gate_run_id,created_at) VALUES('transition','run','before','after',"
+                "'mutate','write','file','id','hash','scope',1,'approval','telegram',"
+                "'source','text','R1','idem',0,'gate','now')"
+            )
+        connection.rollback()
+
+    def test_exact_mutating_approval_slo_rejects_reusable_consumed_approval(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,single_use,approval_hash,consumed_by_transition_id,"
+            "consumed_by_gate_run_id,approved_at) VALUES('approval','run','river',"
+            "'telegram','source','text','write','file','id','hash','scope','R1',"
+            "2000,1,'approval-hash','transition','gate','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,target_type,target_id,target_hash,target_scope,"
+            "approval_required,approval_id,approval_channel,approval_source_digest,"
+            "approval_text_digest,risk_dominance,idempotency_key,guard_version_before,"
+            "gate_run_id,created_at) VALUES('transition','run','before','after',"
+            "'mutate','write','file','id','hash','scope',1,'approval','telegram',"
+            "'source','text','R1','idem',0,'gate','now')"
+        )
+        connection.execute(
+            "INSERT INTO risk_assessments(assessment_id,run_id,transition_id,action_risk,"
+            "target_risk,data_risk,side_effect_risk,permission_risk,"
+            "irreversibility_risk,risk_dominance,assessed_at) VALUES("
+            "'risk','run','transition','R1','R1','R1','R1','R1','R1','R1','now')"
+        )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,worker_agent_id,"
+            "verifier_agent_id,provider,model,prompt_hash,context_hash,evidence_hash,"
+            "independence_class,independence_proof_json,completed_at) VALUES("
+            "'verifier','run','worker','verifier','provider','model','prompt','context',"
+            "'evidence','independent','{}','now')"
+        )
+        connection.execute(
+            "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+            "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+            "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+            "VALUES('gate','run','transition','clock','verifier','pass','now',1000,"
+            "'v1','query','migration','evidence','R1','now')"
+        )
+        connection.execute(
+            "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+            "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,now_epoch_ms,"
+            "bound_at_epoch_ms,bound_by,trusted_clock_source_hash,consumed_at_epoch_ms) "
+            "VALUES('clock','gate','gate','run','transition','nonce',1000,1000,"
+            "'clock','source',1000)"
+        )
+        connection.execute(
+            "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,size_bytes,"
+            "content_type,redaction_status,producer_run_id,verifier_run_id,gate_run_id,"
+            "captured_at) VALUES('evidence','run','evidence.json','sha',1,"
+            "'application/json','none','run','verifier','gate','now')"
+        )
+        connection.execute("UPDATE approvals SET single_use=0 WHERE approval_id='approval'")
+        query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Exact mutating approval binding"
+        )
+        self.assertEqual(connection.execute(query).fetchall(), [("transition",)])
+
     def test_approval_consumption_target_is_exclusive(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -676,22 +786,29 @@ class MigrationTests(unittest.TestCase):
             )
         acquire_metadata = json.dumps(
             {
-                "run_id": "run",
-                "transition_id": "transition",
-                "client_request_id": "client-valid",
+                "client_lease_id": "client-valid",
                 "idempotency_key": "idem-valid",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
                 "gateway_lease_id": "gateway",
             }
         )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
-            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
-            "external_metadata_json,external_run_id,external_transition_id,"
-            "external_client_request_id,external_idempotency_key,state,external_id,"
-            "requested_at,requested_at_epoch_ms) VALUES('acquire-valid','run',"
-            "'transition','allow_lease_acquire','client-valid','idem-valid','v1','{}',"
-            "?,'run','transition','client-valid','idem-valid','accepted','gateway',"
-            "'now',1000)",
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,"
+            "external_id,requested_at,requested_at_epoch_ms) VALUES('acquire-valid','run',"
+            "'transition','allow_lease_acquire','phase','agent','requester',60000,"
+            "'client-valid','idem-valid','v1','{}',?,'run','phase','transition','agent',"
+            "'requester',60000,"
+            "'client-valid','idem-valid','accepted','gateway','now',1000)",
             (acquire_metadata,),
         )
         valid = (
@@ -916,22 +1033,29 @@ class MigrationTests(unittest.TestCase):
             connection.execute("DELETE FROM external_rpc_intents WHERE intent_id='release-intent'")
         acquire_live_metadata = json.dumps(
             {
-                "run_id": "run",
-                "transition_id": "transition",
-                "client_request_id": "client-live",
+                "client_lease_id": "client-live",
                 "idempotency_key": "idem-live",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
                 "gateway_lease_id": "gateway-live",
             }
         )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
-            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
-            "external_metadata_json,external_run_id,external_transition_id,"
-            "external_client_request_id,external_idempotency_key,state,external_id,"
-            "requested_at,requested_at_epoch_ms) VALUES('acquire-live','run',"
-            "'transition','allow_lease_acquire','client-live','idem-live','v1','{}',"
-            "?,'run','transition','client-live','idem-live','accepted','gateway-live',"
-            "'now',1000)",
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,"
+            "external_id,requested_at,requested_at_epoch_ms) VALUES('acquire-live','run',"
+            "'transition','allow_lease_acquire','phase','agent','requester',60000,"
+            "'client-live','idem-live','v1','{}',?,'run','phase','transition','agent',"
+            "'requester',60000,"
+            "'client-live','idem-live','accepted','gateway-live','now',1000)",
             (acquire_live_metadata,),
         )
         acquired_live = (
@@ -1410,7 +1534,7 @@ class MigrationTests(unittest.TestCase):
             {
                 "run_id": "other",
                 "transition_id": "transition",
-                "client_request_id": "client-bad",
+                "client_lease_id": "client-bad",
                 "idempotency_key": "idem-bad",
                 "gateway_lease_id": "gateway-bad",
             }
@@ -1427,24 +1551,51 @@ class MigrationTests(unittest.TestCase):
                 "'gateway-bad','now',1000)",
                 (bad_metadata,),
             )
-        metadata = json.dumps(
+        partial_metadata = json.dumps(
             {
                 "run_id": "run",
                 "transition_id": "transition",
-                "client_request_id": "client-ok",
+                "client_request_id": "client-partial",
+                "idempotency_key": "idem-partial",
+                "gateway_lease_id": "gateway-partial",
+            }
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_transition_id,"
+                "external_client_request_id,external_idempotency_key,state,external_id,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'partial','run','transition','allow_lease_acquire','client-partial',"
+                "'idem-partial','v1','{}',?,'run','transition','client-partial',"
+                "'idem-partial','accepted','gateway-partial','now',1000)",
+                (partial_metadata,),
+            )
+        metadata = json.dumps(
+            {
+                "client_lease_id": "client-ok",
                 "idempotency_key": "idem-ok",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
                 "gateway_lease_id": "gateway-ok",
             }
         )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
-            "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
-            "external_metadata_json,external_run_id,external_transition_id,"
-            "external_client_request_id,external_idempotency_key,state,external_id,"
-            "requested_at,requested_at_epoch_ms) VALUES("
-            "'ok','run','transition','allow_lease_acquire','client-ok','idem-ok',"
-            "'v1','{}',?,'run','transition','client-ok','idem-ok','accepted',"
-            "'gateway-ok','now',1000)",
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,"
+            "external_id,requested_at,requested_at_epoch_ms) VALUES("
+            "'ok','run','transition','allow_lease_acquire','phase','agent','requester',"
+            "60000,'client-ok','idem-ok','v1','{}',?,'run','phase','transition','agent',"
+            "'requester',60000,'client-ok','idem-ok','accepted','gateway-ok','now',1000)",
             (metadata,),
         )
 

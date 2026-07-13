@@ -316,6 +316,8 @@ CREATE TABLE external_rpc_intents (
   idempotency_key TEXT NOT NULL UNIQUE,
   phase TEXT,
   agent_id TEXT,
+  requester_agent_id TEXT,
+  ttl_ms ANY,
   task_digest TEXT,
   metadata_contract_version TEXT,
   metadata_json TEXT NOT NULL,
@@ -326,6 +328,8 @@ CREATE TABLE external_rpc_intents (
   external_idempotency_key TEXT,
   external_phase TEXT,
   external_agent_id TEXT,
+  external_requester_agent_id TEXT,
+  external_ttl_ms ANY,
   external_task_digest TEXT,
   state TEXT NOT NULL CHECK (state IN ('pending','accepted','unknown','failed','reconciled','human_review_required')),
   external_id TEXT,
@@ -338,6 +342,8 @@ CREATE TABLE external_rpc_intents (
   CHECK (typeof(requested_at_epoch_ms)='integer' AND requested_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (accepted_at_epoch_ms IS NULL OR (typeof(accepted_at_epoch_ms)='integer' AND accepted_at_epoch_ms BETWEEN 1 AND 253402300799999)),
   CHECK (resolved_at_epoch_ms IS NULL OR (typeof(resolved_at_epoch_ms)='integer' AND resolved_at_epoch_ms BETWEEN 1 AND 253402300799999)),
+  CHECK (ttl_ms IS NULL OR (typeof(ttl_ms)='integer' AND ttl_ms BETWEEN 1 AND 31536000000)),
+  CHECK (external_ttl_ms IS NULL OR (typeof(external_ttl_ms)='integer' AND external_ttl_ms BETWEEN 1 AND 31536000000)),
   CHECK (
     intent_id <> ''
     AND run_id <> ''
@@ -406,10 +412,18 @@ CREATE TABLE external_rpc_intents (
       metadata_contract_version IS NOT NULL AND metadata_contract_version <> ''
       AND external_metadata_json IS NOT NULL AND json_valid(external_metadata_json)
       AND external_id IS NOT NULL AND external_id <> ''
-      AND external_run_id = run_id
-      AND external_transition_id = transition_id
-      AND external_client_request_id = client_request_id
-      AND external_idempotency_key = idempotency_key
+      AND phase IS NOT NULL AND phase <> ''
+      AND agent_id IS NOT NULL AND agent_id <> ''
+      AND requester_agent_id IS NOT NULL AND requester_agent_id <> ''
+      AND ttl_ms IS NOT NULL
+      AND external_run_id IS run_id
+      AND external_transition_id IS transition_id
+      AND external_client_request_id IS client_request_id
+      AND external_idempotency_key IS idempotency_key
+      AND external_phase IS phase
+      AND external_agent_id IS agent_id
+      AND external_requester_agent_id IS requester_agent_id
+      AND external_ttl_ms IS ttl_ms
     )
   ),
   CHECK (
@@ -417,25 +431,41 @@ CREATE TABLE external_rpc_intents (
     OR external_metadata_json IS NULL
     OR CASE
       WHEN json_valid(external_metadata_json) THEN CASE
-        WHEN json_type(external_metadata_json,'$.run_id')='text'
-          AND json_type(external_metadata_json,'$.transition_id')='text'
-          AND json_type(external_metadata_json,'$.client_request_id')='text'
+        WHEN json_type(external_metadata_json,'$.client_lease_id')='text'
           AND json_type(external_metadata_json,'$.idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.run_id')='text'
+          AND json_type(external_metadata_json,'$.phase')='text'
+          AND json_type(external_metadata_json,'$.transition_id')='text'
+          AND json_type(external_metadata_json,'$.agent_id')='text'
+          AND json_type(external_metadata_json,'$.requester_agent_id')='text'
+          AND json_type(external_metadata_json,'$.ttl_ms')='integer'
           AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
-          AND json_extract(external_metadata_json,'$.run_id') <> ''
-          AND json_extract(external_metadata_json,'$.transition_id') <> ''
-          AND json_extract(external_metadata_json,'$.client_request_id') <> ''
+          AND json_extract(external_metadata_json,'$.client_lease_id') <> ''
           AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
+          AND json_extract(external_metadata_json,'$.run_id') <> ''
+          AND json_extract(external_metadata_json,'$.phase') <> ''
+          AND json_extract(external_metadata_json,'$.transition_id') <> ''
+          AND json_extract(external_metadata_json,'$.agent_id') <> ''
+          AND json_extract(external_metadata_json,'$.requester_agent_id') <> ''
+          AND json_extract(external_metadata_json,'$.ttl_ms') BETWEEN 1 AND 31536000000
           AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
-          AND json_extract(external_metadata_json,'$.run_id') = run_id
-          AND json_extract(external_metadata_json,'$.transition_id') = transition_id
-          AND json_extract(external_metadata_json,'$.client_request_id') = client_request_id
+          AND json_extract(external_metadata_json,'$.client_lease_id') = client_request_id
           AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.run_id') = run_id
+          AND json_extract(external_metadata_json,'$.phase') = phase
+          AND json_extract(external_metadata_json,'$.transition_id') = transition_id
+          AND json_extract(external_metadata_json,'$.agent_id') = agent_id
+          AND json_extract(external_metadata_json,'$.requester_agent_id') = requester_agent_id
+          AND json_extract(external_metadata_json,'$.ttl_ms') = ttl_ms
           AND json_extract(external_metadata_json,'$.gateway_lease_id') = external_id
-          AND external_run_id = run_id
-          AND external_transition_id = transition_id
-          AND external_client_request_id = client_request_id
-          AND external_idempotency_key = idempotency_key
+          AND external_run_id IS run_id
+          AND external_transition_id IS transition_id
+          AND external_client_request_id IS client_request_id
+          AND external_idempotency_key IS idempotency_key
+          AND external_phase IS phase
+          AND external_agent_id IS agent_id
+          AND external_requester_agent_id IS requester_agent_id
+          AND external_ttl_ms IS ttl_ms
         THEN 1 ELSE 0 END
       ELSE 0 END
   ),
@@ -934,25 +964,41 @@ WHEN NEW.state IN ('acquired','release_pending') AND NOT EXISTS (
     AND eri.state IN ('accepted','reconciled')
     AND eri.run_id=NEW.run_id
     AND eri.transition_id=NEW.transition_id
+    AND eri.phase=NEW.phase
+    AND eri.agent_id=NEW.agent_id
+    AND eri.requester_agent_id=NEW.requester_agent_id
+    AND eri.ttl_ms=NEW.ttl_ms
     AND eri.client_request_id=NEW.client_lease_id
     AND eri.idempotency_key=NEW.acquire_idempotency_key
     AND eri.external_id=NEW.gateway_lease_id
+    AND eri.external_phase=NEW.phase
+    AND eri.external_agent_id=NEW.agent_id
+    AND eri.external_requester_agent_id=NEW.requester_agent_id
+    AND eri.external_ttl_ms=NEW.ttl_ms
 )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
 END;
 
 CREATE TRIGGER leases_validate_acquire_proof_update
-AFTER UPDATE OF state, run_id, transition_id, client_lease_id, acquire_idempotency_key, gateway_lease_id ON leases
+AFTER UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, ttl_ms, gateway_lease_id ON leases
 WHEN NEW.state IN ('acquired','release_pending') AND NOT EXISTS (
   SELECT 1 FROM external_rpc_intents eri
   WHERE eri.rpc_kind='allow_lease_acquire'
     AND eri.state IN ('accepted','reconciled')
     AND eri.run_id=NEW.run_id
     AND eri.transition_id=NEW.transition_id
+    AND eri.phase=NEW.phase
+    AND eri.agent_id=NEW.agent_id
+    AND eri.requester_agent_id=NEW.requester_agent_id
+    AND eri.ttl_ms=NEW.ttl_ms
     AND eri.client_request_id=NEW.client_lease_id
     AND eri.idempotency_key=NEW.acquire_idempotency_key
     AND eri.external_id=NEW.gateway_lease_id
+    AND eri.external_phase=NEW.phase
+    AND eri.external_agent_id=NEW.agent_id
+    AND eri.external_requester_agent_id=NEW.requester_agent_id
+    AND eri.external_ttl_ms=NEW.ttl_ms
 )
 BEGIN
   SELECT RAISE(ABORT,'live lease requires acquire intent proof');
@@ -967,6 +1013,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
     WHERE l.state IN ('acquired','release_pending')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
+      AND l.phase=OLD.phase
+      AND l.agent_id=OLD.agent_id
+      AND l.requester_agent_id=OLD.requester_agent_id
+      AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
       AND l.gateway_lease_id=OLD.external_id
@@ -976,7 +1026,7 @@ BEGIN
 END;
 
 CREATE TRIGGER external_rpc_intents_preserve_live_lease_acquire_update
-BEFORE UPDATE OF rpc_kind, state, run_id, transition_id, client_request_id, idempotency_key, external_id ON external_rpc_intents
+BEFORE UPDATE OF rpc_kind, state, run_id, transition_id, phase, agent_id, requester_agent_id, ttl_ms, client_request_id, idempotency_key, external_id, external_phase, external_agent_id, external_requester_agent_id, external_ttl_ms ON external_rpc_intents
 WHEN OLD.rpc_kind='allow_lease_acquire'
   AND OLD.state IN ('accepted','reconciled')
   AND EXISTS (
@@ -984,6 +1034,10 @@ WHEN OLD.rpc_kind='allow_lease_acquire'
     WHERE l.state IN ('acquired','release_pending')
       AND l.run_id=OLD.run_id
       AND l.transition_id=OLD.transition_id
+      AND l.phase=OLD.phase
+      AND l.agent_id=OLD.agent_id
+      AND l.requester_agent_id=OLD.requester_agent_id
+      AND l.ttl_ms=OLD.ttl_ms
       AND l.client_lease_id=OLD.client_request_id
       AND l.acquire_idempotency_key=OLD.idempotency_key
       AND l.gateway_lease_id=OLD.external_id
@@ -1723,6 +1777,7 @@ WHEN NEW.approval_required=1 AND NOT EXISTS (
     AND a.channel=NEW.approval_channel
     AND a.source_message_digest=NEW.approval_source_digest
     AND a.approval_text_digest=NEW.approval_text_digest
+    AND a.single_use=1
     AND a.consumed_by_transition_id=NEW.transition_id
     AND a.consumed_by_gate_run_id=NEW.gate_run_id
     AND CASE a.approved_risk_ceiling
@@ -1753,6 +1808,7 @@ WHEN NEW.approval_required=1 AND NOT EXISTS (
     AND a.channel=NEW.approval_channel
     AND a.source_message_digest=NEW.approval_source_digest
     AND a.approval_text_digest=NEW.approval_text_digest
+    AND a.single_use=1
     AND a.consumed_by_transition_id=NEW.transition_id
     AND a.consumed_by_gate_run_id=NEW.gate_run_id
     AND CASE a.approved_risk_ceiling
