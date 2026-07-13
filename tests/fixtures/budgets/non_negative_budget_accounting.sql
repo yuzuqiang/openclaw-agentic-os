@@ -33,6 +33,8 @@ INSERT INTO transitions(
 
 PRAGMA ignore_check_constraints=ON;
 
+-- Match the malformed ledger net so this fixture isolates the negative-net SLO
+-- branch from counter reconciliation.
 INSERT INTO run_budgets(
   run_id,workflow,capability_class,selected_provider,selected_model,
   selected_endpoint_binding_id,selected_cost_registry_id,

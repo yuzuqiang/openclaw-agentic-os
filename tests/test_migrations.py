@@ -3335,6 +3335,29 @@ class MigrationTests(unittest.TestCase):
                 for query_name, expected_rows in expected_by_query.items():
                     rows = set(connection.execute(contracts[query_name]).fetchall())
                     self.assertLessEqual(expected_rows, rows)
+                if fixture == "budgets/non_negative_budget_accounting.sql":
+                    row = connection.execute(
+                        """
+                        WITH event_sums AS (
+                          SELECT run_id,
+                                 SUM(
+                                   CASE
+                                     WHEN event_type='reserve' THEN input_tokens
+                                     WHEN event_type IN ('release','consume')
+                                       THEN -input_tokens
+                                     ELSE 0
+                                   END
+                                 ) AS net_reserved_input
+                          FROM budget_events
+                          GROUP BY run_id
+                        )
+                        SELECT s.net_reserved_input, rb.reserved_input_tokens
+                        FROM event_sums s
+                        JOIN run_budgets rb USING(run_id)
+                        WHERE s.run_id='fixture-negative-net-reserve'
+                        """
+                    ).fetchone()
+                    self.assertEqual(row, (-3, -3))
                 if fixture == "sqlite_type_affinity_h1_h4.sql":
                     rows = set(
                         connection.execute(
