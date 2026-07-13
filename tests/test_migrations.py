@@ -39,6 +39,33 @@ class MigrationTests(unittest.TestCase):
         except OSError:
             pass
 
+    def _apply_v1_migration_only(self, directory_name: str) -> None:
+        migration_dir = Path(self.temporary.name) / directory_name
+        migration_dir.mkdir()
+        shutil.copy(
+            repository_root() / "migrations/0001_minimum_contract.sql",
+            migration_dir / "0001_minimum_contract.sql",
+        )
+        v1_hash = hashlib.sha256(
+            (migration_dir / "0001_minimum_contract.sql").read_bytes()
+        ).hexdigest()
+        (migration_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "migrations": [
+                        {
+                            "version": 1,
+                            "name": "minimum_contract",
+                            "file": "0001_minimum_contract.sql",
+                            "sha256": v1_hash,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1,))
+
     def _insert_gate_bound_evidence(
         self,
         connection: sqlite3.Connection,
@@ -281,31 +308,7 @@ class MigrationTests(unittest.TestCase):
             )
 
     def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
-        migration_dir = Path(self.temporary.name) / "v1-migrations"
-        migration_dir.mkdir()
-        shutil.copy(
-            repository_root() / "migrations/0001_minimum_contract.sql",
-            migration_dir / "0001_minimum_contract.sql",
-        )
-        v1_hash = hashlib.sha256(
-            (migration_dir / "0001_minimum_contract.sql").read_bytes()
-        ).hexdigest()
-        (migration_dir / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "migrations": [
-                        {
-                            "version": 1,
-                            "name": "minimum_contract",
-                            "file": "0001_minimum_contract.sql",
-                            "sha256": v1_hash,
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1,))
+        self._apply_v1_migration_only("v1-migrations")
 
         with sqlite3.connect(self.database) as connection:
             connection.execute(
@@ -331,6 +334,36 @@ class MigrationTests(unittest.TestCase):
                 "'reports/summary.json',?,'file_authority_shadow','10')",
                 ("b" * 64,),
             )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
+    def test_v1_projection_identity_upgrade_rejects_duplicate_timestamp(self) -> None:
+        self._apply_v1_migration_only("v1-duplicate-timestamp")
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('shadow','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                "'run-a','prepare-run-a','shadow','file_authority_shadow',"
+                "'finalized','R1','R1','now','now','now',1)"
+            )
+            for projection_id, digest in (
+                ("projection-a-old", "a" * 64),
+                ("projection-a-new", "b" * 64),
+            ):
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                    "source_authority,generated_at) VALUES(?,?,"
+                    "'reports/summary.json',?,'file_authority_shadow',"
+                    "'2026-01-01T00:00:00+00:00')",
+                    (projection_id, "run-a", digest),
+                )
 
         with self.assertRaises(sqlite3.IntegrityError):
             apply_migrations(self.database)
@@ -3913,22 +3946,26 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertIn(f"Current migration manifest SHA-256: `{manifest_digest}`", readme)
 
-    def test_migration_is_exact_accepted_ddl_block(self) -> None:
+    def test_design_contract_primary_ddl_is_current_projection_schema(self) -> None:
         design = (repository_root() / "docs/agentic-os-production-adaptation.md").read_text(
             encoding="utf-8"
         )
         contract = design.split("## Minimum Database Contracts", 1)[1]
         ddl = contract.split("```sql\n", 1)[1].split("\n```", 1)[0] + "\n"
-        migration = (repository_root() / "migrations/0001_minimum_contract.sql").read_text(
-            encoding="utf-8"
-        )
-        self.assertEqual(migration, ddl)
+        with sqlite3.connect(":memory:") as connection:
+            connection.executescript(ddl)
+        projection_contract = ddl.split("CREATE TABLE artifact_projections (", 1)[1].split(
+            "CREATE TABLE evidence_hashes", 1
+        )[0]
+        self.assertIn("UNIQUE(run_id, path, source_authority)", projection_contract)
+        self.assertIn("CREATE TABLE artifact_projection_history", projection_contract)
+        self.assertNotIn("UNIQUE(path, sha256)", projection_contract)
 
     def test_design_contract_includes_shadow_projection_v2_overlay(self) -> None:
         design = (repository_root() / "docs/agentic-os-production-adaptation.md").read_text(
             encoding="utf-8"
         )
-        overlay = design.split("Current migration v2 shadow projection overlay:", 1)[1]
+        overlay = design.split("Current migration v2 shadow projection identity:", 1)[1]
         self.assertIn("CREATE TABLE artifact_projection_history", overlay)
         self.assertIn("UNIQUE(run_id, path, source_authority)", overlay)
 

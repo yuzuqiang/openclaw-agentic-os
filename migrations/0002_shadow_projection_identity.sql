@@ -23,19 +23,43 @@ CREATE TABLE artifact_projection_history (
 ) STRICT;
 
 CREATE TEMP TABLE artifact_projection_timestamp_guard (
+  run_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
   generated_at TEXT NOT NULL CHECK (
     julianday(generated_at) IS NOT NULL
+    AND strftime('%Y-%m-%dT%H:%M:%S', generated_at)=substr(generated_at,1,19)
+    AND substr(generated_at,12,2) BETWEEN '00' AND '23'
+    AND substr(generated_at,15,2) BETWEEN '00' AND '59'
+    AND substr(generated_at,18,2) BETWEEN '00' AND '59'
     AND (
-      generated_at GLOB
-        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
-      OR generated_at GLOB
-        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].*+00:00'
+      (
+        length(generated_at)=25
+        AND generated_at GLOB
+          '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+      )
+      OR (
+        length(generated_at)=32
+        AND generated_at GLOB
+          '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+        AND substr(generated_at,21,6)<>'000000'
+      )
     )
-  )
+  ),
+  UNIQUE(run_id,path,source_authority,generated_at)
 ) STRICT;
 
-INSERT INTO artifact_projection_timestamp_guard(generated_at)
-SELECT generated_at
+INSERT INTO artifact_projection_timestamp_guard(
+  run_id,
+  path,
+  source_authority,
+  generated_at
+)
+SELECT
+  run_id,
+  path,
+  source_authority,
+  generated_at
 FROM artifact_projections
 WHERE (run_id, path, source_authority) IN (
   SELECT run_id, path, source_authority
