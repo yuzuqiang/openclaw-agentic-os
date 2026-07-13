@@ -1,0 +1,23 @@
+# Agentic OS runtime authority and SQLite sidecars
+state/agentic-os/
+state/agentic-os/*.db
+state/agentic-os/*.db-*
+state/agentic-os/*.sqlite
+state/agentic-os/*.sqlite-*
+state/agentic-os/backups/
+**/control.db
+**/control.db-wal
+**/control.db-shm
+**/control.db-journal
+**/control.db.backup*
+**/control.db.bak*
+
+# Local test/runtime artifacts
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+.venv/
+dist/
+build/
