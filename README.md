@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `e12ec20ca292a92af99886159a284b786ec97cd9e731cb605100e84710416b5a`
+- Current design artifact SHA-256: `98684cde617622675f401203c729aa904c5e1d8db425c2595a0f888b89ea05ec`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `44cada46292f8f631e06621267321792428a6289ec15ebdf7be4146de237d36e`
 - Current migration manifest SHA-256: `532a9fadcb3990f049df53bc88f41663487d6526837d01f4da3378cfd72224a5`
@@ -44,6 +44,12 @@ explicit file artifacts into `file_authority_shadow` rows and compare current
 file hashes, prepare identity, workflow mode, and deterministic projection IDs
 back to those rows; they do not enable database authority or feed dispatch
 decisions.
+
+The first P1.0 executable budget fixture pack lives under
+`tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
+`MigrationTests.test_p1_budget_sql_fixture_pack_exercises_blocking_slos`
+applies each fixture to a fresh migrated database and proves the expected
+blocking SLO query fires.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

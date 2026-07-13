@@ -3283,6 +3283,66 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(connection.execute(ledger_query).fetchall(), [("missing-budget",)])
 
+    def test_p1_budget_sql_fixture_pack_exercises_blocking_slos(self) -> None:
+        fixture_root = repository_root() / "tests/fixtures"
+        expectations = {
+            "budgets/ledger_reconciliation.sql": {
+                "Budget ledger reconciles to counters and budgets": {
+                    ("fixture-ledger-drift",)
+                },
+            },
+            "budgets/human_attention_cross_dimension_payload.sql": {
+                "Budget event amount malformed or out of range": {
+                    ("fixture-human-cross-payload",)
+                },
+            },
+            "budgets/non_negative_budget_accounting.sql": {
+                "Budget ledger reconciles to counters and budgets": {
+                    ("fixture-negative-net-reserve",)
+                },
+                "Budget prefix over-release or over-restore": {
+                    ("fixture-over-release",)
+                },
+            },
+            "budgets/zero_reserve_policy.sql": {
+                "Invalid zero-reserve policy": {
+                    ("fixture-invalid-zero-policy",)
+                },
+            },
+            "sqlite_type_affinity_h1_h4.sql": {
+                "Model cost registry numeric bounds": {
+                    ("fixture-numeric-text-cost",),
+                    ("fixture-integral-real-cost",),
+                },
+            },
+        }
+        fixture_paths = {
+            str(path.relative_to(fixture_root))
+            for path in fixture_root.rglob("*.sql")
+        }
+        self.assertEqual(fixture_paths, set(expectations))
+        contracts = {contract.query_name: contract.sql_text for contract in SLO_QUERY_CONTRACTS}
+
+        for index, (fixture, expected_by_query) in enumerate(expectations.items()):
+            with self.subTest(fixture=fixture):
+                database = Path(self.temporary.name) / f"fixture-{index}.db"
+                apply_migrations(database)
+                connection = sqlite3.connect(database)
+                self.addCleanup(connection.close)
+                connection.executescript(
+                    (fixture_root / fixture).read_text(encoding="utf-8")
+                )
+                for query_name, expected_rows in expected_by_query.items():
+                    rows = set(connection.execute(contracts[query_name]).fetchall())
+                    self.assertLessEqual(expected_rows, rows)
+                if fixture == "sqlite_type_affinity_h1_h4.sql":
+                    rows = set(
+                        connection.execute(
+                            contracts["Model cost registry numeric bounds"]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-exact-max-cost",), rows)
+
     def test_unknown_usage_blocks_promoted_run_states(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
