@@ -116,7 +116,8 @@ def _run_is_finalized_shadow(
         identity == expected
         and isinstance(finalized_at, str)
         and finalized_at.strip() != ""
-        and finalized_epoch_ms == 1
+        and type(finalized_epoch_ms) is int
+        and finalized_epoch_ms > 0
     )
 
 
