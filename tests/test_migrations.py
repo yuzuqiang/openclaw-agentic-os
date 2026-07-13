@@ -3362,7 +3362,28 @@ class MigrationTests(unittest.TestCase):
                         WHERE s.run_id='fixture-negative-net-reserve'
                         """
                     ).fetchone()
-                    self.assertEqual(row, (-3, -3))
+                    self.assertEqual(row, (-3, 0))
+                    counter_rows = set(
+                        connection.execute(
+                            contracts["Budget counters outside selected budget"]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-negative-net-reserve",), counter_rows)
+                    ledger_without_negative_net = contracts[
+                        "Budget ledger reconciles to counters and budgets"
+                    ].replace(
+                        "COALESCE(s.net_reserved_time,0)<0 OR "
+                        "COALESCE(s.net_reserved_input,0)<0 OR "
+                        "COALESCE(s.net_reserved_output,0)<0 OR "
+                        "COALESCE(s.net_reserved_cost,0)<0 OR "
+                        "COALESCE(s.net_reserved_retries,0)<0 OR "
+                        "COALESCE(s.net_reserved_human,0)<0 OR ",
+                        "",
+                    )
+                    self.assertNotIn(
+                        ("fixture-negative-net-reserve",),
+                        set(connection.execute(ledger_without_negative_net).fetchall()),
+                    )
                 if fixture == "sqlite_type_affinity_h1_h4.sql":
                     rows = set(
                         connection.execute(

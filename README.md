@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `98684cde617622675f401203c729aa904c5e1d8db425c2595a0f888b89ea05ec`
+- Current design artifact SHA-256: `01fb7c282ac8339c83ae4161921c80dd52692066e65e150a3a8b8a021e744f94`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `44cada46292f8f631e06621267321792428a6289ec15ebdf7be4146de237d36e`
 - Current migration manifest SHA-256: `532a9fadcb3990f049df53bc88f41663487d6526837d01f4da3378cfd72224a5`

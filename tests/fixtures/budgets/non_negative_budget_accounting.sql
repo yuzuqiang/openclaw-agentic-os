@@ -31,10 +31,8 @@ INSERT INTO transitions(
   'fixture-non-negative-transition-idem',0,'fixture'
 );
 
-PRAGMA ignore_check_constraints=ON;
-
--- Match the malformed ledger net so this fixture isolates the negative-net SLO
--- branch from counter reconciliation.
+-- Keep the cached counter valid while the ledger net goes negative; the
+-- ledger SLO must catch the negative net without polluting counter bounds.
 INSERT INTO run_budgets(
   run_id,workflow,capability_class,selected_provider,selected_model,
   selected_endpoint_binding_id,selected_cost_registry_id,
@@ -49,10 +47,8 @@ INSERT INTO run_budgets(
   'fixture-capability','fixture-provider','fixture-model','fixture-endpoint',
   'fixture-non-negative-cost','fixture-effective',
   'fixture-non-negative-cost-hash','known','fixture-non-negative-transition',
-  10,10,10,10,1,1,-3,'known','fixture'
+  10,10,10,10,1,1,0,'known','fixture'
 );
-
-PRAGMA ignore_check_constraints=OFF;
 
 INSERT INTO budget_events(
   budget_event_id,event_idempotency_key,event_dedupe_hash,event_sequence,
