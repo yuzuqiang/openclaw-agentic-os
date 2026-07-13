@@ -1,5 +1,4 @@
 PRAGMA foreign_keys=ON;
-PRAGMA ignore_check_constraints=ON;
 
 INSERT INTO model_cost_registry(
   cost_registry_id,provider,model,endpoint_binding_id,capability_class,
@@ -10,6 +9,8 @@ INSERT INTO model_cost_registry(
   'fixture-capability',100000000000,100000000000,'known',
   'fixture-effective-max','fixture-exact-max-cost-hash'
 );
+
+PRAGMA ignore_check_constraints=ON;
 
 INSERT INTO model_cost_registry(
   cost_registry_id,provider,model,endpoint_binding_id,capability_class,

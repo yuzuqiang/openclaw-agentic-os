@@ -31,6 +31,8 @@ INSERT INTO transitions(
   'fixture-non-negative-transition-idem',0,'fixture'
 );
 
+PRAGMA ignore_check_constraints=ON;
+
 INSERT INTO run_budgets(
   run_id,workflow,capability_class,selected_provider,selected_model,
   selected_endpoint_binding_id,selected_cost_registry_id,
@@ -38,14 +40,17 @@ INSERT INTO run_budgets(
   selected_cost_confidence,selected_reserve_transition_id,
   time_budget_seconds,input_token_budget,output_token_budget,
   cost_budget_microusd,retry_budget,human_attention_budget,
+  reserved_input_tokens,
   usage_confidence,updated_at
 ) VALUES(
   'fixture-negative-net-reserve','fixture-budget-non-negative',
   'fixture-capability','fixture-provider','fixture-model','fixture-endpoint',
   'fixture-non-negative-cost','fixture-effective',
   'fixture-non-negative-cost-hash','known','fixture-non-negative-transition',
-  10,10,10,10,1,1,'known','fixture'
+  10,10,10,10,1,1,-3,'known','fixture'
 );
+
+PRAGMA ignore_check_constraints=OFF;
 
 INSERT INTO budget_events(
   budget_event_id,event_idempotency_key,event_dedupe_hash,event_sequence,
