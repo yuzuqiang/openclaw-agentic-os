@@ -3316,9 +3316,14 @@ class MigrationTests(unittest.TestCase):
                 },
             },
         }
-        fixture_paths = {
+        budget_fixture_paths = {
             str(path.relative_to(fixture_root))
-            for path in fixture_root.rglob("*.sql")
+            for path in (fixture_root / "budgets").glob("*.sql")
+        }
+        type_affinity_fixture = fixture_root / "sqlite_type_affinity_h1_h4.sql"
+        fixture_paths = {
+            *budget_fixture_paths,
+            str(type_affinity_fixture.relative_to(fixture_root)),
         }
         self.assertEqual(fixture_paths, set(expectations))
         contracts = {contract.query_name: contract.sql_text for contract in SLO_QUERY_CONTRACTS}
