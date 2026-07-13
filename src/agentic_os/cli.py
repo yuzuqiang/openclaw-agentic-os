@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .migrations import apply_migrations, repository_root, verify_database
 from .privacy import assert_privacy_preflight
+from .shadow import audit_file_authority_shadow, backfill_file_authority_shadow
 
 
 def parser() -> argparse.ArgumentParser:
@@ -28,6 +29,26 @@ def parser() -> argparse.ArgumentParser:
 
     verify = commands.add_parser("verify", help="verify an existing migrated database")
     verify.add_argument("--db", type=Path, required=True)
+
+    shadow_backfill = commands.add_parser(
+        "shadow-backfill", help="backfill explicit artifacts as file-authority shadow"
+    )
+    shadow_backfill.add_argument("--db", type=Path, required=True)
+    shadow_backfill.add_argument("--workflow", required=True)
+    shadow_backfill.add_argument("--run-id", required=True)
+    shadow_backfill.add_argument("--prepare-idempotency-key")
+    shadow_backfill.add_argument("--artifact", type=Path, action="append", required=True)
+    shadow_backfill.add_argument("--repo-root", type=Path, default=repository_root())
+
+    shadow_audit = commands.add_parser(
+        "shadow-audit", help="audit file-authority shadow projection parity"
+    )
+    shadow_audit.add_argument("--db", type=Path, required=True)
+    shadow_audit.add_argument("--workflow", required=True)
+    shadow_audit.add_argument("--run-id", required=True)
+    shadow_audit.add_argument("--prepare-idempotency-key")
+    shadow_audit.add_argument("--artifact", type=Path, action="append", required=True)
+    shadow_audit.add_argument("--repo-root", type=Path, default=repository_root())
     return result
 
 
@@ -46,11 +67,42 @@ def main(argv: list[str] | None = None) -> int:
         applied = apply_migrations(database, repo_root=args.repo_root)
         print(f"migration verification passed: applied={list(applied)} db={database}")
         return 0
-    versions = verify_database(args.db)
-    print(f"database verification passed: versions={list(versions)} db={args.db}")
-    return 0
+    if args.command == "verify":
+        versions = verify_database(args.db)
+        print(f"database verification passed: versions={list(versions)} db={args.db}")
+        return 0
+    if args.command == "shadow-backfill":
+        result = backfill_file_authority_shadow(
+            args.db,
+            args.artifact,
+            workflow=args.workflow,
+            run_id=args.run_id,
+            prepare_idempotency_key=args.prepare_idempotency_key,
+            repo_root_path=args.repo_root,
+        )
+        print(
+            "shadow backfill passed: "
+            f"workflow={result.workflow} run_id={result.run_id} "
+            f"projections={len(result.projections)}"
+        )
+        return 0
+    audit = audit_file_authority_shadow(
+        args.db,
+        args.artifact,
+        workflow=args.workflow,
+        run_id=args.run_id,
+        prepare_idempotency_key=args.prepare_idempotency_key,
+        repo_root_path=args.repo_root,
+    )
+    print(
+        "shadow audit "
+        f"{audit.status}: workflow={audit.workflow} run_id={audit.run_id} "
+        f"checked={audit.checked_count} issues={len(audit.issues)}"
+    )
+    for issue in audit.issues:
+        print(f"{issue.reason}: {issue.path}")
+    return 0 if audit.status == "pass" else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -5,6 +5,12 @@
       "name": "minimum_contract",
       "file": "0001_minimum_contract.sql",
       "sha256": "2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01"
+    },
+    {
+      "version": 2,
+      "name": "shadow_projection_identity",
+      "file": "0002_shadow_projection_identity.sql",
+      "sha256": "44cada46292f8f631e06621267321792428a6289ec15ebdf7be4146de237d36e"
     }
   ]
 }

@@ -23,6 +23,11 @@ from agentic_os.migrations import (
 from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS, SLO_QUERY_COUNT, slo_query_hash
 
 
+def _shadow_projection_id(run_id: str, path: str, digest: str) -> str:
+    payload = f"{run_id}\0{path}\0{digest}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class MigrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state_root = repository_root() / "state/agentic-os"
@@ -38,6 +43,33 @@ class MigrationTests(unittest.TestCase):
             self.state_root.parent.rmdir()
         except OSError:
             pass
+
+    def _apply_v1_migration_only(self, directory_name: str) -> None:
+        migration_dir = Path(self.temporary.name) / directory_name
+        migration_dir.mkdir()
+        shutil.copy(
+            repository_root() / "migrations/0001_minimum_contract.sql",
+            migration_dir / "0001_minimum_contract.sql",
+        )
+        v1_hash = hashlib.sha256(
+            (migration_dir / "0001_minimum_contract.sql").read_bytes()
+        ).hexdigest()
+        (migration_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "migrations": [
+                        {
+                            "version": 1,
+                            "name": "minimum_contract",
+                            "file": "0001_minimum_contract.sql",
+                            "sha256": v1_hash,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1,))
 
     def _insert_gate_bound_evidence(
         self,
@@ -137,30 +169,212 @@ class MigrationTests(unittest.TestCase):
         self.assertIs(DB_AUTHORITY_ENABLED, False)
 
     def test_complete_schema_and_idempotent_apply(self) -> None:
-        self.assertEqual(apply_migrations(self.database), (1,))
+        migrations = load_migrations(repository_root() / "migrations")
+        self.assertEqual(
+            apply_migrations(self.database), tuple(migration.version for migration in migrations)
+        )
         self.assertEqual(apply_migrations(self.database), ())
         with sqlite3.connect(self.database) as connection:
             tables = connection.execute(
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 27)
-            row = connection.execute(
-                "SELECT version,name,sha256 FROM schema_migrations"
-            ).fetchone()
-            self.assertEqual(row[0:2], (1, "minimum_contract"))
+            self.assertEqual(len(tables), 28)
+            rows = connection.execute(
+                "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
+            ).fetchall()
             self.assertEqual(
-                row[2],
-                hashlib.sha256(
-                    (repository_root() / "migrations/0001_minimum_contract.sql").read_bytes()
-                ).hexdigest(),
+                rows,
+                [
+                    (migration.version, migration.name, migration.sha256)
+                    for migration in migrations
+                ],
             )
             self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone(), ("ok",))
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
-                (SLO_QUERY_COUNT,),
+                (SLO_QUERY_COUNT * len(migrations),),
             )
+
+    def test_existing_version_1_database_upgrades_to_shadow_projection_identity(self) -> None:
+        migration_dir = Path(self.temporary.name) / "v1-migrations"
+        migration_dir.mkdir()
+        shutil.copy(
+            repository_root() / "migrations/0001_minimum_contract.sql",
+            migration_dir / "0001_minimum_contract.sql",
+        )
+        v1_hash = hashlib.sha256(
+            (migration_dir / "0001_minimum_contract.sql").read_bytes()
+        ).hexdigest()
+        (migration_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "migrations": [
+                        {
+                            "version": 1,
+                            "name": "minimum_contract",
+                            "file": "0001_minimum_contract.sql",
+                            "sha256": v1_hash,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1,))
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('shadow','file_authority_shadow','now')"
+            )
+            for run_id in ("run-a", "run-b"):
+                connection.execute(
+                    "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                    "authority_mode,state,risk_class,risk_dominance,created_at,"
+                    "updated_at,finalized_at,finalized_at_epoch_ms) VALUES(?,?,"
+                    "'shadow','file_authority_shadow','finalized','R1','R1',"
+                    "'now','now','now',1)",
+                    (run_id, f"prepare-{run_id}"),
+                )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-stale','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow',"
+                "'2026-01-01T00:00:00+00:00')",
+                ("b" * 64,),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-middle','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow',"
+                "'2026-01-01T12:00:00+00:00')",
+                ("c" * 64,),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-current','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow',"
+                "'2026-01-02T00:00:00+00:00')",
+                ("a" * 64,),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                    "source_authority,generated_at) VALUES('projection-b','run-b',"
+                    "'reports/summary.json',?,'file_authority_shadow','now')",
+                    ("a" * 64,),
+                )
+
+        self.assertEqual(apply_migrations(self.database), (2,))
+        retained_projection_id = _shadow_projection_id(
+            "run-a", "reports/summary.json", "a" * 64
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT projection_id,sha256 FROM artifact_projections "
+                    "WHERE run_id='run-a' AND path='reports/summary.json'"
+                ).fetchone(),
+                (retained_projection_id, "a" * 64),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT projection_id,sha256,retained_projection_id,archive_reason "
+                    "FROM artifact_projection_history WHERE run_id='run-a' "
+                    "ORDER BY projection_id"
+                ).fetchall(),
+                [
+                    (
+                        "projection-a-middle",
+                        "c" * 64,
+                        retained_projection_id,
+                        "v1_identity_collapse",
+                    ),
+                    (
+                        "projection-a-stale",
+                        "b" * 64,
+                        retained_projection_id,
+                        "v1_identity_collapse",
+                    ),
+                ],
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-b','run-b',"
+                "'reports/summary.json',?,'file_authority_shadow','now')",
+                ("a" * 64,),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE path='reports/summary.json' AND sha256=?",
+                    ("a" * 64,),
+                ).fetchone(),
+                (2,),
+            )
+
+    def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
+        self._apply_v1_migration_only("v1-migrations")
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('shadow','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                "'run-a','prepare-run-a','shadow','file_authority_shadow',"
+                "'finalized','R1','R1','now','now','now',1)"
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-old','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow','9')",
+                ("a" * 64,),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('projection-a-new','run-a',"
+                "'reports/summary.json',?,'file_authority_shadow','10')",
+                ("b" * 64,),
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
+    def test_v1_projection_identity_upgrade_rejects_duplicate_timestamp(self) -> None:
+        self._apply_v1_migration_only("v1-duplicate-timestamp")
+
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('shadow','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                "'run-a','prepare-run-a','shadow','file_authority_shadow',"
+                "'finalized','R1','R1','now','now','now',1)"
+            )
+            for projection_id, digest in (
+                ("projection-a-old", "a" * 64),
+                ("projection-a-new", "b" * 64),
+            ):
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                    "source_authority,generated_at) VALUES(?,?,"
+                    "'reports/summary.json',?,'file_authority_shadow',"
+                    "'2026-01-01T00:00:00+00:00')",
+                    (projection_id, "run-a", digest),
+                )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
 
     def test_connect_fails_closed_when_wal_is_unavailable(self) -> None:
         connection = mock.Mock()
@@ -183,13 +397,22 @@ class MigrationTests(unittest.TestCase):
 
     def test_packaged_migration_assets_match_repository_assets(self) -> None:
         asset_root = resources.files("agentic_os.migration_assets")
-        for filename in ("manifest.json", "0001_minimum_contract.sql"):
+        manifest = json.loads(
+            (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
+        )
+        for filename in ("manifest.json", *(row["file"] for row in manifest["migrations"])):
             with self.subTest(filename=filename):
                 self.assertEqual(
                     (asset_root / filename).read_bytes(),
                     (repository_root() / "migrations" / filename).read_bytes(),
                 )
-        self.assertEqual(load_migrations()[0].sha256, load_migrations(repository_root() / "migrations")[0].sha256)
+        self.assertEqual(
+            [migration.sha256 for migration in load_migrations()],
+            [
+                migration.sha256
+                for migration in load_migrations(repository_root() / "migrations")
+            ],
+        )
 
     def test_default_migration_loader_uses_package_resources(self) -> None:
         asset_root = resources.files("agentic_os.migration_assets")
@@ -197,12 +420,17 @@ class MigrationTests(unittest.TestCase):
             "agentic_os.migrations.repository_root",
             side_effect=AssertionError("source-tree migrations must not be required"),
         ):
-            migration = load_migrations()[0]
-        self.assertEqual(migration.name, "minimum_contract")
+            migrations = load_migrations()
         self.assertEqual(
-            migration.sha256,
-            hashlib.sha256((asset_root / "0001_minimum_contract.sql").read_bytes()).hexdigest(),
+            [migration.name for migration in migrations],
+            ["minimum_contract", "shadow_projection_identity"],
         )
+        for migration in migrations:
+            with self.subTest(migration=migration.name):
+                self.assertEqual(
+                    migration.sha256,
+                    hashlib.sha256((asset_root / migration.path.name).read_bytes()).hexdigest(),
+                )
 
     def test_verify_is_read_only_and_creates_no_sidecars(self) -> None:
         apply_migrations(self.database)
@@ -217,7 +445,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1,))
+        self.assertEqual(verify_database(verify_target), (1, 2))
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -3228,17 +3456,22 @@ class MigrationTests(unittest.TestCase):
             for contract in SLO_QUERY_CONTRACTS
             if contract.query_name == "SLO query fixture status"
         )
-        migration_hash = json.loads(
+        manifest = json.loads(
             (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
-        )["migrations"][0]["sha256"]
+        )
+        current_migration = manifest["migrations"][-1]
+        schema_version = current_migration["version"]
+        migration_hash = current_migration["sha256"]
         rows = connection.execute(
             "SELECT query_name,schema_version,migration_sha256,query_hash,sql_text,"
-            "empty_db_expected_status,fixture_db_expected_status FROM slo_queries"
+            "empty_db_expected_status,fixture_db_expected_status FROM slo_queries "
+            "WHERE schema_version=? AND migration_sha256=?",
+            (schema_version, migration_hash),
         ).fetchall()
         actual = {row[0]: row[1:] for row in rows}
         expected = {
             contract.query_name: (
-                1,
+                schema_version,
                 migration_hash,
                 slo_query_hash(contract.sql_text),
                 contract.sql_text,
@@ -3249,6 +3482,10 @@ class MigrationTests(unittest.TestCase):
         }
         self.assertEqual(len(actual), SLO_QUERY_COUNT)
         self.assertEqual(actual, expected)
+        self.assertEqual(
+            connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
+            (SLO_QUERY_COUNT * len(manifest["migrations"]),),
+        )
         initial_blockers = {row[0] for row in connection.execute(status_query).fetchall()}
         self.assertEqual(
             initial_blockers,
@@ -3266,16 +3503,16 @@ class MigrationTests(unittest.TestCase):
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
                 "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
-                "'a',?,1,?,?,0,'pass','pass','pass',?,'now',1000)",
-                (contract.query_name, migration_hash, "d" * 64, "e" * 64),
+                "'a',?,?,?,?,0,'pass','pass','pass',?,'now',1000)",
+                (contract.query_name, schema_version, migration_hash, "d" * 64, "e" * 64),
             )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
                 "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
-                "'a-nonzero',?,1,?,?,1,'pass','pass','pass',?,'now',1000)",
-                (contract.query_name, migration_hash, query_hash, "e" * 64),
+                "'a-nonzero',?,?,?,?,1,'pass','pass','pass',?,'now',1000)",
+                (contract.query_name, schema_version, migration_hash, query_hash, "e" * 64),
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
             connection.execute(
@@ -3283,10 +3520,11 @@ class MigrationTests(unittest.TestCase):
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
                 "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
                 "gate_run_id,run_at,run_at_epoch_ms) VALUES("
-                "'a-synthetic-pass',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+                "'a-synthetic-pass',?,?,?,?,0,'pass','pass','pass',?,?,?,?,"
                 "'now',1000)",
                 (
                     contract.query_name,
+                    schema_version,
                     migration_hash,
                     query_hash,
                     "synthetic-evidence",
@@ -3306,10 +3544,11 @@ class MigrationTests(unittest.TestCase):
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
                 "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
                 "gate_run_id,run_at,run_at_epoch_ms) VALUES("
-                "'a-wrong-evidence-binding',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+                "'a-wrong-evidence-binding',?,?,?,?,0,'pass','pass','pass',?,?,?,?,"
                 "'now',1000)",
                 (
                     contract.query_name,
+                    schema_version,
                     migration_hash,
                     query_hash,
                     "slo-evidence-stale",
@@ -3337,10 +3576,11 @@ class MigrationTests(unittest.TestCase):
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
                     "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
                     "gate_run_id,run_at,run_at_epoch_ms) VALUES("
-                    f"'a-non-pass-{decision}',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+                    f"'a-non-pass-{decision}',?,?,?,?,0,'pass','pass','pass',?,?,?,?,"
                     "'now',1000)",
                     (
                         contract.query_name,
+                        schema_version,
                         migration_hash,
                         query_hash,
                         f"slo-evidence-{decision}",
@@ -3354,10 +3594,11 @@ class MigrationTests(unittest.TestCase):
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
             "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
             "gate_run_id,run_at,run_at_epoch_ms) VALUES("
-            "'a-stale-pass',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+            "'a-stale-pass',?,?,?,?,0,'pass','pass','pass',?,?,?,?,"
             "'zzzz',1000)",
             (
                 contract.query_name,
+                schema_version,
                 migration_hash,
                 query_hash,
                 "slo-evidence-stale",
@@ -3370,8 +3611,8 @@ class MigrationTests(unittest.TestCase):
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
             "fixture_db_status,evidence_hash,run_at,run_at_epoch_ms) VALUES("
-            "'a-fresh-fail',?,1,?,?,1,'fail','pass','pass',NULL,'aaaa',2000)",
-            (contract.query_name, migration_hash, query_hash),
+            "'a-fresh-fail',?,?,?,?,1,'fail','pass','pass',NULL,'aaaa',2000)",
+            (contract.query_name, schema_version, migration_hash, query_hash),
         )
         self.assertIn(
             (contract.query_name,),
@@ -3387,10 +3628,11 @@ class MigrationTests(unittest.TestCase):
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
             "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
             "gate_run_id,run_at,run_at_epoch_ms) VALUES("
-            "'a-valid',?,1,?,?,0,'pass','pass','pass',?,?,?,?,"
+            "'a-valid',?,?,?,?,0,'pass','pass','pass',?,?,?,?,"
             "'now',3000)",
             (
                 contract.query_name,
+                schema_version,
                 migration_hash,
                 query_hash,
                 "slo-evidence-valid",
@@ -3458,11 +3700,11 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(connection.close)
         connection.execute("PRAGMA foreign_keys=ON")
         contract = SLO_QUERY_CONTRACTS[0]
-        migration_sha = "2" * 64
+        migration_sha = "3" * 64
         query_hash = "3" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(2,'future_contract',?,'now')",
+            "VALUES(3,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -3471,7 +3713,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                2,
+                3,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -3485,7 +3727,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (2,),
+            (3,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -3675,20 +3917,28 @@ class MigrationTests(unittest.TestCase):
             ),
         )
 
-    def test_manifest_is_machine_readable_and_has_one_pinned_migration(self) -> None:
+    def test_manifest_is_machine_readable_and_has_pinned_migrations(self) -> None:
         manifest = json.loads(
             (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(len(manifest["migrations"]), 1)
-        self.assertEqual(manifest["migrations"][0]["version"], 1)
+        self.assertEqual(
+            [(row["version"], row["name"]) for row in manifest["migrations"]],
+            [(1, "minimum_contract"), (2, "shadow_projection_identity")],
+        )
 
     def test_readme_digests_match_current_design_and_migration(self) -> None:
         readme = (repository_root() / "README.md").read_text(encoding="utf-8")
         design_digest = hashlib.sha256(
             (repository_root() / "docs/agentic-os-production-adaptation.md").read_bytes()
         ).hexdigest()
-        migration_digest = hashlib.sha256(
+        manifest_digest = hashlib.sha256(
+            (repository_root() / "migrations/manifest.json").read_bytes()
+        ).hexdigest()
+        base_migration_digest = hashlib.sha256(
             (repository_root() / "migrations/0001_minimum_contract.sql").read_bytes()
+        ).hexdigest()
+        latest_migration_digest = hashlib.sha256(
+            (repository_root() / "migrations/0002_shadow_projection_identity.sql").read_bytes()
         ).hexdigest()
         self.assertIn("has **not** yet passed fresh independent", readme)
         self.assertIn("revalidation", readme)
@@ -3698,18 +3948,34 @@ class MigrationTests(unittest.TestCase):
             readme,
         )
         self.assertIn(f"Current design artifact SHA-256: `{design_digest}`", readme)
-        self.assertIn(f"Current DDL/migration SHA-256: `{migration_digest}`", readme)
+        self.assertIn(f"Base DDL migration SHA-256: `{base_migration_digest}`", readme)
+        self.assertIn(
+            f"Current latest migration SHA-256: `{latest_migration_digest}`", readme
+        )
+        self.assertIn(f"Current migration manifest SHA-256: `{manifest_digest}`", readme)
 
-    def test_migration_is_exact_accepted_ddl_block(self) -> None:
+    def test_design_contract_primary_ddl_is_current_projection_schema(self) -> None:
         design = (repository_root() / "docs/agentic-os-production-adaptation.md").read_text(
             encoding="utf-8"
         )
         contract = design.split("## Minimum Database Contracts", 1)[1]
         ddl = contract.split("```sql\n", 1)[1].split("\n```", 1)[0] + "\n"
-        migration = (repository_root() / "migrations/0001_minimum_contract.sql").read_text(
+        with sqlite3.connect(":memory:") as connection:
+            connection.executescript(ddl)
+        projection_contract = ddl.split("CREATE TABLE artifact_projections (", 1)[1].split(
+            "CREATE TABLE evidence_hashes", 1
+        )[0]
+        self.assertIn("UNIQUE(run_id, path, source_authority)", projection_contract)
+        self.assertIn("CREATE TABLE artifact_projection_history", projection_contract)
+        self.assertNotIn("UNIQUE(path, sha256)", projection_contract)
+
+    def test_design_contract_includes_shadow_projection_v2_overlay(self) -> None:
+        design = (repository_root() / "docs/agentic-os-production-adaptation.md").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(migration, ddl)
+        overlay = design.split("Current migration v2 shadow projection identity:", 1)[1]
+        self.assertIn("CREATE TABLE artifact_projection_history", overlay)
+        self.assertIn("UNIQUE(run_id, path, source_authority)", overlay)
 
     def test_schema_migration_version_preserves_numeric_type(self) -> None:
         apply_migrations(self.database)

@@ -181,7 +181,10 @@ Fail-closed rule:
 
 ## Minimum Database Contracts
 
-The following DDL is the minimum contract before SLO SQL or gates can be authoritative. Later migrations may add indexes and constraints, but these fields are not optional.
+The following DDL is the current minimum contract after applying the migration
+manifest through version 2. SLO SQL or gates cannot be authoritative until this
+post-migration schema exists. Later migrations may add indexes and constraints,
+but these fields are not optional.
 
 Safe numeric bounds are part of the schema contract. They intentionally fit well below SQLite signed 64-bit integer overflow even when a run reaches the maximum event count: `MAX_BUDGET_EVENTS_PER_RUN=1000000`, `MAX_RUN_TIME_SECONDS=31536000`, `MAX_RUN_TIME_MS=31536000000`, `MAX_RUN_INPUT_TOKENS=1000000000`, `MAX_RUN_OUTPUT_TOKENS=1000000000`, `MAX_RUN_COST_MICROUSD=100000000000`, `MAX_RUN_RETRY_UNITS=1000000`, `MAX_RUN_HUMAN_ATTENTION_UNITS=1000000`, `MAX_PRICE_MICROUSD_PER_MILLION=100000000000`, and `MAX_EPOCH_MS=253402300799999`.
 
@@ -2856,7 +2859,20 @@ CREATE TABLE artifact_projections (
   source_authority TEXT NOT NULL,
   generated_from_transition_id TEXT REFERENCES transitions(transition_id),
   generated_at TEXT NOT NULL,
-  UNIQUE(path, sha256)
+  UNIQUE(run_id, path, source_authority)
+) STRICT;
+
+CREATE TABLE artifact_projection_history (
+  projection_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
+  generated_from_transition_id TEXT REFERENCES transitions(transition_id),
+  generated_at TEXT NOT NULL,
+  retained_projection_id TEXT NOT NULL,
+  archived_at TEXT NOT NULL,
+  archive_reason TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE evidence_hashes (
@@ -3065,6 +3081,38 @@ WHEN EXISTS (
 BEGIN
   SELECT RAISE(ABORT,'pass-audited SLO query is immutable');
 END;
+```
+
+Current migration v2 shadow projection identity:
+
+`0002_shadow_projection_identity.sql` upgrades version-1 databases to the
+current contract shown in the main DDL block. The accepted post-migration
+projection identity is:
+
+```sql
+CREATE TABLE artifact_projections (
+  projection_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
+  generated_from_transition_id TEXT REFERENCES transitions(transition_id),
+  generated_at TEXT NOT NULL,
+  UNIQUE(run_id, path, source_authority)
+) STRICT;
+
+CREATE TABLE artifact_projection_history (
+  projection_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  source_authority TEXT NOT NULL,
+  generated_from_transition_id TEXT REFERENCES transitions(transition_id),
+  generated_at TEXT NOT NULL,
+  retained_projection_id TEXT NOT NULL,
+  archived_at TEXT NOT NULL,
+  archive_reason TEXT NOT NULL
+) STRICT;
 ```
 
 Gate-critical time authority:
@@ -3321,6 +3369,16 @@ Phase 1 - read-only shadow backfill:
 
 - Authority: files.
 - Create the `STRICT`/`ANY` type-preserving schema only after privacy preflight.
+- Apply a compatibility migration that changes `artifact_projections`
+  identity from content-level uniqueness to `UNIQUE(run_id, path,
+  source_authority)`, preserving version-1 databases instead of repinning
+  version 1.
+- Treat the post-v2 `artifact_projections` and
+  `artifact_projection_history` DDL in `Minimum Database Contracts` as the
+  accepted schema contract; v1 duplicate run/path/source rows are collapsed only
+  with canonical timestamp evidence, archived with retained deterministic
+  projection IDs, or rejected fail-closed when the timestamp ordering is
+  ambiguous.
 - Backfill current artifacts into rows marked `file_authority_shadow`.
 - No dispatch adapter reads from DB for decisions.
 - Parity audit compares semantic fields and content hashes.
