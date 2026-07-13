@@ -2205,6 +2205,14 @@ CREATE TABLE judge_verifier_runs (
   CHECK (independence_class='independent'),
   CHECK (worker_agent_id <> verifier_agent_id AND same_worker_context=0),
   CHECK (prompt_hash <> context_hash),
+  CHECK (
+    independence_proof_json <> ''
+    AND CASE
+      WHEN json_valid(independence_proof_json)=1
+      THEN json_type(independence_proof_json)='object'
+      ELSE 0
+    END
+  ),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -2293,6 +2301,44 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'gate risk dominance must match transition risk dominance');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_update
+BEFORE UPDATE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_delete
+BEFORE DELETE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_update
+BEFORE UPDATE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_delete
+BEFORE DELETE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
 END;
 
 CREATE TRIGGER gate_clock_context_validate_gate_insert

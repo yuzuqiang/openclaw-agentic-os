@@ -24,7 +24,7 @@ Non-goals:
 ## Delivery Change Log
 
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
-  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive.
+  - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive; pass gates and their referenced transitions are immutable; verifier independence proof evidence must be valid JSON; R2+ completion gates must bind to the finalizing transition.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
 - 2026-07-12: Applied Round 11 single-writer correction after Round 10 independent review found unresolved High gaps:
   - Frozen Round 10 input SHA-256 before this correction: `a6b93a7bc1357cf037833b75ffc09938ca1d1d4b0ababab129ea5595a666ffdc`.
@@ -2397,6 +2397,14 @@ CREATE TABLE judge_verifier_runs (
   CHECK (independence_class='independent'),
   CHECK (worker_agent_id <> verifier_agent_id AND same_worker_context=0),
   CHECK (prompt_hash <> context_hash),
+  CHECK (
+    independence_proof_json <> ''
+    AND CASE
+      WHEN json_valid(independence_proof_json)=1
+      THEN json_type(independence_proof_json)='object'
+      ELSE 0
+    END
+  ),
   UNIQUE(verifier_run_id,worker_run_id,evidence_hash)
 ) STRICT;
 
@@ -2485,6 +2493,44 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'gate risk dominance must match transition risk dominance');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_update
+BEFORE UPDATE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER gate_runs_freeze_pass_delete
+BEFORE DELETE ON gate_runs
+WHEN OLD.decision='pass'
+BEGIN
+  SELECT RAISE(ABORT,'pass gate is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_update
+BEFORE UPDATE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
+END;
+
+CREATE TRIGGER transitions_freeze_pass_gate_delete
+BEFORE DELETE ON transitions
+WHEN EXISTS (
+  SELECT 1 FROM gate_runs g
+  WHERE g.decision='pass'
+    AND g.run_id=OLD.run_id
+    AND g.transition_id=OLD.transition_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-gated transition is immutable');
 END;
 
 CREATE TRIGGER gate_clock_context_validate_gate_insert
@@ -3108,7 +3154,7 @@ Example SLO query contracts:
 | Budget prefix over-release or over-restore | `WITH ordered AS (SELECT budget_event_id, run_id, event_sequence, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type='release' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_human FROM budget_events) SELECT budget_event_id FROM ordered WHERE net_time<0 OR net_input<0 OR net_output<0 OR net_cost<0 OR net_reserved_retry<0 OR net_retry_consumed<0 OR net_human<0;` |
 | Duplicate or replayed budget events | `SELECT event_dedupe_hash FROM budget_events GROUP BY event_dedupe_hash HAVING COUNT(*)>1;` |
 | Budget event count bounded for SUM safety | `SELECT run_id FROM budget_events GROUP BY run_id HAVING COUNT(*)>1000000 OR MIN(event_sequence)<1 OR MAX(event_sequence)>1000000;` |
-| Completion gate before done for R2+ | `SELECT r.run_id FROM runs r LEFT JOIN gate_runs g ON g.run_id=r.run_id AND g.decision='pass' WHERE r.risk_dominance IN ('R2','R3','R4') AND r.state='finalized' AND (r.finalized_at IS NULL OR r.finalized_at='' OR r.finalized_at_epoch_ms IS NULL OR typeof(r.finalized_at_epoch_ms)<>'integer' OR r.finalized_at_epoch_ms<1 OR r.finalized_at_epoch_ms>253402300799999 OR g.gate_run_id IS NULL OR g.completed_at_epoch_ms IS NULL OR typeof(g.completed_at_epoch_ms)<>'integer' OR g.completed_at_epoch_ms<1 OR g.completed_at_epoch_ms>253402300799999 OR g.completed_at_epoch_ms > r.finalized_at_epoch_ms);` |
+| Completion gate before done for R2+ | `SELECT r.run_id FROM runs r WHERE r.risk_dominance IN ('R2','R3','R4') AND r.state='finalized' AND (r.finalized_at IS NULL OR r.finalized_at='' OR r.finalized_at_epoch_ms IS NULL OR typeof(r.finalized_at_epoch_ms)<>'integer' OR r.finalized_at_epoch_ms<1 OR r.finalized_at_epoch_ms>253402300799999 OR NOT EXISTS (SELECT 1 FROM transitions t JOIN gate_runs g ON g.run_id=t.run_id AND g.transition_id=t.transition_id AND g.decision='pass' WHERE t.run_id=r.run_id AND t.state_after='finalized' AND g.completed_at_epoch_ms IS NOT NULL AND typeof(g.completed_at_epoch_ms)='integer' AND g.completed_at_epoch_ms BETWEEN 1 AND 253402300799999 AND g.completed_at_epoch_ms <= r.finalized_at_epoch_ms));` |
 | Passing gate without verifier row | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (g.verifier_run_id IS NULL OR v.verifier_run_id IS NULL);` |
 | Passing gate wrong-run or non-independent verifier | `SELECT g.gate_run_id FROM gate_runs g JOIN judge_verifier_runs v ON v.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND (v.worker_run_id<>g.run_id OR v.same_worker_context=1 OR v.verifier_agent_id=v.worker_agent_id OR v.prompt_hash=v.context_hash OR v.independence_class IN ('self','same_worker','same_context','correlated','unknown'));` |
 | Gate evidence bound to same run | `SELECT g.gate_run_id FROM gate_runs g LEFT JOIN evidence_hashes e ON e.gate_run_id=g.gate_run_id AND e.evidence_hash=g.evidence_hash AND e.run_id=g.run_id AND e.verifier_run_id=g.verifier_run_id WHERE g.decision='pass' AND g.requires_same_run=1 AND (e.evidence_hash IS NULL OR e.producer_run_id IS NULL OR e.producer_run_id<>g.run_id OR e.verifier_run_id IS NULL OR e.verifier_run_id<>g.verifier_run_id);` |

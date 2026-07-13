@@ -780,6 +780,12 @@ class MigrationTests(unittest.TestCase):
             "captured_at) VALUES('evidence','run','evidence.json','sha',1,"
             "'application/json','none','run','verifier','gate','now')"
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "pass-gated transition"):
+            connection.execute(
+                "UPDATE transitions SET approval_required=0,approval_id=NULL,"
+                "approval_channel=NULL,approval_source_digest=NULL,"
+                "approval_text_digest=NULL WHERE transition_id='transition'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "exact approval binding"):
             connection.execute("UPDATE approvals SET single_use=0 WHERE approval_id='approval'")
 
@@ -1917,6 +1923,47 @@ class MigrationTests(unittest.TestCase):
                 "1000,'v1','query','migration','R2','now')"
             )
 
+    def test_verifier_independence_proof_must_be_valid_json_object(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,state,"
+            "risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'run','prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        for suffix, proof in (("empty", ""), ("invalid", "not-json"), ("array", "[]")):
+            with self.subTest(proof=suffix), self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+                    "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,"
+                    "context_hash,evidence_hash,independence_class,"
+                    "independence_proof_json,completed_at) VALUES(?,?,?,?,"
+                    "'provider','model',?,?,?,'independent',?,'now')",
+                    (
+                        f"verifier-{suffix}",
+                        "run",
+                        "worker",
+                        "verifier",
+                        f"prompt-{suffix}",
+                        f"context-{suffix}",
+                        f"evidence-{suffix}",
+                        proof,
+                    ),
+                )
+        connection.execute(
+            "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+            "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,"
+            "context_hash,evidence_hash,independence_class,independence_proof_json,"
+            "completed_at) VALUES('verifier-valid','run','worker','verifier',"
+            "'provider','model','prompt','context','evidence','independent',"
+            "'{}','now')"
+        )
+
     def test_pass_gate_requires_gate_bound_evidence_row(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -2015,10 +2062,23 @@ class MigrationTests(unittest.TestCase):
             "VALUES('clock','gate','gate','run','transition','nonce',1000,1000,"
             "'clock','source',1000)"
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "clock context"):
-            connection.execute(
-                "UPDATE gate_runs SET completed_at_epoch_ms=1001 WHERE gate_run_id='gate'"
-            )
+        for statement in (
+            "UPDATE gate_runs SET completed_at_epoch_ms=1001 WHERE gate_run_id='gate'",
+            "UPDATE gate_runs SET decision='fail' WHERE gate_run_id='gate'",
+            "DELETE FROM gate_runs WHERE gate_run_id='gate'",
+        ):
+            with self.subTest(statement=statement), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "pass gate is immutable"
+            ):
+                connection.execute(statement)
+        for statement in (
+            "UPDATE transitions SET action_type='rewrite' WHERE transition_id='transition'",
+            "DELETE FROM transitions WHERE transition_id='transition'",
+        ):
+            with self.subTest(statement=statement), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "pass-gated transition is immutable"
+            ):
+                connection.execute(statement)
         for assignment in (
             "gate_nonce='nonce-rewritten'",
             "trusted_clock_source_hash='source-rewritten'",
@@ -2966,6 +3026,71 @@ class MigrationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(f"| Completion gate before done for R2+ | `{query}` |", design)
 
+    def test_completion_gate_slo_requires_pass_gate_on_finalizing_transition(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,finalized_at,finalized_at_epoch_ms,"
+            "created_at,updated_at) VALUES('finalized-r2','prepare','w',"
+            "'file_authority','finalized','R2','R2','done',1000,'now','now')"
+        )
+        for transition_id, state_after, gate_id, completed_at_epoch_ms in (
+            ("old-transition", "gate_passed", "old-gate", 900),
+            ("final-transition", "finalized", None, None),
+        ):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,?,?,"
+                "'gate','check','R2',?,0,'now')",
+                (
+                    transition_id,
+                    "finalized-r2",
+                    "candidate",
+                    state_after,
+                    f"idem-{transition_id}",
+                ),
+            )
+            if gate_id is not None:
+                connection.execute(
+                    "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,"
+                    "clock_context_id,verifier_run_id,decision,completed_at,"
+                    "completed_at_epoch_ms,gate_version,gate_query_hash,"
+                    "migration_sha256,evidence_hash,risk_dominance,created_at) "
+                    "VALUES(?,?,?,?,?,'pass','now',?,'v1','query','migration',"
+                    "?,'R2','now')",
+                    (
+                        gate_id,
+                        "finalized-r2",
+                        transition_id,
+                        f"clock-{gate_id}",
+                        f"verifier-{gate_id}",
+                        completed_at_epoch_ms,
+                        f"evidence-{gate_id}",
+                    ),
+                )
+        query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Completion gate before done for R2+"
+        )
+        self.assertEqual(connection.execute(query).fetchall(), [("finalized-r2",)])
+        connection.execute(
+            "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,clock_context_id,"
+            "verifier_run_id,decision,completed_at,completed_at_epoch_ms,gate_version,"
+            "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,created_at) "
+            "VALUES('final-gate','finalized-r2','final-transition','clock-final',"
+            "'verifier-final','pass','now',999,'v1','query','migration',"
+            "'evidence-final','R2','now')"
+        )
+        self.assertEqual(connection.execute(query).fetchall(), [])
+
     def test_readme_migration_example_uses_private_test_database(self) -> None:
         readme = (repository_root() / "README.md").read_text(encoding="utf-8")
         self.assertIn("agentic_os.cli migrate --test-db", readme)
@@ -3170,11 +3295,12 @@ class MigrationTests(unittest.TestCase):
             (contract.query_name,),
             connection.execute(status_query).fetchall(),
         )
-        connection.execute(
-            "UPDATE gate_runs SET decision='fail' WHERE gate_run_id=?",
-            (valid_gate_id,),
-        )
-        self.assertIn(
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "pass gate is immutable"):
+            connection.execute(
+                "UPDATE gate_runs SET decision='fail' WHERE gate_run_id=?",
+                (valid_gate_id,),
+            )
+        self.assertNotIn(
             (contract.query_name,),
             connection.execute(status_query).fetchall(),
         )
