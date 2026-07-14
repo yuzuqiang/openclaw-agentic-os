@@ -91,6 +91,36 @@ BEGIN
   SELECT RAISE(ABORT,'referenced sessions_spawn reserve budget selection is immutable; counters require ledger-backed updates');
 END;
 
+CREATE TRIGGER budget_events_reject_release_after_spawn_intent_insert
+BEFORE INSERT ON budget_events
+WHEN NEW.event_type='release'
+AND EXISTS (
+  SELECT 1
+  FROM external_rpc_intents i
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.run_id=NEW.run_id
+    AND i.transition_id=NEW.transition_id
+    AND i.spawn_request_id=NEW.spawn_request_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'release cannot drain referenced sessions_spawn reserve');
+END;
+
+CREATE TRIGGER budget_events_reject_release_after_spawn_intent_update
+BEFORE UPDATE OF event_type, run_id, transition_id, spawn_request_id ON budget_events
+WHEN NEW.event_type='release'
+AND EXISTS (
+  SELECT 1
+  FROM external_rpc_intents i
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.run_id=NEW.run_id
+    AND i.transition_id=NEW.transition_id
+    AND i.spawn_request_id=NEW.spawn_request_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'release cannot drain referenced sessions_spawn reserve');
+END;
+
 CREATE INDEX budget_events_spawn_sequence_idx
 ON budget_events(run_id,transition_id,spawn_request_id,event_sequence);
 

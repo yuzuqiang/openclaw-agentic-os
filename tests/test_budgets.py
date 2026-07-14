@@ -204,7 +204,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "'intent','run','transition','sessions_spawn','spawn',?,'client',"
                 "'spawn-idem','phase','agent','task','v1',? ,?,'run','transition',"
                 "'client','spawn-idem','phase','agent','task','accepted','session-key',"
-                "'now',1800000000124,'now',1800000000124)",
+                "'now',1800000000124,'now',1800000000125)",
                 (reserve_event_id, external_metadata, external_metadata),
             )
             connection.execute(
@@ -227,7 +227,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "completed_at_epoch_ms,gate_version,gate_query_hash,"
                 "migration_sha256,evidence_hash,risk_dominance,created_at) "
                 "VALUES('post-gate','run','transition','post-clock','post-verifier',"
-                "'pass','now',1800000000125,'v1','post-gate-query',"
+                "'pass','now',1800000000126,'v1','post-gate-query',"
                 "'migration-sha','budget-runtime-post-evidence','R1','now')"
             )
             connection.execute(
@@ -235,8 +235,8 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,"
                 "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
                 "consumed_at_epoch_ms) VALUES('post-clock','post-gate','post-gate',"
-                "'run','transition','post-nonce',1800000000125,1800000000125,"
-                "'budget-runtime','trusted-post-clock-hash',1800000000125)"
+                "'run','transition','post-nonce',1800000000126,1800000000126,"
+                "'budget-runtime','trusted-post-clock-hash',1800000000126)"
             )
             connection.execute(
                 "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
@@ -511,6 +511,35 @@ class BudgetRuntimeTests(unittest.TestCase):
                 **self._kwargs(
                     idempotency_key="post-rpc-reserve",
                     dedupe_key="post-rpc-reserve",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
+
+    def test_release_after_spawn_intent_fails_closed(self) -> None:
+        kwargs = self._kwargs(
+            idempotency_key="reserve-before-release-intent",
+            dedupe_key="reserve-before-release-intent",
+            amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+        )
+        reserve = reserve_budget(self.database, **kwargs)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES('intent','run',"
+                "'transition','sessions_spawn','spawn',?,'client',"
+                "'spawn-idem','phase','agent','task','{}','pending','now',"
+                "1800000000124)",
+                (reserve.budget_event_id,),
+            )
+        with self.assertRaisesRegex(BudgetError, "existing sessions_spawn intent"):
+            release_budget(
+                self.database,
+                **self._kwargs(
+                    idempotency_key="release-after-intent",
+                    dedupe_key="release-after-intent",
                     amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
                 ),
             )
@@ -1193,6 +1222,31 @@ class BudgetRuntimeTests(unittest.TestCase):
         kwargs["clock_context_id"] = "clock"
         with self.assertRaisesRegex(BudgetError, "fresh clock"):
             consume_budget(self.database, **kwargs)
+
+    def test_post_dispatch_budget_mutation_rejects_accepted_before_request(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-bad-accepted-clock",
+                dedupe_key="reserve-for-bad-accepted-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE external_rpc_intents SET accepted_at_epoch_ms=1800000000123 "
+                "WHERE intent_id='intent'"
+            )
+        with self.assertRaisesRegex(BudgetError, "sessions_spawn request"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="bad-accepted-clock-consume",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
 
     def test_consume_requires_completed_session_state(self) -> None:
         reserve = reserve_budget(

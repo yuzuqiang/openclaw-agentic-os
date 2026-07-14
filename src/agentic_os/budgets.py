@@ -670,7 +670,7 @@ def record_budget_event(
                 raise BudgetError(
                     f"{event_type} requires an owning run in pre-dispatch state"
                 )
-            if event_type == "reserve":
+            if event_type in {"reserve", "release"}:
                 prior_intent = connection.execute(
                     "SELECT intent_id FROM external_rpc_intents "
                     "WHERE rpc_kind='sessions_spawn' AND run_id=? "
@@ -679,8 +679,8 @@ def record_budget_event(
                 ).fetchone()
                 if prior_intent is not None:
                     raise BudgetError(
-                        "reserve requires no existing sessions_spawn intent for "
-                        "the spawn request"
+                        f"{event_type} requires no existing sessions_spawn intent "
+                        "for the spawn request"
                     )
             if event_type == "release":
                 outstanding = _spawn_outstanding(
@@ -941,7 +941,8 @@ def record_post_dispatch_event(
                     "requested budget selection differs from persisted selected cost row"
                 )
             proof = connection.execute(
-                "SELECT sr.state,r.state,i.accepted_at_epoch_ms FROM spawn_requests sr "
+                "SELECT sr.state,r.state,i.accepted_at_epoch_ms,"
+                "i.requested_at_epoch_ms FROM spawn_requests sr "
                 "JOIN runs r ON r.run_id=sr.run_id "
                 "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
                 "AND i.state IN ('accepted','reconciled') "
@@ -975,12 +976,19 @@ def record_post_dispatch_event(
                 clock_context_id=clock_context_id,
             )
             accepted_at_epoch_ms = proof[2]
-            if type(accepted_at_epoch_ms) is not int or (
-                created_at_epoch_ms <= accepted_at_epoch_ms
+            requested_at_epoch_ms = proof[3]
+            if (
+                type(requested_at_epoch_ms) is not int
+                or requested_at_epoch_ms < 1
+                or requested_at_epoch_ms > _MAX_EPOCH_MS
+                or type(accepted_at_epoch_ms) is not int
+                or accepted_at_epoch_ms <= requested_at_epoch_ms
+                or created_at_epoch_ms <= accepted_at_epoch_ms
+                or created_at_epoch_ms <= requested_at_epoch_ms
             ):
                 raise BudgetError(
                     "post-dispatch budget event requires a fresh clock after "
-                    "accepted session proof"
+                    "the sessions_spawn request and accepted session proof"
                 )
             if event_type == "consume" and usage_confidence != "unknown":
                 if amounts.cost_microusd < _required_cost(selection, amounts):

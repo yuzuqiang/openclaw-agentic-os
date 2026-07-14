@@ -1969,6 +1969,18 @@ class MigrationTests(unittest.TestCase):
             "'accepted-session','now',1001)",
             (external_metadata,),
         )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release cannot drain"):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,input_tokens,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('release-after-intent',"
+                "'release-after-intent-idem','release-after-intent-dedupe',5,'r','t',"
+                "'spawn','provider','model','endpoint','capability','cost-row',"
+                "'effective','cost-hash','known','release',1,'known','test','now',1002)"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
             connection.execute("DELETE FROM run_budgets WHERE run_id='r'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
@@ -3643,7 +3655,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(connection.execute(prefix_query).fetchall(), [])
         self.assertEqual(connection.execute(proof_query).fetchall(), [("proof-consume",)])
 
-    def test_post_dispatch_budget_slo_requires_accepted_clock_evidence(self) -> None:
+    def test_post_dispatch_budget_slo_requires_accepted_request_order(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
@@ -3716,7 +3728,7 @@ class MigrationTests(unittest.TestCase):
             "'intent-clock','clock-run','transition-clock','sessions_spawn','spawn',"
             "'clock-reserve','client','spawn-idem','phase','agent','task','v1',?,?,'clock-run',"
             "'transition-clock','client','spawn-idem','phase','agent','task','accepted',"
-            "'session-key','now',900,'now',NULL)",
+            "'session-key','now',1000,'now',900)",
             (external_metadata, external_metadata),
         )
         connection.execute(
@@ -3742,7 +3754,7 @@ class MigrationTests(unittest.TestCase):
             "created_at_epoch_ms) VALUES('clock-consume','idem-clock-consume',"
             "'dedupe-clock-consume',2,'clock-run','transition-clock','spawn',"
             "'provider','model','endpoint','capability','cost-row','effective',"
-            "'cost-hash','known','consume',1,1,'known','test','now',1000)"
+            "'cost-hash','known','consume',1,1,'known','test','now',1100)"
         )
         connection.execute(
             "UPDATE run_budgets SET reserved_input_tokens=0,reserved_cost_microusd=0,"
@@ -3780,6 +3792,155 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(
             connection.execute(current_proof_query).fetchall(),
             [("clock-consume",)],
+        )
+
+    def test_post_dispatch_budget_slo_requires_selected_cost_row(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        for cost_id, effective_at, row_hash in (
+            ("cost-row", "effective", "cost-hash"),
+            ("cost-alt", "effective-alt", "cost-alt-hash"),
+        ):
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+                "VALUES(?,'provider','model','endpoint','capability',1,1,'known',?,?)",
+                (cost_id, effective_at, row_hash),
+            )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'cost-run','prepare-cost','w','file_authority','child_completed','R1','R1',"
+            "'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition-cost','cost-run',"
+            "'before','after','budget','consume','R1','idem-cost',0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+            "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+            "created_at,updated_at) VALUES('spawn','cost-run','phase','agent',"
+            "'transition-cost','client','spawn-idem','task','pending','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,reserved_cost_microusd,usage_confidence,updated_at) "
+            "VALUES('cost-run','w','capability','provider','model','endpoint','cost-row',"
+            "'effective','cost-hash','known','transition-cost',10,10,10,10,1,1,1,1,"
+            "'known','now')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+            "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+            "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
+            "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+            "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('cost-reserve','idem-cost-reserve',"
+            "'dedupe-cost-reserve',1,'cost-run','transition-cost','spawn',"
+            "'provider','model','endpoint','capability','cost-row','effective',"
+            "'cost-hash','known','reserve',1,1,'known','test','now',800)"
+        )
+        external_metadata = (
+            '{"run_id":"cost-run","transition_id":"transition-cost",'
+            '"client_request_id":"client","idempotency_key":"spawn-idem",'
+            '"phase":"phase","agent_id":"agent","task_digest":"task"}'
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+            "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_client_request_id,external_idempotency_key,external_phase,"
+            "external_agent_id,external_task_digest,state,external_id,requested_at,"
+            "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+            "'intent-cost','cost-run','transition-cost','sessions_spawn','spawn',"
+            "'cost-reserve','client','spawn-idem','phase','agent','task','v1',?,?,'cost-run',"
+            "'transition-cost','client','spawn-idem','phase','agent','task','accepted',"
+            "'session-key','now',900,'now',1000)",
+            (external_metadata, external_metadata),
+        )
+        connection.execute(
+            "UPDATE spawn_requests SET session_key='session-key' "
+            "WHERE spawn_request_id='spawn'"
+        )
+        connection.execute(
+            "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+            "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+            "task_digest,state,spawned_at,completed_at) VALUES('session','spawn',"
+            "'cost-run','transition-cost','phase','agent','client','spawn-idem',"
+            "'session-key','task','completed','now','now')"
+        )
+        connection.execute(
+            "UPDATE spawn_requests SET state='completed' WHERE spawn_request_id='spawn'"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+            "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+            "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
+            "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+            "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+            "created_at_epoch_ms) VALUES('cost-consume','idem-cost-consume',"
+            "'dedupe-cost-consume',2,'cost-run','transition-cost','spawn',"
+            "'provider','model','endpoint','capability','cost-alt','effective-alt',"
+            "'cost-alt-hash','known','consume',1,1,'known','test','now',1100)"
+        )
+        connection.execute(
+            "UPDATE run_budgets SET reserved_input_tokens=0,reserved_cost_microusd=0,"
+            "consumed_input_tokens=1,consumed_cost_microusd=1 WHERE run_id='cost-run'"
+        )
+        endpoint_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Endpoint-bound budget event cost row blocks dispatch"
+        )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        prefix_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        current_proof_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if (
+                contract.query_name
+                == "Accepted `sessions_spawn` without exact accepted session identity"
+            )
+        )
+        v5_proof_query = next(
+            contract.sql_text
+            for contract in slo_query_contracts_for_schema_version(5)
+            if (
+                contract.query_name
+                == "Accepted `sessions_spawn` without exact accepted session identity"
+            )
+        )
+        self.assertEqual(connection.execute(endpoint_query).fetchall(), [])
+        self.assertEqual(connection.execute(ledger_query).fetchall(), [])
+        self.assertEqual(connection.execute(prefix_query).fetchall(), [])
+        self.assertEqual(connection.execute(v5_proof_query).fetchall(), [])
+        self.assertEqual(
+            connection.execute(current_proof_query).fetchall(),
+            [("cost-consume",)],
         )
 
     def test_consume_confidence_amount_slo_matches_runtime_pairing(self) -> None:

@@ -126,7 +126,7 @@ def _legacy_retry_reservation_contract(query_name: str) -> SloQueryContract:
 
 
 def _post_dispatch_session_proof_contract(
-    *, require_accepted_timing: bool = False
+    *, require_accepted_timing: bool = False, require_selected_cost: bool = False
 ) -> SloQueryContract:
     contract = _contract_by_name(
         'Accepted `sessions_spawn` without exact accepted session identity'
@@ -138,11 +138,33 @@ def _post_dispatch_session_proof_contract(
         "OR typeof(eri.accepted_at_epoch_ms)<>'integer' "
         "OR eri.accepted_at_epoch_ms<1 "
         "OR eri.accepted_at_epoch_ms>253402300799999 "
+        "OR typeof(eri.requested_at_epoch_ms)<>'integer' "
+        "OR eri.requested_at_epoch_ms<1 "
+        "OR eri.requested_at_epoch_ms>253402300799999 "
+        "OR eri.accepted_at_epoch_ms<=eri.requested_at_epoch_ms "
         "OR typeof(be.created_at_epoch_ms)<>'integer' "
         "OR be.created_at_epoch_ms<1 "
         "OR be.created_at_epoch_ms>253402300799999 "
         "OR be.created_at_epoch_ms<=eri.accepted_at_epoch_ms "
+        "OR be.created_at_epoch_ms<=eri.requested_at_epoch_ms "
         if require_accepted_timing
+        else ""
+    )
+    selected_cost_predicate = (
+        "OR rb.run_id IS NULL OR be.provider IS NOT rb.selected_provider "
+        "OR be.model IS NOT rb.selected_model "
+        "OR be.endpoint_binding_id IS NOT rb.selected_endpoint_binding_id "
+        "OR be.capability_class IS NOT rb.capability_class "
+        "OR be.cost_registry_id IS NOT rb.selected_cost_registry_id "
+        "OR be.cost_effective_at IS NOT rb.selected_cost_effective_at "
+        "OR be.cost_registry_hash IS NOT rb.selected_cost_registry_hash "
+        "OR be.cost_confidence IS NOT rb.selected_cost_confidence "
+        if require_selected_cost
+        else ""
+    )
+    selected_cost_join = (
+        "LEFT JOIN run_budgets rb ON rb.run_id=be.run_id "
+        if require_selected_cost
         else ""
     )
     post_dispatch_sql = (
@@ -164,12 +186,14 @@ def _post_dispatch_session_proof_contract(
         "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
         "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
         "AND s.session_key=eri.external_id "
+        f"{selected_cost_join}"
         "WHERE be.event_type IN ('consume','retry_decrement','retry_restore',"
         "'human_attention') AND (be.spawn_request_id IS NULL "
         "OR sr.spawn_request_id IS NULL OR sr.state NOT IN ('accepted','completed') "
         "OR sr.session_key IS NULL OR sr.session_key='' "
         "OR eri.intent_id IS NULL OR eri.external_id IS NULL OR eri.external_id='' "
         f"{timing_predicate}"
+        f"{selected_cost_predicate}"
         "OR s.session_id IS NULL OR (be.event_type='consume' "
         "AND (sr.state<>'completed' OR s.state<>'completed' "
         "OR s.completed_at IS NULL OR s.completed_at='')))"
@@ -261,7 +285,9 @@ _SLO_QUERY_CONTRACTS_V5 = _replace_contract(
 SLO_QUERY_CONTRACTS = _replace_contract(
     _replace_contract(
         _SLO_QUERY_CONTRACTS_V5,
-        _post_dispatch_session_proof_contract(require_accepted_timing=True),
+        _post_dispatch_session_proof_contract(
+            require_accepted_timing=True, require_selected_cost=True
+        ),
     ),
     _consume_confidence_amount_contract(),
 )

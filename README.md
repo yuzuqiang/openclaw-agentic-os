@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `d69b0d839e83bcd076b389af48b7d486bfb6b412fcbd4d60e0f12e0425f62625`
+- Current design artifact SHA-256: `86e2dd30ab9918c6d67cc588d6dfb5bf8452bdf121a745531279b270323607bb`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `34e18b105cbed15b599cb467b70de15e1276ec5167bfc641d99e4232747782fa`
-- Current migration manifest SHA-256: `7a76ded51fb44be9ee516b5c056ec3d36006d79f91152843d46d0408021614f7`
+- Current migration manifest SHA-256: `243a83799163ca6a05b81f5675aed72a13ed221fdd025c6f4f115aa7a45fd39c`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -58,8 +58,8 @@ the selected transition and endpoint-bound cost row, derives a conservative
 integer-microusd cost floor from that registry row, requires an exact
 same-run/same-transition spawn request, stamps events only from a persisted
 same-run/same-transition trusted gate/order clock context, requires the owning
-run to remain in pre-dispatch `candidate` state, refuses prior unknown usage or
-post-intent reserve writes, and re-runs every pinned blocking budget SLO plus
+run to remain in pre-dispatch `candidate` state, refuses prior unknown usage and
+post-intent reserve or release writes, and re-runs every pinned blocking budget SLO plus
 runtime ledger-contamination checks before commit. Those contamination checks
 include per-spawn reserve/release, retry, and pure `human_attention` bindings.
 Release checks outstanding amounts, including pure `human_attention`
@@ -74,15 +74,15 @@ decrement/restore, and pure
 `human_attention` only for an exact accepted session/spawn/intent tuple;
 `consume` additionally requires a completed session. These post-dispatch
 mutations require an active automatic dispatch state, a fresh trusted clock
-after the accepted session proof, and no prior unknown usage poison except for
+after both the spawn request and accepted session proof, and no prior unknown usage poison except for
 exact idempotent replay. Known and estimated usage move outstanding
 reservations into consumed counters, while unknown completed usage is persisted
 only as a zero-amount classification and marks the run budget unknown so later
 automatic budget work fails closed. Migration v5 versions the retry prefix SLO
 so every reserve/consume/release/retry/human-attention prefix window is scoped
 by run, transition, spawn request, and capability; migration v6 versions the
-post-dispatch SLO guards for accepted timing and consume confidence/amount
-pairing. Atomic final settlement of unused reservation, legacy-money
+post-dispatch SLO guards for request/accepted timing, selected cost-row binding,
+and consume confidence/amount pairing. Atomic final settlement of unused reservation, legacy-money
 import conversion, and the remaining adversarial fixture matrix remain open in
 Issue #4.
 
