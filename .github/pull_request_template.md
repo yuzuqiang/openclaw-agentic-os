@@ -24,8 +24,9 @@ Commands and results:
 ## Codex review gate
 
 - [ ] GitHub Codex review requested or automatic review observed
-- [ ] Codex review completed
-- [ ] All Codex P0/P1 findings resolved
-- [ ] River final audit completed
+- [ ] Codex review completed for the exact current head
+- [ ] All Codex P0/P1 findings resolved; P2 findings resolved or explicitly deferred with a linked follow-up
+- [ ] Required checks passed for the exact current head
 
-Do not merge until all four boxes are checked.
+Do not manually merge while the watcher is active. The watcher CAS-checks the
+reviewed head and required checks, then auto-merges; ambiguity fails closed.

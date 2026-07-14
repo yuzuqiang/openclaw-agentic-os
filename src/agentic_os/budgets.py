@@ -460,7 +460,7 @@ _EVENT_COMPARE_COLUMNS = (
     "cost_effective_at,cost_registry_hash,cost_confidence,zero_reserve_policy_id,"
     "zero_reserve_policy_hash,event_type,time_seconds,input_tokens,output_tokens,"
     "cost_microusd,human_attention_units,retry_units,usage_confidence,source,"
-    "created_at,created_at_epoch_ms"
+    "created_at,created_at_epoch_ms,clock_context_id"
 )
 
 
@@ -654,6 +654,7 @@ def record_budget_event(
                 source,
                 created_at,
                 created_at_epoch_ms,
+                None,
             )
             replay = _existing_event(
                 connection, idempotency_key=idempotency_key, expected=expected
@@ -720,8 +721,9 @@ def record_budget_event(
                 "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
                 "cost_confidence,zero_reserve_policy_id,zero_reserve_policy_hash,event_type,"
                 "time_seconds,input_tokens,output_tokens,cost_microusd,human_attention_units,"
-                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms,"
+                "clock_context_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     budget_event_id,
                     idempotency_key,
@@ -1024,6 +1026,7 @@ def record_post_dispatch_event(
                 source,
                 created_at,
                 created_at_epoch_ms,
+                clock_context_id,
             )
             replay = _existing_event(
                 connection, idempotency_key=idempotency_key, expected=expected
@@ -1100,8 +1103,9 @@ def record_post_dispatch_event(
                 "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
                 "cost_confidence,zero_reserve_policy_id,zero_reserve_policy_hash,event_type,"
                 "time_seconds,input_tokens,output_tokens,cost_microusd,human_attention_units,"
-                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms,"
+                "clock_context_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (budget_event_id, idempotency_key, event_dedupe_hash, sequence, *expected[2:]),
             )
             _update_post_dispatch_counters(

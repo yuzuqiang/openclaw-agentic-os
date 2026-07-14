@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `86e2dd30ab9918c6d67cc588d6dfb5bf8452bdf121a745531279b270323607bb`
+- Current design artifact SHA-256: `f44366f2304d62cabe768d4be2639bb65374065adb3461eb91f50f93b5b31697`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `34e18b105cbed15b599cb467b70de15e1276ec5167bfc641d99e4232747782fa`
-- Current migration manifest SHA-256: `243a83799163ca6a05b81f5675aed72a13ed221fdd025c6f4f115aa7a45fd39c`
+- Current latest migration SHA-256: `96a3a822d6adccab3f2bf423c7f8905d2e11b6f7d0b1d74064a0c4e205f7f50d`
+- Current migration manifest SHA-256: `d92170c5b94fa8ff8ad7c40bbe9842afc87349a292d3f25ac2d9c8308c072b90`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -82,7 +82,11 @@ automatic budget work fails closed. Migration v5 versions the retry prefix SLO
 so every reserve/consume/release/retry/human-attention prefix window is scoped
 by run, transition, spawn request, and capability; migration v6 versions the
 post-dispatch SLO guards for request/accepted timing, selected cost-row binding,
-and consume confidence/amount pairing. Atomic final settlement of unused reservation, legacy-money
+and consume confidence/amount pairing. Migration v7 records the trusted clock
+context on post-dispatch budget events, freezes accepted post-dispatch usage
+ledger rows against update/delete, and versions the current SLO proof so
+post-dispatch events must bind to the selected reserve transition and one-use
+trusted clock. Atomic final settlement of unused reservation, legacy-money
 import conversion, and the remaining adversarial fixture matrix remain open in
 Issue #4.
 

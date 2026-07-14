@@ -35,6 +35,12 @@
       "name": "budget_post_dispatch_slo_guards",
       "file": "0006_budget_post_dispatch_slo_guards.sql",
       "sha256": "34e18b105cbed15b599cb467b70de15e1276ec5167bfc641d99e4232747782fa"
+    },
+    {
+      "version": 7,
+      "name": "budget_post_dispatch_clock_identity",
+      "file": "0007_budget_post_dispatch_clock_identity.sql",
+      "sha256": "96a3a822d6adccab3f2bf423c7f8905d2e11b6f7d0b1d74064a0c4e205f7f50d"
     }
   ]
 }

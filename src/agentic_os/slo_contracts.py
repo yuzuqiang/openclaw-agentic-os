@@ -126,7 +126,11 @@ def _legacy_retry_reservation_contract(query_name: str) -> SloQueryContract:
 
 
 def _post_dispatch_session_proof_contract(
-    *, require_accepted_timing: bool = False, require_selected_cost: bool = False
+    *,
+    require_accepted_timing: bool = False,
+    require_selected_cost: bool = False,
+    require_selected_transition: bool = False,
+    require_trusted_clock: bool = False,
 ) -> SloQueryContract:
     contract = _contract_by_name(
         'Accepted `sessions_spawn` without exact accepted session identity'
@@ -150,6 +154,11 @@ def _post_dispatch_session_proof_contract(
         if require_accepted_timing
         else ""
     )
+    selected_transition_predicate = (
+        "OR be.transition_id IS NOT rb.selected_reserve_transition_id "
+        if require_selected_transition
+        else ""
+    )
     selected_cost_predicate = (
         "OR rb.run_id IS NULL OR be.provider IS NOT rb.selected_provider "
         "OR be.model IS NOT rb.selected_model "
@@ -159,12 +168,49 @@ def _post_dispatch_session_proof_contract(
         "OR be.cost_effective_at IS NOT rb.selected_cost_effective_at "
         "OR be.cost_registry_hash IS NOT rb.selected_cost_registry_hash "
         "OR be.cost_confidence IS NOT rb.selected_cost_confidence "
+        f"{selected_transition_predicate}"
         if require_selected_cost
         else ""
     )
     selected_cost_join = (
         "LEFT JOIN run_budgets rb ON rb.run_id=be.run_id "
         if require_selected_cost
+        else ""
+    )
+    trusted_clock_join = (
+        "LEFT JOIN gate_clock_context c ON c.clock_context_id=be.clock_context_id "
+        "AND c.run_id=be.run_id AND c.transition_id=be.transition_id "
+        "LEFT JOIN gate_runs g ON g.gate_run_id=c.gate_run_id "
+        "AND g.clock_context_id=c.clock_context_id "
+        "AND g.run_id=c.run_id AND g.transition_id=c.transition_id "
+        if require_trusted_clock
+        else ""
+    )
+    trusted_clock_predicate = (
+        "OR be.clock_context_id IS NULL OR be.clock_context_id='' "
+        "OR c.clock_context_id IS NULL "
+        "OR c.gate_run_id IS NULL OR c.consumed_by_gate_run_id IS NULL "
+        "OR c.consumed_by_gate_run_id IS NOT c.gate_run_id "
+        "OR typeof(c.now_epoch_ms)<>'integer' "
+        "OR c.now_epoch_ms<1 OR c.now_epoch_ms>253402300799999 "
+        "OR typeof(c.bound_at_epoch_ms)<>'integer' "
+        "OR c.bound_at_epoch_ms<1 "
+        "OR c.bound_at_epoch_ms>253402300799999 "
+        "OR c.bound_at_epoch_ms IS NOT c.now_epoch_ms "
+        "OR typeof(c.consumed_at_epoch_ms)<>'integer' "
+        "OR c.consumed_at_epoch_ms<1 "
+        "OR c.consumed_at_epoch_ms>253402300799999 "
+        "OR c.consumed_at_epoch_ms IS NOT c.now_epoch_ms "
+        "OR c.trusted_clock_source_hash IS NULL "
+        "OR c.trusted_clock_source_hash='' "
+        "OR c.gate_nonce IS NULL OR c.gate_nonce='' "
+        "OR g.gate_run_id IS NULL OR g.decision<>'pass' "
+        "OR typeof(g.completed_at_epoch_ms)<>'integer' "
+        "OR g.completed_at_epoch_ms<1 "
+        "OR g.completed_at_epoch_ms>253402300799999 "
+        "OR g.completed_at_epoch_ms IS NOT c.now_epoch_ms "
+        "OR be.created_at_epoch_ms IS NOT c.now_epoch_ms "
+        if require_trusted_clock
         else ""
     )
     post_dispatch_sql = (
@@ -186,6 +232,7 @@ def _post_dispatch_session_proof_contract(
         "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
         "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
         "AND s.session_key=eri.external_id "
+        f"{trusted_clock_join}"
         f"{selected_cost_join}"
         "WHERE be.event_type IN ('consume','retry_decrement','retry_restore',"
         "'human_attention') AND (be.spawn_request_id IS NULL "
@@ -193,6 +240,7 @@ def _post_dispatch_session_proof_contract(
         "OR sr.session_key IS NULL OR sr.session_key='' "
         "OR eri.intent_id IS NULL OR eri.external_id IS NULL OR eri.external_id='' "
         f"{timing_predicate}"
+        f"{trusted_clock_predicate}"
         f"{selected_cost_predicate}"
         "OR s.session_id IS NULL OR (be.event_type='consume' "
         "AND (sr.state<>'completed' OR s.state<>'completed' "
@@ -282,7 +330,7 @@ _SLO_QUERY_CONTRACTS_V5 = _replace_contract(
     ),
     _post_dispatch_session_proof_contract(),
 )
-SLO_QUERY_CONTRACTS = _replace_contract(
+_SLO_QUERY_CONTRACTS_V6 = _replace_contract(
     _replace_contract(
         _SLO_QUERY_CONTRACTS_V5,
         _post_dispatch_session_proof_contract(
@@ -291,6 +339,15 @@ SLO_QUERY_CONTRACTS = _replace_contract(
     ),
     _consume_confidence_amount_contract(),
 )
+SLO_QUERY_CONTRACTS = _replace_contract(
+    _SLO_QUERY_CONTRACTS_V6,
+    _post_dispatch_session_proof_contract(
+        require_accepted_timing=True,
+        require_selected_cost=True,
+        require_selected_transition=True,
+        require_trusted_clock=True,
+    ),
+)
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
@@ -298,6 +355,7 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     3: _SLO_QUERY_CONTRACTS_V3,
     4: _SLO_QUERY_CONTRACTS_V4,
     5: _SLO_QUERY_CONTRACTS_V5,
+    6: _SLO_QUERY_CONTRACTS_V6,
 }
 
 

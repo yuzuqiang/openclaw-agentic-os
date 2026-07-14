@@ -1398,6 +1398,40 @@ class BudgetRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(self._event_count(), 1)
 
+    def test_post_dispatch_event_persists_clock_context_and_is_immutable(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-post-clock",
+                dedupe_key="reserve-for-post-clock",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="clock-bound-consume",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT clock_context_id FROM budget_events WHERE budget_event_id=?",
+                (result.budget_event_id,),
+            ).fetchone()
+            self.assertEqual(row, ("post-clock",))
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_events SET source='repair' WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "DELETE FROM budget_events WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+
     def test_missing_database_is_not_created(self) -> None:
         missing = Path(self.temporary.name) / "missing.db"
         with self.assertRaises(BudgetError):
