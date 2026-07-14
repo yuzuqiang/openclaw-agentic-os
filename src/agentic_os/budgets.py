@@ -65,6 +65,7 @@ _BUDGET_INVARIANT_QUERIES = {
     "Duplicate or replayed budget events",
     "Budget event count bounded for SUM safety",
 }
+_BUDGET_MUTATION_RUN_STATES = {"candidate"}
 
 
 @dataclass(frozen=True)
@@ -306,7 +307,8 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
         "LEFT JOIN spawn_requests sr ON sr.spawn_request_id=be.spawn_request_id "
         " AND sr.run_id=be.run_id AND sr.transition_id=be.transition_id "
         "LEFT JOIN run_budgets rb ON rb.run_id=be.run_id "
-        "WHERE be.event_type IN ('reserve','consume','release') AND ("
+        "WHERE be.event_type IN ('reserve','consume','release',"
+        "'retry_decrement','retry_restore') AND ("
         "be.spawn_request_id IS NULL OR sr.spawn_request_id IS NULL "
         "OR rb.run_id IS NULL OR be.provider<>rb.selected_provider "
         "OR be.transition_id<>rb.selected_reserve_transition_id "
@@ -338,18 +340,23 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
         "SUM(CASE WHEN event_type='reserve' THEN retry_units "
         "WHEN event_type='release' THEN -retry_units ELSE 0 END) "
         "OVER ledger_window AS net_retry,"
+        "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
+        "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
+        "OVER ledger_window AS net_consumed_retry,"
         "SUM(CASE WHEN event_type='reserve' THEN human_attention_units "
         "WHEN event_type IN ('release','human_attention') "
         "THEN -human_attention_units ELSE 0 END) "
         "OVER ledger_window AS net_human "
         "FROM budget_events "
-        "WHERE event_type IN ('reserve','consume','release','human_attention') "
+        "WHERE event_type IN ('reserve','consume','release','retry_decrement',"
+        "'retry_restore','human_attention') "
         "WINDOW ledger_window AS (PARTITION BY run_id,transition_id,"
         "spawn_request_id,capability_class "
         "ORDER BY event_sequence,budget_event_id ROWS BETWEEN UNBOUNDED PRECEDING "
         "AND CURRENT ROW)) "
         "SELECT budget_event_id FROM ordered WHERE net_time<0 OR net_input<0 "
-        "OR net_output<0 OR net_cost<0 OR net_retry<0 OR net_human<0 LIMIT 1"
+        "OR net_output<0 OR net_cost<0 OR net_retry<0 OR net_consumed_retry<0 "
+        "OR net_human<0 LIMIT 1"
     ).fetchone()
     if invalid_spawn_prefix is not None:
         raise BudgetError("per-spawn budget ledger prefix over-releases a reservation")
@@ -569,8 +576,10 @@ def record_budget_event(
                     "requested budget selection differs from persisted selected cost row"
                 )
             spawn_identity = connection.execute(
-                "SELECT state FROM spawn_requests WHERE spawn_request_id=? "
-                "AND run_id=? AND transition_id=?",
+                "SELECT sr.state,r.state FROM spawn_requests sr "
+                "JOIN runs r ON r.run_id=sr.run_id "
+                "WHERE sr.spawn_request_id=? "
+                "AND sr.run_id=? AND sr.transition_id=?",
                 (spawn_request_id, run_id, transition_id),
             ).fetchone()
             if spawn_identity is None:
@@ -633,6 +642,10 @@ def record_budget_event(
             if spawn_identity[0] != "pending":
                 raise BudgetError(
                     f"{event_type} requires a pending pre-RPC spawn request"
+                )
+            if spawn_identity[1] not in _BUDGET_MUTATION_RUN_STATES:
+                raise BudgetError(
+                    f"{event_type} requires an owning run in pre-dispatch state"
                 )
             if event_type == "reserve":
                 prior_intent = connection.execute(

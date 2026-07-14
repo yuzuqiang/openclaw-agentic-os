@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -53,7 +54,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             pass
 
     def _seed_budget(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
@@ -151,7 +152,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         }
 
     def _budget_row(self) -> tuple[object, ...]:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute(
                 "SELECT reserved_time_seconds,reserved_input_tokens,"
                 "reserved_output_tokens,reserved_cost_microusd,reserved_retries,"
@@ -161,14 +162,14 @@ class BudgetRuntimeTests(unittest.TestCase):
             ).fetchone()
 
     def _event_count(self) -> int:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM budget_events").fetchone()[0]
 
     def _slo_rows(self, query_name: str) -> list[tuple[object, ...]]:
         sql = next(
             item.sql_text for item in SLO_QUERY_CONTRACTS if item.query_name == query_name
         )
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute(sql).fetchall()
 
     def test_reserve_is_atomic_and_idempotent(self) -> None:
@@ -198,7 +199,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=10, cost_microusd=5),
         )
         reserve_budget(self.database, **kwargs)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "UPDATE run_budgets SET reserved_input_tokens=11 WHERE run_id='run'"
             )
@@ -214,7 +215,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
         )
         reserve_budget(self.database, **kwargs)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "UPDATE spawn_requests SET state='failed' WHERE spawn_request_id='spawn'"
             )
@@ -351,14 +352,14 @@ class BudgetRuntimeTests(unittest.TestCase):
                     amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
                 ),
             )
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             epochs = connection.execute(
                 "SELECT created_at_epoch_ms FROM budget_events ORDER BY event_sequence"
             ).fetchall()
         self.assertEqual(epochs, [(1_800_000_000_123,), (1_800_000_000_123,)])
 
     def test_budget_writer_restores_wal_journal_mode(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
         self.assertEqual(str(mode).casefold(), "delete")
 
@@ -371,7 +372,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             ),
         )
 
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(str(mode).casefold(), "wal")
 
@@ -393,7 +394,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
         )
         reserve = reserve_budget(self.database, **kwargs)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
                 "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
@@ -418,7 +419,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 1)
 
     def test_release_cannot_use_another_spawn_reservation(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
                 "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
@@ -445,7 +446,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._budget_row(), (0, 10, 0, 1, 0, 0, 0, 0, 0, 0))
 
     def test_release_counts_pure_human_attention_consumption_per_spawn(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
                 "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
@@ -471,7 +472,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         )
         spawn_2["spawn_request_id"] = "spawn-2"
         reserve_budget(self.database, **spawn_2)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
                 "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
@@ -497,7 +498,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 3)
 
     def test_cross_spawn_over_release_contamination_blocks_reserve(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
                 "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
@@ -627,7 +628,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
 
     def test_reserve_and_release_require_pending_spawn_state(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "UPDATE spawn_requests SET state='failed' WHERE spawn_request_id='spawn'"
             )
@@ -642,8 +643,28 @@ class BudgetRuntimeTests(unittest.TestCase):
                     ),
                 )
 
+    def test_budget_mutations_require_pre_dispatch_run_state(self) -> None:
+        for state in ("human_review_required", "rolled_back", "finalized"):
+            with self.subTest(state=state):
+                with closing(sqlite3.connect(self.database)) as connection, connection:
+                    connection.execute(
+                        "UPDATE runs SET state=? WHERE run_id='run'",
+                        (state,),
+                    )
+                for operation in (reserve_budget, release_budget):
+                    with self.assertRaisesRegex(BudgetError, "pre-dispatch state"):
+                        operation(
+                            self.database,
+                            **self._kwargs(
+                                idempotency_key=f"run-state-{state}-{operation.__name__}",
+                                dedupe_key=f"run-state-{state}-{operation.__name__}",
+                                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                            ),
+                        )
+                self.assertEqual(self._event_count(), 0)
+
     def test_composite_spawn_binding_antijoin_blocks_legacy_contamination(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
                 "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
@@ -691,7 +712,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._budget_row(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     def test_wrong_transition_ledger_event_blocks_selected_reserve(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
                 "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
@@ -733,6 +754,48 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 1)
         self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
 
+    def test_retry_events_must_be_composite_bound_to_selected_spawn(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES('transition-other','run',"
+                "'before','after','dispatch','spawn','R1','transition-other-idem',0,'now')"
+            )
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES('spawn-other','run','phase','agent',"
+                "'transition-other','client-other','spawn-idem-other','task','pending',"
+                "'now','now')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+                "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('wrong-retry','wrong-retry-idem','wrong-retry-dedupe',1,"
+                "'run','transition-other','spawn-other','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known',"
+                "'retry_decrement',1,'known','legacy','now',1000)"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET consumed_retries=1 WHERE run_id='run'"
+            )
+        with self.assertRaisesRegex(BudgetError, "composite-bound"):
+            reserve_budget(
+                self.database,
+                **self._kwargs(
+                    idempotency_key="blocked-wrong-retry",
+                    dedupe_key="blocked-wrong-retry",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
+        self.assertEqual(self._budget_row(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
     def test_runtime_runs_all_pinned_blocking_budget_slos(self) -> None:
         self.assertTrue(
             {
@@ -743,7 +806,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         )
 
     def test_model_cost_registry_slo_blocks_budget_commit(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
                 "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
@@ -764,7 +827,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 0)
 
     def test_zero_reserve_requires_exact_policy_and_minima(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO endpoint_zero_reserve_policies("
                 "zero_reserve_policy_id,endpoint_binding_id,capability_class,policy_hash,"
@@ -793,7 +856,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 1)
 
     def test_unknown_selected_usage_confidence_blocks_without_writes(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "UPDATE run_budgets SET usage_confidence='unknown' WHERE run_id='run'"
             )
@@ -809,7 +872,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 0)
 
     def test_prior_unknown_usage_event_blocks_without_new_writes(self) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
                 "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
@@ -845,7 +908,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         )
         kwargs["usage_confidence"] = "estimated"
         reserve_budget(self.database, **kwargs)
-        with sqlite3.connect(self.database) as connection:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
             confidence = connection.execute(
                 "SELECT usage_confidence FROM run_budgets WHERE run_id='run'"
             ).fetchone()[0]
