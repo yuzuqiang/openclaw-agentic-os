@@ -52,6 +52,7 @@ _MAX_EPOCH_MS = 253_402_300_799_999
 _USAGE_CONFIDENCE = {"known", "estimated"}
 _POST_DISPATCH_USAGE_CONFIDENCE = {"known", "estimated", "unknown"}
 _BUDGET_INVARIANT_QUERIES = {
+    "Accepted `sessions_spawn` without exact accepted session identity",
     "Unknown usage blocks auto-local",
     "Model cost registry numeric bounds",
     "Endpoint-bound budget event cost row blocks dispatch",
@@ -959,6 +960,7 @@ def record_post_dispatch_event(
                 "WHERE sr.spawn_request_id=? AND sr.run_id=? AND sr.transition_id=? "
                 "AND sr.state IN ('accepted','completed') "
                 "AND (?<>'consume' OR (sr.state='completed' "
+                "AND s.state='completed' "
                 "AND s.completed_at IS NOT NULL AND s.completed_at<>''))",
                 (spawn_request_id, run_id, transition_id, event_type),
             ).fetchone()
@@ -1059,6 +1061,16 @@ def record_post_dispatch_event(
                         raise BudgetExceeded(
                             f"consume exceeds outstanding reservation dimension={field}"
                         )
+                remaining = BudgetAmounts(
+                    **{
+                        field: getattr(outstanding, field) - getattr(amounts, field)
+                        for field in _LIMITS
+                    }
+                )
+                if remaining.cost_microusd < _required_cost(selection, remaining):
+                    raise BudgetExceeded(
+                        "consume would underfund the remaining per-spawn token reservation"
+                    )
             elif event_type == "retry_decrement" and (
                 amounts.retry_units > outstanding.retry_units
             ):

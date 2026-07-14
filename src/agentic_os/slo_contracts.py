@@ -125,38 +125,59 @@ def _legacy_retry_reservation_contract(query_name: str) -> SloQueryContract:
     )
 
 
-def _spawn_partition_retry_prefix_contract() -> SloQueryContract:
+def _post_dispatch_session_proof_contract() -> SloQueryContract:
+    contract = _contract_by_name(
+        'Accepted `sessions_spawn` without exact accepted session identity'
+    )
+    base_sql = contract.sql_text.rstrip()
+    if base_sql.endswith(";"):
+        base_sql = base_sql[:-1]
+    post_dispatch_sql = (
+        " UNION SELECT be.budget_event_id FROM budget_events be "
+        "LEFT JOIN spawn_requests sr ON sr.spawn_request_id=be.spawn_request_id "
+        "AND sr.run_id=be.run_id AND sr.transition_id=be.transition_id "
+        "LEFT JOIN external_rpc_intents eri ON eri.rpc_kind='sessions_spawn' "
+        "AND eri.state IN ('accepted','reconciled') "
+        "AND eri.spawn_request_id=sr.spawn_request_id AND eri.run_id=sr.run_id "
+        "AND eri.transition_id=sr.transition_id "
+        "AND eri.client_request_id=sr.client_request_id "
+        "AND eri.idempotency_key=sr.spawn_idempotency_key "
+        "AND eri.phase=sr.phase AND eri.agent_id=sr.agent_id "
+        "AND eri.task_digest=sr.task_digest AND eri.external_id=sr.session_key "
+        "LEFT JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id "
+        "AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id "
+        "AND s.client_request_id=sr.client_request_id "
+        "AND s.spawn_idempotency_key=sr.spawn_idempotency_key "
+        "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
+        "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
+        "AND s.session_key=eri.external_id "
+        "WHERE be.event_type IN ('consume','retry_decrement','retry_restore',"
+        "'human_attention') AND (be.spawn_request_id IS NULL "
+        "OR sr.spawn_request_id IS NULL OR sr.state NOT IN ('accepted','completed') "
+        "OR sr.session_key IS NULL OR sr.session_key='' "
+        "OR eri.intent_id IS NULL OR eri.external_id IS NULL OR eri.external_id='' "
+        "OR s.session_id IS NULL OR (be.event_type='consume' "
+        "AND (sr.state<>'completed' OR s.state<>'completed' "
+        "OR s.completed_at IS NULL OR s.completed_at='')))"
+    )
+    return SloQueryContract(
+        contract.query_name,
+        base_sql + post_dispatch_sql,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
+def _spawn_partition_budget_prefix_contract() -> SloQueryContract:
     contract = _contract_by_name(_BUDGET_PREFIX_NAME)
-    old_reserved = (
-        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
-        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
-        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) "
-        "OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry"
-    )
-    new_reserved = (
-        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
-        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
-        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) "
+    old_window = "OVER (PARTITION BY run_id ORDER BY event_sequence)"
+    new_window = (
         "OVER (PARTITION BY run_id,transition_id,spawn_request_id,capability_class "
-        "ORDER BY event_sequence) AS net_reserved_retry"
+        "ORDER BY event_sequence)"
     )
-    old_consumed = (
-        "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
-        "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
-        "OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed"
-    )
-    new_consumed = (
-        "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
-        "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
-        "OVER (PARTITION BY run_id,transition_id,spawn_request_id,capability_class "
-        "ORDER BY event_sequence) AS net_retry_consumed"
-    )
-    sql_text = contract.sql_text.replace(old_reserved, new_reserved).replace(
-        old_consumed,
-        new_consumed,
-    )
-    if sql_text == contract.sql_text:
-        raise RuntimeError("budget prefix SLO retry partition replacement failed")
+    if contract.sql_text.count(old_window) != 7:
+        raise RuntimeError("budget prefix SLO partition replacement count changed")
+    sql_text = contract.sql_text.replace(old_window, new_window)
     return SloQueryContract(
         contract.query_name,
         sql_text,
@@ -196,8 +217,11 @@ _SLO_QUERY_CONTRACTS_V1_V2 = _replace_contract(
 
 _SLO_QUERY_CONTRACTS_V4 = SLO_QUERY_CONTRACTS
 SLO_QUERY_CONTRACTS = _replace_contract(
-    SLO_QUERY_CONTRACTS,
-    _spawn_partition_retry_prefix_contract(),
+    _replace_contract(
+        SLO_QUERY_CONTRACTS,
+        _spawn_partition_budget_prefix_contract(),
+    ),
+    _post_dispatch_session_proof_contract(),
 )
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {

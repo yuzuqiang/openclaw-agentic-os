@@ -618,7 +618,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "'endpoint','capability','cost-row','effective','cost-hash','known',"
                 "'release',1,1,'known','legacy','now',1001)"
             )
-        with self.assertRaisesRegex(BudgetError, "per-spawn"):
+        with self.assertRaisesRegex(BudgetError, "Budget prefix|per-spawn"):
             reserve_budget(
                 self.database,
                 **self._kwargs(
@@ -717,6 +717,26 @@ class BudgetRuntimeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def test_consume_cannot_underfund_remaining_token_reservation(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-consume-cost-floor",
+                dedupe_key="reserve-consume-cost-floor",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with self.assertRaisesRegex(BudgetExceeded, "underfund"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="consume-cost-only",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._budget_row(), (0, 10, 0, 1, 0, 0, 0, 0, 0, 0))
 
     def test_reserve_and_release_require_pending_spawn_state(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
@@ -1041,7 +1061,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             **self._kwargs(
                 idempotency_key="reserve-for-trigger",
                 dedupe_key="reserve-for-trigger",
-                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=2),
             ),
         )
         self._accept_spawn(reserve.budget_event_id, completed=True)
@@ -1173,6 +1193,27 @@ class BudgetRuntimeTests(unittest.TestCase):
         kwargs["clock_context_id"] = "clock"
         with self.assertRaisesRegex(BudgetError, "fresh clock"):
             consume_budget(self.database, **kwargs)
+
+    def test_consume_requires_completed_session_state(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-running-session",
+                dedupe_key="reserve-for-running-session",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE sessions SET state='running' WHERE session_id='session'")
+        with self.assertRaisesRegex(BudgetError, "accepted session proof"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="running-session-consume",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
 
     def test_retry_decrement_debits_reserved_retry_unit_at_budget_limit(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:

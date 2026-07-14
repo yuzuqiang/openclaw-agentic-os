@@ -79,8 +79,9 @@ exact idempotent replay. Known and estimated usage move outstanding
 reservations into consumed counters, while unknown completed usage is persisted
 only as a zero-amount classification and marks the run budget unknown so later
 automatic budget work fails closed. Migration v5 versions the retry prefix SLO
-so retry decrement/restore windows are scoped by run, transition, spawn request,
-and capability. Atomic final settlement of unused reservation, legacy-money
+so every reserve/consume/release/retry/human-attention prefix window is scoped
+by run, transition, spawn request, and capability. Atomic final settlement of
+unused reservation, legacy-money
 import conversion, and the remaining adversarial fixture matrix remain open in
 Issue #4.
 

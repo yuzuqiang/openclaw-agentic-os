@@ -3450,6 +3450,197 @@ class MigrationTests(unittest.TestCase):
             [("retry-b-decrement",)],
         )
 
+    def test_budget_prefix_slo_partitions_token_consumption_by_spawn(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'token-scope-run','prepare-token-scope','w','file_authority','candidate',"
+            "'R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition-token-scope',"
+            "'token-scope-run','before','after','budget','consume','R1',"
+            "'idem-token-scope',0,'now')"
+        )
+        for spawn_id, client_id, idem in (
+            ("spawn-a", "client-a", "spawn-idem-a"),
+            ("spawn-b", "client-b", "spawn-idem-b"),
+        ):
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES(?,'token-scope-run','phase','agent',"
+                "'transition-token-scope',?,?,'task','pending','now','now')",
+                (spawn_id, client_id, idem),
+            )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,reserved_cost_microusd,consumed_input_tokens,"
+            "consumed_cost_microusd,usage_confidence,updated_at) VALUES("
+            "'token-scope-run','w','capability','provider','model','endpoint',"
+            "'cost-row','effective','cost-hash','known','transition-token-scope',"
+            "10,10,10,10,1,1,0,0,1,1,'known','now')"
+        )
+        for event_id, sequence, spawn_id, event_type in (
+            ("input-a-reserve", 1, "spawn-a", "reserve"),
+            ("input-b-consume", 2, "spawn-b", "consume"),
+        ):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,input_tokens,cost_microusd,usage_confidence,source,"
+                "created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'token-scope-run','transition-token-scope',?,'provider','model',"
+                "'endpoint','capability','cost-row','effective','cost-hash','known',"
+                "?,1,1,'known','test','now',?)",
+                (
+                    event_id,
+                    f"idem-{event_id}",
+                    f"dedupe-{event_id}",
+                    sequence,
+                    spawn_id,
+                    event_type,
+                    1000 + sequence,
+                ),
+            )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        current_prefix_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        v4_prefix_query = next(
+            contract.sql_text
+            for contract in slo_query_contracts_for_schema_version(4)
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        self.assertEqual(connection.execute(ledger_query).fetchall(), [])
+        self.assertEqual(connection.execute(v4_prefix_query).fetchall(), [])
+        self.assertEqual(
+            connection.execute(current_prefix_query).fetchall(),
+            [("input-b-consume",)],
+        )
+
+    def test_post_dispatch_budget_slo_requires_accepted_session_proof(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'proof-run','prepare-proof','w','file_authority','child_completed','R1','R1',"
+            "'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition-proof','proof-run',"
+            "'before','after','budget','consume','R1','idem-proof',0,'now')"
+        )
+        connection.execute(
+            "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+            "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+            "created_at,updated_at) VALUES('spawn','proof-run','phase','agent',"
+            "'transition-proof','client','spawn-idem','task','pending','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,reserved_cost_microusd,consumed_input_tokens,"
+            "consumed_cost_microusd,usage_confidence,updated_at) VALUES("
+            "'proof-run','w','capability','provider','model','endpoint','cost-row',"
+            "'effective','cost-hash','known','transition-proof',10,10,10,10,1,1,"
+            "0,0,1,1,'known','now')"
+        )
+        for event_id, sequence, event_type in (
+            ("proof-reserve", 1, "reserve"),
+            ("proof-consume", 2, "consume"),
+        ):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,input_tokens,cost_microusd,usage_confidence,source,"
+                "created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'proof-run','transition-proof','spawn','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known',?,1,1,"
+                "'known','test','now',?)",
+                (
+                    event_id,
+                    f"idem-{event_id}",
+                    f"dedupe-{event_id}",
+                    sequence,
+                    event_type,
+                    1000 + sequence,
+                ),
+            )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        prefix_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        proof_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if (
+                contract.query_name
+                == "Accepted `sessions_spawn` without exact accepted session identity"
+            )
+        )
+        self.assertEqual(connection.execute(ledger_query).fetchall(), [])
+        self.assertEqual(connection.execute(prefix_query).fetchall(), [])
+        self.assertEqual(connection.execute(proof_query).fetchall(), [("proof-consume",)])
+
     def test_budget_ledger_slo_rejects_events_without_run_budget(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
