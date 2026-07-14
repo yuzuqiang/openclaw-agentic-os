@@ -17,6 +17,12 @@
       "name": "budget_ledger_slo_identity",
       "file": "0003_budget_ledger_slo_identity.sql",
       "sha256": "77efaab7b2ba87aaef02a89dd8dc0aa78936abc56b23759b1218d8baee541a6e"
+    },
+    {
+      "version": 4,
+      "name": "budget_post_dispatch_mutations",
+      "file": "0004_budget_post_dispatch_mutations.sql",
+      "sha256": "3059c549a225296bd6d020b0810ffb38b1c57558a6b7f0718529a55a56baf92d"
     }
   ]
 }

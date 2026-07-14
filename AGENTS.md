@@ -32,5 +32,7 @@ current corrected artifact hash.
 
 Every pull request must receive a completed GitHub Codex review before merge.
 Any Codex P0/P1 finding blocks merge. After fixes, request `@codex review` again
-and wait for a clean review. River performs the final evidence audit and is the
-only actor authorized by project policy to merge into `main`.
+and wait for a clean review of the exact current head. The review watcher may
+auto-merge only after CAS-checking that reviewed head and required checks; head
+changes, missing checks, or ambiguous review state fail closed. Implementation
+agents must not merge directly.

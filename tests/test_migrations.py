@@ -272,7 +272,7 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (2, 3))
+        self.assertEqual(apply_migrations(self.database), (2, 3, 4))
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
         )
@@ -361,7 +361,7 @@ class MigrationTests(unittest.TestCase):
                 [(1, legacy_hash), (2, legacy_hash)],
             )
 
-        self.assertEqual(apply_migrations(self.database), (3,))
+        self.assertEqual(apply_migrations(self.database), (3, 4))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -369,7 +369,12 @@ class MigrationTests(unittest.TestCase):
                     "WHERE query_name=? ORDER BY schema_version",
                     (query_name,),
                 ).fetchall(),
-                [(1, legacy_hash), (2, legacy_hash), (3, current_hash)],
+                [
+                    (1, legacy_hash),
+                    (2, legacy_hash),
+                    (3, current_hash),
+                    (4, current_hash),
+                ],
             )
 
     def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
@@ -526,6 +531,7 @@ class MigrationTests(unittest.TestCase):
                 "minimum_contract",
                 "shadow_projection_identity",
                 "budget_ledger_slo_identity",
+                "budget_post_dispatch_mutations",
             ],
         )
         for migration in migrations:
@@ -548,7 +554,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1, 2, 3))
+        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4))
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -1956,13 +1962,22 @@ class MigrationTests(unittest.TestCase):
             connection.execute("DELETE FROM run_budgets WHERE run_id='r'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
             connection.execute("UPDATE run_budgets SET run_id='other' WHERE run_id='r'")
-        for assignment in ("reserved_input_tokens=0", "input_token_budget=0"):
-            with self.subTest(assignment=assignment), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "budget row is immutable"
-            ):
-                connection.execute(
-                    f"UPDATE run_budgets SET {assignment} WHERE run_id='r'"
-                )
+        connection.execute(
+            "UPDATE run_budgets SET reserved_input_tokens=0 WHERE run_id='r'"
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT reserved_input_tokens FROM run_budgets WHERE run_id='r'"
+            ).fetchone(),
+            (0,),
+        )
+        connection.execute(
+            "UPDATE run_budgets SET reserved_input_tokens=1 WHERE run_id='r'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "selection is immutable"):
+            connection.execute(
+                "UPDATE run_budgets SET input_token_budget=0 WHERE run_id='r'"
+            )
         for assignment in ("input_tokens=2", "event_sequence=99"):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
                 sqlite3.IntegrityError, "immutable"
@@ -3912,11 +3927,11 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(connection.close)
         connection.execute("PRAGMA foreign_keys=ON")
         contract = SLO_QUERY_CONTRACTS[0]
-        migration_sha = "4" * 64
-        query_hash = "4" * 64
+        migration_sha = "5" * 64
+        query_hash = "5" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(4,'future_contract',?,'now')",
+            "VALUES(5,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -3925,7 +3940,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                4,
+                5,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -3939,7 +3954,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (4,),
+            (5,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -4139,6 +4154,7 @@ class MigrationTests(unittest.TestCase):
                 (1, "minimum_contract"),
                 (2, "shadow_projection_identity"),
                 (3, "budget_ledger_slo_identity"),
+                (4, "budget_post_dispatch_mutations"),
             ],
         )
 

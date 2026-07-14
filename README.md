@@ -12,8 +12,8 @@ revalidation, and neither artifact proves production runtime behavior.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `6690f8cd77e6d58d5c12f9639128bce72dfb15568abcd4a7ae28f414d50d300f`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `77efaab7b2ba87aaef02a89dd8dc0aa78936abc56b23759b1218d8baee541a6e`
-- Current migration manifest SHA-256: `26222783297cd70b5f6eb7064d6196dd25d5c5ea8c177f5f01a0bbb582e4ca13`
+- Current latest migration SHA-256: `3059c549a225296bd6d020b0810ffb38b1c57558a6b7f0718529a55a56baf92d`
+- Current migration manifest SHA-256: `cbab30327a1866dd140db330a9c4e6eb26ff578d7b62deb69b25ccd17794e829`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -65,12 +65,18 @@ include per-spawn reserve/release, retry, and pure `human_attention` bindings.
 Release checks outstanding amounts, including pure `human_attention`
 consumption rows, and the remaining token-cost floor per spawn request, so one
 request cannot release another request's reservation or leave its remaining tokens
-underfunded. The
-API is idempotent on a caller key and separately rejects
-reused source dedupe identities. It does not yet claim end-to-end `sessions_spawn`
-settlement: migration v3 deliberately freezes a referenced prior-reserve row
-and its counters, so a follow-up reviewed migration/SLO change is required
-before consume/settle can account for an accepted spawn safely.
+underfunded. The API is idempotent on a caller key and separately rejects
+reused source dedupe identities. It does not yet claim end-to-end
+`sessions_spawn` settlement. Migration v4 keeps the referenced reserve selection
+immutable while permitting atomic counter changes for post-dispatch events. The
+runtime now records `consume`, retry decrement/restore, and pure
+`human_attention` only for an exact accepted session/spawn/intent tuple;
+`consume` additionally requires a completed session. Known and estimated usage
+move outstanding reservations into consumed counters, while unknown completed
+usage is persisted only as a zero-amount classification and marks the run
+budget unknown so later automatic budget work fails closed. Atomic final
+settlement of unused reservation, legacy-money import conversion, and the
+remaining adversarial fixture matrix remain open in Issue #4.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API
@@ -89,7 +95,8 @@ integration proof.
 - `main` contains reviewed project state.
 - Implementation work should use focused branches and pull requests.
 - Every PR must wait for a completed GitHub Codex review; any P0/P1 finding blocks merge.
-- After Codex is clean, River performs the final audit and merges into `main`.
+- After Codex is clean for the exact current head, the watcher CAS-checks the
+  head and required checks, then auto-merges into `main`; ambiguity fails closed.
 - Design changes must preserve executable DDL/SLO validation and adversarial fixtures.
 - Production readiness must be backed by runtime evidence, not document-only acceptance.
 
