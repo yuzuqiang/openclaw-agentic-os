@@ -20,7 +20,12 @@ from agentic_os.migrations import (
     repository_root,
     verify_database,
 )
-from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS, SLO_QUERY_COUNT, slo_query_hash
+from agentic_os.slo_contracts import (
+    SLO_QUERY_CONTRACTS,
+    SLO_QUERY_COUNT,
+    slo_query_contracts_for_schema_version,
+    slo_query_hash,
+)
 
 
 def _shadow_projection_id(run_id: str, path: str, digest: str) -> str:
@@ -267,7 +272,7 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (2,))
+        self.assertEqual(apply_migrations(self.database), (2, 3))
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
         )
@@ -313,6 +318,58 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 ).fetchone(),
                 (2,),
+            )
+
+    def test_existing_version_2_database_upgrades_to_budget_ledger_slo_identity(self) -> None:
+        migration_dir = Path(self.temporary.name) / "v2-migrations"
+        migration_dir.mkdir()
+        manifest = json.loads(
+            (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
+        )
+        v1_v2_migrations = manifest["migrations"][:2]
+        for row in v1_v2_migrations:
+            shutil.copy(
+                repository_root() / "migrations" / row["file"],
+                migration_dir / row["file"],
+            )
+        (migration_dir / "manifest.json").write_text(
+            json.dumps({"migrations": v1_v2_migrations}),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1, 2))
+        query_name = "Budget ledger reconciles to counters and budgets"
+        legacy_contract = next(
+            contract
+            for contract in slo_query_contracts_for_schema_version(2)
+            if contract.query_name == query_name
+        )
+        current_contract = next(
+            contract for contract in SLO_QUERY_CONTRACTS if contract.query_name == query_name
+        )
+        legacy_hash = slo_query_hash(legacy_contract.sql_text)
+        current_hash = slo_query_hash(current_contract.sql_text)
+        self.assertNotEqual(legacy_hash, current_hash)
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT schema_version,query_hash FROM slo_queries "
+                    "WHERE query_name=? ORDER BY schema_version",
+                    (query_name,),
+                ).fetchall(),
+                [(1, legacy_hash), (2, legacy_hash)],
+            )
+
+        self.assertEqual(apply_migrations(self.database), (3,))
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT schema_version,query_hash FROM slo_queries "
+                    "WHERE query_name=? ORDER BY schema_version",
+                    (query_name,),
+                ).fetchall(),
+                [(1, legacy_hash), (2, legacy_hash), (3, current_hash)],
             )
 
     def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
@@ -465,7 +522,11 @@ class MigrationTests(unittest.TestCase):
             migrations = load_migrations()
         self.assertEqual(
             [migration.name for migration in migrations],
-            ["minimum_contract", "shadow_projection_identity"],
+            [
+                "minimum_contract",
+                "shadow_projection_identity",
+                "budget_ledger_slo_identity",
+            ],
         )
         for migration in migrations:
             with self.subTest(migration=migration.name):
@@ -487,7 +548,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1, 2))
+        self.assertEqual(verify_database(verify_target), (1, 2, 3))
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -3283,6 +3344,115 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(connection.execute(ledger_query).fetchall(), [("missing-budget",)])
 
+    def test_p1_budget_sql_fixture_pack_exercises_blocking_slos(self) -> None:
+        fixture_root = repository_root() / "tests/fixtures"
+        expectations = {
+            "budgets/ledger_reconciliation.sql": {
+                "Budget ledger reconciles to counters and budgets": {
+                    ("fixture-ledger-drift",)
+                },
+            },
+            "budgets/human_attention_cross_dimension_payload.sql": {
+                "Budget event amount malformed or out of range": {
+                    ("fixture-human-cross-payload",)
+                },
+            },
+            "budgets/non_negative_budget_accounting.sql": {
+                "Budget ledger reconciles to counters and budgets": {
+                    ("fixture-negative-net-reserve",)
+                },
+                "Budget prefix over-release or over-restore": {
+                    ("fixture-over-release",)
+                },
+            },
+            "budgets/zero_reserve_policy.sql": {
+                "Invalid zero-reserve policy": {
+                    ("fixture-invalid-zero-policy",)
+                },
+            },
+            "sqlite_type_affinity_h1_h4.sql": {
+                "Model cost registry numeric bounds": {
+                    ("fixture-numeric-text-cost",),
+                    ("fixture-integral-real-cost",),
+                },
+            },
+        }
+        budget_fixture_paths = {
+            str(path.relative_to(fixture_root))
+            for path in (fixture_root / "budgets").glob("*.sql")
+        }
+        type_affinity_fixture = fixture_root / "sqlite_type_affinity_h1_h4.sql"
+        fixture_paths = {
+            *budget_fixture_paths,
+            str(type_affinity_fixture.relative_to(fixture_root)),
+        }
+        self.assertEqual(fixture_paths, set(expectations))
+        contracts = {contract.query_name: contract.sql_text for contract in SLO_QUERY_CONTRACTS}
+
+        for index, (fixture, expected_by_query) in enumerate(expectations.items()):
+            with self.subTest(fixture=fixture):
+                database = Path(self.temporary.name) / f"fixture-{index}.db"
+                apply_migrations(database)
+                connection = sqlite3.connect(database)
+                self.addCleanup(connection.close)
+                connection.executescript(
+                    (fixture_root / fixture).read_text(encoding="utf-8")
+                )
+                for query_name, expected_rows in expected_by_query.items():
+                    rows = set(connection.execute(contracts[query_name]).fetchall())
+                    self.assertLessEqual(expected_rows, rows)
+                if fixture == "budgets/non_negative_budget_accounting.sql":
+                    row = connection.execute(
+                        """
+                        WITH event_sums AS (
+                          SELECT run_id,
+                                 SUM(
+                                   CASE
+                                     WHEN event_type='reserve' THEN input_tokens
+                                     WHEN event_type IN ('release','consume')
+                                       THEN -input_tokens
+                                     ELSE 0
+                                   END
+                                 ) AS net_reserved_input
+                          FROM budget_events
+                          GROUP BY run_id
+                        )
+                        SELECT s.net_reserved_input, rb.reserved_input_tokens
+                        FROM event_sums s
+                        JOIN run_budgets rb USING(run_id)
+                        WHERE s.run_id='fixture-negative-net-reserve'
+                        """
+                    ).fetchone()
+                    self.assertEqual(row, (-3, 0))
+                    counter_rows = set(
+                        connection.execute(
+                            contracts["Budget counters outside selected budget"]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-negative-net-reserve",), counter_rows)
+                    ledger_without_negative_net = contracts[
+                        "Budget ledger reconciles to counters and budgets"
+                    ].replace(
+                        "COALESCE(s.net_reserved_time,0)<0 OR "
+                        "COALESCE(s.net_reserved_input,0)<0 OR "
+                        "COALESCE(s.net_reserved_output,0)<0 OR "
+                        "COALESCE(s.net_reserved_cost,0)<0 OR "
+                        "COALESCE(s.net_reserved_retries,0)<0 OR "
+                        "COALESCE(s.net_reserved_human,0)<0 OR ",
+                        "",
+                    )
+                    self.assertNotIn(
+                        ("fixture-negative-net-reserve",),
+                        set(connection.execute(ledger_without_negative_net).fetchall()),
+                    )
+                if fixture == "sqlite_type_affinity_h1_h4.sql":
+                    rows = set(
+                        connection.execute(
+                            contracts["Model cost registry numeric bounds"]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-exact-max-cost",), rows)
+
     def test_unknown_usage_blocks_promoted_run_states(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -3742,11 +3912,11 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(connection.close)
         connection.execute("PRAGMA foreign_keys=ON")
         contract = SLO_QUERY_CONTRACTS[0]
-        migration_sha = "3" * 64
-        query_hash = "3" * 64
+        migration_sha = "4" * 64
+        query_hash = "4" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(3,'future_contract',?,'now')",
+            "VALUES(4,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -3755,7 +3925,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                3,
+                4,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -3769,7 +3939,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (3,),
+            (4,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -3965,7 +4135,11 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(
             [(row["version"], row["name"]) for row in manifest["migrations"]],
-            [(1, "minimum_contract"), (2, "shadow_projection_identity")],
+            [
+                (1, "minimum_contract"),
+                (2, "shadow_projection_identity"),
+                (3, "budget_ledger_slo_identity"),
+            ],
         )
 
     def test_readme_digests_match_current_design_and_migration(self) -> None:
@@ -3973,14 +4147,14 @@ class MigrationTests(unittest.TestCase):
         design_digest = hashlib.sha256(
             (repository_root() / "docs/agentic-os-production-adaptation.md").read_bytes()
         ).hexdigest()
-        manifest_digest = hashlib.sha256(
-            (repository_root() / "migrations/manifest.json").read_bytes()
-        ).hexdigest()
+        manifest_path = repository_root() / "migrations/manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         base_migration_digest = hashlib.sha256(
             (repository_root() / "migrations/0001_minimum_contract.sql").read_bytes()
         ).hexdigest()
         latest_migration_digest = hashlib.sha256(
-            (repository_root() / "migrations/0002_shadow_projection_identity.sql").read_bytes()
+            (repository_root() / "migrations" / manifest["migrations"][-1]["file"]).read_bytes()
         ).hexdigest()
         self.assertIn("has **not** yet passed fresh independent", readme)
         self.assertIn("revalidation", readme)

@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .privacy import assert_privacy_preflight
-from .slo_contracts import SLO_QUERY_CONTRACTS, SLO_QUERY_COUNT, slo_query_hash
+from .slo_contracts import (
+    SLO_QUERY_COUNT,
+    slo_query_contracts_for_schema_version,
+    slo_query_hash,
+)
 
 try:
     from importlib.resources.abc import Traversable
@@ -236,8 +240,9 @@ def _verify_schema(
 
 
 def _expected_slo_rows(migration: Migration) -> dict[tuple[object, ...], tuple[object, ...]]:
-    if SLO_QUERY_COUNT != 30:
-        raise MigrationError(f"expected 30 required SLO queries, found {SLO_QUERY_COUNT}")
+    contracts = slo_query_contracts_for_schema_version(migration.version)
+    if len(contracts) != SLO_QUERY_COUNT or SLO_QUERY_COUNT != 30:
+        raise MigrationError(f"expected 30 required SLO queries, found {len(contracts)}")
     return {
         (
             contract.query_name,
@@ -249,12 +254,12 @@ def _expected_slo_rows(migration: Migration) -> dict[tuple[object, ...], tuple[o
             contract.empty_db_expected_status,
             contract.fixture_db_expected_status,
         )
-        for contract in SLO_QUERY_CONTRACTS
+        for contract in contracts
     }
 
 
 def _seed_slo_queries(connection: sqlite3.Connection, migration: Migration) -> None:
-    for contract in SLO_QUERY_CONTRACTS:
+    for contract in slo_query_contracts_for_schema_version(migration.version):
         connection.execute(
             "INSERT INTO slo_queries("
             "query_name,schema_version,migration_sha256,query_hash,sql_text,"
