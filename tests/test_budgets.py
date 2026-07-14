@@ -13,6 +13,7 @@ from agentic_os.budgets import (
     BudgetError,
     BudgetExceeded,
     BudgetSelection,
+    _BUDGET_INVARIANT_QUERIES,
     _required_cost,
     release_budget,
     reserve_budget,
@@ -356,6 +357,24 @@ class BudgetRuntimeTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(epochs, [(1_800_000_000_123,), (1_800_000_000_123,)])
 
+    def test_budget_writer_restores_wal_journal_mode(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        self.assertEqual(str(mode).casefold(), "delete")
+
+        reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="wal-restore",
+                dedupe_key="wal-restore",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+
+        with sqlite3.connect(self.database) as connection:
+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(str(mode).casefold(), "wal")
+
     def test_missing_trusted_order_context_blocks_without_writes(self) -> None:
         kwargs = self._kwargs(
             idempotency_key="missing-clock",
@@ -424,6 +443,58 @@ class BudgetRuntimeTests(unittest.TestCase):
             release_budget(self.database, **kwargs)
         self.assertEqual(self._event_count(), 1)
         self.assertEqual(self._budget_row(), (0, 10, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def test_release_counts_pure_human_attention_consumption_per_spawn(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES('spawn-2','run','phase','agent','transition',"
+                "'client-2','spawn-idem-2','task','pending','now','now')"
+            )
+        reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="spawn-1-human-reserve",
+                dedupe_key="spawn-1-human-reserve",
+                amounts=BudgetAmounts(
+                    input_tokens=1, cost_microusd=1, human_attention_units=1
+                ),
+            ),
+        )
+        spawn_2 = self._kwargs(
+            idempotency_key="spawn-2-human-reserve",
+            dedupe_key="spawn-2-human-reserve",
+            amounts=BudgetAmounts(
+                input_tokens=1, cost_microusd=1, human_attention_units=1
+            ),
+        )
+        spawn_2["spawn_request_id"] = "spawn-2"
+        reserve_budget(self.database, **spawn_2)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+                "capability_class,event_type,human_attention_units,usage_confidence,"
+                "source,created_at,created_at_epoch_ms) VALUES('human-consumed',"
+                "'human-consumed-idem','human-consumed-dedupe',3,'run','transition',"
+                "'spawn','capability','human_attention',1,'known','settlement','now',"
+                "1800000000124)"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_human_attention=1,"
+                "consumed_human_attention=1 WHERE run_id='run'"
+            )
+        with self.assertRaisesRegex(BudgetExceeded, "dimension=human_attention_units"):
+            release_budget(
+                self.database,
+                **self._kwargs(
+                    idempotency_key="double-release-human",
+                    dedupe_key="double-release-human",
+                    amounts=BudgetAmounts(human_attention_units=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 3)
 
     def test_cross_spawn_over_release_contamination_blocks_reserve(self) -> None:
         with sqlite3.connect(self.database) as connection:
@@ -661,6 +732,36 @@ class BudgetRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(self._event_count(), 1)
         self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def test_runtime_runs_all_pinned_blocking_budget_slos(self) -> None:
+        self.assertTrue(
+            {
+                "Model cost registry numeric bounds",
+                "`sessions_spawn` intent without exact strict prior reserve",
+                "Meaningless `sessions_spawn` reserve",
+            }.issubset(_BUDGET_INVARIANT_QUERIES)
+        )
+
+    def test_model_cost_registry_slo_blocks_budget_commit(self) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('bad-cost','bad-provider','bad-model',"
+                "'bad-endpoint','bad-capability',1,1,'unknown','bad-effective',"
+                "'bad-cost-hash')"
+            )
+        with self.assertRaisesRegex(BudgetError, "Model cost registry numeric bounds"):
+            reserve_budget(
+                self.database,
+                **self._kwargs(
+                    idempotency_key="blocked-bad-cost-registry",
+                    dedupe_key="blocked-bad-cost-registry",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 0)
 
     def test_zero_reserve_requires_exact_policy_and_minima(self) -> None:
         with sqlite3.connect(self.database) as connection:

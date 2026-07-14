@@ -52,9 +52,12 @@ _MAX_EPOCH_MS = 253_402_300_799_999
 _USAGE_CONFIDENCE = {"known", "estimated"}
 _BUDGET_INVARIANT_QUERIES = {
     "Unknown usage blocks auto-local",
+    "Model cost registry numeric bounds",
     "Endpoint-bound budget event cost row blocks dispatch",
     "Run budget selected cost row mismatch",
+    "`sessions_spawn` intent without exact strict prior reserve",
     "Invalid zero-reserve policy",
+    "Meaningless `sessions_spawn` reserve",
     "Budget event amount malformed or out of range",
     "Budget counters outside selected budget",
     "Budget ledger reconciles to counters and budgets",
@@ -189,10 +192,23 @@ def _connect(database: Path) -> sqlite3.Connection:
     except sqlite3.Error as exc:
         raise BudgetError("budget database must already exist and be writable") from exc
     connection.execute("PRAGMA busy_timeout=10000")
+    journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    actual_journal_mode = journal_mode[0] if journal_mode else None
+    if str(actual_journal_mode).casefold() != "wal":
+        connection.close()
+        raise BudgetError(
+            "SQLite WAL journal mode is unavailable: "
+            f"requested WAL, got {actual_journal_mode!r}"
+        )
     connection.execute("PRAGMA foreign_keys=ON")
     if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
         connection.close()
         raise BudgetError("SQLite foreign key enforcement is unavailable")
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists() and stat.S_IMODE(sidecar.stat().st_mode) != 0o600:
+            connection.close()
+            raise BudgetError(f"budget database sidecar must have mode 0600: {sidecar}")
     return connection
 
 
@@ -323,12 +339,13 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
         "WHEN event_type='release' THEN -retry_units ELSE 0 END) "
         "OVER ledger_window AS net_retry,"
         "SUM(CASE WHEN event_type='reserve' THEN human_attention_units "
-        "WHEN event_type='release' THEN -human_attention_units ELSE 0 END) "
+        "WHEN event_type IN ('release','human_attention') "
+        "THEN -human_attention_units ELSE 0 END) "
         "OVER ledger_window AS net_human "
-        "FROM budget_events WHERE event_type IN ('reserve','consume','release') "
+        "FROM budget_events "
+        "WHERE event_type IN ('reserve','consume','release','human_attention') "
         "WINDOW ledger_window AS (PARTITION BY run_id,transition_id,"
-        "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
-        "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence "
+        "spawn_request_id,capability_class "
         "ORDER BY event_sequence,budget_event_id ROWS BETWEEN UNBOUNDED PRECEDING "
         "AND CURRENT ROW)) "
         "SELECT budget_event_id FROM ordered WHERE net_time<0 OR net_input<0 "
@@ -362,13 +379,15 @@ def _spawn_outstanding(
         "WHEN event_type IN ('release','human_attention') "
         "THEN -human_attention_units ELSE 0 END),0) "
         "FROM budget_events WHERE spawn_request_id=? AND run_id=? AND transition_id=? "
-        "AND provider=? AND model=? AND endpoint_binding_id=? AND capability_class=? "
-        "AND cost_registry_id=? AND cost_effective_at=? AND cost_registry_hash=? "
-        "AND cost_confidence=?",
+        "AND ((event_type='human_attention' AND capability_class=?) OR ("
+        "event_type<>'human_attention' AND provider=? AND model=? "
+        "AND endpoint_binding_id=? AND capability_class=? AND cost_registry_id=? "
+        "AND cost_effective_at=? AND cost_registry_hash=? AND cost_confidence=?))",
         (
             spawn_request_id,
             run_id,
             transition_id,
+            selection.capability_class,
             selection.provider,
             selection.model,
             selection.endpoint_binding_id,
