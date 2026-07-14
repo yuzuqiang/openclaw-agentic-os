@@ -125,13 +125,26 @@ def _legacy_retry_reservation_contract(query_name: str) -> SloQueryContract:
     )
 
 
-def _post_dispatch_session_proof_contract() -> SloQueryContract:
+def _post_dispatch_session_proof_contract(
+    *, require_accepted_timing: bool = False
+) -> SloQueryContract:
     contract = _contract_by_name(
         'Accepted `sessions_spawn` without exact accepted session identity'
     )
     base_sql = contract.sql_text.rstrip()
     if base_sql.endswith(";"):
         base_sql = base_sql[:-1]
+    timing_predicate = (
+        "OR typeof(eri.accepted_at_epoch_ms)<>'integer' "
+        "OR eri.accepted_at_epoch_ms<1 "
+        "OR eri.accepted_at_epoch_ms>253402300799999 "
+        "OR typeof(be.created_at_epoch_ms)<>'integer' "
+        "OR be.created_at_epoch_ms<1 "
+        "OR be.created_at_epoch_ms>253402300799999 "
+        "OR be.created_at_epoch_ms<=eri.accepted_at_epoch_ms "
+        if require_accepted_timing
+        else ""
+    )
     post_dispatch_sql = (
         " UNION SELECT be.budget_event_id FROM budget_events be "
         "LEFT JOIN spawn_requests sr ON sr.spawn_request_id=be.spawn_request_id "
@@ -156,6 +169,7 @@ def _post_dispatch_session_proof_contract() -> SloQueryContract:
         "OR sr.spawn_request_id IS NULL OR sr.state NOT IN ('accepted','completed') "
         "OR sr.session_key IS NULL OR sr.session_key='' "
         "OR eri.intent_id IS NULL OR eri.external_id IS NULL OR eri.external_id='' "
+        f"{timing_predicate}"
         "OR s.session_id IS NULL OR (be.event_type='consume' "
         "AND (sr.state<>'completed' OR s.state<>'completed' "
         "OR s.completed_at IS NULL OR s.completed_at='')))"
@@ -178,6 +192,27 @@ def _spawn_partition_budget_prefix_contract() -> SloQueryContract:
     if contract.sql_text.count(old_window) != 7:
         raise RuntimeError("budget prefix SLO partition replacement count changed")
     sql_text = contract.sql_text.replace(old_window, new_window)
+    return SloQueryContract(
+        contract.query_name,
+        sql_text,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
+def _consume_confidence_amount_contract() -> SloQueryContract:
+    contract = _contract_by_name("Budget event amount malformed or out of range")
+    sql_text = contract.sql_text.rstrip()
+    if sql_text.endswith(";"):
+        sql_text = sql_text[:-1]
+    sql_text += (
+        " OR (event_type='consume' AND usage_confidence='unknown' "
+        "AND (time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 "
+        "OR cost_microusd<>0)) "
+        "OR (event_type='consume' AND usage_confidence IN ('known','estimated') "
+        "AND time_seconds=0 AND input_tokens=0 AND output_tokens=0 "
+        "AND cost_microusd=0);"
+    )
     return SloQueryContract(
         contract.query_name,
         sql_text,
@@ -216,12 +251,19 @@ _SLO_QUERY_CONTRACTS_V1_V2 = _replace_contract(
 )
 
 _SLO_QUERY_CONTRACTS_V4 = SLO_QUERY_CONTRACTS
-SLO_QUERY_CONTRACTS = _replace_contract(
+_SLO_QUERY_CONTRACTS_V5 = _replace_contract(
     _replace_contract(
         SLO_QUERY_CONTRACTS,
         _spawn_partition_budget_prefix_contract(),
     ),
     _post_dispatch_session_proof_contract(),
+)
+SLO_QUERY_CONTRACTS = _replace_contract(
+    _replace_contract(
+        _SLO_QUERY_CONTRACTS_V5,
+        _post_dispatch_session_proof_contract(require_accepted_timing=True),
+    ),
+    _consume_confidence_amount_contract(),
 )
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
@@ -229,6 +271,7 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     2: _SLO_QUERY_CONTRACTS_V1_V2,
     3: _SLO_QUERY_CONTRACTS_V3,
     4: _SLO_QUERY_CONTRACTS_V4,
+    5: _SLO_QUERY_CONTRACTS_V5,
 }
 
 

@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `69887add0ce8c19b9f9408e7df801a04484186bdd26e5e3e7b7940860c17b19a`
+- Current design artifact SHA-256: `d69b0d839e83bcd076b389af48b7d486bfb6b412fcbd4d60e0f12e0425f62625`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `770a7d588edb7b578954c01ee85f69cdeca1e3d1a43d43d0df7a941a6da1336c`
-- Current migration manifest SHA-256: `dd4a836947a7a2057f9656f6bb6b1bad28a40fc3080c13084674dda2150e4e55`
+- Current latest migration SHA-256: `34e18b105cbed15b599cb467b70de15e1276ec5167bfc641d99e4232747782fa`
+- Current migration manifest SHA-256: `7a76ded51fb44be9ee516b5c056ec3d36006d79f91152843d46d0408021614f7`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -80,8 +80,9 @@ reservations into consumed counters, while unknown completed usage is persisted
 only as a zero-amount classification and marks the run budget unknown so later
 automatic budget work fails closed. Migration v5 versions the retry prefix SLO
 so every reserve/consume/release/retry/human-attention prefix window is scoped
-by run, transition, spawn request, and capability. Atomic final settlement of
-unused reservation, legacy-money
+by run, transition, spawn request, and capability; migration v6 versions the
+post-dispatch SLO guards for accepted timing and consume confidence/amount
+pairing. Atomic final settlement of unused reservation, legacy-money
 import conversion, and the remaining adversarial fixture matrix remain open in
 Issue #4.
 

@@ -29,6 +29,12 @@
       "name": "budget_retry_prefix_spawn_scope",
       "file": "0005_budget_retry_prefix_spawn_scope.sql",
       "sha256": "770a7d588edb7b578954c01ee85f69cdeca1e3d1a43d43d0df7a941a6da1336c"
+    },
+    {
+      "version": 6,
+      "name": "budget_post_dispatch_slo_guards",
+      "file": "0006_budget_post_dispatch_slo_guards.sql",
+      "sha256": "34e18b105cbed15b599cb467b70de15e1276ec5167bfc641d99e4232747782fa"
     }
   ]
 }
