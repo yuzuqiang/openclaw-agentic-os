@@ -347,9 +347,16 @@ class MigrationTests(unittest.TestCase):
         current_contract = next(
             contract for contract in SLO_QUERY_CONTRACTS if contract.query_name == query_name
         )
+        v3_contract = next(
+            contract
+            for contract in slo_query_contracts_for_schema_version(3)
+            if contract.query_name == query_name
+        )
         legacy_hash = slo_query_hash(legacy_contract.sql_text)
+        v3_hash = slo_query_hash(v3_contract.sql_text)
         current_hash = slo_query_hash(current_contract.sql_text)
         self.assertNotEqual(legacy_hash, current_hash)
+        self.assertNotEqual(v3_hash, current_hash)
 
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -372,7 +379,7 @@ class MigrationTests(unittest.TestCase):
                 [
                     (1, legacy_hash),
                     (2, legacy_hash),
-                    (3, current_hash),
+                    (3, v3_hash),
                     (4, current_hash),
                 ],
             )
@@ -1962,17 +1969,15 @@ class MigrationTests(unittest.TestCase):
             connection.execute("DELETE FROM run_budgets WHERE run_id='r'")
         with self.assertRaisesRegex(sqlite3.IntegrityError, "budget row is immutable"):
             connection.execute("UPDATE run_budgets SET run_id='other' WHERE run_id='r'")
-        connection.execute(
-            "UPDATE run_budgets SET reserved_input_tokens=0 WHERE run_id='r'"
-        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "ledger-backed"):
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=0 WHERE run_id='r'"
+            )
         self.assertEqual(
             connection.execute(
                 "SELECT reserved_input_tokens FROM run_budgets WHERE run_id='r'"
             ).fetchone(),
-            (0,),
-        )
-        connection.execute(
-            "UPDATE run_budgets SET reserved_input_tokens=1 WHERE run_id='r'"
+            (1,),
         )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "selection is immutable"):
             connection.execute(
@@ -3288,23 +3293,35 @@ class MigrationTests(unittest.TestCase):
             "'model','endpoint','cost-row','effective','cost-hash','known',"
             "'transition-retry',10,10,10,10,1,1,1,'known','now')"
         )
+        connection.execute(
+            "INSERT INTO endpoint_zero_reserve_policies("
+            "zero_reserve_policy_id,endpoint_binding_id,capability_class,policy_hash,"
+            "enabled,min_retry_units,min_time_seconds,min_human_attention_units,"
+            "effective_from_epoch_ms,effective_until_epoch_ms) VALUES("
+            "'zero-retry','endpoint','capability','zero-hash',1,1,0,0,1,"
+            "253402300799999)"
+        )
         for event_id, sequence, event_type, retry_units in (
-            ("retry-burst", 1, "retry_decrement", 2),
-            ("retry-restore", 2, "retry_restore", 1),
+            ("retry-reserve", 1, "reserve", 1),
+            ("retry-burst", 2, "retry_decrement", 2),
+            ("retry-restore", 3, "retry_restore", 1),
         ):
             connection.execute(
                 "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
                 "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
                 "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
-                "cost_registry_hash,cost_confidence,event_type,retry_units,"
+                "cost_registry_hash,cost_confidence,zero_reserve_policy_id,"
+                "zero_reserve_policy_hash,event_type,retry_units,"
                 "usage_confidence,source,created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
                 "'retry-run','transition-retry','provider','model','endpoint','capability',"
-                "'cost-row','effective','cost-hash','known',?,?,'known','test','now',?)",
+                "'cost-row','effective','cost-hash','known',?,?,?,?,'known','test','now',?)",
                 (
                     event_id,
                     f"idem-{event_id}",
                     f"dedupe-{event_id}",
                     sequence,
+                    "zero-retry" if event_type == "reserve" else None,
+                    "zero-hash" if event_type == "reserve" else None,
                     event_type,
                     retry_units,
                     1000 + sequence,

@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `6690f8cd77e6d58d5c12f9639128bce72dfb15568abcd4a7ae28f414d50d300f`
+- Current design artifact SHA-256: `7b6009bf927b4918b79e0e04f974c90401b563f56b911a27a60d17eab105f6a1`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `3059c549a225296bd6d020b0810ffb38b1c57558a6b7f0718529a55a56baf92d`
-- Current migration manifest SHA-256: `cbab30327a1866dd140db330a9c4e6eb26ff578d7b62deb69b25ccd17794e829`
+- Current latest migration SHA-256: `65cc55347943c1abce34ec41bd5feb46cef93e3c9858cc13a803e3f116a5caa6`
+- Current migration manifest SHA-256: `cbb9c4441903b4ebdc9d8b92ca65d209ec24ba503edd617fd478ecc4376aa379`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -68,8 +68,9 @@ request cannot release another request's reservation or leave its remaining toke
 underfunded. The API is idempotent on a caller key and separately rejects
 reused source dedupe identities. It does not yet claim end-to-end
 `sessions_spawn` settlement. Migration v4 keeps the referenced reserve selection
-immutable while permitting atomic counter changes for post-dispatch events. The
-runtime now records `consume`, retry decrement/restore, and pure
+immutable while permitting only ledger-backed atomic counter cache changes for
+post-dispatch events. The runtime now records `consume`, retry
+decrement/restore, and pure
 `human_attention` only for an exact accepted session/spawn/intent tuple;
 `consume` additionally requires a completed session. Known and estimated usage
 move outstanding reservations into consumed counters, while unknown completed

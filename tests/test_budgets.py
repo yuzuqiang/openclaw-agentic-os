@@ -999,6 +999,36 @@ class BudgetRuntimeTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, (6, 6, 3, 8, 4, 4, 2, 2))
 
+    def test_referenced_spawn_counter_drift_requires_ledger_backing(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-trigger",
+                dedupe_key="reserve-for-trigger",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "ledger-backed"):
+                connection.execute(
+                    "UPDATE run_budgets SET reserved_input_tokens=11 "
+                    "WHERE run_id='run'"
+                )
+        consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="ledger-backed-consume",
+                amounts=BudgetAmounts(input_tokens=4, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_input_tokens,consumed_input_tokens "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (6, 4))
+
     def test_unknown_completed_usage_is_durable_and_blocks_more_budget_work(self) -> None:
         reserve = reserve_budget(
             self.database,
@@ -1016,6 +1046,14 @@ class BudgetRuntimeTests(unittest.TestCase):
         kwargs["usage_confidence"] = "unknown"
         consume_budget(self.database, **kwargs)
         consume_budget(self.database, **kwargs)
+        with self.assertRaisesRegex(BudgetError, "unknown usage confidence"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="blocked-after-unknown",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
         with closing(sqlite3.connect(self.database)) as connection:
             confidence = connection.execute(
                 "SELECT usage_confidence FROM run_budgets WHERE run_id='run'"
@@ -1026,6 +1064,65 @@ class BudgetRuntimeTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(confidence, "unknown")
         self.assertEqual(event, ("consume", "unknown", 0, 0))
+
+    def test_retry_decrement_debits_reserved_retry_unit_at_budget_limit(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE run_budgets SET retry_budget=1 WHERE run_id='run'")
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-single-retry",
+                dedupe_key="reserve-single-retry",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1, retry_units=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        decrement_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="single-retry-decrement",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (0, 1))
+        restore_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="single-retry-restore",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (1, 0))
+
+    def test_retry_decrement_requires_this_spawn_retry_reservation(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-without-retry",
+                dedupe_key="reserve-without-retry",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        with self.assertRaisesRegex(BudgetExceeded, "outstanding reservation"):
+            decrement_retry_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="retry-without-reservation",
+                    amounts=BudgetAmounts(retry_units=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
 
     def test_retry_and_human_attention_events_update_exact_counters(self) -> None:
         reserve = reserve_budget(
@@ -1049,6 +1146,12 @@ class BudgetRuntimeTests(unittest.TestCase):
                 amounts=BudgetAmounts(retry_units=1),
             ),
         )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (0, 1))
         consume_human_attention(
             self.database,
             **self._post_kwargs(

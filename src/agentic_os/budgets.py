@@ -357,7 +357,8 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
         "WHEN event_type IN ('consume','release') THEN -cost_microusd ELSE 0 END) "
         "OVER ledger_window AS net_cost,"
         "SUM(CASE WHEN event_type='reserve' THEN retry_units "
-        "WHEN event_type='release' THEN -retry_units ELSE 0 END) "
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) "
         "OVER ledger_window AS net_retry,"
         "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
         "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
@@ -400,7 +401,8 @@ def _spawn_outstanding(
         "COALESCE(SUM(CASE WHEN event_type='reserve' THEN cost_microusd "
         "WHEN event_type IN ('consume','release') THEN -cost_microusd ELSE 0 END),0),"
         "COALESCE(SUM(CASE WHEN event_type='reserve' THEN retry_units "
-        "WHEN event_type='release' THEN -retry_units ELSE 0 END),0),"
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END),0),"
         "COALESCE(SUM(CASE WHEN event_type='reserve' THEN human_attention_units "
         "WHEN event_type IN ('release','human_attention') "
         "THEN -human_attention_units ELSE 0 END),0) "
@@ -806,29 +808,37 @@ def _update_post_dispatch_counters(
         )
     elif event_type == "retry_decrement":
         cursor = connection.execute(
-            "UPDATE run_budgets SET consumed_retries=consumed_retries+?,"
+            "UPDATE run_budgets SET reserved_retries=reserved_retries-?,"
+            "consumed_retries=consumed_retries+?,"
             "usage_confidence=CASE WHEN usage_confidence='known' AND ?='estimated' "
             "THEN 'estimated' ELSE usage_confidence END,updated_at=? "
-            "WHERE run_id=? AND reserved_retries+consumed_retries+?<=retry_budget",
+            "WHERE run_id=? AND reserved_retries>=? "
+            "AND consumed_retries+?<=retry_budget",
             (
+                amounts.retry_units,
                 amounts.retry_units,
                 usage_confidence,
                 updated_at,
                 run_id,
+                amounts.retry_units,
                 amounts.retry_units,
             ),
         )
     elif event_type == "retry_restore":
         cursor = connection.execute(
-            "UPDATE run_budgets SET consumed_retries=consumed_retries-?,"
+            "UPDATE run_budgets SET reserved_retries=reserved_retries+?,"
+            "consumed_retries=consumed_retries-?,"
             "usage_confidence=CASE WHEN usage_confidence='known' AND ?='estimated' "
             "THEN 'estimated' ELSE usage_confidence END,updated_at=? "
-            "WHERE run_id=? AND consumed_retries>=?",
+            "WHERE run_id=? AND consumed_retries>=? "
+            "AND reserved_retries+?<=retry_budget",
             (
+                amounts.retry_units,
                 amounts.retry_units,
                 usage_confidence,
                 updated_at,
                 run_id,
+                amounts.retry_units,
                 amounts.retry_units,
             ),
         )
@@ -1003,6 +1013,14 @@ def record_post_dispatch_event(
                 _assert_budget_invariants(connection)
                 connection.execute("COMMIT")
                 return replay
+            usage_row = connection.execute(
+                "SELECT usage_confidence FROM run_budgets WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if usage_row is None or usage_row[0] == "unknown":
+                raise BudgetError(
+                    "unknown usage confidence blocks post-dispatch budget mutation"
+                )
             if proof[1] not in _POST_DISPATCH_RUN_STATES:
                 raise BudgetError(
                     "post-dispatch budget event requires an active post-dispatch run"
@@ -1020,6 +1038,10 @@ def record_post_dispatch_event(
                         raise BudgetExceeded(
                             f"consume exceeds outstanding reservation dimension={field}"
                         )
+            elif event_type == "retry_decrement" and (
+                amounts.retry_units > outstanding.retry_units
+            ):
+                raise BudgetExceeded("retry_decrement exceeds outstanding reservation")
             elif event_type == "human_attention" and (
                 amounts.human_attention_units > outstanding.human_attention_units
             ):
