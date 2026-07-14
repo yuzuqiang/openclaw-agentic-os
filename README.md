@@ -51,6 +51,21 @@ The first P1.0 executable budget fixture pack lives under
 applies each fixture to a fresh migrated database and proves the expected
 blocking SLO query fires.
 
+`agentic_os.budgets` is the first P1.0 runtime slice. It records pre-RPC reserve
+and release events under `BEGIN IMMEDIATE`, updates counter caches in the same
+transaction, pins the selected transition and endpoint-bound cost
+row, derives a conservative integer-microusd cost floor from that registry row,
+requires an exact same-run/same-transition spawn request, allocates monotonic
+ordering time inside the write transaction, refuses unknown usage, and re-runs
+the blocking budget SLOs before commit. Release checks outstanding amounts and
+the remaining token-cost floor per spawn request, so one request cannot release
+another request's reservation or leave its remaining tokens underfunded. The
+API is idempotent on a caller key and separately rejects
+reused source dedupe identities. It does not yet claim end-to-end `sessions_spawn`
+settlement: migration v3 deliberately freezes a referenced prior-reserve row
+and its counters, so a follow-up reviewed migration/SLO change is required
+before consume/settle can account for an accepted spawn safely.
+
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API
 to produce the snapshot instead of copying a live database file.
