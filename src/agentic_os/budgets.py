@@ -74,7 +74,6 @@ _POST_DISPATCH_RUN_STATES = {
     "child_completed",
     "child_failed",
     "aggregation_completed",
-    "human_review_required",
 }
 
 
@@ -302,7 +301,9 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
     unknown_usage = connection.execute(
         "SELECT be.budget_event_id FROM budget_events be "
         "JOIN runs r ON r.run_id=be.run_id "
+        "LEFT JOIN run_budgets rb ON rb.run_id=be.run_id "
         "WHERE be.usage_confidence='unknown' AND ("
+        "rb.run_id IS NULL OR rb.usage_confidence IS NOT 'unknown' OR "
         "r.state IN ('gate_passed','release_pending','finalized') OR NOT ("
         "be.event_type='consume' AND be.time_seconds=0 AND be.input_tokens=0 "
         "AND be.output_tokens=0 AND be.cost_microusd=0 "
@@ -939,7 +940,7 @@ def record_post_dispatch_event(
                     "requested budget selection differs from persisted selected cost row"
                 )
             proof = connection.execute(
-                "SELECT sr.state,r.state FROM spawn_requests sr "
+                "SELECT sr.state,r.state,i.accepted_at_epoch_ms FROM spawn_requests sr "
                 "JOIN runs r ON r.run_id=sr.run_id "
                 "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
                 "AND i.state IN ('accepted','reconciled') "
@@ -971,6 +972,14 @@ def record_post_dispatch_event(
                 transition_id=transition_id,
                 clock_context_id=clock_context_id,
             )
+            accepted_at_epoch_ms = proof[2]
+            if type(accepted_at_epoch_ms) is not int or (
+                created_at_epoch_ms <= accepted_at_epoch_ms
+            ):
+                raise BudgetError(
+                    "post-dispatch budget event requires a fresh clock after "
+                    "accepted session proof"
+                )
             if event_type == "consume" and usage_confidence != "unknown":
                 if amounts.cost_microusd < _required_cost(selection, amounts):
                     raise BudgetExceeded(
@@ -1013,6 +1022,18 @@ def record_post_dispatch_event(
                 _assert_budget_invariants(connection)
                 connection.execute("COMMIT")
                 return replay
+            poisoned_usage = connection.execute(
+                "SELECT 1 FROM run_budgets rb "
+                "WHERE rb.run_id=? AND rb.usage_confidence='unknown' "
+                "UNION ALL "
+                "SELECT 1 FROM budget_events be "
+                "WHERE be.run_id=? AND be.usage_confidence='unknown' LIMIT 1",
+                (run_id, run_id),
+            ).fetchone()
+            if poisoned_usage is not None:
+                raise BudgetError(
+                    "unknown usage confidence blocks post-dispatch budget mutation"
+                )
             usage_row = connection.execute(
                 "SELECT usage_confidence FROM run_budgets WHERE run_id=?",
                 (run_id,),

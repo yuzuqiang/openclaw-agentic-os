@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `7b6009bf927b4918b79e0e04f974c90401b563f56b911a27a60d17eab105f6a1`
+- Current design artifact SHA-256: `69887add0ce8c19b9f9408e7df801a04484186bdd26e5e3e7b7940860c17b19a`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `65cc55347943c1abce34ec41bd5feb46cef93e3c9858cc13a803e3f116a5caa6`
-- Current migration manifest SHA-256: `cbb9c4441903b4ebdc9d8b92ca65d209ec24ba503edd617fd478ecc4376aa379`
+- Current latest migration SHA-256: `770a7d588edb7b578954c01ee85f69cdeca1e3d1a43d43d0df7a941a6da1336c`
+- Current migration manifest SHA-256: `dd4a836947a7a2057f9656f6bb6b1bad28a40fc3080c13084674dda2150e4e55`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -72,12 +72,17 @@ immutable while permitting only ledger-backed atomic counter cache changes for
 post-dispatch events. The runtime now records `consume`, retry
 decrement/restore, and pure
 `human_attention` only for an exact accepted session/spawn/intent tuple;
-`consume` additionally requires a completed session. Known and estimated usage
-move outstanding reservations into consumed counters, while unknown completed
-usage is persisted only as a zero-amount classification and marks the run
-budget unknown so later automatic budget work fails closed. Atomic final
-settlement of unused reservation, legacy-money import conversion, and the
-remaining adversarial fixture matrix remain open in Issue #4.
+`consume` additionally requires a completed session. These post-dispatch
+mutations require an active automatic dispatch state, a fresh trusted clock
+after the accepted session proof, and no prior unknown usage poison except for
+exact idempotent replay. Known and estimated usage move outstanding
+reservations into consumed counters, while unknown completed usage is persisted
+only as a zero-amount classification and marks the run budget unknown so later
+automatic budget work fails closed. Migration v5 versions the retry prefix SLO
+so retry decrement/restore windows are scoped by run, transition, spawn request,
+and capability. Atomic final settlement of unused reservation, legacy-money
+import conversion, and the remaining adversarial fixture matrix remain open in
+Issue #4.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

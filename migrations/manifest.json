@@ -23,6 +23,12 @@
       "name": "budget_post_dispatch_mutations",
       "file": "0004_budget_post_dispatch_mutations.sql",
       "sha256": "65cc55347943c1abce34ec41bd5feb46cef93e3c9858cc13a803e3f116a5caa6"
+    },
+    {
+      "version": 5,
+      "name": "budget_retry_prefix_spawn_scope",
+      "file": "0005_budget_retry_prefix_spawn_scope.sql",
+      "sha256": "770a7d588edb7b578954c01ee85f69cdeca1e3d1a43d43d0df7a941a6da1336c"
     }
   ]
 }

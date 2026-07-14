@@ -272,7 +272,7 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (2, 3, 4))
+        self.assertEqual(apply_migrations(self.database), (2, 3, 4, 5))
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
         )
@@ -368,7 +368,7 @@ class MigrationTests(unittest.TestCase):
                 [(1, legacy_hash), (2, legacy_hash)],
             )
 
-        self.assertEqual(apply_migrations(self.database), (3, 4))
+        self.assertEqual(apply_migrations(self.database), (3, 4, 5))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -381,6 +381,7 @@ class MigrationTests(unittest.TestCase):
                     (2, legacy_hash),
                     (3, v3_hash),
                     (4, current_hash),
+                    (5, current_hash),
                 ],
             )
 
@@ -539,6 +540,7 @@ class MigrationTests(unittest.TestCase):
                 "shadow_projection_identity",
                 "budget_ledger_slo_identity",
                 "budget_post_dispatch_mutations",
+                "budget_retry_prefix_spawn_scope",
             ],
         )
         for migration in migrations:
@@ -561,7 +563,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4))
+        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4, 5))
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -3340,6 +3342,114 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(connection.execute(ledger_query).fetchall(), [])
         self.assertEqual(connection.execute(prefix_query).fetchall(), [("retry-burst",)])
 
+    def test_budget_prefix_slo_partitions_retry_consumption_by_spawn(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'retry-scope-run','prepare-retry-scope','w','file_authority','candidate',"
+            "'R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES('transition-retry-scope',"
+            "'retry-scope-run','before','after','budget','retry','R1',"
+            "'idem-retry-scope',0,'now')"
+        )
+        for spawn_id, client_id, idem in (
+            ("spawn-a", "client-a", "spawn-idem-a"),
+            ("spawn-b", "client-b", "spawn-idem-b"),
+        ):
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES(?,'retry-scope-run','phase','agent',"
+                "'transition-retry-scope',?,?,'task','pending','now','now')",
+                (spawn_id, client_id, idem),
+            )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_retries,consumed_retries,usage_confidence,updated_at) "
+            "VALUES('retry-scope-run','w','capability','provider','model','endpoint',"
+            "'cost-row','effective','cost-hash','known','transition-retry-scope',"
+            "10,10,10,10,1,1,0,1,'known','now')"
+        )
+        connection.execute(
+            "INSERT INTO endpoint_zero_reserve_policies("
+            "zero_reserve_policy_id,endpoint_binding_id,capability_class,policy_hash,"
+            "enabled,min_retry_units,min_time_seconds,min_human_attention_units,"
+            "effective_from_epoch_ms,effective_until_epoch_ms) VALUES("
+            "'zero-retry','endpoint','capability','zero-hash',1,1,0,0,1,"
+            "253402300799999)"
+        )
+        for event_id, sequence, spawn_id, event_type in (
+            ("retry-a-reserve", 1, "spawn-a", "reserve"),
+            ("retry-b-decrement", 2, "spawn-b", "retry_decrement"),
+        ):
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "zero_reserve_policy_id,zero_reserve_policy_hash,event_type,retry_units,"
+                "usage_confidence,source,created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'retry-scope-run','transition-retry-scope',?,'provider','model',"
+                "'endpoint','capability','cost-row','effective','cost-hash','known',"
+                "?,?,?,1,'known','test','now',?)",
+                (
+                    event_id,
+                    f"idem-{event_id}",
+                    f"dedupe-{event_id}",
+                    sequence,
+                    spawn_id,
+                    "zero-retry" if event_type == "reserve" else None,
+                    "zero-hash" if event_type == "reserve" else None,
+                    event_type,
+                    1000 + sequence,
+                ),
+            )
+        ledger_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget ledger reconciles to counters and budgets"
+        )
+        current_prefix_query = next(
+            contract.sql_text
+            for contract in SLO_QUERY_CONTRACTS
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        v4_prefix_query = next(
+            contract.sql_text
+            for contract in slo_query_contracts_for_schema_version(4)
+            if contract.query_name == "Budget prefix over-release or over-restore"
+        )
+        self.assertEqual(connection.execute(ledger_query).fetchall(), [])
+        self.assertEqual(connection.execute(v4_prefix_query).fetchall(), [])
+        self.assertEqual(
+            connection.execute(current_prefix_query).fetchall(),
+            [("retry-b-decrement",)],
+        )
+
     def test_budget_ledger_slo_rejects_events_without_run_budget(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -3948,7 +4058,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "5" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(5,'future_contract',?,'now')",
+            "VALUES(6,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -3957,7 +4067,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                5,
+                6,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -3971,7 +4081,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (5,),
+            (6,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -4172,6 +4282,7 @@ class MigrationTests(unittest.TestCase):
                 (2, "shadow_projection_identity"),
                 (3, "budget_ledger_slo_identity"),
                 (4, "budget_post_dispatch_mutations"),
+                (5, "budget_retry_prefix_spawn_scope"),
             ],
         )
 

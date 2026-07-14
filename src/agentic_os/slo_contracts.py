@@ -125,6 +125,46 @@ def _legacy_retry_reservation_contract(query_name: str) -> SloQueryContract:
     )
 
 
+def _spawn_partition_retry_prefix_contract() -> SloQueryContract:
+    contract = _contract_by_name(_BUDGET_PREFIX_NAME)
+    old_reserved = (
+        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) "
+        "OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry"
+    )
+    new_reserved = (
+        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) "
+        "OVER (PARTITION BY run_id,transition_id,spawn_request_id,capability_class "
+        "ORDER BY event_sequence) AS net_reserved_retry"
+    )
+    old_consumed = (
+        "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
+        "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
+        "OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed"
+    )
+    new_consumed = (
+        "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
+        "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
+        "OVER (PARTITION BY run_id,transition_id,spawn_request_id,capability_class "
+        "ORDER BY event_sequence) AS net_retry_consumed"
+    )
+    sql_text = contract.sql_text.replace(old_reserved, new_reserved).replace(
+        old_consumed,
+        new_consumed,
+    )
+    if sql_text == contract.sql_text:
+        raise RuntimeError("budget prefix SLO retry partition replacement failed")
+    return SloQueryContract(
+        contract.query_name,
+        sql_text,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
 def _replace_contract(
     contracts: tuple[SloQueryContract, ...],
     replacement: SloQueryContract,
@@ -154,10 +194,17 @@ _SLO_QUERY_CONTRACTS_V1_V2 = _replace_contract(
     _legacy_retry_reservation_contract(_BUDGET_PREFIX_NAME),
 )
 
+_SLO_QUERY_CONTRACTS_V4 = SLO_QUERY_CONTRACTS
+SLO_QUERY_CONTRACTS = _replace_contract(
+    SLO_QUERY_CONTRACTS,
+    _spawn_partition_retry_prefix_contract(),
+)
+
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
     2: _SLO_QUERY_CONTRACTS_V1_V2,
     3: _SLO_QUERY_CONTRACTS_V3,
+    4: _SLO_QUERY_CONTRACTS_V4,
 }
 
 

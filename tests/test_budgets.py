@@ -211,6 +211,41 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "UPDATE spawn_requests SET state=? WHERE spawn_request_id='spawn'",
                 ("completed" if completed else "accepted",),
             )
+            connection.execute(
+                "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+                "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,"
+                "context_hash,evidence_hash,independence_class,"
+                "independence_proof_json,completed_at) VALUES("
+                "'post-verifier','run','worker-agent','post-verifier-agent',"
+                "'provider','model','post-prompt-hash','post-context-hash',"
+                "'budget-runtime-post-evidence','independent',"
+                "'{\"reviewer_session\":\"post-dispatch-clock\"}','now')"
+            )
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,"
+                "clock_context_id,verifier_run_id,decision,completed_at,"
+                "completed_at_epoch_ms,gate_version,gate_query_hash,"
+                "migration_sha256,evidence_hash,risk_dominance,created_at) "
+                "VALUES('post-gate','run','transition','post-clock','post-verifier',"
+                "'pass','now',1800000000125,'v1','post-gate-query',"
+                "'migration-sha','budget-runtime-post-evidence','R1','now')"
+            )
+            connection.execute(
+                "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+                "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,"
+                "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
+                "consumed_at_epoch_ms) VALUES('post-clock','post-gate','post-gate',"
+                "'run','transition','post-nonce',1800000000125,1800000000125,"
+                "'budget-runtime','trusted-post-clock-hash',1800000000125)"
+            )
+            connection.execute(
+                "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
+                "size_bytes,content_type,redaction_status,producer_run_id,"
+                "verifier_run_id,gate_run_id,captured_at) VALUES("
+                "'budget-runtime-post-evidence','run','budget-runtime-post-evidence.json',"
+                "'post-sha256',1,'application/json','none','run','post-verifier',"
+                "'post-gate','now')"
+            )
 
     def _post_kwargs(
         self,
@@ -225,6 +260,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 amounts=amounts,
             ),
             "source": "usage-import",
+            "clock_context_id": "post-clock",
         }
 
     def _slo_rows(self, query_name: str) -> list[tuple[object, ...]]:
@@ -1064,6 +1100,79 @@ class BudgetRuntimeTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(confidence, "unknown")
         self.assertEqual(event, ("consume", "unknown", 0, 0))
+
+    def test_zero_unknown_usage_row_must_poison_run_budget(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-drifted-unknown",
+                dedupe_key="reserve-for-drifted-unknown",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('drifted-unknown','drifted-unknown-idem',"
+                "'drifted-unknown-dedupe',2,'run','transition','spawn','provider',"
+                "'model','endpoint','capability','cost-row','effective','cost-hash',"
+                "'known','consume','unknown','legacy-import','now',1800000000125)"
+            )
+        with self.assertRaisesRegex(BudgetError, "unknown usage confidence"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="blocked-after-drifted-unknown",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 2)
+
+    def test_post_dispatch_budget_mutation_rejects_manual_review_run(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-manual-review",
+                dedupe_key="reserve-for-manual-review",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE runs SET state='human_review_required' WHERE run_id='run'"
+            )
+        with self.assertRaisesRegex(BudgetError, "active post-dispatch run"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="manual-review-consume",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+
+    def test_post_dispatch_budget_mutation_requires_post_acceptance_clock(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-stale-clock",
+                dedupe_key="reserve-for-stale-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        kwargs = self._post_kwargs(
+            idempotency_key="stale-clock-consume",
+            amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+        )
+        kwargs["clock_context_id"] = "clock"
+        with self.assertRaisesRegex(BudgetError, "fresh clock"):
+            consume_budget(self.database, **kwargs)
 
     def test_retry_decrement_debits_reserved_retry_unit_at_budget_limit(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
