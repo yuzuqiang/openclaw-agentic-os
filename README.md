@@ -55,11 +55,13 @@ blocking SLO query fires.
 and release events under `BEGIN IMMEDIATE`, updates counter caches in the same
 transaction, pins the selected transition and endpoint-bound cost
 row, derives a conservative integer-microusd cost floor from that registry row,
-requires an exact same-run/same-transition spawn request, allocates monotonic
-ordering time inside the write transaction, refuses unknown usage, and re-runs
-the blocking budget SLOs before commit. Release checks outstanding amounts and
-the remaining token-cost floor per spawn request, so one request cannot release
-another request's reservation or leave its remaining tokens underfunded. The
+requires an exact same-run/same-transition spawn request, stamps events only
+from a persisted same-run/same-transition trusted gate/order clock context,
+refuses prior unknown usage or post-intent reserve writes, and re-runs the
+blocking budget SLOs plus runtime ledger-contamination checks before commit.
+Release checks outstanding amounts and the remaining token-cost floor per spawn
+request, so one request cannot release another request's reservation or leave
+its remaining tokens underfunded. The
 API is idempotent on a caller key and separately rejects
 reused source dedupe identities. It does not yet claim end-to-end `sessions_spawn`
 settlement: migration v3 deliberately freezes a referenced prior-reserve row

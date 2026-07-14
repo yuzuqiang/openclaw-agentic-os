@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import stat
 import sqlite3
-import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -137,15 +136,32 @@ def _created_at(epoch_ms: int) -> str:
     ).isoformat()
 
 
-def _allocate_created_at(
-    connection: sqlite3.Connection, *, run_id: str
+def _trusted_created_at(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    transition_id: str,
+    clock_context_id: str,
 ) -> tuple[str, int]:
-    wall_epoch_ms = time.time_ns() // 1_000_000
-    previous = connection.execute(
-        "SELECT MAX(created_at_epoch_ms) FROM budget_events WHERE run_id=?",
-        (run_id,),
-    ).fetchone()[0]
-    epoch_ms = max(wall_epoch_ms, previous + 1 if previous is not None else 1)
+    row = connection.execute(
+        "SELECT c.now_epoch_ms FROM gate_clock_context c "
+        "JOIN gate_runs g ON g.gate_run_id=c.gate_run_id "
+        " AND g.clock_context_id=c.clock_context_id "
+        " AND g.run_id=c.run_id AND g.transition_id=c.transition_id "
+        "WHERE c.clock_context_id=? AND c.run_id=? AND c.transition_id=? "
+        " AND c.gate_run_id=c.consumed_by_gate_run_id "
+        " AND c.bound_at_epoch_ms=c.now_epoch_ms "
+        " AND c.consumed_at_epoch_ms=c.now_epoch_ms "
+        " AND c.trusted_clock_source_hash<>'' AND c.gate_nonce<>'' "
+        " AND g.decision='pass' AND g.completed_at_epoch_ms=c.now_epoch_ms",
+        (clock_context_id, run_id, transition_id),
+    ).fetchone()
+    if row is None:
+        raise BudgetError(
+            "budget event requires a trusted same-run, same-transition "
+            "gate/order clock context"
+        )
+    epoch_ms = row[0]
     return _created_at(epoch_ms), epoch_ms
 
 
@@ -252,6 +268,12 @@ def _required_cost(selection: BudgetSelection, amounts: BudgetAmounts) -> int:
 
 
 def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
+    unknown_usage = connection.execute(
+        "SELECT budget_event_id FROM budget_events "
+        "WHERE usage_confidence='unknown' LIMIT 1"
+    ).fetchone()
+    if unknown_usage is not None:
+        raise BudgetError("unknown usage confidence already exists in budget ledger")
     contracts = {
         item.query_name: item.sql_text
         for item in SLO_QUERY_CONTRACTS
@@ -271,6 +293,7 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
         "WHERE be.event_type IN ('reserve','consume','release') AND ("
         "be.spawn_request_id IS NULL OR sr.spawn_request_id IS NULL "
         "OR rb.run_id IS NULL OR be.provider<>rb.selected_provider "
+        "OR be.transition_id<>rb.selected_reserve_transition_id "
         "OR be.model<>rb.selected_model "
         "OR be.endpoint_binding_id<>rb.selected_endpoint_binding_id "
         "OR be.capability_class<>rb.capability_class "
@@ -281,6 +304,38 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if invalid_binding is not None:
         raise BudgetError("budget event is not composite-bound to its spawn and cost row")
+    invalid_spawn_prefix = connection.execute(
+        "WITH ordered AS ("
+        "SELECT budget_event_id,"
+        "SUM(CASE WHEN event_type='reserve' THEN time_seconds "
+        "WHEN event_type IN ('consume','release') THEN -time_seconds ELSE 0 END) "
+        "OVER ledger_window AS net_time,"
+        "SUM(CASE WHEN event_type='reserve' THEN input_tokens "
+        "WHEN event_type IN ('consume','release') THEN -input_tokens ELSE 0 END) "
+        "OVER ledger_window AS net_input,"
+        "SUM(CASE WHEN event_type='reserve' THEN output_tokens "
+        "WHEN event_type IN ('consume','release') THEN -output_tokens ELSE 0 END) "
+        "OVER ledger_window AS net_output,"
+        "SUM(CASE WHEN event_type='reserve' THEN cost_microusd "
+        "WHEN event_type IN ('consume','release') THEN -cost_microusd ELSE 0 END) "
+        "OVER ledger_window AS net_cost,"
+        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
+        "WHEN event_type='release' THEN -retry_units ELSE 0 END) "
+        "OVER ledger_window AS net_retry,"
+        "SUM(CASE WHEN event_type='reserve' THEN human_attention_units "
+        "WHEN event_type='release' THEN -human_attention_units ELSE 0 END) "
+        "OVER ledger_window AS net_human "
+        "FROM budget_events WHERE event_type IN ('reserve','consume','release') "
+        "WINDOW ledger_window AS (PARTITION BY run_id,transition_id,"
+        "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+        "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence "
+        "ORDER BY event_sequence,budget_event_id ROWS BETWEEN UNBOUNDED PRECEDING "
+        "AND CURRENT ROW)) "
+        "SELECT budget_event_id FROM ordered WHERE net_time<0 OR net_input<0 "
+        "OR net_output<0 OR net_cost<0 OR net_retry<0 OR net_human<0 LIMIT 1"
+    ).fetchone()
+    if invalid_spawn_prefix is not None:
+        raise BudgetError("per-spawn budget ledger prefix over-releases a reservation")
 
 
 def _spawn_outstanding(
@@ -355,7 +410,8 @@ _EVENT_COMPARE_COLUMNS = (
     "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
     "cost_effective_at,cost_registry_hash,cost_confidence,zero_reserve_policy_id,"
     "zero_reserve_policy_hash,event_type,time_seconds,input_tokens,output_tokens,"
-    "cost_microusd,human_attention_units,retry_units,usage_confidence,source"
+    "cost_microusd,human_attention_units,retry_units,usage_confidence,source,"
+    "created_at,created_at_epoch_ms"
 )
 
 
@@ -452,6 +508,7 @@ def record_budget_event(
     usage_confidence: Literal["known", "estimated"] = "known",
     spawn_request_id: str,
     zero_reserve_policy_id: str | None = None,
+    clock_context_id: str | None = None,
 ) -> BudgetEventResult:
     """Record one authoritative event and update its counter cache atomically."""
 
@@ -463,6 +520,7 @@ def record_budget_event(
     dedupe_key = _required_text("dedupe_key", dedupe_key)
     source = _required_text("source", source)
     spawn_request_id = _required_text("spawn_request_id", spawn_request_id)
+    clock_context_id = _required_text("clock_context_id", clock_context_id)
     if usage_confidence not in _USAGE_CONFIDENCE:
         raise BudgetError("unknown usage confidence blocks budget mutation")
     if amounts.is_zero():
@@ -500,6 +558,12 @@ def record_budget_event(
                 raise BudgetError(
                     "budget event requires an exact same-run, same-transition spawn request"
                 )
+            created_at, created_at_epoch_ms = _trusted_created_at(
+                connection,
+                run_id=run_id,
+                transition_id=transition_id,
+                clock_context_id=clock_context_id,
+            )
             required_cost = _required_cost(selection, amounts)
             if event_type == "reserve" and amounts.cost_microusd < required_cost:
                 raise BudgetExceeded(
@@ -537,6 +601,8 @@ def record_budget_event(
                 amounts.retry_units,
                 usage_confidence,
                 source,
+                created_at,
+                created_at_epoch_ms,
             )
             replay = _existing_event(
                 connection, idempotency_key=idempotency_key, expected=expected
@@ -549,6 +615,18 @@ def record_budget_event(
                 raise BudgetError(
                     f"{event_type} requires a pending pre-RPC spawn request"
                 )
+            if event_type == "reserve":
+                prior_intent = connection.execute(
+                    "SELECT intent_id FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn' AND run_id=? "
+                    "AND transition_id=? AND spawn_request_id=? LIMIT 1",
+                    (run_id, transition_id, spawn_request_id),
+                ).fetchone()
+                if prior_intent is not None:
+                    raise BudgetError(
+                        "reserve requires no existing sessions_spawn intent for "
+                        "the spawn request"
+                    )
             if event_type == "release":
                 outstanding = _spawn_outstanding(
                     connection,
@@ -573,9 +651,6 @@ def record_budget_event(
                     raise BudgetExceeded(
                         "release would underfund the remaining per-spawn token reservation"
                     )
-            created_at, created_at_epoch_ms = _allocate_created_at(
-                connection, run_id=run_id
-            )
             sequence = connection.execute(
                 "SELECT COALESCE(MAX(event_sequence),0)+1 FROM budget_events "
                 "WHERE run_id=?",
@@ -598,8 +673,6 @@ def record_budget_event(
                     event_dedupe_hash,
                     sequence,
                     *expected[2:],
-                    created_at,
-                    created_at_epoch_ms,
                 ),
             )
             _update_counters(
