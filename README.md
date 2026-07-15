@@ -19,8 +19,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
-disabled (`agentic_os.DB_AUTHORITY_ENABLED is False`), and no OpenClaw runtime
-adapter is implemented yet.
+disabled (`agentic_os.DB_AUTHORITY_ENABLED is False`).
 
 ## Foundation commands
 
@@ -174,6 +173,13 @@ same boundary. It covers allowLease acquire/status/release and session
 spawn/status/list/result metadata, including idempotent replay identity, without
 making OpenClaw RPCs, changing Gateway configuration, starting a reconciliation
 scanner, or enabling database authority.
+`agentic_os.openclaw_adapter`, `agentic_os.runtime_dispatch`, and
+`agentic_os.reconciliation` add the next bounded Issue #5 slice: an injectable
+metadata-capable adapter contract, a DB-persisted pending-intent runtime
+dispatcher, exact accepted lease/session persistence, owned-lease cleanup on
+spawn metadata failure, and a fail-closed scanner that reconciles unknown
+outcomes only from list/status metadata. Unknown `sessions_spawn` outcomes are
+never retried; zero, ambiguous, or mismatched observations move to human review.
 
 ## Version-management policy
 
