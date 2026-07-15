@@ -205,7 +205,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 29)
+            self.assertEqual(len(tables), 32)
             rows = connection.execute(
                 "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -222,6 +222,150 @@ class MigrationTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
                 (SLO_QUERY_COUNT * len(migrations),),
             )
+
+    def test_legacy_money_import_evidence_children_match_completed_batch_counts(
+        self,
+    ) -> None:
+        apply_migrations(self.database)
+        digest_a = "a" * 64
+        digest_b = "b" * 64
+        digest_c = "c" * 64
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "INSERT INTO legacy_money_import_quarantine("
+                "quarantine_id,batch_id,source_row_ordinal,legacy_row_id,"
+                "source_column,source_type,source_unit,source_value_text,"
+                "reason_code,reason_detail,row_payload_hash,created_at) VALUES("
+                "'quarantine-a','quarantine-batch',1,'row-a','actual_cost_usd',"
+                "'text','usd_decimal','bad','invalid_money','bad money',?,"
+                "'now')",
+                (digest_b,),
+            )
+            connection.execute(
+                "INSERT INTO legacy_money_import_batches("
+                "batch_id,source_schema_version,source_table,source_unit,"
+                "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                "created_at,completed_at,failure_reason) VALUES("
+                "'quarantine-batch','legacy_budget_terminal_usage_v1',"
+                "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                "'quarantined',1,1,0,'now','now','failed')",
+                (digest_a,),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "quarantine evidence"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_quarantine("
+                    "quarantine_id,batch_id,source_row_ordinal,legacy_row_id,"
+                    "source_column,source_type,source_unit,source_value_text,"
+                    "reason_code,reason_detail,row_payload_hash,created_at) VALUES("
+                    "'quarantine-extra','quarantine-batch',2,'row-b',"
+                    "'actual_cost_usd','text','usd_decimal','bad',"
+                    "'invalid_money','bad money',?,'now')",
+                    (digest_c,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "promotion evidence"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_promotions("
+                    "batch_id,legacy_row_id,row_payload_hash,settlement_id,promoted_at"
+                    ") VALUES('quarantine-batch','row-a',?,'missing-settlement','now')",
+                    (digest_b,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "count mismatch"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_batches("
+                    "batch_id,source_schema_version,source_table,source_unit,"
+                    "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                    "created_at,completed_at,failure_reason) VALUES("
+                    "'missing-quarantine-evidence','legacy_budget_terminal_usage_v1',"
+                    "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                    "'quarantined',2,2,0,'now','now','failed')",
+                    (digest_a,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "count mismatch"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_batches("
+                    "batch_id,source_schema_version,source_table,source_unit,"
+                    "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                    "created_at,completed_at,failure_reason) VALUES("
+                    "'missing-promotion-evidence','legacy_budget_terminal_usage_v1',"
+                    "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                    "'promoted',1,0,1,'now','now',NULL)",
+                    (digest_b,),
+                )
+
+            connection.execute(
+                "INSERT INTO legacy_money_import_promotions("
+                "batch_id,legacy_row_id,row_payload_hash,settlement_id,promoted_at"
+                ") VALUES('promotion-batch','row-a',?,'missing-settlement-a','now')",
+                (digest_b,),
+            )
+            connection.execute(
+                "INSERT INTO legacy_money_import_batches("
+                "batch_id,source_schema_version,source_table,source_unit,"
+                "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                "created_at,completed_at,failure_reason) VALUES("
+                "'promotion-batch','legacy_budget_terminal_usage_v1',"
+                "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                "'promoted',1,0,1,'now','now',NULL)",
+                (digest_b,),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "promotion evidence"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_promotions("
+                    "batch_id,legacy_row_id,row_payload_hash,settlement_id,promoted_at"
+                    ") VALUES('promotion-batch','row-b',?,'missing-settlement-b','now')",
+                    (digest_c,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "quarantine evidence"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_quarantine("
+                    "quarantine_id,batch_id,source_row_ordinal,legacy_row_id,"
+                    "source_column,source_type,source_unit,source_value_text,"
+                    "reason_code,reason_detail,row_payload_hash,created_at) VALUES("
+                    "'quarantine-wrong-status','promotion-batch',1,'row-a',"
+                    "'actual_cost_usd','text','usd_decimal','bad',"
+                    "'invalid_money','bad money',?,'now')",
+                    (digest_c,),
+                )
+
+    def test_legacy_money_import_batch_source_identity_is_constrained(self) -> None:
+        apply_migrations(self.database)
+        digest = "a" * 64
+        insert_sql = (
+            "INSERT INTO legacy_money_import_batches("
+            "batch_id,source_schema_version,source_table,source_unit,payload_hash,"
+            "status,row_count,quarantine_count,promoted_count,created_at,completed_at,"
+            "failure_reason) VALUES(?,?,?,?,?,'promoted',0,0,0,'now','now',NULL)"
+        )
+        with sqlite3.connect(self.database) as connection:
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "legacy_money_import_source_schema_version",
+            ):
+                connection.execute(
+                    insert_sql,
+                    (
+                        "bad-schema-version",
+                        "legacy_budget_terminal_usage_v0",
+                        "legacy_budget_terminal_usage_v1",
+                        "usd_decimal",
+                        digest,
+                    ),
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "legacy_money_import_source_table",
+            ):
+                connection.execute(
+                    insert_sql,
+                    (
+                        "bad-source-table",
+                        "legacy_budget_terminal_usage_v1",
+                        "other_table",
+                        "usd_decimal",
+                        digest,
+                    ),
+                )
 
     def test_existing_version_1_database_upgrades_to_shadow_projection_identity(self) -> None:
         migration_dir = Path(self.temporary.name) / "v1-migrations"
@@ -293,7 +437,7 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (2, 3, 4, 5, 6, 7, 8))
+        self.assertEqual(apply_migrations(self.database), (2, 3, 4, 5, 6, 7, 8, 9))
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
         )
@@ -389,7 +533,7 @@ class MigrationTests(unittest.TestCase):
                 [(1, legacy_hash), (2, legacy_hash)],
             )
 
-        self.assertEqual(apply_migrations(self.database), (3, 4, 5, 6, 7, 8))
+        self.assertEqual(apply_migrations(self.database), (3, 4, 5, 6, 7, 8, 9))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -406,6 +550,7 @@ class MigrationTests(unittest.TestCase):
                     (6, current_hash),
                     (7, current_hash),
                     (8, current_hash),
+                    (9, current_hash),
                 ],
             )
 
@@ -568,6 +713,7 @@ class MigrationTests(unittest.TestCase):
                 "budget_post_dispatch_slo_guards",
                 "budget_post_dispatch_clock_identity",
                 "budget_atomic_final_settlement",
+                "legacy_money_import_quarantine",
             ],
         )
         for migration in migrations:
@@ -590,7 +736,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4, 5, 6, 7, 8))
+        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4, 5, 6, 7, 8, 9))
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -5078,7 +5224,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(9,'future_contract',?,'now')",
+            "VALUES(10,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -5087,7 +5233,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                9,
+                10,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -5101,7 +5247,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (9,),
+            (10,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -5306,6 +5452,7 @@ class MigrationTests(unittest.TestCase):
                 (6, "budget_post_dispatch_slo_guards"),
                 (7, "budget_post_dispatch_clock_identity"),
                 (8, "budget_atomic_final_settlement"),
+                (9, "legacy_money_import_quarantine"),
             ],
         )
 
