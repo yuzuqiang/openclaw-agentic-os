@@ -53,9 +53,9 @@ projection evidence in the same local operation. An existing `file_authority`
 workflow must first pass through `file_authority_shadow` backfill before it can
 enter dual-write mode; a brand-new workflow may start directly in
 `dual_write_shadow`. Exact replay with the same
-prepare key, run, artifact path, and content is a no-op; changed replay or
-file/SQLite drift, including workflow-mode drift after the original write, fails
-closed and refuses to overwrite file authority. Promotion from
+prepare key, run, artifact path, content, and no additional run projections is a
+no-op; changed replay or file/SQLite drift, including workflow-mode drift after
+the original write, fails closed and refuses to overwrite file authority. Promotion from
 `file_authority_shadow` to `dual_write_shadow` first rehashes every current
 file-shadow projection for that workflow; stale or missing backfill artifacts
 block the promotion. A first dual-write must create the file atomically through a

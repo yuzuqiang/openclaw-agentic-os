@@ -886,6 +886,79 @@ class ShadowTests(unittest.TestCase):
                 (0,),
             )
 
+    def test_dual_write_shadow_rejects_empty_shadow_prepare_key_before_promotion(
+        self,
+    ) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        relative = backfilled.resolve().relative_to(repository_root()).as_posix()
+        digest = hashlib.sha256(backfilled.read_bytes()).hexdigest()
+        created_at, finalized_at_epoch_ms = shadow_module._utc_now()
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+                "finalized_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "shadow-run",
+                    " ",
+                    "heartbeat",
+                    "file_authority_shadow",
+                    "finalized",
+                    "R1",
+                    "R1",
+                    created_at,
+                    created_at,
+                    created_at,
+                    finalized_at_epoch_ms,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,?)",
+                (
+                    shadow_module._projection_id("shadow-run", relative, digest),
+                    "shadow-run",
+                    relative,
+                    digest,
+                    "file_authority_shadow",
+                    created_at,
+                ),
+            )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "prepare identity"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority_shadow",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE source_authority='dual_write_shadow'"
+                ).fetchone(),
+                (0,),
+            )
+
     def test_dual_write_shadow_replay_fails_on_workflow_mode_drift(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         payload = b'{"dual": true}\n'
@@ -1039,6 +1112,49 @@ class ShadowTests(unittest.TestCase):
                 ).fetchone(),
                 (1,),
             )
+
+    def test_dual_write_shadow_replay_rejects_extra_run_projection(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        payload = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+            risk_class="R1",
+            risk_dominance="R1",
+        )
+        extra_path = "reports/extra.json"
+        extra_digest = "e" * 64
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,'now')",
+                (
+                    shadow_module._projection_id("dual-run", extra_path, extra_digest),
+                    "dual-run",
+                    extra_path,
+                    extra_digest,
+                    "dual_write_shadow",
+                ),
+            )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "extra projections"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                payload,
+                workflow="heartbeat",
+                run_id="dual-run",
+                prepare_idempotency_key="prepare-dual",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertEqual(artifact.read_bytes(), payload)
 
     def test_dual_write_shadow_rejects_prepare_key_mismatch_on_replay(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"

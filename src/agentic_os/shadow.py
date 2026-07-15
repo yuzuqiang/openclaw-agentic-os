@@ -312,6 +312,14 @@ def _assert_workflow_shadow_parity(
         finalized_at,
         finalized_at_epoch_ms,
     ) in runs:
+        if (
+            not isinstance(prepare_key, str)
+            or prepare_key != prepare_key.strip()
+            or not prepare_key
+        ):
+            raise ShadowBackfillError(
+                f"workflow {workflow!r} has incomplete shadow prepare identity"
+            )
         run_identity = (
             run_workflow,
             authority_mode,
@@ -627,6 +635,12 @@ def dual_write_shadow_artifact(
             if rows:
                 existing_ids = {row[0] for row in rows}
                 existing_digests = {row[1] for row in rows}
+                run_projection_paths = {path for path, _digest in run_projections}
+                if len(run_projections) != 1 or run_projection_paths != {relative}:
+                    raise ShadowBackfillError(
+                        "dual-write shadow replay drift for "
+                        f"{run_id}; refusing extra projections"
+                    )
                 if existing_ids != {projection.projection_id} or existing_digests != {
                     digest
                 }:
