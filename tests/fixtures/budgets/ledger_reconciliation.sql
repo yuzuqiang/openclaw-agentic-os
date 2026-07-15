@@ -75,6 +75,8 @@ INSERT INTO transitions(
   'fixture-consume-over-budget-transition-idem',0,'fixture'
 );
 
+PRAGMA ignore_check_constraints=ON;
+
 INSERT INTO run_budgets(
   run_id,workflow,capability_class,selected_provider,selected_model,
   selected_endpoint_binding_id,selected_cost_registry_id,
@@ -82,13 +84,30 @@ INSERT INTO run_budgets(
   selected_cost_confidence,selected_reserve_transition_id,
   time_budget_seconds,input_token_budget,output_token_budget,
   cost_budget_microusd,retry_budget,human_attention_budget,
-  usage_confidence,updated_at
+  consumed_input_tokens,usage_confidence,updated_at
 ) VALUES(
   'fixture-consume-over-budget','fixture-budget-ledger','fixture-capability',
   'fixture-provider','fixture-model','fixture-endpoint','fixture-ledger-cost',
   'fixture-effective','fixture-ledger-cost-hash','known',
-  'fixture-consume-over-budget-transition',10,5,10,10,1,1,'known',
+  'fixture-consume-over-budget-transition',10,5,10,10,1,1,6,'known',
   'fixture'
+);
+
+PRAGMA ignore_check_constraints=OFF;
+
+INSERT INTO budget_events(
+  budget_event_id,event_idempotency_key,event_dedupe_hash,event_sequence,
+  run_id,transition_id,provider,model,endpoint_binding_id,capability_class,
+  cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,
+  event_type,input_tokens,usage_confidence,source,created_at,created_at_epoch_ms
+) VALUES(
+  'fixture-consume-over-budget-reserve',
+  'fixture-consume-over-budget-reserve-idem',
+  'fixture-consume-over-budget-reserve-dedupe',1,
+  'fixture-consume-over-budget','fixture-consume-over-budget-transition',
+  'fixture-provider','fixture-model','fixture-endpoint','fixture-capability',
+  'fixture-ledger-cost','fixture-effective','fixture-ledger-cost-hash',
+  'known','reserve',5,'known','fixture','fixture',999
 );
 
 INSERT INTO budget_events(
@@ -98,7 +117,7 @@ INSERT INTO budget_events(
   event_type,input_tokens,usage_confidence,source,created_at,created_at_epoch_ms
 ) VALUES(
   'fixture-consume-over-budget-event','fixture-consume-over-budget-idem',
-  'fixture-consume-over-budget-dedupe',1,'fixture-consume-over-budget',
+  'fixture-consume-over-budget-dedupe',2,'fixture-consume-over-budget',
   'fixture-consume-over-budget-transition','fixture-provider','fixture-model',
   'fixture-endpoint','fixture-capability','fixture-ledger-cost',
   'fixture-effective','fixture-ledger-cost-hash','known','consume',6,
@@ -146,14 +165,16 @@ INSERT INTO budget_events(
   budget_event_id,event_idempotency_key,event_dedupe_hash,event_sequence,
   run_id,transition_id,provider,model,endpoint_binding_id,capability_class,
   cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,
-  event_type,input_tokens,usage_confidence,source,created_at,created_at_epoch_ms
+  event_type,time_seconds,input_tokens,output_tokens,cost_microusd,
+  human_attention_units,retry_units,usage_confidence,source,created_at,
+  created_at_epoch_ms
 ) VALUES
 (
   'fixture-duplicate-replay-a','fixture-duplicate-replay-a-idem',
   'fixture-duplicate-replay-dedupe',1,'fixture-duplicate-replay',
   'fixture-duplicate-replay-transition','fixture-provider','fixture-model',
   'fixture-endpoint','fixture-capability','fixture-ledger-cost',
-  'fixture-effective','fixture-ledger-cost-hash','known','reserve',1,
+  'fixture-effective','fixture-ledger-cost-hash','known','reserve',0,1,0,0,0,0,
   'known','fixture','fixture',1000
 ),
 (
@@ -161,6 +182,6 @@ INSERT INTO budget_events(
   'fixture-duplicate-replay-dedupe',2,'fixture-duplicate-replay',
   'fixture-duplicate-replay-transition','fixture-provider','fixture-model',
   'fixture-endpoint','fixture-capability','fixture-ledger-cost',
-  'fixture-effective','fixture-ledger-cost-hash','known','reserve',1,
+  'fixture-effective','fixture-ledger-cost-hash','known','reserve',0,1,0,0,0,0,
   'known','fixture','fixture',1001
 );

@@ -85,7 +85,7 @@ INSERT INTO budget_events(
   budget_event_id,event_idempotency_key,event_dedupe_hash,event_sequence,
   run_id,transition_id,provider,model,endpoint_binding_id,capability_class,
   cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,
-  event_type,human_attention_units,usage_confidence,source,created_at,
+  event_type,input_tokens,human_attention_units,usage_confidence,source,created_at,
   created_at_epoch_ms
 ) VALUES(
   'fixture-consume-carries-human-attention',
@@ -94,7 +94,7 @@ INSERT INTO budget_events(
   'fixture-human-cross-dimension','fixture-human-transition',
   'fixture-provider','fixture-model','fixture-endpoint','fixture-capability',
   'fixture-human-cost','fixture-effective','fixture-human-cost-hash',
-  'known','consume',1,'known','fixture','fixture',1002
+  'known','consume',1,1,'known','fixture','fixture',1002
 );
 
 PRAGMA ignore_check_constraints=OFF;

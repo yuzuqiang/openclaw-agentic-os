@@ -4777,6 +4777,54 @@ class MigrationTests(unittest.TestCase):
                         ("fixture-negative-net-reserve",),
                         set(connection.execute(ledger_without_negative_net).fetchall()),
                     )
+                if fixture == "budgets/ledger_reconciliation.sql":
+                    row = connection.execute(
+                        """
+                        SELECT
+                          SUM(CASE WHEN event_type='reserve' THEN input_tokens ELSE 0 END),
+                          SUM(CASE WHEN event_type='consume' THEN input_tokens ELSE 0 END),
+                          input_token_budget,
+                          consumed_input_tokens
+                        FROM budget_events
+                        JOIN run_budgets USING(run_id)
+                        WHERE run_id='fixture-consume-over-budget'
+                        GROUP BY run_id
+                        """
+                    ).fetchone()
+                    self.assertEqual(row, (5, 6, 5, 6))
+                    ledger_query = contracts[
+                        "Budget ledger reconciles to counters and budgets"
+                    ]
+                    ledger_without_negative_net = ledger_query.replace(
+                        "COALESCE(s.net_reserved_time,0)<0 OR "
+                        "COALESCE(s.net_reserved_input,0)<0 OR "
+                        "COALESCE(s.net_reserved_output,0)<0 OR "
+                        "COALESCE(s.net_reserved_cost,0)<0 OR "
+                        "COALESCE(s.net_reserved_retries,0)<0 OR "
+                        "COALESCE(s.net_reserved_human,0)<0 OR ",
+                        "",
+                    )
+                    self.assertIn(
+                        ("fixture-consume-over-budget",),
+                        set(connection.execute(ledger_without_negative_net).fetchall()),
+                    )
+                if fixture == "budgets/human_attention_cross_dimension_payload.sql":
+                    amount_query = contracts[
+                        "Budget event amount malformed or out of range"
+                    ]
+                    amount_without_consume_cross_dimension = amount_query.replace(
+                        " OR (event_type='consume' "
+                        "AND (retry_units<>0 OR human_attention_units<>0))",
+                        "",
+                    )
+                    self.assertNotIn(
+                        ("fixture-consume-carries-human-attention",),
+                        set(
+                            connection.execute(
+                                amount_without_consume_cross_dimension
+                            ).fetchall()
+                        ),
+                    )
                 if fixture == "sqlite_type_affinity_h1_h4.sql":
                     rows = set(
                         connection.execute(
