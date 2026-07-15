@@ -162,16 +162,16 @@ def _unit_for_quarantine(cells: dict[str, _SourceCell]) -> str | None:
 
 
 def _decimal_to_integral_microusd(decimal_value: Decimal) -> tuple[int | None, str | None]:
-    if decimal_value.is_zero():
-        return 0, None
     sign, digits, exponent = decimal_value.as_tuple()
     if sign:
         return None, "money_out_of_range"
+    if decimal_value.is_zero():
+        return 0, None
     if decimal_value.adjusted() + 6 > _MAX_MONEY_MICROUSD_ADJUSTED:
         return None, "money_out_of_range"
-    coefficient = int("".join(str(digit) for digit in digits))
     scale_exponent = exponent + 6
     if scale_exponent >= 0:
+        coefficient = int("".join(str(digit) for digit in digits))
         microusd = coefficient * (10 ** scale_exponent)
     else:
         required_trailing_zeros = -scale_exponent
@@ -182,10 +182,12 @@ def _decimal_to_integral_microusd(decimal_value: Decimal) -> tuple[int | None, s
             trailing_zeros += 1
         if trailing_zeros < required_trailing_zeros:
             return None, "fractional_microusd"
-        divisor = 10 ** required_trailing_zeros
-        if coefficient % divisor:
+        integral_digits = digits[: len(digits) - required_trailing_zeros]
+        if not integral_digits:
+            return 0, None
+        if any(digit != 0 for digit in digits[len(digits) - required_trailing_zeros :]):
             return None, "fractional_microusd"
-        microusd = coefficient // divisor
+        microusd = int("".join(str(digit) for digit in integral_digits))
     if microusd > _MAX_MONEY_MICROUSD:
         return None, "money_out_of_range"
     return microusd, None
@@ -375,18 +377,27 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
     try:
         with sqlite3.connect(uri, uri=True) as source:
             source_object = source.execute(
-                "SELECT type FROM sqlite_schema WHERE name=?",
-                (LEGACY_SOURCE_TABLE,),
+                "SELECT type,sql FROM sqlite_schema WHERE name=? AND tbl_name=?",
+                (LEGACY_SOURCE_TABLE, LEGACY_SOURCE_TABLE),
             ).fetchone()
             source_object_type = source_object[0] if source_object is not None else "missing"
-            if source_object_type != "table":
+            source_object_sql = source_object[1] if source_object is not None else None
+            source_object_kind = source_object_type
+            normalized_source_sql = " ".join(str(source_object_sql or "").lower().split())
+            if (
+                source_object_type == "table"
+                and normalized_source_sql.startswith("create virtual table")
+            ):
+                source_object_kind = "virtual_table"
+            if source_object_kind != "table":
                 detail = (
                     f"expected {LEGACY_SOURCE_TABLE!r} to be a real SQLite table, "
-                    f"found {source_object_type!r}"
+                    f"found {source_object_kind!r}"
                 )
                 row_hash = _sha256_json(
                     {
-                        "schema_object_type": source_object_type,
+                        "schema_object_type": source_object_kind,
+                        "schema_object_sql": source_object_sql,
                         "source_path": str(source_path),
                     }
                 )
@@ -395,7 +406,7 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
                         source_row_ordinal=0,
                         legacy_row_id="__schema__",
                         source_column="__schema__",
-                        source_type=str(source_object_type),
+                        source_type=str(source_object_kind),
                         source_unit=None,
                         source_value_text=LEGACY_SOURCE_TABLE,
                         reason_code="invalid_source_schema",
@@ -405,7 +416,8 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
                 )
                 return [], quarantines, _sha256_json(
                     {
-                        "schema_object_type": source_object_type,
+                        "schema_object_type": source_object_kind,
+                        "schema_object_sql": source_object_sql,
                         "source_path": str(source_path),
                     }
                 )
@@ -702,17 +714,6 @@ def _record_quarantine_batch(
                     replayed=True,
                 )
             timestamp = _utc_now()
-            _insert_batch(
-                connection,
-                batch_id=batch_id,
-                payload_hash=payload_hash,
-                status="quarantined",
-                row_count=_source_row_count(rows, quarantines),
-                quarantine_count=len(quarantines),
-                promoted_count=0,
-                failure_reason=failure_reason,
-                timestamp=timestamp,
-            )
             for quarantine in quarantines:
                 connection.execute(
                     "INSERT INTO legacy_money_import_quarantine("
@@ -735,6 +736,17 @@ def _record_quarantine_batch(
                         timestamp,
                     ),
                 )
+            _insert_batch(
+                connection,
+                batch_id=batch_id,
+                payload_hash=payload_hash,
+                status="quarantined",
+                row_count=_source_row_count(rows, quarantines),
+                quarantine_count=len(quarantines),
+                promoted_count=0,
+                failure_reason=failure_reason,
+                timestamp=timestamp,
+            )
             connection.execute("COMMIT")
             return LegacyMoneyImportResult(
                 batch_id=batch_id,
@@ -839,17 +851,6 @@ def import_legacy_terminal_usage(
                     )
                 )
             timestamp = _utc_now()
-            _insert_batch(
-                connection,
-                batch_id=batch_id,
-                payload_hash=payload_hash,
-                status="promoted",
-                row_count=len(rows),
-                quarantine_count=0,
-                promoted_count=len(rows),
-                failure_reason=None,
-                timestamp=timestamp,
-            )
             for row, result in zip(rows, results):
                 connection.execute(
                     "INSERT INTO legacy_money_import_promotions("
@@ -863,6 +864,17 @@ def import_legacy_terminal_usage(
                         timestamp,
                     ),
                 )
+            _insert_batch(
+                connection,
+                batch_id=batch_id,
+                payload_hash=payload_hash,
+                status="promoted",
+                row_count=len(rows),
+                quarantine_count=0,
+                promoted_count=len(rows),
+                failure_reason=None,
+                timestamp=timestamp,
+            )
             connection.execute("COMMIT")
             return LegacyMoneyImportResult(
                 batch_id=batch_id,

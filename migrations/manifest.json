@@ -52,7 +52,7 @@
       "version": 9,
       "name": "legacy_money_import_quarantine",
       "file": "0009_legacy_money_import_quarantine.sql",
-      "sha256": "2841e905799918a3a5957ed30a1e00791121625e5ab18cbc1850b2d5711f2b90"
+      "sha256": "2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a"
     }
   ]
 }

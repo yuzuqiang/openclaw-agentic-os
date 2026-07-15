@@ -233,16 +233,6 @@ class MigrationTests(unittest.TestCase):
         with sqlite3.connect(self.database) as connection:
             connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute(
-                "INSERT INTO legacy_money_import_batches("
-                "batch_id,source_schema_version,source_table,source_unit,"
-                "payload_hash,status,row_count,quarantine_count,promoted_count,"
-                "created_at,completed_at,failure_reason) VALUES("
-                "'quarantine-batch','legacy_budget_terminal_usage_v1',"
-                "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
-                "'quarantined',1,1,0,'now','now','failed')",
-                (digest_a,),
-            )
-            connection.execute(
                 "INSERT INTO legacy_money_import_quarantine("
                 "quarantine_id,batch_id,source_row_ordinal,legacy_row_id,"
                 "source_column,source_type,source_unit,source_value_text,"
@@ -251,6 +241,16 @@ class MigrationTests(unittest.TestCase):
                 "'text','usd_decimal','bad','invalid_money','bad money',?,"
                 "'now')",
                 (digest_b,),
+            )
+            connection.execute(
+                "INSERT INTO legacy_money_import_batches("
+                "batch_id,source_schema_version,source_table,source_unit,"
+                "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                "created_at,completed_at,failure_reason) VALUES("
+                "'quarantine-batch','legacy_budget_terminal_usage_v1',"
+                "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                "'quarantined',1,1,0,'now','now','failed')",
+                (digest_a,),
             )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "quarantine evidence"):
                 connection.execute(
@@ -270,7 +270,35 @@ class MigrationTests(unittest.TestCase):
                     ") VALUES('quarantine-batch','row-a',?,'missing-settlement','now')",
                     (digest_b,),
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "count mismatch"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_batches("
+                    "batch_id,source_schema_version,source_table,source_unit,"
+                    "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                    "created_at,completed_at,failure_reason) VALUES("
+                    "'missing-quarantine-evidence','legacy_budget_terminal_usage_v1',"
+                    "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                    "'quarantined',2,2,0,'now','now','failed')",
+                    (digest_a,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "count mismatch"):
+                connection.execute(
+                    "INSERT INTO legacy_money_import_batches("
+                    "batch_id,source_schema_version,source_table,source_unit,"
+                    "payload_hash,status,row_count,quarantine_count,promoted_count,"
+                    "created_at,completed_at,failure_reason) VALUES("
+                    "'missing-promotion-evidence','legacy_budget_terminal_usage_v1',"
+                    "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
+                    "'promoted',1,0,1,'now','now',NULL)",
+                    (digest_b,),
+                )
 
+            connection.execute(
+                "INSERT INTO legacy_money_import_promotions("
+                "batch_id,legacy_row_id,row_payload_hash,settlement_id,promoted_at"
+                ") VALUES('promotion-batch','row-a',?,'missing-settlement-a','now')",
+                (digest_b,),
+            )
             connection.execute(
                 "INSERT INTO legacy_money_import_batches("
                 "batch_id,source_schema_version,source_table,source_unit,"
@@ -279,12 +307,6 @@ class MigrationTests(unittest.TestCase):
                 "'promotion-batch','legacy_budget_terminal_usage_v1',"
                 "'legacy_budget_terminal_usage_v1','usd_decimal',?,"
                 "'promoted',1,0,1,'now','now',NULL)",
-                (digest_b,),
-            )
-            connection.execute(
-                "INSERT INTO legacy_money_import_promotions("
-                "batch_id,legacy_row_id,row_payload_hash,settlement_id,promoted_at"
-                ") VALUES('promotion-batch','row-a',?,'missing-settlement-a','now')",
                 (digest_b,),
             )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "promotion evidence"):

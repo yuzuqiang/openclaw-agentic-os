@@ -2707,9 +2707,11 @@ class BudgetRuntimeTests(unittest.TestCase):
             self._legacy_row("null", actual_cost_usd=None),
             self._legacy_row("nan", actual_cost_usd=float("nan")),
             self._legacy_row("negative", actual_cost_usd="-0.01"),
+            self._legacy_row("signed-zero", actual_cost_usd="-0.00"),
             self._legacy_row("inf", actual_cost_usd=float("inf")),
             self._legacy_row("overflow", actual_cost_usd="1e20"),
             self._legacy_row("huge-exponent", actual_cost_usd="1e999999999"),
+            self._legacy_row("over-precision", actual_cost_usd="0." + ("1" * 5000)),
             self._legacy_row(
                 "context-round",
                 actual_cost_usd="0.0000010000000000000000000000000000000000000001",
@@ -2745,6 +2747,18 @@ class BudgetRuntimeTests(unittest.TestCase):
             self.assertIn("fractional_microusd", reasons)
             self.assertIn("invalid_source_unit", reasons)
             self.assertIn("invalid_integer", reasons)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT legacy_row_id,reason_code FROM legacy_money_import_quarantine "
+                    "WHERE batch_id='legacy-bad-batch' "
+                    "AND legacy_row_id IN ('signed-zero','over-precision') "
+                    "ORDER BY legacy_row_id"
+                ).fetchall(),
+                [
+                    ("over-precision", "fractional_microusd"),
+                    ("signed-zero", "money_out_of_range"),
+                ],
+            )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
                 connection.execute(
                     "DELETE FROM legacy_money_import_quarantine "
@@ -2916,6 +2930,46 @@ class BudgetRuntimeTests(unittest.TestCase):
                     "WHERE batch_id='legacy-view-batch'"
                 ).fetchall(),
                 [("__schema__", "view", "invalid_source_schema")],
+            )
+
+    def test_legacy_money_import_rejects_virtual_source_table(self) -> None:
+        source = Path(self.temporary.name) / "legacy-virtual.db"
+        with closing(sqlite3.connect(source)) as connection, connection:
+            try:
+                connection.execute(
+                    f"CREATE VIRTUAL TABLE {LEGACY_SOURCE_TABLE} USING fts5("
+                    + ",".join(LEGACY_SOURCE_COLUMNS)
+                    + ")"
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such module" in str(exc):
+                    self.skipTest(f"SQLite FTS5 module unavailable: {exc}")
+                raise
+            placeholders = ",".join("?" for _ in LEGACY_SOURCE_COLUMNS)
+            connection.execute(
+                f"INSERT INTO {LEGACY_SOURCE_TABLE}("
+                + ",".join(LEGACY_SOURCE_COLUMNS)
+                + f") VALUES({placeholders})",
+                self._legacy_row("virtual-row", actual_cost_usd="0.001"),
+            )
+
+        result = import_legacy_terminal_usage(
+            self.database, source, batch_id="legacy-virtual-batch"
+        )
+
+        self.assertEqual(
+            (result.status, result.row_count, result.promoted_count, result.quarantine_count),
+            ("quarantined", 1, 0, 1),
+        )
+        self.assertEqual(self._settlement_count(), 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT legacy_row_id,source_type,reason_code "
+                    "FROM legacy_money_import_quarantine "
+                    "WHERE batch_id='legacy-virtual-batch'"
+                ).fetchall(),
+                [("__schema__", "virtual_table", "invalid_source_schema")],
             )
 
     def test_legacy_money_import_rejects_changed_batch_or_payload_conflict(

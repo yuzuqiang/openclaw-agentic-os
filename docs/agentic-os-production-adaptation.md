@@ -3177,10 +3177,14 @@ failures, and malformed rows all become durable quarantine evidence and
 payload-hash input, and any quarantine promotes zero authoritative rows for the
 whole batch. Quarantine records include a deterministic source-row ordinal in
 their identity so byte-identical malformed rows with missing or non-text legacy
-identifiers remain separately durable. Clean batches promote through the same
-atomic final-settlement runtime path, so imports cannot create unlinked
-settlement or budget events. Exact batch replay is idempotent; reused batch,
-idempotency, or dedupe identity with changed raw legacy payload fails closed.
+identifiers remain separately durable. The evidence child tables use deferred
+batch references so the immutable parent batch row can be inserted only after
+the exact final quarantine or promotion child count already exists in the same
+transaction; later child evidence appends remain blocked by the batch status and
+count guards. Clean batches promote through the same atomic final-settlement
+runtime path, so imports cannot create unlinked settlement or budget events.
+Exact batch replay is idempotent; reused batch, idempotency, or dedupe identity
+with changed raw legacy payload fails closed.
 This slice does not enable production database authority.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
