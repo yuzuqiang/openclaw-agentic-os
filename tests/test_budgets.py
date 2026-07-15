@@ -1223,7 +1223,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(BudgetError, "fresh clock"):
             consume_budget(self.database, **kwargs)
 
-    def test_post_dispatch_budget_mutation_rejects_accepted_before_request(self) -> None:
+    def test_accepted_spawn_timing_is_immutable_after_acceptance(self) -> None:
         reserve = reserve_budget(
             self.database,
             **self._kwargs(
@@ -1234,18 +1234,15 @@ class BudgetRuntimeTests(unittest.TestCase):
         )
         self._accept_spawn(reserve.budget_event_id, completed=True)
         with closing(sqlite3.connect(self.database)) as connection, connection:
-            connection.execute(
-                "UPDATE external_rpc_intents SET accepted_at_epoch_ms=1800000000123 "
-                "WHERE intent_id='intent'"
-            )
-        with self.assertRaisesRegex(BudgetError, "sessions_spawn request"):
-            consume_budget(
-                self.database,
-                **self._post_kwargs(
-                    idempotency_key="bad-accepted-clock-consume",
-                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
-                ),
-            )
+            for assignment in (
+                "requested_at_epoch_ms=1800000000126",
+                "accepted_at_epoch_ms=1800000000126",
+            ):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "external intent proof"):
+                    connection.execute(
+                        f"UPDATE external_rpc_intents SET {assignment} "
+                        "WHERE intent_id='intent'"
+                    )
         self.assertEqual(self._event_count(), 1)
 
     def test_consume_requires_completed_session_state(self) -> None:
@@ -1424,6 +1421,18 @@ class BudgetRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
                 connection.execute(
                     "UPDATE budget_events SET source='repair' WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_events SET event_idempotency_key='rewritten-key' "
+                    "WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_events SET event_dedupe_hash='rewritten-hash' "
+                    "WHERE budget_event_id=?",
                     (result.budget_event_id,),
                 )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):

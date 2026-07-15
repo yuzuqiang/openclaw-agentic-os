@@ -2103,6 +2103,12 @@ class MigrationTests(unittest.TestCase):
                 "'before','after','budget','consume','R1','idem-v4',0,'now')"
             )
             connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES('v4-other-transition','v4-run',"
+                "'before','after','budget','consume','R1','idem-v4-other',0,'now')"
+            )
+            connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
                 "transition_id,client_request_id,spawn_idempotency_key,task_digest,"
                 "state,session_key,created_at,updated_at) VALUES('v4-spawn','v4-run',"
@@ -2184,7 +2190,26 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
             with connection:
                 connection.execute(
+                    "UPDATE budget_events SET event_idempotency_key='rewritten-v4-key' "
+                    "WHERE budget_event_id='v4-consume'"
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with connection:
+                connection.execute(
+                    "UPDATE budget_events SET event_dedupe_hash='rewritten-v4-hash' "
+                    "WHERE budget_event_id='v4-consume'"
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with connection:
+                connection.execute(
                     "DELETE FROM budget_events WHERE budget_event_id='v4-consume'"
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "selection is immutable"):
+            with connection:
+                connection.execute(
+                    "UPDATE run_budgets "
+                    "SET selected_reserve_transition_id='v4-other-transition' "
+                    "WHERE run_id='v4-run'"
                 )
 
     def test_spawn_request_transition_must_belong_to_same_run(self) -> None:

@@ -3133,9 +3133,11 @@ SLO rows require those post-dispatch events to bind to the run budget's
 `selected_reserve_transition_id`, exact selected cost row, accepted/requested
 clock ordering, and a persisted one-use trusted gate clock context whose
 `now_epoch_ms` exactly matches the budget event timestamp. The migration also
-freezes accepted post-dispatch budget events against update/delete so counter
-rewrites cannot erase the authoritative usage ledger. Schema version 6 keeps
-its historical SLO query hashes; version 7 and later use this stricter proof.
+freezes accepted post-dispatch budget events against update/delete, including
+replay keys, and freezes accepted `sessions_spawn` request/accepted epoch
+timing so counter rewrites cannot erase or retroactively reshape the
+authoritative usage ledger. Schema version 6 keeps its historical SLO query
+hashes; version 7 and later use this stricter proof.
 
 Gate-critical time authority:
 

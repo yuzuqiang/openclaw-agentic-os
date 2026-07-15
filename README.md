@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `f44366f2304d62cabe768d4be2639bb65374065adb3461eb91f50f93b5b31697`
+- Current design artifact SHA-256: `e1fb5b005fc6ba2ab15d0afca550d3d7c4c5f5baab47e4e65533678d81f595b5`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `9093dcf4194d34304ed07a8b5b87f85414ab897ac9f135bee8b35615e043380d`
-- Current migration manifest SHA-256: `65db232f49f83d2c853c5a350285b2ad3ff8ef0b7b77b09c3ccd1482aae0b2c5`
+- Current latest migration SHA-256: `7a117effddf6f86c7262e2ecd2b3dd8d5efad51d288fb45b63a06326b17cbc01`
+- Current migration manifest SHA-256: `bb4ce04e52bc591371a0a5bb35c545bc81096e1ac6a1031fb9c920b9ac28a221`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -86,9 +86,10 @@ and consume confidence/amount pairing. Migration v7 records the trusted clock
 context on post-dispatch budget events, freezes accepted post-dispatch usage
 ledger rows against update/delete, and versions the current SLO proof so
 post-dispatch events must bind to the selected reserve transition and one-use
-trusted clock. Atomic final settlement of unused reservation, legacy-money
-import conversion, and the remaining adversarial fixture matrix remain open in
-Issue #4.
+trusted clock. Accepted post-dispatch replay keys and accepted `sessions_spawn`
+request/accepted epoch timing are immutable once they become settlement proof.
+Atomic final settlement of unused reservation, legacy-money import conversion,
+and the remaining adversarial fixture matrix remain open in Issue #4.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

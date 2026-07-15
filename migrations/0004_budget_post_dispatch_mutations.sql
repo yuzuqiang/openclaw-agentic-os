@@ -2,7 +2,8 @@ DROP TRIGGER run_budgets_preserve_spawn_prior_reserve_update;
 
 CREATE TRIGGER run_budgets_preserve_spawn_prior_reserve_update
 BEFORE UPDATE OF selected_provider, selected_model, selected_endpoint_binding_id,
-  capability_class, selected_cost_registry_id, selected_cost_effective_at,
+  capability_class, selected_reserve_transition_id, selected_cost_registry_id,
+  selected_cost_effective_at,
   selected_cost_registry_hash, selected_cost_confidence, time_budget_seconds,
   input_token_budget, output_token_budget, cost_budget_microusd, retry_budget,
   human_attention_budget, reserved_time_seconds, reserved_input_tokens,
@@ -23,6 +24,7 @@ AND (
   OR NEW.selected_model IS NOT OLD.selected_model
   OR NEW.selected_endpoint_binding_id IS NOT OLD.selected_endpoint_binding_id
   OR NEW.capability_class IS NOT OLD.capability_class
+  OR NEW.selected_reserve_transition_id IS NOT OLD.selected_reserve_transition_id
   OR NEW.selected_cost_registry_id IS NOT OLD.selected_cost_registry_id
   OR NEW.selected_cost_effective_at IS NOT OLD.selected_cost_effective_at
   OR NEW.selected_cost_registry_hash IS NOT OLD.selected_cost_registry_hash
@@ -109,12 +111,13 @@ END;
 
 CREATE TRIGGER budget_events_preserve_accepted_post_dispatch_update
 BEFORE UPDATE OF budget_event_id, event_type, event_sequence, run_id,
-  transition_id, spawn_request_id, provider, model, endpoint_binding_id,
-  capability_class, cost_registry_id, cost_effective_at, cost_registry_hash,
-  cost_confidence, zero_reserve_policy_id, zero_reserve_policy_hash,
-  time_seconds, input_tokens, output_tokens, cost_microusd,
-  human_attention_units, retry_units, usage_confidence, source, created_at,
-  created_at_epoch_ms ON budget_events
+  transition_id, spawn_request_id, event_idempotency_key, event_dedupe_hash,
+  provider, model, endpoint_binding_id, capability_class, cost_registry_id,
+  cost_effective_at, cost_registry_hash, cost_confidence,
+  zero_reserve_policy_id, zero_reserve_policy_hash, time_seconds,
+  input_tokens, output_tokens, cost_microusd, human_attention_units,
+  retry_units, usage_confidence, source, created_at, created_at_epoch_ms
+  ON budget_events
 WHEN OLD.event_type IN ('consume','retry_decrement','retry_restore','human_attention')
 AND EXISTS (
   SELECT 1
