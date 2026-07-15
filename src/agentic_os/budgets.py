@@ -77,6 +77,11 @@ _POST_DISPATCH_RUN_STATES = {
     "child_failed",
     "aggregation_completed",
 }
+_FINAL_SETTLEMENT_RUN_STATES = {
+    "child_completed",
+    "child_failed",
+    "aggregation_completed",
+}
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,14 @@ class BudgetEventResult:
     replayed: bool
 
 
+@dataclass(frozen=True)
+class BudgetSettlementResult:
+    settlement_id: str
+    events: tuple[BudgetEventResult, ...]
+    released: BudgetAmounts
+    replayed: bool
+
+
 def _required_text(label: str, value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise BudgetError(f"{label} must be a non-empty string")
@@ -138,6 +151,13 @@ def _dedupe_hash(dedupe_key: str) -> str:
     return hashlib.sha256(
         f"agentic-os-budget-dedupe\0{dedupe_key}".encode("utf-8")
     ).hexdigest()
+
+
+def _settlement_id(idempotency_key: str) -> str:
+    digest = hashlib.sha256(
+        f"agentic-os-budget-settlement\0{idempotency_key}".encode("utf-8")
+    ).hexdigest()
+    return f"settlement-{digest}"
 
 
 def _created_at(epoch_ms: int) -> str:
@@ -344,6 +364,34 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if invalid_binding is not None:
         raise BudgetError("budget event is not composite-bound to its spawn and cost row")
+    has_settlements = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='budget_settlements'"
+    ).fetchone()
+    if has_settlements is not None:
+        invalid_settlement = connection.execute(
+            "SELECT bs.settlement_id FROM budget_settlements bs WHERE "
+            "((bs.actual_time_seconds>0 OR bs.actual_input_tokens>0 "
+            "OR bs.actual_output_tokens>0 OR bs.actual_cost_microusd>0) "
+            "IS NOT (SELECT COUNT(*)=1 FROM budget_events be "
+            "WHERE be.settlement_id=bs.settlement_id AND be.event_type='consume')) "
+            "OR ((bs.actual_retry_units>0) IS NOT (SELECT COUNT(*)=1 "
+            "FROM budget_events be WHERE be.settlement_id=bs.settlement_id "
+            "AND be.event_type='retry_decrement')) "
+            "OR ((bs.actual_human_attention_units>0) IS NOT (SELECT COUNT(*)=1 "
+            "FROM budget_events be WHERE be.settlement_id=bs.settlement_id "
+            "AND be.event_type='human_attention')) "
+            "OR ((bs.released_time_seconds>0 OR bs.released_input_tokens>0 "
+            "OR bs.released_output_tokens>0 OR bs.released_cost_microusd>0 "
+            "OR bs.released_retry_units>0 OR bs.released_human_attention_units>0) "
+            "IS NOT (SELECT COUNT(*)=1 FROM budget_events be "
+            "WHERE be.settlement_id=bs.settlement_id AND be.event_type='release')) "
+            "OR EXISTS (SELECT 1 FROM budget_events be "
+            "WHERE be.settlement_id=bs.settlement_id "
+            "AND be.event_type NOT IN ('consume','retry_decrement',"
+            "'human_attention','release')) LIMIT 1"
+        ).fetchone()
+        if invalid_settlement is not None:
+            raise BudgetError("atomic final settlement ledger is incomplete or malformed")
     invalid_spawn_prefix = connection.execute(
         "WITH ordered AS ("
         "SELECT budget_event_id,"
@@ -1147,3 +1195,365 @@ def restore_retry_budget(database: Path, **kwargs: object) -> BudgetEventResult:
 
 def consume_human_attention(database: Path, **kwargs: object) -> BudgetEventResult:
     return record_post_dispatch_event(database, event_type="human_attention", **kwargs)  # type: ignore[arg-type]
+
+
+def settle_budget(
+    database: Path,
+    *,
+    run_id: str,
+    transition_id: str,
+    selection: BudgetSelection,
+    actual_usage: BudgetAmounts,
+    idempotency_key: str,
+    dedupe_key: str,
+    source: str,
+    spawn_request_id: str,
+    clock_context_id: str,
+    usage_confidence: Literal["known", "estimated"] = "known",
+) -> BudgetSettlementResult:
+    """Atomically consume terminal usage and release one spawn's remainder.
+
+    ``actual_usage`` is the terminal usage not already represented by earlier
+    post-dispatch events.  The exact remaining reservation is split between
+    this usage and a linked release inside one ``BEGIN IMMEDIATE`` transaction.
+    """
+
+    run_id = _required_text("run_id", run_id)
+    transition_id = _required_text("transition_id", transition_id)
+    idempotency_key = _required_text("idempotency_key", idempotency_key)
+    dedupe_key = _required_text("dedupe_key", dedupe_key)
+    source = _required_text("source", source)
+    spawn_request_id = _required_text("spawn_request_id", spawn_request_id)
+    clock_context_id = _required_text("clock_context_id", clock_context_id)
+    if usage_confidence not in _USAGE_CONFIDENCE:
+        raise BudgetError("final settlement requires known or estimated usage")
+
+    connection = _connect(Path(database))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _verify_schema_identity(connection)
+            actual_selection = _selected_binding(
+                connection,
+                run_id=run_id,
+                transition_id=transition_id,
+                allow_unknown_usage=True,
+            )
+            if actual_selection != selection:
+                raise BudgetConflict(
+                    "requested budget selection differs from persisted selected cost row"
+                )
+            proof = connection.execute(
+                "SELECT sr.state,r.state,i.accepted_at_epoch_ms,"
+                "i.requested_at_epoch_ms FROM spawn_requests sr "
+                "JOIN runs r ON r.run_id=sr.run_id "
+                "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
+                "AND i.state IN ('accepted','reconciled') "
+                "AND i.spawn_request_id=sr.spawn_request_id AND i.run_id=sr.run_id "
+                "AND i.transition_id=sr.transition_id "
+                "AND i.client_request_id=sr.client_request_id "
+                "AND i.idempotency_key=sr.spawn_idempotency_key "
+                "AND i.phase=sr.phase AND i.agent_id=sr.agent_id "
+                "AND i.task_digest=sr.task_digest AND i.external_id=sr.session_key "
+                "JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id "
+                "AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id "
+                "AND s.client_request_id=sr.client_request_id "
+                "AND s.spawn_idempotency_key=sr.spawn_idempotency_key "
+                "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
+                "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
+                "WHERE sr.spawn_request_id=? AND sr.run_id=? AND sr.transition_id=? "
+                "AND sr.state='completed' AND s.state='completed' "
+                "AND s.completed_at IS NOT NULL AND s.completed_at<>''",
+                (spawn_request_id, run_id, transition_id),
+            ).fetchone()
+            if proof is None:
+                raise BudgetError(
+                    "final settlement requires exact completed session proof"
+                )
+            created_at, created_at_epoch_ms = _trusted_created_at(
+                connection,
+                run_id=run_id,
+                transition_id=transition_id,
+                clock_context_id=clock_context_id,
+            )
+            requested_at_epoch_ms = proof[3]
+            accepted_at_epoch_ms = proof[2]
+            if (
+                type(requested_at_epoch_ms) is not int
+                or requested_at_epoch_ms < 1
+                or type(accepted_at_epoch_ms) is not int
+                or accepted_at_epoch_ms <= requested_at_epoch_ms
+                or created_at_epoch_ms <= accepted_at_epoch_ms
+            ):
+                raise BudgetError(
+                    "final settlement requires a trusted clock after request acceptance"
+                )
+            if (
+                actual_usage.input_tokens
+                or actual_usage.output_tokens
+                or actual_usage.cost_microusd
+            ) and actual_usage.cost_microusd < _required_cost(selection, actual_usage):
+                raise BudgetExceeded(
+                    "final usage cost is below the selected registry price"
+                )
+
+            settlement_id = _settlement_id(idempotency_key)
+            settlement_dedupe_hash = _dedupe_hash(dedupe_key)
+            expected_replay = (
+                settlement_id,
+                settlement_dedupe_hash,
+                run_id,
+                transition_id,
+                spawn_request_id,
+                selection.provider,
+                selection.model,
+                selection.endpoint_binding_id,
+                selection.capability_class,
+                selection.cost_registry_id,
+                selection.cost_effective_at,
+                selection.cost_registry_hash,
+                selection.cost_confidence,
+                actual_usage.time_seconds,
+                actual_usage.input_tokens,
+                actual_usage.output_tokens,
+                actual_usage.cost_microusd,
+                actual_usage.retry_units,
+                actual_usage.human_attention_units,
+                usage_confidence,
+                source,
+                created_at,
+                created_at_epoch_ms,
+                clock_context_id,
+            )
+            replay = connection.execute(
+                "SELECT settlement_id,settlement_dedupe_hash,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "actual_time_seconds,actual_input_tokens,actual_output_tokens,"
+                "actual_cost_microusd,actual_retry_units,actual_human_attention_units,"
+                "usage_confidence,source,created_at,created_at_epoch_ms,clock_context_id,"
+                "released_time_seconds,released_input_tokens,released_output_tokens,"
+                "released_cost_microusd,released_retry_units,"
+                "released_human_attention_units FROM budget_settlements "
+                "WHERE settlement_idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if replay is not None:
+                if replay[: len(expected_replay)] != expected_replay:
+                    raise BudgetConflict(
+                        "settlement idempotency key was reused with another payload"
+                    )
+                _assert_budget_invariants(connection)
+                events = tuple(
+                    BudgetEventResult(row[0], row[1], True)
+                    for row in connection.execute(
+                        "SELECT budget_event_id,event_sequence FROM budget_events "
+                        "WHERE settlement_id=? ORDER BY event_sequence",
+                        (settlement_id,),
+                    ).fetchall()
+                )
+                released = BudgetAmounts(*replay[len(expected_replay) :])
+                connection.execute("COMMIT")
+                return BudgetSettlementResult(
+                    settlement_id, events, released, True
+                )
+
+            if proof[1] not in _FINAL_SETTLEMENT_RUN_STATES:
+                raise BudgetError(
+                    "final settlement requires a completed post-dispatch run state"
+                )
+            poisoned_usage = connection.execute(
+                "SELECT 1 FROM run_budgets rb "
+                "WHERE rb.run_id=? AND rb.usage_confidence='unknown' "
+                "UNION ALL SELECT 1 FROM budget_events be "
+                "WHERE be.run_id=? AND be.usage_confidence='unknown' LIMIT 1",
+                (run_id, run_id),
+            ).fetchone()
+            if poisoned_usage is not None:
+                raise BudgetError("unknown usage confidence blocks final settlement")
+            _assert_budget_invariants(connection)
+            outstanding = _spawn_outstanding(
+                connection,
+                spawn_request_id=spawn_request_id,
+                run_id=run_id,
+                transition_id=transition_id,
+                selection=selection,
+            )
+            if outstanding.is_zero():
+                raise BudgetError("final settlement requires an outstanding reservation")
+            for field in _LIMITS:
+                if getattr(actual_usage, field) > getattr(outstanding, field):
+                    raise BudgetExceeded(
+                        f"final usage exceeds outstanding reservation dimension={field}"
+                    )
+            released = BudgetAmounts(
+                **{
+                    field: getattr(outstanding, field) - getattr(actual_usage, field)
+                    for field in _LIMITS
+                }
+            )
+            values = (
+                settlement_id,
+                idempotency_key,
+                settlement_dedupe_hash,
+                run_id,
+                transition_id,
+                spawn_request_id,
+                selection.provider,
+                selection.model,
+                selection.endpoint_binding_id,
+                selection.capability_class,
+                selection.cost_registry_id,
+                selection.cost_effective_at,
+                selection.cost_registry_hash,
+                selection.cost_confidence,
+                actual_usage.time_seconds,
+                actual_usage.input_tokens,
+                actual_usage.output_tokens,
+                actual_usage.cost_microusd,
+                actual_usage.retry_units,
+                actual_usage.human_attention_units,
+                released.time_seconds,
+                released.input_tokens,
+                released.output_tokens,
+                released.cost_microusd,
+                released.retry_units,
+                released.human_attention_units,
+                usage_confidence,
+                source,
+                created_at,
+                created_at_epoch_ms,
+                clock_context_id,
+            )
+            connection.execute(
+                "INSERT INTO budget_settlements("
+                "settlement_id,settlement_idempotency_key,settlement_dedupe_hash,"
+                "run_id,transition_id,spawn_request_id,provider,model,"
+                "endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,"
+                "actual_time_seconds,actual_input_tokens,actual_output_tokens,"
+                "actual_cost_microusd,actual_retry_units,"
+                "actual_human_attention_units,released_time_seconds,"
+                "released_input_tokens,released_output_tokens,"
+                "released_cost_microusd,released_retry_units,"
+                "released_human_attention_units,usage_confidence,source,"
+                "created_at,created_at_epoch_ms,clock_context_id"
+                ") VALUES(" + ",".join("?" for _ in values) + ")",
+                values,
+            )
+
+            event_results: list[BudgetEventResult] = []
+
+            def insert_event(event_type: str, amounts: BudgetAmounts) -> None:
+                if amounts.is_zero():
+                    return
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(event_sequence),0)+1 FROM budget_events "
+                    "WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()[0]
+                if type(sequence) is not int or not 1 <= sequence <= _MAX_EVENT_SEQUENCE:
+                    raise BudgetExceeded("budget event sequence limit reached")
+                event_idempotency_key = f"{idempotency_key}\0{event_type}"
+                budget_event_id = _event_id(event_idempotency_key)
+                connection.execute(
+                    "INSERT INTO budget_events("
+                    "budget_event_id,event_idempotency_key,event_dedupe_hash,"
+                    "event_sequence,run_id,transition_id,spawn_request_id,provider,"
+                    "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                    "cost_effective_at,cost_registry_hash,cost_confidence,"
+                    "zero_reserve_policy_id,zero_reserve_policy_hash,event_type,"
+                    "time_seconds,input_tokens,output_tokens,cost_microusd,"
+                    "human_attention_units,retry_units,usage_confidence,source,"
+                    "created_at,created_at_epoch_ms,clock_context_id,settlement_id"
+                    ") VALUES(" + ",".join("?" for _ in range(30)) + ")",
+                    (
+                        budget_event_id,
+                        event_idempotency_key,
+                        _dedupe_hash(f"{dedupe_key}\0{event_type}"),
+                        sequence,
+                        run_id,
+                        transition_id,
+                        spawn_request_id,
+                        selection.provider,
+                        selection.model,
+                        selection.endpoint_binding_id,
+                        selection.capability_class,
+                        selection.cost_registry_id,
+                        selection.cost_effective_at,
+                        selection.cost_registry_hash,
+                        selection.cost_confidence,
+                        None,
+                        None,
+                        event_type,
+                        amounts.time_seconds,
+                        amounts.input_tokens,
+                        amounts.output_tokens,
+                        amounts.cost_microusd,
+                        amounts.human_attention_units,
+                        amounts.retry_units,
+                        usage_confidence,
+                        source,
+                        created_at,
+                        created_at_epoch_ms,
+                        clock_context_id,
+                        settlement_id,
+                    ),
+                )
+                if event_type == "release":
+                    _update_counters(
+                        connection,
+                        event_type="release",
+                        run_id=run_id,
+                        amounts=amounts,
+                        usage_confidence=usage_confidence,
+                        updated_at=created_at,
+                    )
+                else:
+                    _update_post_dispatch_counters(
+                        connection,
+                        event_type=event_type,
+                        run_id=run_id,
+                        amounts=amounts,
+                        usage_confidence=usage_confidence,
+                        updated_at=created_at,
+                    )
+                event_results.append(
+                    BudgetEventResult(budget_event_id, sequence, False)
+                )
+
+            insert_event(
+                "consume",
+                BudgetAmounts(
+                    time_seconds=actual_usage.time_seconds,
+                    input_tokens=actual_usage.input_tokens,
+                    output_tokens=actual_usage.output_tokens,
+                    cost_microusd=actual_usage.cost_microusd,
+                ),
+            )
+            insert_event(
+                "retry_decrement",
+                BudgetAmounts(retry_units=actual_usage.retry_units),
+            )
+            insert_event(
+                "human_attention",
+                BudgetAmounts(
+                    human_attention_units=actual_usage.human_attention_units
+                ),
+            )
+            insert_event("release", released)
+            _assert_budget_invariants(connection)
+            connection.execute("COMMIT")
+            return BudgetSettlementResult(
+                settlement_id, tuple(event_results), released, False
+            )
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+    except sqlite3.IntegrityError as exc:
+        raise BudgetConflict(f"final settlement violates ledger contract: {exc}") from exc
+    except sqlite3.Error as exc:
+        raise BudgetError(f"final settlement transaction failed: {exc}") from exc
+    finally:
+        connection.close()

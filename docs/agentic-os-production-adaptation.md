@@ -3139,6 +3139,23 @@ timing so counter rewrites cannot erase or retroactively reshape the
 authoritative usage ledger. Schema version 6 keeps its historical SLO query
 hashes; version 7 and later use this stricter proof.
 
+Current migration v8 atomic final settlement:
+
+`0008_budget_atomic_final_settlement.sql` adds immutable
+`budget_settlements` proof rows and links their generated ledger events through
+`budget_events.settlement_id`. A completed spawn may be settled exactly once.
+The proof binds the same run, selected reserve transition, spawn request,
+accepted `sessions_spawn` intent, completed session, selected endpoint/cost
+row, and trusted post-accept clock. The settlement atomically records any
+remaining terminal `consume`, `retry_decrement`, and `human_attention` usage
+and releases every unused reserved dimension in the same `BEGIN IMMEDIATE`
+transaction. Post-intent `release` remains rejected unless it carries this
+exact settlement proof. Settlement rows and linked events are immutable, and
+the current amount/SLO contract blocks incomplete or extra linked event sets.
+Schema version 7 keeps its historical SLO query hashes; version 8 and later use
+the atomic-settlement completeness contract. This runtime slice does not cover
+legacy-money conversion and does not enable production database authority.
+
 Gate-critical time authority:
 
 - Approval expiry authority is `approvals.expires_at_epoch_ms` only. It is stored in a `STRICT` table `ANY` column, must have integer storage class by `typeof(...)= 'integer'`, and is compared only to the trusted gate-context integer `gate_clock_context.now_epoch_ms`.

@@ -41,6 +41,12 @@
       "name": "budget_post_dispatch_clock_identity",
       "file": "0007_budget_post_dispatch_clock_identity.sql",
       "sha256": "84b5a34adc999eb65f56c474a64d3c363d029f6409d89dfac750b300bcfde6ea"
+    },
+    {
+      "version": 8,
+      "name": "budget_atomic_final_settlement",
+      "file": "0008_budget_atomic_final_settlement.sql",
+      "sha256": "b294119716045ec080456b4e32b37b541c4bd9b31185e4654d46d50ad2757fab"
     }
   ]
 }

@@ -293,6 +293,42 @@ def _consume_confidence_amount_contract() -> SloQueryContract:
     )
 
 
+def _atomic_final_settlement_contract(
+    contract: SloQueryContract,
+) -> SloQueryContract:
+    sql_text = contract.sql_text.rstrip()
+    if sql_text.endswith(";"):
+        sql_text = sql_text[:-1]
+    sql_text += (
+        " UNION ALL SELECT bs.settlement_id FROM budget_settlements bs WHERE "
+        "((bs.actual_time_seconds>0 OR bs.actual_input_tokens>0 "
+        "OR bs.actual_output_tokens>0 OR bs.actual_cost_microusd>0) "
+        "IS NOT (SELECT COUNT(*)=1 FROM budget_events be "
+        "WHERE be.settlement_id=bs.settlement_id AND be.event_type='consume')) "
+        "OR ((bs.actual_retry_units>0) IS NOT (SELECT COUNT(*)=1 "
+        "FROM budget_events be WHERE be.settlement_id=bs.settlement_id "
+        "AND be.event_type='retry_decrement')) "
+        "OR ((bs.actual_human_attention_units>0) IS NOT (SELECT COUNT(*)=1 "
+        "FROM budget_events be WHERE be.settlement_id=bs.settlement_id "
+        "AND be.event_type='human_attention')) "
+        "OR ((bs.released_time_seconds>0 OR bs.released_input_tokens>0 "
+        "OR bs.released_output_tokens>0 OR bs.released_cost_microusd>0 "
+        "OR bs.released_retry_units>0 OR bs.released_human_attention_units>0) "
+        "IS NOT (SELECT COUNT(*)=1 FROM budget_events be "
+        "WHERE be.settlement_id=bs.settlement_id AND be.event_type='release')) "
+        "OR EXISTS (SELECT 1 FROM budget_events be "
+        "WHERE be.settlement_id=bs.settlement_id "
+        "AND be.event_type NOT IN ('consume','retry_decrement',"
+        "'human_attention','release'));"
+    )
+    return SloQueryContract(
+        contract.query_name,
+        sql_text,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
 def _replace_contract(
     contracts: tuple[SloQueryContract, ...],
     replacement: SloQueryContract,
@@ -339,13 +375,23 @@ _SLO_QUERY_CONTRACTS_V6 = _replace_contract(
     ),
     _consume_confidence_amount_contract(),
 )
-SLO_QUERY_CONTRACTS = _replace_contract(
+_SLO_QUERY_CONTRACTS_V7 = _replace_contract(
     _SLO_QUERY_CONTRACTS_V6,
     _post_dispatch_session_proof_contract(
         require_accepted_timing=True,
         require_selected_cost=True,
         require_selected_transition=True,
         require_trusted_clock=True,
+    ),
+)
+SLO_QUERY_CONTRACTS = _replace_contract(
+    _SLO_QUERY_CONTRACTS_V7,
+    _atomic_final_settlement_contract(
+        next(
+            contract
+            for contract in _SLO_QUERY_CONTRACTS_V7
+            if contract.query_name == "Budget event amount malformed or out of range"
+        )
     ),
 )
 
@@ -356,6 +402,7 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     4: _SLO_QUERY_CONTRACTS_V4,
     5: _SLO_QUERY_CONTRACTS_V5,
     6: _SLO_QUERY_CONTRACTS_V6,
+    7: _SLO_QUERY_CONTRACTS_V7,
 }
 
 
