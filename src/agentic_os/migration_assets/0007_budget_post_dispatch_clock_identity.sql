@@ -5,6 +5,9 @@ CREATE INDEX budget_events_clock_context_idx
 ON budget_events(clock_context_id)
 WHERE clock_context_id IS NOT NULL;
 
+DROP TRIGGER budget_events_preserve_accepted_post_dispatch_delete;
+DROP TRIGGER budget_events_preserve_accepted_post_dispatch_update;
+
 CREATE TRIGGER budget_events_preserve_accepted_post_dispatch_delete
 BEFORE DELETE ON budget_events
 WHEN OLD.event_type IN ('consume','retry_decrement','retry_restore','human_attention')

@@ -76,6 +76,27 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(apply_migrations(self.database, migration_dir=migration_dir), (1,))
 
+    def _apply_migrations_through(self, version: int, directory_name: str) -> None:
+        source_dir = repository_root() / "migrations"
+        migration_dir = Path(self.temporary.name) / directory_name
+        migration_dir.mkdir()
+        manifest = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
+        selected = [
+            migration
+            for migration in manifest["migrations"]
+            if migration["version"] <= version
+        ]
+        for migration in selected:
+            shutil.copy(source_dir / migration["file"], migration_dir / migration["file"])
+        (migration_dir / "manifest.json").write_text(
+            json.dumps({"migrations": selected}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            apply_migrations(self.database, migration_dir=migration_dir),
+            tuple(migration["version"] for migration in selected),
+        )
+
     def _insert_gate_bound_evidence(
         self,
         connection: sqlite3.Connection,
@@ -2046,6 +2067,125 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE spawn_requests SET state='accepted' WHERE spawn_request_id='spawn'"
             )
+
+    def test_v4_preserves_accepted_post_dispatch_events_before_counter_rewrite(self) -> None:
+        self._apply_migrations_through(4, "through-v4")
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        external_metadata = (
+            '{"run_id":"v4-run","transition_id":"v4-transition",'
+            '"client_request_id":"v4-client","idempotency_key":"v4-spawn-idem",'
+            '"phase":"phase","agent_id":"agent","task_digest":"task"}'
+        )
+        with connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('w','file_authority','now')"
+            )
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('cost-row','provider','model','endpoint',"
+                "'capability',1,1,'known','effective','cost-hash')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,updated_at) "
+                "VALUES('v4-run','prepare-v4','w','file_authority','child_completed',"
+                "'R1','R1','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES('v4-transition','v4-run',"
+                "'before','after','budget','consume','R1','idem-v4',0,'now')"
+            )
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,"
+                "state,session_key,created_at,updated_at) VALUES('v4-spawn','v4-run',"
+                "'phase','agent','v4-transition','v4-client','v4-spawn-idem','task',"
+                "'pending','session-key','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                "selected_provider,selected_model,selected_endpoint_binding_id,"
+                "selected_cost_registry_id,selected_cost_effective_at,"
+                "selected_cost_registry_hash,selected_cost_confidence,"
+                "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+                "output_token_budget,cost_budget_microusd,retry_budget,"
+                "human_attention_budget,reserved_input_tokens,reserved_cost_microusd,"
+                "consumed_input_tokens,consumed_cost_microusd,usage_confidence,updated_at) "
+                "VALUES('v4-run','w','capability','provider','model','endpoint',"
+                "'cost-row','effective','cost-hash','known','v4-transition',10,10,"
+                "10,10,1,1,1,1,0,0,'known','now')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,input_tokens,cost_microusd,usage_confidence,source,"
+                "created_at,created_at_epoch_ms) VALUES('v4-reserve','idem-v4-reserve',"
+                "'dedupe-v4-reserve',1,'v4-run','v4-transition','v4-spawn',"
+                "'provider','model','endpoint','capability','cost-row','effective',"
+                "'cost-hash','known','reserve',1,1,'known','test','now',800)"
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_client_request_id,"
+                "external_idempotency_key,external_phase,external_agent_id,"
+                "external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+                "'intent-v4','v4-run','v4-transition','sessions_spawn','v4-spawn',"
+                "'v4-reserve','v4-client','v4-spawn-idem','phase','agent','task',"
+                "'v1',?,?,'v4-run','v4-transition','v4-client','v4-spawn-idem',"
+                "'phase','agent','task','accepted','session-key','now',900,'now',1000)",
+                (external_metadata, external_metadata),
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,"
+                "transition_id,phase,agent_id,client_request_id,"
+                "spawn_idempotency_key,session_key,task_digest,state) VALUES("
+                "'v4-session','v4-spawn','v4-run','v4-transition','phase','agent',"
+                "'v4-client','v4-spawn-idem','session-key','task','running')"
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET state='accepted' "
+                "WHERE spawn_request_id='v4-spawn'"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,input_tokens,cost_microusd,usage_confidence,source,"
+                "created_at,created_at_epoch_ms) VALUES('v4-consume','idem-v4-consume',"
+                "'dedupe-v4-consume',2,'v4-run','v4-transition','v4-spawn',"
+                "'provider','model','endpoint','capability','cost-row','effective',"
+                "'cost-hash','known','consume',1,1,'known','test','now',1100)"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=0,"
+                "reserved_cost_microusd=0,consumed_input_tokens=1,"
+                "consumed_cost_microusd=1 WHERE run_id='v4-run'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with connection:
+                connection.execute(
+                    "UPDATE budget_events SET source='repair' "
+                    "WHERE budget_event_id='v4-consume'"
+                )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+            with connection:
+                connection.execute(
+                    "DELETE FROM budget_events WHERE budget_event_id='v4-consume'"
+                )
 
     def test_spawn_request_transition_must_belong_to_same_run(self) -> None:
         apply_migrations(self.database)
