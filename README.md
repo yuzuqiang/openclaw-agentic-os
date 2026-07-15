@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `b6fdd178f793dcb4d2904882d0988be955d90190aa7152c22a2e33c70ca8b086`
+- Current design artifact SHA-256: `ca9f48c5a33df41b4a923e9da7557f52578c57fcb35e172a20aa7eba7a3b1882`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
 - Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
@@ -137,6 +137,11 @@ an explicit local-recovery caller opts in. External session and allow-lease
 integrations must pass the
 validators in `agentic_os.metadata`; these validators are probes, not runtime
 integration proof.
+`agentic_os.metadata_dispatch` adds a pure fake-adapter dispatch probe for the
+same boundary. It covers allowLease acquire/status/release and session
+spawn/status/list/result metadata, including idempotent replay identity, without
+making OpenClaw RPCs, changing Gateway configuration, starting a reconciliation
+scanner, or enabling database authority.
 
 ## Version-management policy
 

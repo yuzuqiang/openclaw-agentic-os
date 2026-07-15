@@ -5,11 +5,13 @@ import unittest
 
 from agentic_os.metadata import (
     ALLOW_LEASE_OBSERVED_FIELDS,
+    ALLOW_LEASE_RELEASE_FIELDS,
     SESSION_FIELDS,
     MetadataContractError,
     validate_accepted_lease_identity,
     validate_accepted_session_identity,
     validate_allow_lease_observation,
+    validate_allow_lease_release_observation,
     validate_session_observation,
 )
 
@@ -45,6 +47,20 @@ class MetadataTests(unittest.TestCase):
         raw["metadata_contract_version"] = "v1"
         self.assertEqual(
             validate_allow_lease_observation(
+                local=local,
+                normalized=dict(local),
+                raw_json=json.dumps(raw),
+                metadata_contract_version="v1",
+            ),
+            local,
+        )
+
+    def test_allow_lease_release_exact_triple_positive_control(self) -> None:
+        local = values(ALLOW_LEASE_RELEASE_FIELDS)
+        raw = dict(local)
+        raw["metadata_contract_version"] = "v1"
+        self.assertEqual(
+            validate_allow_lease_release_observation(
                 local=local,
                 normalized=dict(local),
                 raw_json=json.dumps(raw),
@@ -210,6 +226,19 @@ class MetadataTests(unittest.TestCase):
                 local=lease,
                 normalized=dict(lease),
                 raw_json="{" + ",".join(lease_pairs) + "}",
+                metadata_contract_version="v1",
+            )
+
+        release = values(ALLOW_LEASE_RELEASE_FIELDS)
+        release_pairs = [
+            f'"{key}":{json.dumps(value)}' for key, value in release.items()
+        ]
+        release_pairs.append(f'"gateway_lease_id":{json.dumps(release["gateway_lease_id"])}')
+        with self.assertRaisesRegex(MetadataContractError, "duplicate key: gateway_lease_id"):
+            validate_allow_lease_release_observation(
+                local=release,
+                normalized=dict(release),
+                raw_json="{" + ",".join(release_pairs) + "}",
                 metadata_contract_version="v1",
             )
 

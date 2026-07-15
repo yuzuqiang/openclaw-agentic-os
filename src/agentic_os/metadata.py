@@ -37,6 +37,7 @@ ALLOW_LEASE_IDENTITY_FIELDS = (
 
 ALLOW_LEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("ttl_ms",)
 ALLOW_LEASE_OBSERVED_FIELDS = ALLOW_LEASE_FIELDS + ("gateway_lease_id",)
+ALLOW_LEASE_RELEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("gateway_lease_id",)
 MAX_LEASE_TTL_MS = 31_536_000_000
 
 
@@ -170,6 +171,10 @@ def validate_allow_lease_observation(**kwargs: Any) -> dict[str, Any]:
     if not (local_values == observed_values == raw_values):
         raise MetadataContractError("local, normalized, and raw metadata do not match")
     return observed_values
+
+
+def validate_allow_lease_release_observation(**kwargs: Any) -> dict[str, str]:
+    return validate_metadata_observation(fields=ALLOW_LEASE_RELEASE_FIELDS, **kwargs)
 
 
 def validate_accepted_lease_identity(

@@ -1,0 +1,34 @@
+{
+  "metadata_contract_version": "metadata-dispatch-v1",
+  "allow_lease": {
+    "client_lease_id": "lease-client-1",
+    "idempotency_key": "lease-acquire-idem-1",
+    "run_id": "run-1",
+    "phase": "B",
+    "transition_id": "transition-1",
+    "agent_id": "software-architect",
+    "requester_agent_id": "main",
+    "ttl_ms": 60000,
+    "gateway_lease_id": "gateway-lease-1"
+  },
+  "allow_lease_release": {
+    "client_lease_id": "lease-client-1",
+    "idempotency_key": "lease-release-idem-1",
+    "run_id": "run-1",
+    "phase": "B",
+    "transition_id": "transition-1",
+    "agent_id": "software-architect",
+    "requester_agent_id": "main",
+    "gateway_lease_id": "gateway-lease-1"
+  },
+  "session": {
+    "run_id": "run-1",
+    "transition_id": "transition-1",
+    "client_request_id": "session-client-1",
+    "idempotency_key": "session-spawn-idem-1",
+    "phase": "B",
+    "agent_id": "software-architect",
+    "task_digest": "sha256:metadata-dispatch-task",
+    "session_key": "session-key-1"
+  }
+}
