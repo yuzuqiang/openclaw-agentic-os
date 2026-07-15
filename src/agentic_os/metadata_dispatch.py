@@ -173,6 +173,7 @@ class MetadataDispatchProbe:
         self._session_intent_by_key: dict[str, SessionSpawnIntent] = {}
 
     def acquire_allow_lease(self, intent: AllowLeaseIntent) -> str:
+        self._preflight_lease_acquire_replay(intent)
         observation = self._adapter.allow_lease_acquire(intent)
         gateway_lease_id = self._gateway_lease_id(observation)
         observed = validate_allow_lease_observation(
@@ -205,6 +206,7 @@ class MetadataDispatchProbe:
         )
 
     def release_allow_lease(self, intent: AllowLeaseReleaseIntent) -> str:
+        self._preflight_release_replay(intent)
         acquired = self._lease_by_gateway_id.get(intent.gateway_lease_id)
         if acquired is None:
             raise MetadataContractError("release references an unknown gateway lease")
@@ -235,6 +237,7 @@ class MetadataDispatchProbe:
         return released
 
     def spawn_session(self, intent: SessionSpawnIntent) -> str:
+        self._preflight_session_spawn_replay(intent)
         observation = self._adapter.session_spawn(intent)
         session_key = self._validate_session_observation(intent, observation)
         prior = self._session_by_spawn_key.get(intent.idempotency_key)
@@ -279,6 +282,21 @@ class MetadataDispatchProbe:
         if not isinstance(gateway_lease_id, str) or not gateway_lease_id:
             raise MetadataContractError("accepted gateway lease identity must be non-empty")
         return gateway_lease_id
+
+    def _preflight_lease_acquire_replay(self, intent: AllowLeaseIntent) -> None:
+        prior = self._lease_by_acquire_key.get(intent.idempotency_key)
+        if prior is not None and prior[0] != intent:
+            raise MetadataContractError("duplicate acquire identity changed")
+
+    def _preflight_release_replay(self, intent: AllowLeaseReleaseIntent) -> None:
+        prior = self._release_by_key.get(intent.idempotency_key)
+        if prior is not None and prior[0] != intent:
+            raise MetadataContractError("release replay identity changed")
+
+    def _preflight_session_spawn_replay(self, intent: SessionSpawnIntent) -> None:
+        prior = self._session_by_spawn_key.get(intent.idempotency_key)
+        if prior is not None and prior[0] != intent:
+            raise MetadataContractError("duplicate spawn identity changed")
 
     def _remember_lease_acquire(self, intent: AllowLeaseIntent, gateway_lease_id: str) -> None:
         prior = self._lease_by_acquire_key.get(intent.idempotency_key)

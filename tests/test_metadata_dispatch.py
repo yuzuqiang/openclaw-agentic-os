@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,24 @@ def positive_script(data: dict[str, Any]) -> dict[str, list[MetadataObservation]
     }
 
 
+class RecordingScriptedMetadataDispatchAdapter(ScriptedMetadataDispatchAdapter):
+    def __init__(self, script: dict[str, list[MetadataObservation]]) -> None:
+        super().__init__(script)
+        self.calls: list[str] = []
+
+    def allow_lease_acquire(self, intent: AllowLeaseIntent) -> MetadataObservation:
+        self.calls.append("allow_lease_acquire")
+        return super().allow_lease_acquire(intent)
+
+    def allow_lease_release(self, intent: AllowLeaseReleaseIntent) -> MetadataObservation:
+        self.calls.append("allow_lease_release")
+        return super().allow_lease_release(intent)
+
+    def session_spawn(self, intent: SessionSpawnIntent) -> MetadataObservation:
+        self.calls.append("session_spawn")
+        return super().session_spawn(intent)
+
+
 class MetadataDispatchTests(unittest.TestCase):
     def test_positive_probe_covers_lease_and_session_lifecycle(self) -> None:
         data = fixture()
@@ -196,6 +215,91 @@ class MetadataDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(MetadataContractError, "different lease identity"):
             probe.acquire_allow_lease(intent)
 
+    def test_changed_acquire_replay_identity_is_rejected_before_adapter_call(self) -> None:
+        data = fixture()
+        version = data["metadata_contract_version"]
+        lease = data["allow_lease"]
+        changed_observation = dict(lease)
+        changed_observation["client_lease_id"] = "client-lease-2"
+        adapter = RecordingScriptedMetadataDispatchAdapter(
+            {
+                "allow_lease_acquire": [
+                    observation(lease, version=version),
+                    observation(changed_observation, version=version),
+                ]
+            }
+        )
+        probe = MetadataDispatchProbe(adapter)
+        intent = lease_intent(data)
+        changed_intent = replace(intent, client_lease_id="client-lease-2")
+
+        self.assertEqual(probe.acquire_allow_lease(intent), lease["gateway_lease_id"])
+        with self.assertRaisesRegex(MetadataContractError, "duplicate acquire identity changed"):
+            probe.acquire_allow_lease(changed_intent)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+
+    def test_changed_release_replay_identity_is_rejected_before_adapter_call(self) -> None:
+        data = fixture()
+        version = data["metadata_contract_version"]
+        lease_1 = data["allow_lease"]
+        release_1 = data["allow_lease_release"]
+        lease_2 = dict(lease_1)
+        lease_2.update(
+            {
+                "client_lease_id": "client-lease-2",
+                "idempotency_key": "allow-lease-acquire-idempotency-key-2",
+                "run_id": "run-2",
+                "transition_id": "transition-2",
+                "gateway_lease_id": "gateway-lease-2",
+            }
+        )
+        release_2 = dict(release_1)
+        release_2.update(
+            {
+                "run_id": lease_2["run_id"],
+                "transition_id": lease_2["transition_id"],
+                "gateway_lease_id": lease_2["gateway_lease_id"],
+            }
+        )
+        adapter = RecordingScriptedMetadataDispatchAdapter(
+            {
+                "allow_lease_acquire": [
+                    observation(lease_1, version=version),
+                    observation(lease_2, version=version),
+                ],
+                "allow_lease_release": [
+                    observation(release_1, version=version),
+                    observation(release_2, version=version),
+                ],
+            }
+        )
+        probe = MetadataDispatchProbe(adapter)
+        lease_intent_1 = lease_intent(data)
+        lease_intent_2 = replace(
+            lease_intent_1,
+            client_lease_id=lease_2["client_lease_id"],
+            idempotency_key=lease_2["idempotency_key"],
+            run_id=lease_2["run_id"],
+            transition_id=lease_2["transition_id"],
+        )
+        release_intent_1 = release_intent(data)
+        release_intent_2 = replace(
+            release_intent_1,
+            run_id=release_2["run_id"],
+            transition_id=release_2["transition_id"],
+            gateway_lease_id=release_2["gateway_lease_id"],
+        )
+
+        self.assertEqual(probe.acquire_allow_lease(lease_intent_1), lease_1["gateway_lease_id"])
+        self.assertEqual(probe.acquire_allow_lease(lease_intent_2), lease_2["gateway_lease_id"])
+        self.assertEqual(probe.release_allow_lease(release_intent_1), lease_1["gateway_lease_id"])
+        with self.assertRaisesRegex(MetadataContractError, "release replay identity changed"):
+            probe.release_allow_lease(release_intent_2)
+        self.assertEqual(
+            adapter.calls,
+            ["allow_lease_acquire", "allow_lease_acquire", "allow_lease_release"],
+        )
+
     def test_duplicate_session_spawn_returning_different_key_fails_closed(self) -> None:
         data = fixture()
         version = data["metadata_contract_version"]
@@ -217,6 +321,32 @@ class MetadataDispatchTests(unittest.TestCase):
         self.assertEqual(probe.spawn_session(intent), session_key)
         with self.assertRaisesRegex(MetadataContractError, "different session identity"):
             probe.spawn_session(intent)
+
+    def test_changed_spawn_replay_identity_is_rejected_before_adapter_call(self) -> None:
+        data = fixture()
+        version = data["metadata_contract_version"]
+        session_key = data["session"]["session_key"]
+        metadata = {
+            key: value for key, value in data["session"].items() if key != "session_key"
+        }
+        changed_metadata = dict(metadata)
+        changed_metadata["client_request_id"] = "client-request-2"
+        adapter = RecordingScriptedMetadataDispatchAdapter(
+            {
+                "session_spawn": [
+                    observation(metadata, version=version, identity=session_key),
+                    observation(changed_metadata, version=version, identity="session-key-2"),
+                ]
+            }
+        )
+        probe = MetadataDispatchProbe(adapter)
+        intent = session_intent(data)
+        changed_intent = replace(intent, client_request_id="client-request-2")
+
+        self.assertEqual(probe.spawn_session(intent), session_key)
+        with self.assertRaisesRegex(MetadataContractError, "duplicate spawn identity changed"):
+            probe.spawn_session(changed_intent)
+        self.assertEqual(adapter.calls, ["session_spawn"])
 
     def test_session_list_absent_or_duplicate_match_fails_closed(self) -> None:
         data = fixture()
