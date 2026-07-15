@@ -191,7 +191,7 @@ Safe numeric bounds are part of the schema contract. They intentionally fit well
 
 SQLite type preservation is mandatory, not optional. Every table that stores bounded gate-critical numeric authority is `STRICT`, and every bounded gate-critical money/token/time/retry/human-attention/epoch field uses `ANY` plus an explicit `typeof(field)='integer'` range check. `ANY` in a `STRICT` table preserves the input storage class before `CHECK`, so numeric text such as `'1500'` and integral `REAL` values such as `1500.0` remain wrong-type and fail. Plain `INTEGER` affinity is forbidden for those fields because it can coerce numeric text before the check executes.
 
-Money is represented only as fixed-scale integer micro-USD (`microusd`) in gate-critical tables; any legacy `REAL` migration must deterministically round to microusd, validate original source type/range before insertion, and fail-closed to quarantine on `NULL`, `NaN`, `Inf`, `1e999`, negative, fractional-after-rounding ambiguity, integral `REAL` authority values, numeric text, or max+1 values.
+Money is represented only as fixed-scale integer micro-USD (`microusd`) in gate-critical tables; any legacy migration must convert from the explicit `usd_decimal` source unit to microusd with Python `Decimal` after validating the original SQLite storage class, and fail-closed to quarantine on `NULL`, `NaN`, `Inf`, `1e999`, negative, fractional-microusd ambiguity, mixed units, or max+1 values. Direct authority tables still reject numeric text and `REAL`; the legacy importer accepts only text decimals, integer-dollar storage, or finite integral `REAL` dollars before conversion.
 
 ```sql
 CREATE TABLE schema_migrations (
@@ -3161,8 +3161,22 @@ revalidates completed-session proof after normal `gate_passed` /
 `release_pending` / `finalized` progression even if a malicious fixture bypasses
 runtime triggers.
 Schema version 7 keeps its historical SLO query hashes; version 8 and later use
-the atomic-settlement completeness contract. This runtime slice does not cover
-legacy-money conversion and does not enable production database authority.
+the atomic-settlement completeness contract.
+
+Current migration v9 legacy money import quarantine:
+
+`0009_legacy_money_import_quarantine.sql` adds immutable
+`legacy_money_import_batches`, `legacy_money_import_quarantine`, and
+`legacy_money_import_promotions` evidence tables. The only supported source
+schema is `legacy_budget_terminal_usage_v1`; the only supported source unit is
+`usd_decimal`. Import validation reads the original SQLite storage class before
+conversion, converts with Python `Decimal` into integer microusd, records durable
+quarantine evidence for malformed rows, and promotes zero authoritative rows
+when any row in a batch is quarantined. Clean batches promote through the same
+atomic final-settlement runtime path, so imports cannot create unlinked
+settlement or budget events. Exact batch replay is idempotent; reused batch,
+idempotency, or dedupe identity with changed payload fails closed. This slice
+does not enable production database authority.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:

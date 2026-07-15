@@ -47,6 +47,12 @@
       "name": "budget_atomic_final_settlement",
       "file": "0008_budget_atomic_final_settlement.sql",
       "sha256": "a48d383bf392347ef804aac1d6ab5f778feff99b32f204b89ca207aad92effe4"
+    },
+    {
+      "version": 9,
+      "name": "legacy_money_import_quarantine",
+      "file": "0009_legacy_money_import_quarantine.sql",
+      "sha256": "de93abaa893dc4a5154405ec04acae6395f01f58f6f2d21a142c5a08ed794d21"
     }
   ]
 }
