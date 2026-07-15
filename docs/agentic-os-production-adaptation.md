@@ -3475,9 +3475,11 @@ Phase 2 - dual-write shadow:
   with explicit new-workflow proof and no prior run evidence for that workflow.
 - Promotion from `file_authority_shadow` requires a fresh parity rehash of all
   existing shadow projections for the workflow, no nonterminal file-authority
-  runs, and R1 shadow evidence only.
+  runs, no positive `open_file_authority_runs` counter, and R1 shadow evidence only.
 - First dual-write runs create their file artifact atomically and reject
-  pre-existing files unless matching dual-write evidence already exists.
+  pre-existing files unless matching dual-write evidence already exists. New
+  writes finalize only after durable prepared run/projection evidence exists, so
+  exact retry can recover an interrupted file write without orphaning authority.
 - Exact replay and audit count all same-run projection rows across authorities;
   any extra or cross-authority projection fails closed.
 - JSON/JSONL remains operational authority; DB rows are parity evidence.

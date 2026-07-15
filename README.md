@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `1336b24496f57387e9a26f019b8135168da2968e905858d37662fa25ea0a050d`
+- Current design artifact SHA-256: `abcb5844b8bb8488b10a673687f45199843d72a62577520b40015872b9d6a928`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
 - Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
@@ -59,13 +59,16 @@ no-op; changed replay or file/SQLite drift, including workflow-mode drift after
 the original write, fails closed and refuses to overwrite file authority. Promotion from
 `file_authority_shadow` to `dual_write_shadow` first rehashes every current
 file-shadow projection for that workflow; stale or missing backfill artifacts,
-non-R1 shadow evidence, or any nonterminal file-authority run block the promotion.
+non-R1 shadow evidence, any nonterminal file-authority run, or a positive
+`open_file_authority_runs` counter blocks the promotion.
 A first dual-write must create the file atomically through a fsynced temporary
 file and final no-overwrite link; a pre-existing artifact without a matching
 dual-write projection is rejected instead of being retroactively stamped as a
-successful run. Replay and audit count every projection row for the run, not only
-`dual_write_shadow` rows, so cross-authority projection contamination fails
-closed. The CLI requires explicit `--risk-class R1 --risk-dominance R1`;
+successful run. New writes are finalized only after durable prepared run
+evidence exists, so an interrupted write can be recovered by an exact retry
+without leaving a final file artifact that has no SQLite shadow evidence. Replay
+and audit count every projection row for the run, not only `dual_write_shadow`
+rows, so extra or cross-authority projection contamination fails closed. The CLI requires explicit `--risk-class R1 --risk-dominance R1`;
 higher-risk dual-write runs are rejected until their completion-gate evidence can
 be persisted instead of downcast to R1. `--content-file` is subject to the
 raw-state denylist before bytes are read, and a post-commit checkpoint failure

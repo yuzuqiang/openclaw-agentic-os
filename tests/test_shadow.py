@@ -935,6 +935,49 @@ class ShadowTests(unittest.TestCase):
                 ("file_authority_shadow",),
             )
 
+    def test_dual_write_shadow_honors_open_file_authority_run_counter(
+        self,
+    ) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority','now')"
+            )
+        backfill_file_authority_shadow(
+            self.database,
+            [backfilled],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE workflow_authority SET open_file_authority_runs=1 "
+                "WHERE workflow='heartbeat'"
+            )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "open file-authority run"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority_shadow",),
+            )
+
     def test_dual_write_shadow_requires_current_shadow_parity_before_promotion(
         self,
     ) -> None:
@@ -1101,6 +1144,49 @@ class ShadowTests(unittest.TestCase):
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
 
         with self.assertRaisesRegex(ShadowBackfillError, "non-R1 shadow parity"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+
+    def test_dual_write_shadow_rejects_contaminated_shadow_baseline_before_promotion(
+        self,
+    ) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        contaminant = self._artifact("contaminant.json", b'{"dual": false}\n')
+        contaminant_relative = contaminant.resolve().relative_to(repository_root()).as_posix()
+        contaminant_digest = hashlib.sha256(contaminant.read_bytes()).hexdigest()
+        backfill_file_authority_shadow(
+            self.database,
+            [backfilled],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,'now')",
+                (
+                    shadow_module._projection_id(
+                        "shadow-run", contaminant_relative, contaminant_digest
+                    ),
+                    "shadow-run",
+                    contaminant_relative,
+                    contaminant_digest,
+                    "dual_write_shadow",
+                ),
+            )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "unexpected shadow parity"):
             dual_write_shadow_artifact(
                 self.database,
                 artifact,
@@ -1314,6 +1400,51 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(artifact.read_bytes(), payload)
 
+    def test_dual_write_shadow_audit_rejects_extra_dual_write_projection(
+        self,
+    ) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        payload = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+            risk_class="R1",
+            risk_dominance="R1",
+            new_workflow=True,
+        )
+        extra_artifact = self._artifact("extra-dual.json", b'{"extra": true}\n')
+        extra_relative = extra_artifact.resolve().relative_to(repository_root()).as_posix()
+        extra_digest = hashlib.sha256(extra_artifact.read_bytes()).hexdigest()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,'now')",
+                (
+                    shadow_module._projection_id("dual-run", extra_relative, extra_digest),
+                    "dual-run",
+                    extra_relative,
+                    extra_digest,
+                    "dual_write_shadow",
+                ),
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_dual_write_shadow(
+            self.database,
+            [artifact, extra_artifact],
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+        )
+
+        self.assertEqual(audit.status, "fail")
+        self.assertIn("unexpected_projection", {issue.reason for issue in audit.issues})
+
     def test_dual_write_shadow_replay_rejects_cross_authority_projection(
         self,
     ) -> None:
@@ -1470,13 +1601,97 @@ class ShadowTests(unittest.TestCase):
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
+                    "SELECT state FROM runs "
+                    "WHERE run_id='write-failed'"
+                ).fetchone(),
+                ("prepared",),
+            )
+            self.assertEqual(
+                connection.execute(
                     "SELECT COUNT(*) FROM artifact_projections "
                     "WHERE run_id='write-failed'"
                 ).fetchone(),
-                (0,),
+                (1,),
             )
         self.assertTrue(temp_paths)
         self.assertTrue(all(not path.exists() for path in temp_paths))
+
+        recovered = dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            b'{"partial": true}\n',
+            workflow="heartbeat",
+            run_id="write-failed",
+            risk_class="R1",
+            risk_dominance="R1",
+        )
+
+        self.assertEqual(recovered.status, "recovered")
+        self.assertEqual(artifact.read_bytes(), b'{"partial": true}\n')
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM runs WHERE run_id='write-failed'"
+                ).fetchone(),
+                ("finalized",),
+            )
+
+    def test_dual_write_shadow_recovers_prepared_file_after_finalize_failure(
+        self,
+    ) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "finalize.json"
+        payload = b'{"finalize": true}\n'
+        original_finalize = shadow_module._finalize_prepared_shadow_run
+
+        with mock.patch.object(
+            shadow_module,
+            "_finalize_prepared_shadow_run",
+            side_effect=ShadowBackfillError("finalize interrupted"),
+        ):
+            with self.assertRaisesRegex(ShadowBackfillError, "finalize interrupted"):
+                dual_write_shadow_artifact(
+                    self.database,
+                    artifact,
+                    payload,
+                    workflow="heartbeat",
+                    run_id="finalize-failed",
+                    risk_class="R1",
+                    risk_dominance="R1",
+                    new_workflow=True,
+                )
+
+        self.assertEqual(artifact.read_bytes(), payload)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM runs WHERE run_id='finalize-failed'"
+                ).fetchone(),
+                ("prepared",),
+            )
+
+        with mock.patch.object(
+            shadow_module,
+            "_finalize_prepared_shadow_run",
+            side_effect=original_finalize,
+        ):
+            recovered = dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                payload,
+                workflow="heartbeat",
+                run_id="finalize-failed",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertEqual(recovered.status, "recovered")
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM runs WHERE run_id='finalize-failed'"
+                ).fetchone(),
+                ("finalized",),
+            )
 
     def test_dual_write_shadow_preserves_committed_file_after_checkpoint_failure(
         self,
