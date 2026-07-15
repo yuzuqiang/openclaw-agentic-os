@@ -700,6 +700,8 @@ class ShadowTests(unittest.TestCase):
             payload,
             workflow="heartbeat",
             run_id="dual-run",
+            risk_class="R1",
+            risk_dominance="R1",
         )
 
         self.assertFalse(agentic_os.DB_AUTHORITY_ENABLED)
@@ -746,6 +748,8 @@ class ShadowTests(unittest.TestCase):
             payload,
             workflow="heartbeat",
             run_id="dual-run",
+            risk_class="R1",
+            risk_dominance="R1",
         )
         self.assertEqual(replay.status, "replayed")
         with sqlite3.connect(self.database) as connection:
@@ -766,6 +770,130 @@ class ShadowTests(unittest.TestCase):
         )
         self.assertEqual(audit.status, "pass", audit.issues)
 
+    def test_dual_write_shadow_rejects_file_authority_without_backfill(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority','now')"
+            )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "backfill first"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections WHERE run_id='dual-run'"
+                ).fetchone(),
+                (0,),
+            )
+
+    def test_dual_write_shadow_promotes_only_backfilled_workflow(self) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority','now')"
+            )
+        backfill_file_authority_shadow(
+            self.database,
+            [backfilled],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        result = dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            b'{"dual": true}\n',
+            workflow="heartbeat",
+            run_id="dual-run",
+            risk_class="R1",
+            risk_dominance="R1",
+        )
+
+        self.assertEqual(result.status, "written")
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("dual_write_shadow",),
+            )
+
+    def test_dual_write_shadow_replay_fails_on_workflow_mode_drift(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        payload = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+            risk_class="R1",
+            risk_dominance="R1",
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE workflow_authority SET mode='file_authority_shadow' "
+                "WHERE workflow='heartbeat'"
+            )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "backfill first"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                payload,
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority_shadow",),
+            )
+
+    def test_dual_write_shadow_rejects_non_r1_risk(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "only explicit R1"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R2",
+                risk_dominance="R2",
+            )
+
+        self.assertFalse(self.database.exists())
+        self.assertFalse(artifact.exists())
+
     def test_dual_write_shadow_changed_replay_fails_before_overwrite(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         original = b'{"dual": true}\n'
@@ -776,6 +904,8 @@ class ShadowTests(unittest.TestCase):
             workflow="heartbeat",
             run_id="dual-run",
             prepare_idempotency_key="prepare-dual",
+            risk_class="R1",
+            risk_dominance="R1",
         )
 
         with self.assertRaisesRegex(ShadowBackfillError, "refusing to overwrite"):
@@ -786,6 +916,8 @@ class ShadowTests(unittest.TestCase):
                 workflow="heartbeat",
                 run_id="dual-run",
                 prepare_idempotency_key="prepare-dual",
+                risk_class="R1",
+                risk_dominance="R1",
             )
 
         self.assertEqual(artifact.read_bytes(), original)
@@ -808,6 +940,8 @@ class ShadowTests(unittest.TestCase):
             workflow="heartbeat",
             run_id="dual-run",
             prepare_idempotency_key="prepare-one",
+            risk_class="R1",
+            risk_dominance="R1",
         )
 
         with self.assertRaisesRegex(ShadowBackfillError, "matching shadow run"):
@@ -818,6 +952,8 @@ class ShadowTests(unittest.TestCase):
                 workflow="heartbeat",
                 run_id="dual-run",
                 prepare_idempotency_key="prepare-two",
+                risk_class="R1",
+                risk_dominance="R1",
             )
         self.assertEqual(artifact.read_bytes(), payload)
 
@@ -829,6 +965,8 @@ class ShadowTests(unittest.TestCase):
             b'{"dual": true}\n',
             workflow="heartbeat",
             run_id="dual-run",
+            risk_class="R1",
+            risk_dominance="R1",
         )
         artifact.write_bytes(b'{"dual": "drift"}\n')
         self._checkpoint_and_remove_sidecars()
@@ -873,6 +1011,8 @@ class ShadowTests(unittest.TestCase):
                     b'{"partial": true}\n',
                     workflow="heartbeat",
                     run_id="write-failed",
+                    risk_class="R1",
+                    risk_dominance="R1",
                 )
 
         self.assertFalse(artifact.exists())
@@ -903,6 +1043,8 @@ class ShadowTests(unittest.TestCase):
                     payload,
                     workflow="heartbeat",
                     run_id="checkpoint-busy",
+                    risk_class="R1",
+                    risk_dominance="R1",
                 )
 
         self.assertEqual(artifact.read_bytes(), payload)
@@ -929,6 +1071,10 @@ class ShadowTests(unittest.TestCase):
                     "heartbeat",
                     "--run-id",
                     "cli-dual",
+                    "--risk-class",
+                    "R1",
+                    "--risk-dominance",
+                    "R1",
                     "--artifact",
                     str(artifact),
                     "--content",
@@ -1000,6 +1146,10 @@ class ShadowTests(unittest.TestCase):
                     "heartbeat",
                     "--run-id",
                     "raw-state-copy",
+                    "--risk-class",
+                    "R1",
+                    "--risk-dominance",
+                    "R1",
                     "--artifact",
                     str(artifact),
                     "--content-file",

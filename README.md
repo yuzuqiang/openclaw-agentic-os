@@ -31,7 +31,7 @@ PYTHONPATH=src python3 -m agentic_os.cli preflight
 PYTHONPATH=src python3 -m agentic_os.cli migrate --test-db
 PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --prepare-idempotency-key file-shadow:shadow-demo --artifact README.md
-PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
+PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --risk-class R1 --risk-dominance R1 --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -49,9 +49,15 @@ decisions.
 
 `dual-write-shadow` is the first executable P1.0 shadow-mode slice. It writes a
 single file-authority artifact and records matching `dual_write_shadow` SQLite
-projection evidence in the same local operation. Exact replay with the same
+projection evidence in the same local operation. An existing `file_authority`
+workflow must first pass through `file_authority_shadow` backfill before it can
+enter dual-write mode; a brand-new workflow may start directly in
+`dual_write_shadow`. Exact replay with the same
 prepare key, run, artifact path, and content is a no-op; changed replay or
-file/SQLite drift fails closed and refuses to overwrite file authority.
+file/SQLite drift, including workflow-mode drift after the original write, fails
+closed and refuses to overwrite file authority. The CLI requires explicit
+`--risk-class R1 --risk-dominance R1`; higher-risk dual-write runs are rejected
+until their completion-gate evidence can be persisted instead of downcast to R1.
 `--content-file` is subject to the raw-state denylist before bytes are read, and
 a post-commit checkpoint failure must not delete the committed authority file.
 This is parity evidence only: it does not create `db_authority_canary` or

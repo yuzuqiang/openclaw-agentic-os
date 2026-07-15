@@ -116,17 +116,30 @@ def _normalize_required_identity(name: str, value: str) -> str:
     return normalized
 
 
+def _normalize_dual_write_risk(risk_class: str, risk_dominance: str) -> tuple[str, str]:
+    normalized_class = _normalize_required_identity("risk_class", risk_class)
+    normalized_dominance = _normalize_required_identity("risk_dominance", risk_dominance)
+    if (normalized_class, normalized_dominance) != ("R1", "R1"):
+        raise ShadowBackfillError(
+            "dual-write shadow supports only explicit R1 risk; "
+            "run higher-risk work through the completion gate before shadowing"
+        )
+    return normalized_class, normalized_dominance
+
+
 def _run_is_finalized_shadow(
     row: tuple[object, ...] | None,
     *,
     workflow: str,
     authority_mode: str = "file_authority_shadow",
     prepare_idempotency_key: str | None = None,
+    risk_class: str = "R1",
+    risk_dominance: str = "R1",
 ) -> bool:
     if row is None:
         return False
     if prepare_idempotency_key is None:
-        expected = (workflow, authority_mode, "finalized", "R1", "R1")
+        expected = (workflow, authority_mode, "finalized", risk_class, risk_dominance)
         identity = row[:5]
         finalized_at = row[5]
         finalized_epoch_ms = row[6]
@@ -136,8 +149,8 @@ def _run_is_finalized_shadow(
             authority_mode,
             prepare_idempotency_key,
             "finalized",
-            "R1",
-            "R1",
+            risk_class,
+            risk_dominance,
         )
         identity = row[:6]
         finalized_at = row[6]
@@ -230,8 +243,11 @@ def _ensure_shadow_run(
     run_id: str,
     prepare_idempotency_key: str,
     authority_mode: str = "file_authority_shadow",
+    risk_class: str = "R1",
+    risk_dominance: str = "R1",
     created_at: str,
     finalized_at_epoch_ms: int,
+    allow_workflow_promotion: bool = True,
 ) -> None:
     workflow = _normalize_required_identity("workflow", workflow)
     run_id = _normalize_required_identity("run_id", run_id)
@@ -247,15 +263,32 @@ def _ensure_shadow_run(
             "VALUES(?,?,?)",
             (workflow, authority_mode, created_at),
         )
-    elif existing_workflow[0] in ("file_authority", "file_authority_shadow"):
+    elif existing_workflow[0] == authority_mode:
+        pass
+    elif (
+        allow_workflow_promotion
+        and authority_mode == "file_authority_shadow"
+        and existing_workflow[0] == "file_authority"
+    ):
         connection.execute(
             "UPDATE workflow_authority SET mode=?,updated_at=? "
             "WHERE workflow=?",
             (authority_mode, created_at, workflow),
         )
-    elif existing_workflow[0] != authority_mode:
+    elif (
+        allow_workflow_promotion
+        and authority_mode == "dual_write_shadow"
+        and existing_workflow[0] == "file_authority_shadow"
+    ):
+        connection.execute(
+            "UPDATE workflow_authority SET mode=?,updated_at=? "
+            "WHERE workflow=?",
+            (authority_mode, created_at, workflow),
+        )
+    else:
         raise ShadowBackfillError(
-            f"workflow {workflow!r} is not in {authority_mode} mode"
+            f"workflow {workflow!r} is not in {authority_mode} mode; "
+            "run file-authority shadow backfill first"
         )
 
     existing_run = connection.execute(
@@ -269,6 +302,8 @@ def _ensure_shadow_run(
             workflow=workflow,
             authority_mode=authority_mode,
             prepare_idempotency_key=prepare_idempotency_key,
+            risk_class=risk_class,
+            risk_dominance=risk_dominance,
         ):
             raise ShadowBackfillError(f"run {run_id!r} is not a matching shadow run")
         return
@@ -276,12 +311,14 @@ def _ensure_shadow_run(
     connection.execute(
         "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
         "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
-        "finalized_at_epoch_ms) VALUES(?,?,?,?,'finalized','R1','R1',?,?,?,?)",
+        "finalized_at_epoch_ms) VALUES(?,?,?,?,'finalized',?,?,?, ?,?,?)",
         (
             run_id,
             prepare_idempotency_key,
             workflow,
             authority_mode,
+            risk_class,
+            risk_dominance,
             created_at,
             created_at,
             created_at,
@@ -391,6 +428,8 @@ def dual_write_shadow_artifact(
     workflow: str,
     run_id: str,
     prepare_idempotency_key: str | None = None,
+    risk_class: str,
+    risk_dominance: str,
     repo_root_path: Path | None = None,
 ) -> DualWriteShadowResult:
     """Write one file-authority artifact plus SQLite parity evidence.
@@ -408,6 +447,7 @@ def dual_write_shadow_artifact(
         if prepare_idempotency_key is not None
         else f"dual-write-shadow:{run_id}"
     )
+    risk_class, risk_dominance = _normalize_dual_write_risk(risk_class, risk_dominance)
     root = Path(repo_root_path or repository_root()).resolve()
     target, relative = _normalize_artifact_target(artifact, repo_root_path=root)
     digest = hashlib.sha256(content).hexdigest()
@@ -457,8 +497,11 @@ def dual_write_shadow_artifact(
                     run_id=run_id,
                     prepare_idempotency_key=prepare_key,
                     authority_mode="dual_write_shadow",
+                    risk_class=risk_class,
+                    risk_dominance=risk_dominance,
                     created_at=created_at,
                     finalized_at_epoch_ms=finalized_at_epoch_ms,
+                    allow_workflow_promotion=False,
                 )
                 connection.execute("COMMIT")
                 _checkpoint_offline_snapshot(connection)
@@ -480,6 +523,8 @@ def dual_write_shadow_artifact(
                 run_id=run_id,
                 prepare_idempotency_key=prepare_key,
                 authority_mode="dual_write_shadow",
+                risk_class=risk_class,
+                risk_dominance=risk_dominance,
                 created_at=created_at,
                 finalized_at_epoch_ms=finalized_at_epoch_ms,
             )

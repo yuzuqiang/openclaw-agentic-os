@@ -62,6 +62,8 @@ def parser() -> argparse.ArgumentParser:
     dual_write.add_argument("--workflow", required=True)
     dual_write.add_argument("--run-id", required=True)
     dual_write.add_argument("--prepare-idempotency-key")
+    dual_write.add_argument("--risk-class", choices=("R1",), required=True)
+    dual_write.add_argument("--risk-dominance", choices=("R1",), required=True)
     dual_write.add_argument("--artifact", type=Path, required=True)
     content = dual_write.add_mutually_exclusive_group(required=True)
     content.add_argument("--content")
@@ -128,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
             workflow=args.workflow,
             run_id=args.run_id,
             prepare_idempotency_key=args.prepare_idempotency_key,
+            risk_class=args.risk_class,
+            risk_dominance=args.risk_dominance,
             repo_root_path=args.repo_root,
         )
         print(
