@@ -18,6 +18,7 @@ from .budgets import (
     BudgetError,
     _LIMITS,
     _connect,
+    _dedupe_hash,
     _selected_binding,
     _settle_budget_on_connection,
     _verify_schema_identity,
@@ -28,6 +29,8 @@ LEGACY_SOURCE_SCHEMA_VERSION = "legacy_budget_terminal_usage_v1"
 LEGACY_SOURCE_TABLE = "legacy_budget_terminal_usage_v1"
 LEGACY_SOURCE_UNIT = "usd_decimal"
 _MONEY_SCALE = Decimal("1000000")
+_MAX_MONEY_MICROUSD = _LIMITS["cost_microusd"]
+_MAX_MONEY_MICROUSD_ADJUSTED = len(str(_MAX_MONEY_MICROUSD)) - 1
 _TEXT_FIELDS = (
     "legacy_row_id",
     "run_id",
@@ -86,6 +89,7 @@ class _SourceCell:
 
 @dataclass(frozen=True)
 class _LegacyRow:
+    source_row_ordinal: int
     legacy_row_id: str
     run_id: str
     transition_id: str
@@ -101,6 +105,7 @@ class _LegacyRow:
 
 @dataclass(frozen=True)
 class _Quarantine:
+    source_row_ordinal: int
     legacy_row_id: str
     source_column: str
     source_type: str
@@ -130,11 +135,13 @@ def _required_text_cell(
     field: str,
     problems: list[_Quarantine],
     row_hash: str,
+    source_row_ordinal: int,
 ) -> str | None:
     cell = cells[field]
     if cell.storage_type != "text" or not isinstance(cell.value, str) or not cell.value.strip():
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column=field,
                 source_type=cell.storage_type,
@@ -154,17 +161,41 @@ def _unit_for_quarantine(cells: dict[str, _SourceCell]) -> str | None:
     return cell.value if cell and isinstance(cell.value, str) else None
 
 
+def _decimal_to_integral_microusd(decimal_value: Decimal) -> tuple[int | None, str | None]:
+    if decimal_value.is_zero():
+        return 0, None
+    sign, digits, exponent = decimal_value.as_tuple()
+    if sign:
+        return None, "money_out_of_range"
+    if decimal_value.adjusted() + 6 > _MAX_MONEY_MICROUSD_ADJUSTED:
+        return None, "money_out_of_range"
+    coefficient = int("".join(str(digit) for digit in digits))
+    scale_exponent = exponent + 6
+    if scale_exponent >= 0:
+        microusd = coefficient * (10 ** scale_exponent)
+    else:
+        divisor = 10 ** (-scale_exponent)
+        if coefficient % divisor:
+            return None, "fractional_microusd"
+        microusd = coefficient // divisor
+    if microusd > _MAX_MONEY_MICROUSD:
+        return None, "money_out_of_range"
+    return microusd, None
+
+
 def _integer_cell(
     cells: dict[str, _SourceCell],
     field: str,
     maximum: int,
     problems: list[_Quarantine],
     row_hash: str,
+    source_row_ordinal: int,
 ) -> int:
     cell = cells[field]
     if cell.storage_type != "integer" or type(cell.value) is not int:
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column=field,
                 source_type=cell.storage_type,
@@ -179,6 +210,7 @@ def _integer_cell(
     if not 0 <= cell.value <= maximum:
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column=field,
                 source_type=cell.storage_type,
@@ -197,12 +229,14 @@ def _money_to_microusd(
     cells: dict[str, _SourceCell],
     problems: list[_Quarantine],
     row_hash: str,
+    source_row_ordinal: int,
 ) -> int:
     unit = cells["source_unit"]
     money = cells["actual_cost_usd"]
     if unit.storage_type != "text" or unit.value != LEGACY_SOURCE_UNIT:
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column="source_unit",
                 source_type=unit.storage_type,
@@ -217,6 +251,7 @@ def _money_to_microusd(
     if money.storage_type == "real" and isinstance(money.value, float) and not math.isfinite(money.value):
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column="actual_cost_usd",
                 source_type=money.storage_type,
@@ -244,6 +279,7 @@ def _money_to_microusd(
     except (InvalidOperation, ValueError):
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column="actual_cost_usd",
                 source_type=money.storage_type,
@@ -261,6 +297,7 @@ def _money_to_microusd(
     if not decimal_value.is_finite():
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column="actual_cost_usd",
                 source_type=money.storage_type,
@@ -272,11 +309,26 @@ def _money_to_microusd(
             )
         )
         return 0
-    microusd_decimal = decimal_value * _MONEY_SCALE
-    integral = microusd_decimal.to_integral_value()
-    if microusd_decimal != integral:
+    value, conversion_error = _decimal_to_integral_microusd(decimal_value)
+    if conversion_error == "money_out_of_range":
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
+                legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
+                source_column="actual_cost_usd",
+                source_type=money.storage_type,
+                source_unit=LEGACY_SOURCE_UNIT,
+                source_value_text=money.quoted,
+                reason_code="money_out_of_range",
+                reason_detail=f"converted microusd must be in [0,{_LIMITS['cost_microusd']}]",
+                row_payload_hash=row_hash,
+            )
+        )
+        return 0
+    if conversion_error == "fractional_microusd":
+        problems.append(
+            _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column="actual_cost_usd",
                 source_type=money.storage_type,
@@ -288,10 +340,10 @@ def _money_to_microusd(
             )
         )
         return 0
-    value = int(integral)
-    if not 0 <= value <= _LIMITS["cost_microusd"]:
+    if value is None or not 0 <= value <= _LIMITS["cost_microusd"]:
         problems.append(
             _Quarantine(
+                source_row_ordinal=source_row_ordinal,
                 legacy_row_id=str(cells.get("legacy_row_id", _SourceCell("", "", "")).value or "<missing>"),
                 source_column="actual_cost_usd",
                 source_type=money.storage_type,
@@ -314,6 +366,41 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
     quarantines: list[_Quarantine] = []
     try:
         with sqlite3.connect(uri, uri=True) as source:
+            source_object = source.execute(
+                "SELECT type FROM sqlite_schema WHERE name=?",
+                (LEGACY_SOURCE_TABLE,),
+            ).fetchone()
+            source_object_type = source_object[0] if source_object is not None else "missing"
+            if source_object_type != "table":
+                detail = (
+                    f"expected {LEGACY_SOURCE_TABLE!r} to be a real SQLite table, "
+                    f"found {source_object_type!r}"
+                )
+                row_hash = _sha256_json(
+                    {
+                        "schema_object_type": source_object_type,
+                        "source_path": str(source_path),
+                    }
+                )
+                quarantines.append(
+                    _Quarantine(
+                        source_row_ordinal=0,
+                        legacy_row_id="__schema__",
+                        source_column="__schema__",
+                        source_type=str(source_object_type),
+                        source_unit=None,
+                        source_value_text=LEGACY_SOURCE_TABLE,
+                        reason_code="invalid_source_schema",
+                        reason_detail=detail,
+                        row_payload_hash=row_hash,
+                    )
+                )
+                return [], quarantines, _sha256_json(
+                    {
+                        "schema_object_type": source_object_type,
+                        "source_path": str(source_path),
+                    }
+                )
             columns = [
                 item[1]
                 for item in source.execute(f"PRAGMA table_info({LEGACY_SOURCE_TABLE})")
@@ -323,6 +410,7 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
                 row_hash = _sha256_json({"schema_columns": columns})
                 quarantines.append(
                     _Quarantine(
+                        source_row_ordinal=0,
                         legacy_row_id="__schema__",
                         source_column="__schema__",
                         source_type="schema",
@@ -346,9 +434,9 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
             query = (
                 "SELECT "
                 + ",".join(select_parts)
-                + f" FROM {LEGACY_SOURCE_TABLE} ORDER BY legacy_row_id"
+                + f" FROM {LEGACY_SOURCE_TABLE} ORDER BY rowid"
             )
-            for record in source.execute(query).fetchall():
+            for source_row_ordinal, record in enumerate(source.execute(query).fetchall(), start=1):
                 cells: dict[str, _SourceCell] = {}
                 offset = 0
                 for column in LEGACY_SOURCE_COLUMNS:
@@ -366,22 +454,35 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
                     }
                     for column in LEGACY_SOURCE_COLUMNS
                 }
-                raw_rows.append(raw_payload)
                 row_hash = _sha256_json(raw_payload)
+                raw_rows.append(
+                    {
+                        "source_row_ordinal": source_row_ordinal,
+                        "row_payload_hash": row_hash,
+                        "payload": raw_payload,
+                    }
+                )
                 problems: list[_Quarantine] = []
                 text_values = {
-                    field: _required_text_cell(cells, field, problems, row_hash)
+                    field: _required_text_cell(
+                        cells, field, problems, row_hash, source_row_ordinal
+                    )
                     for field in _TEXT_FIELDS
                 }
                 integer_values = {
-                    field: _integer_cell(cells, field, maximum, problems, row_hash)
+                    field: _integer_cell(
+                        cells, field, maximum, problems, row_hash, source_row_ordinal
+                    )
                     for field, maximum in _INTEGER_FIELDS.items()
                 }
-                cost_microusd = _money_to_microusd(cells, problems, row_hash)
+                cost_microusd = _money_to_microusd(
+                    cells, problems, row_hash, source_row_ordinal
+                )
                 usage_confidence = text_values["usage_confidence"]
                 if usage_confidence not in {"known", "estimated"}:
                     problems.append(
                         _Quarantine(
+                            source_row_ordinal=source_row_ordinal,
                             legacy_row_id=str(text_values["legacy_row_id"] or "<missing>"),
                             source_column="usage_confidence",
                             source_type=cells["usage_confidence"].storage_type,
@@ -397,6 +498,7 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
                     continue
                 rows.append(
                     _LegacyRow(
+                        source_row_ordinal=source_row_ordinal,
                         legacy_row_id=text_values["legacy_row_id"] or "",
                         run_id=text_values["run_id"] or "",
                         transition_id=text_values["transition_id"] or "",
@@ -421,8 +523,18 @@ def _read_source_rows(source_database: Path) -> tuple[list[_LegacyRow], list[_Qu
                 )
     except sqlite3.Error as exc:
         row_hash = _sha256_json({"sqlite_error": str(exc)})
+        raw_rows.append(
+            {
+                "source_read_failed": {
+                    "source_path": str(source_path),
+                    "sqlite_error": str(exc),
+                },
+                "row_payload_hash": row_hash,
+            }
+        )
         quarantines.append(
             _Quarantine(
+                source_row_ordinal=0,
                 legacy_row_id="__source__",
                 source_column="__source__",
                 source_type="sqlite",
@@ -440,6 +552,7 @@ def _quarantine_id(batch_id: str, quarantine: _Quarantine) -> str:
     return "legacy-quarantine-" + _sha256_json(
         {
             "batch_id": batch_id,
+            "source_row_ordinal": quarantine.source_row_ordinal,
             "legacy_row_id": quarantine.legacy_row_id,
             "source_column": quarantine.source_column,
             "reason_code": quarantine.reason_code,
@@ -483,12 +596,35 @@ def _insert_batch(
 
 
 def _source_row_count(rows: list[_LegacyRow], quarantines: list[_Quarantine]) -> int:
-    invalid_row_ids = {
+    source_rows = {item.source_row_ordinal for item in rows if item.source_row_ordinal > 0}
+    source_rows.update(
+        item.source_row_ordinal for item in quarantines if item.source_row_ordinal > 0
+    )
+    non_row_evidence = {
         item.legacy_row_id
         for item in quarantines
-        if not item.legacy_row_id.startswith("__")
+        if item.source_row_ordinal == 0
     }
-    return len(rows) + len(invalid_row_ids)
+    return len(source_rows) + len(non_row_evidence)
+
+
+def _reject_changed_legacy_payload_replay(
+    connection: sqlite3.Connection, rows: list[_LegacyRow]
+) -> None:
+    for row in rows:
+        existing_hashes = [
+            item[0]
+            for item in connection.execute(
+                "SELECT lip.row_payload_hash FROM legacy_money_import_promotions lip "
+                "JOIN budget_settlements bs ON bs.settlement_id=lip.settlement_id "
+                "WHERE bs.settlement_idempotency_key=? OR bs.settlement_dedupe_hash=?",
+                (row.idempotency_key, _dedupe_hash(row.dedupe_key)),
+            ).fetchall()
+        ]
+        if any(existing_hash != row.row_payload_hash for existing_hash in existing_hashes):
+            raise LegacyMoneyImportConflict(
+                "legacy import identity was reused with another raw payload"
+            )
 
 
 def _record_quarantine_batch(
@@ -539,12 +675,14 @@ def _record_quarantine_batch(
             for quarantine in quarantines:
                 connection.execute(
                     "INSERT INTO legacy_money_import_quarantine("
-                    "quarantine_id,batch_id,legacy_row_id,source_column,source_type,"
+                    "quarantine_id,batch_id,source_row_ordinal,legacy_row_id,"
+                    "source_column,source_type,"
                     "source_unit,source_value_text,reason_code,reason_detail,"
-                    "row_payload_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "row_payload_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         _quarantine_id(batch_id, quarantine),
                         batch_id,
+                        quarantine.source_row_ordinal,
                         quarantine.legacy_row_id,
                         quarantine.source_column,
                         quarantine.source_type,
@@ -624,6 +762,7 @@ def import_legacy_terminal_usage(
                     quarantine_count=existing[4],
                     replayed=True,
                 )
+            _reject_changed_legacy_payload_replay(connection, rows)
             results = []
             for row in rows:
                 selection = _selected_binding(
@@ -687,6 +826,7 @@ def import_legacy_terminal_usage(
                 connection.execute("ROLLBACK")
             quarantine_rows = [
                 _Quarantine(
+                    source_row_ordinal=row.source_row_ordinal,
                     legacy_row_id=row.legacy_row_id,
                     source_column="__promotion__",
                     source_type="runtime",

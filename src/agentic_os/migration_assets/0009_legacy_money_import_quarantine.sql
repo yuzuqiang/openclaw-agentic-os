@@ -26,6 +26,7 @@ CREATE TABLE legacy_money_import_batches (
 CREATE TABLE legacy_money_import_quarantine (
   quarantine_id TEXT PRIMARY KEY,
   batch_id TEXT NOT NULL REFERENCES legacy_money_import_batches(batch_id),
+  source_row_ordinal ANY NOT NULL,
   legacy_row_id TEXT NOT NULL,
   source_column TEXT NOT NULL,
   source_type TEXT NOT NULL,
@@ -36,9 +37,10 @@ CREATE TABLE legacy_money_import_quarantine (
   row_payload_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
   CHECK (quarantine_id<>'' AND batch_id<>'' AND legacy_row_id<>''),
+  CHECK (typeof(source_row_ordinal)='integer' AND source_row_ordinal>=0),
   CHECK (source_column<>'' AND source_type<>'' AND reason_code<>''),
   CHECK (reason_detail<>'' AND length(row_payload_hash)=64),
-  UNIQUE(batch_id,legacy_row_id,source_column,reason_code)
+  UNIQUE(batch_id,source_row_ordinal,legacy_row_id,source_column,reason_code)
 ) STRICT;
 
 CREATE TABLE legacy_money_import_promotions (

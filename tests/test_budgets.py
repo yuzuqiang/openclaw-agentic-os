@@ -2709,6 +2709,11 @@ class BudgetRuntimeTests(unittest.TestCase):
             self._legacy_row("negative", actual_cost_usd="-0.01"),
             self._legacy_row("inf", actual_cost_usd=float("inf")),
             self._legacy_row("overflow", actual_cost_usd="1e20"),
+            self._legacy_row("huge-exponent", actual_cost_usd="1e999999999"),
+            self._legacy_row(
+                "context-round",
+                actual_cost_usd="0.0000010000000000000000000000000000000000000001",
+            ),
             self._legacy_row("fraction", actual_cost_usd="0.0000001"),
             self._legacy_row("rounding", actual_cost_usd="0.0000015"),
             self._legacy_row("bad-unit", actual_cost_usd="0.01", source_unit="microusd"),
@@ -2744,6 +2749,129 @@ class BudgetRuntimeTests(unittest.TestCase):
                     "DELETE FROM legacy_money_import_quarantine "
                     "WHERE batch_id='legacy-bad-batch'"
                 )
+
+    def test_legacy_money_import_quarantines_duplicate_missing_row_ids(
+        self,
+    ) -> None:
+        before_events = self._event_count()
+        duplicate = self._legacy_row(None, actual_cost_usd="0.01")  # type: ignore[arg-type]
+        source = self._legacy_source([duplicate, duplicate], name="legacy-duplicate-null.db")
+
+        result = import_legacy_terminal_usage(
+            self.database, source, batch_id="legacy-duplicate-null-batch"
+        )
+
+        self.assertEqual(
+            (result.status, result.row_count, result.promoted_count, result.quarantine_count),
+            ("quarantined", 2, 0, 2),
+        )
+        self.assertEqual(self._event_count(), before_events)
+        self.assertEqual(self._settlement_count(), 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status,row_count,quarantine_count,promoted_count "
+                    "FROM legacy_money_import_batches WHERE batch_id=?",
+                    ("legacy-duplicate-null-batch",),
+                ).fetchone(),
+                ("quarantined", 2, 2, 0),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT source_row_ordinal,legacy_row_id,source_column,reason_code "
+                    "FROM legacy_money_import_quarantine WHERE batch_id=? "
+                    "ORDER BY source_row_ordinal",
+                    ("legacy-duplicate-null-batch",),
+                ).fetchall(),
+                [
+                    (1, "<missing>", "legacy_row_id", "invalid_text"),
+                    (2, "<missing>", "legacy_row_id", "invalid_text"),
+                ],
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM budget_settlements"
+                ).fetchone(),
+                (0,),
+            )
+
+    def test_legacy_money_import_read_failure_hash_is_not_empty_replay(self) -> None:
+        missing = Path(self.temporary.name) / "missing-legacy.db"
+
+        result = import_legacy_terminal_usage(
+            self.database, missing, batch_id="legacy-missing-source-batch"
+        )
+        empty_source = self._legacy_source([], name="legacy-empty.db")
+
+        self.assertEqual(
+            (result.status, result.row_count, result.promoted_count, result.quarantine_count),
+            ("quarantined", 1, 0, 1),
+        )
+        self.assertFalse(missing.exists())
+        with self.assertRaises(LegacyMoneyImportConflict):
+            import_legacy_terminal_usage(
+                self.database, empty_source, batch_id="legacy-missing-source-batch"
+            )
+        with closing(sqlite3.connect(self.database)) as connection:
+            missing_hash = connection.execute(
+                "SELECT payload_hash FROM legacy_money_import_batches "
+                "WHERE batch_id='legacy-missing-source-batch'"
+            ).fetchone()[0]
+        empty = import_legacy_terminal_usage(
+            self.database, empty_source, batch_id="legacy-empty-source-batch"
+        )
+        self.assertEqual(
+            (empty.status, empty.row_count, empty.promoted_count, empty.quarantine_count),
+            ("promoted", 0, 0, 0),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            empty_hash = connection.execute(
+                "SELECT payload_hash FROM legacy_money_import_batches "
+                "WHERE batch_id='legacy-empty-source-batch'"
+            ).fetchone()[0]
+        self.assertNotEqual(missing_hash, empty_hash)
+
+    def test_legacy_money_import_requires_real_source_table(self) -> None:
+        source = Path(self.temporary.name) / "legacy-view.db"
+        raw_table = "legacy_budget_terminal_usage_raw"
+        row = self._legacy_row("view-row", actual_cost_usd="0.001")
+        with closing(sqlite3.connect(source)) as connection, connection:
+            connection.execute(
+                legacy_terminal_usage_schema_sql().replace(
+                    LEGACY_SOURCE_TABLE, raw_table, 1
+                )
+            )
+            placeholders = ",".join("?" for _ in LEGACY_SOURCE_COLUMNS)
+            connection.execute(
+                f"INSERT INTO {raw_table}("
+                + ",".join(LEGACY_SOURCE_COLUMNS)
+                + f") VALUES({placeholders})",
+                row,
+            )
+            connection.execute(
+                f"CREATE VIEW {LEGACY_SOURCE_TABLE} AS SELECT "
+                + ",".join(LEGACY_SOURCE_COLUMNS)
+                + f" FROM {raw_table}"
+            )
+
+        result = import_legacy_terminal_usage(
+            self.database, source, batch_id="legacy-view-batch"
+        )
+
+        self.assertEqual(
+            (result.status, result.row_count, result.promoted_count, result.quarantine_count),
+            ("quarantined", 1, 0, 1),
+        )
+        self.assertEqual(self._settlement_count(), 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT legacy_row_id,source_type,reason_code "
+                    "FROM legacy_money_import_quarantine "
+                    "WHERE batch_id='legacy-view-batch'"
+                ).fetchall(),
+                [("__schema__", "view", "invalid_source_schema")],
+            )
 
     def test_legacy_money_import_rejects_changed_batch_or_payload_conflict(
         self,
@@ -2791,7 +2919,15 @@ class BudgetRuntimeTests(unittest.TestCase):
             batch_id="legacy-conflict-new-batch",
         )
         self.assertEqual(result.status, "quarantined")
+        self.assertEqual(result.row_count, 1)
         with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT row_count FROM legacy_money_import_batches "
+                    "WHERE batch_id='legacy-conflict-new-batch'"
+                ).fetchone(),
+                (1,),
+            )
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM budget_settlements "
@@ -2803,6 +2939,75 @@ class BudgetRuntimeTests(unittest.TestCase):
                 connection.execute(
                     "SELECT reason_code FROM legacy_money_import_quarantine "
                     "WHERE batch_id='legacy-conflict-new-batch'"
+                ).fetchall(),
+                [("promotion_failed",)],
+            )
+
+    def test_legacy_money_import_rejects_changed_raw_payload_replay(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-legacy-raw-conflict",
+                dedupe_key="reserve-for-legacy-raw-conflict",
+                amounts=BudgetAmounts(cost_microusd=2000),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        source = self._legacy_source(
+            [
+                self._legacy_row(
+                    "row-raw-conflict",
+                    actual_cost_usd="0.001000",
+                    idempotency_key="legacy-raw-conflict-terminal",
+                    dedupe_key="legacy-raw-conflict-source",
+                )
+            ],
+            name="legacy-raw-conflict.db",
+        )
+        first = import_legacy_terminal_usage(
+            self.database, source, batch_id="legacy-raw-conflict-first"
+        )
+        changed_source = self._legacy_source(
+            [
+                self._legacy_row(
+                    "row-raw-conflict",
+                    actual_cost_usd="0.0010",
+                    idempotency_key="legacy-raw-conflict-terminal",
+                    dedupe_key="legacy-raw-conflict-source",
+                )
+            ],
+            name="legacy-raw-conflict-changed.db",
+        )
+
+        changed = import_legacy_terminal_usage(
+            self.database,
+            changed_source,
+            batch_id="legacy-raw-conflict-changed",
+        )
+
+        self.assertEqual(
+            (first.status, first.promoted_count, changed.status, changed.row_count),
+            ("promoted", 1, "quarantined", 1),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM budget_settlements "
+                    "WHERE settlement_idempotency_key='legacy-raw-conflict-terminal'"
+                ).fetchone(),
+                (1,),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM legacy_money_import_promotions "
+                    "WHERE batch_id='legacy-raw-conflict-changed'"
+                ).fetchone(),
+                (0,),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT reason_code FROM legacy_money_import_quarantine "
+                    "WHERE batch_id='legacy-raw-conflict-changed'"
                 ).fetchall(),
                 [("promotion_failed",)],
             )

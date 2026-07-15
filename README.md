@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `527efe9ecec6c8908ec6273fb1a8c17dec32480a5fdf38128e32a0e2c3facd4c`
+- Current design artifact SHA-256: `cb059b529a5180c211ed0510482c2c10b887d4382447936d0bb1c01d3c13121d`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `de93abaa893dc4a5154405ec04acae6395f01f58f6f2d21a142c5a08ed794d21`
-- Current migration manifest SHA-256: `f7bb57ad1ee1c0eb62a36c542223386097d5201f5c44e0fb83bb79446404b4b9`
+- Current latest migration SHA-256: `dfbc11e47cc06743ac478a04a76e3a58fad955fa6fbe1def662c074c5edf8046`
+- Current migration manifest SHA-256: `9f209ef1a93a6da9d18f44423345fe24432f56b846194dbc808411346373d484`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, and three legacy import evidence tables, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -105,13 +105,16 @@ aggregation states, conflicting replays fail closed, and concurrent final
 settlements cannot create two terminal proofs.
 Migration v9 adds an explicit legacy terminal-usage import contract for
 `legacy_budget_terminal_usage_v1` rows whose only money unit is `usd_decimal`.
-The importer validates each original SQLite storage class before conversion,
-uses Python `Decimal` to convert USD decimals into integer microusd, records
-durable quarantine evidence, and promotes zero authoritative rows when any row
-in the batch is quarantined. Clean batches promote through the v8 final
-settlement runtime path, so imported settlements always have linked budget
-events; exact replay is idempotent, while reused batch/idempotency/dedupe
-identity with changed payload fails closed.
+The importer requires that source object to be a real SQLite table, validates
+each original SQLite storage class before conversion, and converts Python
+`Decimal` values into integer microusd without context rounding. Read failures,
+schema failures, and malformed rows all become durable quarantine evidence and
+payload-hash input, and any quarantine promotes zero authoritative rows for the
+whole batch. Quarantine identity includes a deterministic source-row ordinal, so
+duplicate malformed legacy rows remain separately durable. Clean batches promote
+through the v8 final settlement runtime path, so imported settlements always
+have linked budget events; exact replay is idempotent, while reused batch,
+idempotency, or dedupe identity with changed raw legacy payload fails closed.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

@@ -3168,15 +3168,20 @@ Current migration v9 legacy money import quarantine:
 `0009_legacy_money_import_quarantine.sql` adds immutable
 `legacy_money_import_batches`, `legacy_money_import_quarantine`, and
 `legacy_money_import_promotions` evidence tables. The only supported source
-schema is `legacy_budget_terminal_usage_v1`; the only supported source unit is
-`usd_decimal`. Import validation reads the original SQLite storage class before
-conversion, converts with Python `Decimal` into integer microusd, records durable
-quarantine evidence for malformed rows, and promotes zero authoritative rows
-when any row in a batch is quarantined. Clean batches promote through the same
+schema is a real SQLite table named `legacy_budget_terminal_usage_v1`; the only
+supported source unit is `usd_decimal`. Import validation rejects views before
+trusting `typeof()` / `quote()` storage-class evidence, reads the original SQLite
+storage class before conversion, and converts Python `Decimal` values into
+integer microusd without default-context rounding. Read failures, schema
+failures, and malformed rows all become durable quarantine evidence and
+payload-hash input, and any quarantine promotes zero authoritative rows for the
+whole batch. Quarantine records include a deterministic source-row ordinal in
+their identity so byte-identical malformed rows with missing or non-text legacy
+identifiers remain separately durable. Clean batches promote through the same
 atomic final-settlement runtime path, so imports cannot create unlinked
 settlement or budget events. Exact batch replay is idempotent; reused batch,
-idempotency, or dedupe identity with changed payload fails closed. This slice
-does not enable production database authority.
+idempotency, or dedupe identity with changed raw legacy payload fails closed.
+This slice does not enable production database authority.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:
