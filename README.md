@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `f2f26215350e7eeb949c4b62f01ea771566b0c5e1cdadab3d3e93b4bdc32be8f`
+- Current design artifact SHA-256: `4ec068406cb979652ddbc989ebd3398519d95a90e9e56ce14f1ea22d73252f60`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `f0739d6a981905a4cbee429d73e816fb4f09b89576f6f0769eefb3112b26839f`
-- Current migration manifest SHA-256: `c7a68a6293b311fb1dcfa9af2e12925376b5680e62a9c5f301cac9210bcbe6f1`
+- Current latest migration SHA-256: `0ff3ac9579f876188753e5102e3a57d7cf7d410e56cc2262e26161d9848b65c3`
+- Current migration manifest SHA-256: `d660aab0339f998e5edf79a768dabca4a4ffbdc3a90e83d9528d66b92799d18f`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table and one settlement proof table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -98,7 +98,8 @@ unused reservation dimension under one `BEGIN IMMEDIATE` transaction. Linked
 ledger events share a settlement identity; incomplete direct imports are
 blocking SLO evidence, selected cost-row outstanding proof is rechecked in the
 database trigger, source dedupe identity is shared with post-dispatch events,
-completed-session proof is revalidated by the v8 SLO, conflicting replays fail
+completed-session proof is frozen in the database and revalidated by the v8 SLO,
+cross-table source dedupe reuse is rejected by the database, conflicting replays fail
 closed, and concurrent final settlements cannot create two terminal proofs.
 Legacy-money import conversion and the remaining adversarial fixture matrix
 remain open in Issue #4.

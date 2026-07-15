@@ -1872,13 +1872,23 @@ class BudgetRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(len(result.events), 1)
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "immutable completed-session proof"
+            ):
+                connection.execute(
+                    "UPDATE sessions SET state='running',completed_at=NULL "
+                    "WHERE session_id='session'"
+                )
+            connection.execute(
+                "DROP TRIGGER sessions_preserve_settlement_completed_proof_update"
+            )
             connection.execute(
                 "UPDATE sessions SET state='running',completed_at=NULL "
                 "WHERE session_id='session'"
             )
         rows = self._slo_rows("Budget event amount malformed or out of range")
         self.assertIn((result.settlement_id,), rows)
-        with self.assertRaisesRegex(BudgetError, "completed session proof"):
+        with self.assertRaisesRegex(BudgetError, "schema verification failed"):
             settle_budget(
                 self.database,
                 run_id="run",
@@ -1967,7 +1977,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             ),
         )
         self._accept_spawn(reserve.budget_event_id, completed=True)
-        consume_budget(
+        consumed = consume_budget(
             self.database,
             **{
                 **self._post_kwargs(
@@ -1977,6 +1987,32 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "dedupe_key": "shared-terminal-source",
             },
         )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            event_hash = connection.execute(
+                "SELECT event_dedupe_hash FROM budget_events WHERE budget_event_id=?",
+                (consumed.budget_event_id,),
+            ).fetchone()[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "source dedupe"):
+                connection.execute(
+                    "INSERT INTO budget_settlements("
+                    "settlement_id,settlement_idempotency_key,"
+                    "settlement_dedupe_hash,run_id,transition_id,"
+                    "spawn_request_id,provider,model,endpoint_binding_id,"
+                    "capability_class,cost_registry_id,cost_effective_at,"
+                    "cost_registry_hash,cost_confidence,actual_time_seconds,"
+                    "actual_input_tokens,actual_output_tokens,actual_cost_microusd,"
+                    "actual_retry_units,actual_human_attention_units,"
+                    "released_time_seconds,released_input_tokens,"
+                    "released_output_tokens,released_cost_microusd,"
+                    "released_retry_units,released_human_attention_units,"
+                    "usage_confidence,source,created_at,created_at_epoch_ms,"
+                    "clock_context_id) VALUES('direct-reused-dedupe-settlement',"
+                    "'direct-reused-dedupe-idem',?,'run','transition','spawn',"
+                    "'provider','model','endpoint','capability','cost-row',"
+                    "'effective','cost-hash','known',0,0,0,0,0,0,0,2,0,2,0,0,"
+                    "'known','imported','now',1800000000126,'post-clock')",
+                    (event_hash,),
+                )
         with self.assertRaisesRegex(BudgetConflict, "budget event"):
             settle_budget(
                 self.database,
@@ -2002,6 +2038,27 @@ class BudgetRuntimeTests(unittest.TestCase):
             spawn_request_id="spawn",
             clock_context_id="post-clock",
         )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            settlement_hash = connection.execute(
+                "SELECT settlement_dedupe_hash FROM budget_settlements "
+                "WHERE settlement_idempotency_key='final-owns-source'"
+            ).fetchone()[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "source dedupe"):
+                connection.execute(
+                    "INSERT INTO budget_events("
+                    "budget_event_id,event_idempotency_key,event_dedupe_hash,"
+                    "event_sequence,run_id,transition_id,spawn_request_id,"
+                    "provider,model,endpoint_binding_id,capability_class,"
+                    "cost_registry_id,cost_effective_at,cost_registry_hash,"
+                    "cost_confidence,event_type,input_tokens,cost_microusd,"
+                    "usage_confidence,source,created_at,created_at_epoch_ms"
+                    ") VALUES('direct-reused-settlement-dedupe-event',"
+                    "'direct-reused-settlement-dedupe-idem',?,99,'run',"
+                    "'transition','spawn','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known',"
+                    "'consume',1,1,'known','imported','now',1800000000130)",
+                    (settlement_hash,),
+                )
         with self.assertRaisesRegex(BudgetConflict, "final settlement"):
             consume_budget(
                 self.database,

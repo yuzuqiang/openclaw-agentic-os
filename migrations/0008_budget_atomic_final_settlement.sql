@@ -69,6 +69,16 @@ WHERE settlement_id IS NOT NULL;
 CREATE INDEX budget_settlements_spawn_idx
 ON budget_settlements(run_id,transition_id,spawn_request_id);
 
+CREATE TRIGGER budget_settlements_reject_event_dedupe_insert
+BEFORE INSERT ON budget_settlements
+WHEN EXISTS (
+  SELECT 1 FROM budget_events be
+  WHERE be.event_dedupe_hash=NEW.settlement_dedupe_hash
+)
+BEGIN
+  SELECT RAISE(ABORT,'final settlement source dedupe key was already used by a budget event');
+END;
+
 CREATE TRIGGER budget_settlements_validate_insert
 BEFORE INSERT ON budget_settlements
 WHEN NOT EXISTS (
@@ -237,6 +247,30 @@ CREATE TRIGGER budget_settlements_preserve_delete
 BEFORE DELETE ON budget_settlements
 BEGIN
   SELECT RAISE(ABORT,'accepted final settlement is immutable');
+END;
+
+CREATE TRIGGER sessions_preserve_settlement_completed_proof_update
+BEFORE UPDATE OF state, completed_at ON sessions
+WHEN EXISTS (
+  SELECT 1 FROM budget_settlements bs
+  WHERE bs.run_id=OLD.run_id
+    AND bs.transition_id=OLD.transition_id
+    AND bs.spawn_request_id=OLD.spawn_request_id
+    AND bs.created_at_epoch_ms>0
+)
+AND (NEW.state<>OLD.state OR NEW.completed_at IS NOT OLD.completed_at)
+BEGIN
+  SELECT RAISE(ABORT,'final settlement requires immutable completed-session proof');
+END;
+
+CREATE TRIGGER budget_events_reject_settlement_dedupe_insert
+BEFORE INSERT ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM budget_settlements bs
+  WHERE bs.settlement_dedupe_hash=NEW.event_dedupe_hash
+)
+BEGIN
+  SELECT RAISE(ABORT,'budget event source dedupe key was already used by a final settlement');
 END;
 
 CREATE TRIGGER budget_events_validate_settlement_link_insert
