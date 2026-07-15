@@ -6,8 +6,13 @@ import argparse
 from pathlib import Path
 
 from .migrations import apply_migrations, repository_root, verify_database
-from .privacy import assert_privacy_preflight
-from .shadow import audit_file_authority_shadow, backfill_file_authority_shadow
+from .privacy import assert_paths_retrievable, assert_privacy_preflight
+from .shadow import (
+    audit_dual_write_shadow,
+    audit_file_authority_shadow,
+    backfill_file_authority_shadow,
+    dual_write_shadow_artifact,
+)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -49,6 +54,36 @@ def parser() -> argparse.ArgumentParser:
     shadow_audit.add_argument("--prepare-idempotency-key")
     shadow_audit.add_argument("--artifact", type=Path, action="append", required=True)
     shadow_audit.add_argument("--repo-root", type=Path, default=repository_root())
+
+    dual_write = commands.add_parser(
+        "dual-write-shadow", help="write a file artifact plus dual-write shadow evidence"
+    )
+    dual_write.add_argument("--db", type=Path, required=True)
+    dual_write.add_argument("--workflow", required=True)
+    dual_write.add_argument("--run-id", required=True)
+    dual_write.add_argument("--prepare-idempotency-key")
+    dual_write.add_argument("--risk-class", choices=("R1",), required=True)
+    dual_write.add_argument("--risk-dominance", choices=("R1",), required=True)
+    dual_write.add_argument("--artifact", type=Path, required=True)
+    content = dual_write.add_mutually_exclusive_group(required=True)
+    content.add_argument("--content")
+    content.add_argument("--content-file", type=Path)
+    dual_write.add_argument(
+        "--new-workflow",
+        action="store_true",
+        help="assert this workflow has no prior file-authority run evidence",
+    )
+    dual_write.add_argument("--repo-root", type=Path, default=repository_root())
+
+    dual_audit = commands.add_parser(
+        "dual-write-shadow-audit", help="audit dual-write shadow parity"
+    )
+    dual_audit.add_argument("--db", type=Path, required=True)
+    dual_audit.add_argument("--workflow", required=True)
+    dual_audit.add_argument("--run-id", required=True)
+    dual_audit.add_argument("--prepare-idempotency-key")
+    dual_audit.add_argument("--artifact", type=Path, action="append", required=True)
+    dual_audit.add_argument("--repo-root", type=Path, default=repository_root())
     return result
 
 
@@ -86,14 +121,49 @@ def main(argv: list[str] | None = None) -> int:
             f"projections={len(result.projections)}"
         )
         return 0
-    audit = audit_file_authority_shadow(
-        args.db,
-        args.artifact,
-        workflow=args.workflow,
-        run_id=args.run_id,
-        prepare_idempotency_key=args.prepare_idempotency_key,
-        repo_root_path=args.repo_root,
-    )
+    if args.command == "dual-write-shadow":
+        if args.content_file is not None:
+            content_file = args.content_file.expanduser()
+            assert_paths_retrievable((content_file, content_file.resolve()))
+            content = content_file.read_bytes()
+        else:
+            content = args.content.encode("utf-8")
+        result = dual_write_shadow_artifact(
+            args.db,
+            args.artifact,
+            content,
+            workflow=args.workflow,
+            run_id=args.run_id,
+            prepare_idempotency_key=args.prepare_idempotency_key,
+            risk_class=args.risk_class,
+            risk_dominance=args.risk_dominance,
+            new_workflow=args.new_workflow,
+            repo_root_path=args.repo_root,
+        )
+        print(
+            "dual-write shadow "
+            f"{result.status}: workflow={result.workflow} run_id={result.run_id} "
+            f"path={result.projection.path} sha256={result.projection.sha256}"
+        )
+        return 0
+    if args.command == "dual-write-shadow-audit":
+        audit = audit_dual_write_shadow(
+            args.db,
+            args.artifact,
+            workflow=args.workflow,
+            run_id=args.run_id,
+            prepare_idempotency_key=args.prepare_idempotency_key,
+            repo_root_path=args.repo_root,
+        )
+    else:
+        audit = audit_file_authority_shadow(
+            args.db,
+            args.artifact,
+            workflow=args.workflow,
+            run_id=args.run_id,
+            prepare_idempotency_key=args.prepare_idempotency_key,
+            repo_root_path=args.repo_root,
+        )
     print(
         "shadow audit "
         f"{audit.status}: workflow={audit.workflow} run_id={audit.run_id} "

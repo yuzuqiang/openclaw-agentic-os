@@ -3471,7 +3471,17 @@ Phase 1 - read-only shadow backfill:
 Phase 2 - dual-write shadow:
 
 - Authority: files.
-- New runs write both files and DB rows marked `dual_write_shadow`.
+- New workflows may write both files and DB rows marked `dual_write_shadow` only
+  with explicit new-workflow proof and no prior run evidence for that workflow.
+- Promotion from `file_authority_shadow` requires a fresh parity rehash of all
+  existing shadow projections for the workflow, no nonterminal file-authority
+  runs, no positive `open_file_authority_runs` counter, and R1 shadow evidence only.
+- First dual-write runs create their file artifact atomically and reject
+  pre-existing files unless matching dual-write evidence already exists. New
+  writes finalize only after durable prepared run/projection evidence exists, so
+  exact retry can recover an interrupted file write without orphaning authority.
+- Exact replay and audit count all same-run projection rows across authorities;
+  any extra or cross-authority projection fails closed.
 - JSON/JSONL remains operational authority; DB rows are parity evidence.
 - Endpoint-bound selected provider/model cost-row reservation, exact reserve-before-`sessions_spawn` pointer/order authority, raw-JSON/normalized/local metadata equality, accepted session identity and exact sessions row binding, authoritative bounded fixed-scale budget ledger with guarded counters, pure-dimension human-attention rows, exact approval target binding, per-gate trusted clock context with snapshot equality, type-preserving `STRICT`/`ANY` numeric storage for every bounded gate-critical numeric field, pass-gate verifier invariants, predicate backend fields, and SLO fixture tables exist before any canary.
 
