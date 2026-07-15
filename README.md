@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `830d28c7c5e2aa60af911440327d9ea96549063e81aea3fa405c6a6b58f083dc`
+- Current design artifact SHA-256: `b6fdd178f793dcb4d2904882d0988be955d90190aa7152c22a2e33c70ca8b086`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
 - Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
@@ -49,7 +49,13 @@ The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
 `MigrationTests.test_p1_budget_sql_fixture_pack_exercises_blocking_slos`
 applies each fixture to a fresh migrated database and proves the expected
-blocking SLO query fires.
+blocking SLO query fires. The current pack covers the named Issue #4 fixture
+matrix slice for post-dispatch consume-over-budget, consume carrying retry or
+human-attention units, cross-dimensional retry decrement/restore payloads,
+duplicate/replayed budget events, selected model/cost-row binding mismatches,
+and max+1 SQLite type-affinity cost bounds. Concurrent reserve oversubscription
+and non-finite legacy money conversion remain pinned by runtime tests, not static
+SQL fixtures.
 
 `agentic_os.budgets` is the first P1.0 runtime slice. It opens mutating
 connections in verified WAL mode, records pre-RPC reserve and release events
