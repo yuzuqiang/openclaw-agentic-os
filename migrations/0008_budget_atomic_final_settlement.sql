@@ -108,10 +108,7 @@ WHEN NOT EXISTS (
     AND sr.run_id=NEW.run_id AND sr.transition_id=NEW.transition_id
     AND sr.state='completed' AND s.state='completed'
     AND s.completed_at IS NOT NULL AND s.completed_at<>''
-    AND r.state IN (
-      'child_completed','child_failed','aggregation_completed',
-      'gate_passed','release_pending','finalized'
-    )
+    AND r.state IN ('child_completed','child_failed','aggregation_completed')
     AND rb.selected_reserve_transition_id=NEW.transition_id
     AND rb.selected_provider=NEW.provider AND rb.selected_model=NEW.model
     AND rb.selected_endpoint_binding_id=NEW.endpoint_binding_id

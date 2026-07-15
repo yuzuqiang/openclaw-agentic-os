@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `875b644c0d0ba52464ef959f294222b437eac4b7870f982d89595e0aa6b2cdbc`
+- Current design artifact SHA-256: `1b20c4633f1e3b34a17a4e019a7ec29acb5605b8f1aaa31bb69324808547f85e`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `e3e95d356a94ce0a63b96c37b5baf043d4635938da87eb302c00822bb91d38ba`
-- Current migration manifest SHA-256: `136d2cddf07247391459eed96922ba12c5f09ff9de233ae86aef16fb368eac92`
+- Current latest migration SHA-256: `a48d383bf392347ef804aac1d6ab5f778feff99b32f204b89ca207aad92effe4`
+- Current migration manifest SHA-256: `5f5703b9fdd651e9dc8a0417cb44e57933cc8a43be0e8a0f25c041f458a84f94`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table and one settlement proof table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -99,8 +99,10 @@ ledger events share a settlement identity; incomplete direct imports are
 blocking SLO evidence, selected cost-row outstanding proof is rechecked in the
 database trigger, source dedupe identity is shared with post-dispatch events,
 completed-session proof is frozen in the database and revalidated by the v8 SLO,
-cross-table source dedupe reuse is rejected by the database, conflicting replays fail
-closed, and concurrent final settlements cannot create two terminal proofs.
+cross-table source dedupe reuse is rejected by the database, fresh direct
+settlement rows are rejected after the run advances beyond completed child or
+aggregation states, conflicting replays fail closed, and concurrent final
+settlements cannot create two terminal proofs.
 Legacy-money import conversion and the remaining adversarial fixture matrix
 remain open in Issue #4.
 

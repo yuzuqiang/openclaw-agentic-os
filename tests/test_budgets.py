@@ -2225,6 +2225,63 @@ class BudgetRuntimeTests(unittest.TestCase):
             self.assertTrue(replay.replayed)
             self.assertEqual(replay.settlement_id, result.settlement_id)
 
+    def test_direct_final_settlement_rejects_new_row_after_gate_passed(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-before-gate-passed-direct",
+                dedupe_key="reserve-before-gate-passed-direct",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        insert_sql = (
+            "INSERT INTO budget_settlements("
+            "settlement_id,settlement_idempotency_key,settlement_dedupe_hash,"
+            "run_id,transition_id,spawn_request_id,provider,model,"
+            "endpoint_binding_id,capability_class,cost_registry_id,"
+            "cost_effective_at,cost_registry_hash,cost_confidence,"
+            "actual_time_seconds,actual_input_tokens,actual_output_tokens,"
+            "actual_cost_microusd,actual_retry_units,"
+            "actual_human_attention_units,released_time_seconds,"
+            "released_input_tokens,released_output_tokens,"
+            "released_cost_microusd,released_retry_units,"
+            "released_human_attention_units,usage_confidence,source,"
+            "created_at,created_at_epoch_ms,clock_context_id) VALUES("
+            "'gate-passed-direct-settlement','gate-passed-direct-idem',"
+            "'gate-passed-direct-dedupe','run','transition','spawn','provider',"
+            "'model','endpoint','capability','cost-row','effective','cost-hash',"
+            "'known',0,0,0,0,0,0,0,1,0,1,0,0,'known','direct-import',"
+            "'now',1800000000126,'post-clock')"
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "UPDATE runs SET state='gate_passed' WHERE run_id='run'"
+            )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "final settlement requires exact completed-session",
+            ):
+                connection.execute(insert_sql)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM budget_settlements"
+                ).fetchone()[0],
+                0,
+            )
+            connection.execute(
+                "UPDATE runs SET state='child_completed' WHERE run_id='run'"
+            )
+            connection.execute(insert_sql)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM budget_settlements"
+                ).fetchone()[0],
+                1,
+            )
+            connection.commit()
+
     def test_final_settlement_rejects_outstanding_from_unselected_cost_row(
         self,
     ) -> None:

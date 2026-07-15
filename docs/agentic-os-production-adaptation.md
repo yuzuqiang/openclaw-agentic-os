@@ -3152,10 +3152,12 @@ and releases every unused reserved dimension in the same `BEGIN IMMEDIATE`
 transaction. Post-intent `release` remains rejected unless it carries this
 exact settlement proof. Settlement rows and linked events are immutable, and the
 database rejects cross-table source dedupe reuse, freezes the completed session
-proof once referenced by a settlement, and rejects unlinked post-settlement
-budget events for the same spawn. The current amount/SLO contract blocks
-incomplete, amount-mismatched, binding-mismatched, or extra linked event sets
-and revalidates completed-session proof after normal `gate_passed` /
+proof once referenced by a settlement, rejects fresh settlement rows after the
+run has advanced beyond `child_completed` / `child_failed` /
+`aggregation_completed`, and rejects unlinked post-settlement budget events for
+the same spawn. The current amount/SLO contract blocks incomplete,
+amount-mismatched, binding-mismatched, or extra linked event sets and
+revalidates completed-session proof after normal `gate_passed` /
 `release_pending` / `finalized` progression even if a malicious fixture bypasses
 runtime triggers.
 Schema version 7 keeps its historical SLO query hashes; version 8 and later use
