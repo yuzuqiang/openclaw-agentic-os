@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `ca9f48c5a33df41b4a923e9da7557f52578c57fcb35e172a20aa7eba7a3b1882`
+- Current design artifact SHA-256: `c4ffa493b7b8ce52f4b9e76df1bb04b9cbfae628e4bdc439be83ef20e5f18ede`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
 - Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
@@ -55,7 +55,13 @@ enter dual-write mode; a brand-new workflow may start directly in
 `dual_write_shadow`. Exact replay with the same
 prepare key, run, artifact path, and content is a no-op; changed replay or
 file/SQLite drift, including workflow-mode drift after the original write, fails
-closed and refuses to overwrite file authority. The CLI requires explicit
+closed and refuses to overwrite file authority. Promotion from
+`file_authority_shadow` to `dual_write_shadow` first rehashes every current
+file-shadow projection for that workflow; stale or missing backfill artifacts
+block the promotion. A first dual-write must create the file atomically through a
+fsynced temporary file and final no-overwrite link; a pre-existing artifact
+without a matching dual-write projection is rejected instead of being
+retroactively stamped as a successful run. The CLI requires explicit
 `--risk-class R1 --risk-dominance R1`; higher-risk dual-write runs are rejected
 until their completion-gate evidence can be persisted instead of downcast to R1.
 `--content-file` is subject to the raw-state denylist before bytes are read, and

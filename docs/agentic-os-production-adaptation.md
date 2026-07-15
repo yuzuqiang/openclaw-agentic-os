@@ -3472,6 +3472,10 @@ Phase 2 - dual-write shadow:
 
 - Authority: files.
 - New runs write both files and DB rows marked `dual_write_shadow`.
+- Promotion from `file_authority_shadow` requires a fresh parity rehash of all
+  existing shadow projections for the workflow.
+- First dual-write runs create their file artifact atomically and reject
+  pre-existing files unless matching dual-write evidence already exists.
 - JSON/JSONL remains operational authority; DB rows are parity evidence.
 - Endpoint-bound selected provider/model cost-row reservation, exact reserve-before-`sessions_spawn` pointer/order authority, raw-JSON/normalized/local metadata equality, accepted session identity and exact sessions row binding, authoritative bounded fixed-scale budget ledger with guarded counters, pure-dimension human-attention rows, exact approval target binding, per-gate trusted clock context with snapshot equality, type-preserving `STRICT`/`ANY` numeric storage for every bounded gate-critical numeric field, pass-gate verifier invariants, predicate backend fields, and SLO fixture tables exist before any canary.
 

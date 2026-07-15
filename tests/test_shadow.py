@@ -840,6 +840,52 @@ class ShadowTests(unittest.TestCase):
                 ("dual_write_shadow",),
             )
 
+    def test_dual_write_shadow_requires_current_shadow_parity_before_promotion(
+        self,
+    ) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority','now')"
+            )
+        backfill_file_authority_shadow(
+            self.database,
+            [backfilled],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        backfilled.write_bytes(b'{"shadow": "stale"}\n')
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "shadow parity audit failed"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority_shadow",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE source_authority='dual_write_shadow'"
+                ).fetchone(),
+                (0,),
+            )
+
     def test_dual_write_shadow_replay_fails_on_workflow_mode_drift(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         payload = b'{"dual": true}\n'
@@ -894,6 +940,31 @@ class ShadowTests(unittest.TestCase):
         self.assertFalse(self.database.exists())
         self.assertFalse(artifact.exists())
 
+    def test_dual_write_shadow_rejects_preexisting_artifact_without_projection(
+        self,
+    ) -> None:
+        artifact = self._artifact("dual.json", b'{"dual": true}\n')
+
+        with self.assertRaisesRegex(ShadowBackfillError, "pre-existing artifact"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE run_id='dual-run'"
+                ).fetchone(),
+                (0,),
+            )
+
     def test_dual_write_shadow_changed_replay_fails_before_overwrite(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         original = b'{"dual": true}\n'
@@ -928,6 +999,45 @@ class ShadowTests(unittest.TestCase):
                     "WHERE run_id='dual-run' AND source_authority='dual_write_shadow'"
                 ).fetchone(),
                 (hashlib.sha256(original).hexdigest(),),
+            )
+
+    def test_dual_write_shadow_changed_path_replay_fails_before_append(
+        self,
+    ) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        changed_path = Path(self.temporary.name) / "reports" / "renamed.json"
+        payload = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+            risk_class="R1",
+            risk_dominance="R1",
+        )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "different artifact path"):
+            dual_write_shadow_artifact(
+                self.database,
+                changed_path,
+                payload,
+                workflow="heartbeat",
+                run_id="dual-run",
+                prepare_idempotency_key="prepare-dual",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(changed_path.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE run_id='dual-run' AND source_authority='dual_write_shadow'"
+                ).fetchone(),
+                (1,),
             )
 
     def test_dual_write_shadow_rejects_prepare_key_mismatch_on_replay(self) -> None:
@@ -984,12 +1094,15 @@ class ShadowTests(unittest.TestCase):
     def test_dual_write_shadow_cleans_created_file_after_write_failure(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "partial.json"
         original_open = Path.open
+        temp_paths: list[Path] = []
 
         class FailingDestination:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+
             def __enter__(self) -> "FailingDestination":
-                artifact.parent.mkdir(parents=True, exist_ok=True)
-                with original_open(artifact, "xb"):
-                    pass
+                with original_open(self.path, "xb") as handle:
+                    handle.write(b"partial")
                 return self
 
             def write(self, _content: bytes) -> int:
@@ -999,8 +1112,13 @@ class ShadowTests(unittest.TestCase):
                 return False
 
         def flaky_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
-            if path == artifact and mode == "xb":
-                return FailingDestination()
+            if (
+                path.parent == artifact.parent
+                and path.name.startswith(f".{artifact.name}.tmp-")
+                and mode == "xb"
+            ):
+                temp_paths.append(path)
+                return FailingDestination(path)
             return original_open(path, mode, *args, **kwargs)
 
         with mock.patch.object(Path, "open", flaky_open):
@@ -1024,6 +1142,8 @@ class ShadowTests(unittest.TestCase):
                 ).fetchone(),
                 (0,),
             )
+        self.assertTrue(temp_paths)
+        self.assertTrue(all(not path.exists() for path in temp_paths))
 
     def test_dual_write_shadow_preserves_committed_file_after_checkpoint_failure(
         self,

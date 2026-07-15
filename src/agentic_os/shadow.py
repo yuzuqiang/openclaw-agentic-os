@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -227,6 +228,57 @@ def _checkpoint_offline_snapshot(connection: sqlite3.Connection) -> None:
         raise ShadowBackfillError("shadow database checkpoint failed")
 
 
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_create_file(target: Path, content: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(
+        f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    )
+    linked = False
+    try:
+        with temporary.open("xb") as destination:
+            written = destination.write(content)
+            if written != len(content):
+                raise OSError("short write")
+            destination.flush()
+            os.fsync(destination.fileno())
+        try:
+            os.link(temporary, target)
+            linked = True
+        except FileExistsError as exc:
+            raise ShadowBackfillError(
+                f"existing artifact appeared during atomic write: {target}"
+            ) from exc
+        _fsync_directory(target.parent)
+    except Exception:
+        if linked:
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    else:
+        try:
+            temporary.unlink()
+        except Exception:
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+
 def _remove_checkpointed_sidecars(database: Path) -> None:
     for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(f"{database}{suffix}")
@@ -234,6 +286,94 @@ def _remove_checkpointed_sidecars(database: Path) -> None:
             sidecar.unlink()
         except FileNotFoundError:
             pass
+
+
+def _assert_workflow_shadow_parity(
+    connection: sqlite3.Connection, *, workflow: str, repo_root_path: Path
+) -> None:
+    runs = connection.execute(
+        "SELECT run_id,workflow,authority_mode,prepare_idempotency_key,state,"
+        "risk_class,risk_dominance,finalized_at,finalized_at_epoch_ms "
+        "FROM runs WHERE workflow=? AND authority_mode='file_authority_shadow'",
+        (workflow,),
+    ).fetchall()
+    if not runs:
+        raise ShadowBackfillError(
+            f"workflow {workflow!r} has no file-authority shadow parity baseline"
+        )
+    for (
+        run_id,
+        run_workflow,
+        authority_mode,
+        prepare_key,
+        state,
+        risk_class,
+        risk_dominance,
+        finalized_at,
+        finalized_at_epoch_ms,
+    ) in runs:
+        run_identity = (
+            run_workflow,
+            authority_mode,
+            prepare_key,
+            state,
+            risk_class,
+            risk_dominance,
+            finalized_at,
+            finalized_at_epoch_ms,
+        )
+        if not _run_is_finalized_shadow(
+            run_identity,
+            workflow=workflow,
+            prepare_idempotency_key=prepare_key,
+            risk_class=risk_class,
+            risk_dominance=risk_dominance,
+        ):
+            raise ShadowBackfillError(
+                f"workflow {workflow!r} has non-finalized shadow parity evidence"
+            )
+        projections = connection.execute(
+            "SELECT projection_id,path,sha256 FROM artifact_projections "
+            "WHERE run_id=? AND source_authority='file_authority_shadow'",
+            (run_id,),
+        ).fetchall()
+        if not projections:
+            raise ShadowBackfillError(
+                f"workflow {workflow!r} has a shadow run with no parity projections"
+            )
+        for projection_id, path, digest in projections:
+            if (
+                not isinstance(path, str)
+                or not isinstance(digest, str)
+                or not isinstance(projection_id, str)
+                or Path(path).is_absolute()
+            ):
+                raise ShadowBackfillError(
+                    f"workflow {workflow!r} has invalid shadow parity evidence"
+                )
+            expected_projection_id = _projection_id(run_id, path, digest)
+            if projection_id != expected_projection_id:
+                raise ShadowBackfillError(
+                    f"workflow {workflow!r} has stale shadow parity evidence"
+                )
+            artifact = repo_root_path / path
+            try:
+                explicit_relative = _repo_relative(
+                    repo_root_path, artifact, resolve=False
+                )
+                resolved = artifact.resolve(strict=True)
+                resolved_relative = _repo_relative(repo_root_path, resolved)
+                assert_paths_retrievable(
+                    (path, explicit_relative, artifact, resolved, resolved_relative)
+                )
+            except (OSError, ShadowBackfillError) as exc:
+                raise ShadowBackfillError(
+                    f"workflow {workflow!r} shadow parity is missing or unsafe"
+                ) from exc
+            if not resolved.is_file() or _sha256(resolved) != digest:
+                raise ShadowBackfillError(
+                    f"workflow {workflow!r} shadow parity audit failed"
+                )
 
 
 def _ensure_shadow_run(
@@ -248,6 +388,7 @@ def _ensure_shadow_run(
     created_at: str,
     finalized_at_epoch_ms: int,
     allow_workflow_promotion: bool = True,
+    repo_root_path: Path | None = None,
 ) -> None:
     workflow = _normalize_required_identity("workflow", workflow)
     run_id = _normalize_required_identity("run_id", run_id)
@@ -280,6 +421,13 @@ def _ensure_shadow_run(
         and authority_mode == "dual_write_shadow"
         and existing_workflow[0] == "file_authority_shadow"
     ):
+        if repo_root_path is None:
+            raise ShadowBackfillError(
+                "dual-write promotion requires shadow parity evidence"
+            )
+        _assert_workflow_shadow_parity(
+            connection, workflow=workflow, repo_root_path=repo_root_path
+        )
         connection.execute(
             "UPDATE workflow_authority SET mode=?,updated_at=? "
             "WHERE workflow=?",
@@ -471,6 +619,11 @@ def dual_write_shadow_artifact(
                 "WHERE run_id=? AND path=? AND source_authority='dual_write_shadow'",
                 (run_id, relative),
             ).fetchall()
+            run_projections = connection.execute(
+                "SELECT path,sha256 FROM artifact_projections "
+                "WHERE run_id=? AND source_authority='dual_write_shadow'",
+                (run_id,),
+            ).fetchall()
             if rows:
                 existing_ids = {row[0] for row in rows}
                 existing_digests = {row[1] for row in rows}
@@ -513,9 +666,14 @@ def dual_write_shadow_artifact(
                     status="replayed",
                 )
 
-            if target.exists() and _sha256(target) != digest:
+            if run_projections:
                 raise ShadowBackfillError(
-                    f"existing artifact differs for {relative}; refusing to overwrite"
+                    "dual-write shadow replay drift for "
+                    f"{run_id}; refusing to add a different artifact path"
+                )
+            if target.exists():
+                raise ShadowBackfillError(
+                    f"pre-existing artifact has no dual-write projection: {relative}"
                 )
             _ensure_shadow_run(
                 connection,
@@ -527,6 +685,7 @@ def dual_write_shadow_artifact(
                 risk_dominance=risk_dominance,
                 created_at=created_at,
                 finalized_at_epoch_ms=finalized_at_epoch_ms,
+                repo_root_path=root,
             )
             connection.execute(
                 "INSERT INTO artifact_projections("
@@ -541,11 +700,8 @@ def dual_write_shadow_artifact(
                     created_at,
                 ),
             )
-            if not target.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("xb") as destination:
-                    created_file = True
-                    destination.write(content)
+            _atomic_create_file(target, content)
+            created_file = True
             connection.execute("COMMIT")
             committed = True
             _checkpoint_offline_snapshot(connection)
