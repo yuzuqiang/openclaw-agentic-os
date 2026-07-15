@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `c4ffa493b7b8ce52f4b9e76df1bb04b9cbfae628e4bdc439be83ef20e5f18ede`
+- Current design artifact SHA-256: `1336b24496f57387e9a26f019b8135168da2968e905858d37662fa25ea0a050d`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
 - Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
@@ -31,7 +31,7 @@ PYTHONPATH=src python3 -m agentic_os.cli preflight
 PYTHONPATH=src python3 -m agentic_os.cli migrate --test-db
 PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --prepare-idempotency-key file-shadow:shadow-demo --artifact README.md
-PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --risk-class R1 --risk-dominance R1 --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
+PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --risk-class R1 --risk-dominance R1 --new-workflow --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -52,20 +52,24 @@ single file-authority artifact and records matching `dual_write_shadow` SQLite
 projection evidence in the same local operation. An existing `file_authority`
 workflow must first pass through `file_authority_shadow` backfill before it can
 enter dual-write mode; a brand-new workflow may start directly in
-`dual_write_shadow`. Exact replay with the same
+`dual_write_shadow` only when the caller supplies explicit new-workflow proof and
+the database has no prior run evidence for that workflow. Exact replay with the same
 prepare key, run, artifact path, content, and no additional run projections is a
 no-op; changed replay or file/SQLite drift, including workflow-mode drift after
 the original write, fails closed and refuses to overwrite file authority. Promotion from
 `file_authority_shadow` to `dual_write_shadow` first rehashes every current
-file-shadow projection for that workflow; stale or missing backfill artifacts
-block the promotion. A first dual-write must create the file atomically through a
-fsynced temporary file and final no-overwrite link; a pre-existing artifact
-without a matching dual-write projection is rejected instead of being
-retroactively stamped as a successful run. The CLI requires explicit
-`--risk-class R1 --risk-dominance R1`; higher-risk dual-write runs are rejected
-until their completion-gate evidence can be persisted instead of downcast to R1.
-`--content-file` is subject to the raw-state denylist before bytes are read, and
-a post-commit checkpoint failure must not delete the committed authority file.
+file-shadow projection for that workflow; stale or missing backfill artifacts,
+non-R1 shadow evidence, or any nonterminal file-authority run block the promotion.
+A first dual-write must create the file atomically through a fsynced temporary
+file and final no-overwrite link; a pre-existing artifact without a matching
+dual-write projection is rejected instead of being retroactively stamped as a
+successful run. Replay and audit count every projection row for the run, not only
+`dual_write_shadow` rows, so cross-authority projection contamination fails
+closed. The CLI requires explicit `--risk-class R1 --risk-dominance R1`;
+higher-risk dual-write runs are rejected until their completion-gate evidence can
+be persisted instead of downcast to R1. `--content-file` is subject to the
+raw-state denylist before bytes are read, and a post-commit checkpoint failure
+must not delete the committed authority file.
 This is parity evidence only: it does not create `db_authority_canary` or
 `db_authority` runs, does not call OpenClaw or Gateway, and does not claim
 canary readiness.

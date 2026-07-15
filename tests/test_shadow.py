@@ -13,7 +13,7 @@ from unittest import mock
 import agentic_os
 import agentic_os.shadow as shadow_module
 from agentic_os.cli import main as cli_main
-from agentic_os.migrations import apply_migrations, repository_root
+from agentic_os.migrations import MigrationError, apply_migrations, repository_root
 from agentic_os.privacy import PrivacyPreflightError
 from agentic_os.shadow import (
     ShadowBackfillError,
@@ -702,6 +702,7 @@ class ShadowTests(unittest.TestCase):
             run_id="dual-run",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
 
         self.assertFalse(agentic_os.DB_AUTHORITY_ENABLED)
@@ -750,6 +751,7 @@ class ShadowTests(unittest.TestCase):
             run_id="dual-run",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
         self.assertEqual(replay.status, "replayed")
         with sqlite3.connect(self.database) as connection:
@@ -769,6 +771,55 @@ class ShadowTests(unittest.TestCase):
             run_id="dual-run",
         )
         self.assertEqual(audit.status, "pass", audit.issues)
+
+    def test_dual_write_shadow_requires_explicit_new_workflow_proof(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "new-workflow proof"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_authority "
+                    "WHERE workflow='heartbeat'"
+                ).fetchone(),
+                (0,),
+            )
+
+    def test_dual_write_shadow_rejects_prior_run_without_workflow_metadata(self) -> None:
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'file-run','prepare-file','heartbeat','file_authority',"
+                "'running','R1','R1','now','now')"
+            )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(MigrationError, "foreign_key_check failed"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                new_workflow=True,
+            )
+
+        self.assertFalse(artifact.exists())
 
     def test_dual_write_shadow_rejects_file_authority_without_backfill(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
@@ -838,6 +889,50 @@ class ShadowTests(unittest.TestCase):
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
                 ).fetchone(),
                 ("dual_write_shadow",),
+            )
+
+    def test_dual_write_shadow_blocks_promotion_with_open_file_authority_run(
+        self,
+    ) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'file-run','prepare-file','heartbeat','file_authority',"
+                "'running','R1','R1','now','now')"
+            )
+        backfill_file_authority_shadow(
+            self.database,
+            [backfilled],
+            workflow="heartbeat",
+            run_id="shadow-run",
+        )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "open file-authority run"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority_shadow",),
             )
 
     def test_dual_write_shadow_requires_current_shadow_parity_before_promotion(
@@ -959,6 +1054,65 @@ class ShadowTests(unittest.TestCase):
                 (0,),
             )
 
+    def test_dual_write_shadow_rejects_non_r1_shadow_risk_before_promotion(
+        self,
+    ) -> None:
+        backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
+        relative = backfilled.resolve().relative_to(repository_root()).as_posix()
+        digest = hashlib.sha256(backfilled.read_bytes()).hexdigest()
+        created_at, finalized_at_epoch_ms = shadow_module._utc_now()
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('heartbeat','file_authority_shadow','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+                "finalized_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "shadow-run",
+                    "prepare-shadow",
+                    "heartbeat",
+                    "file_authority_shadow",
+                    "finalized",
+                    "R2",
+                    "R2",
+                    created_at,
+                    created_at,
+                    created_at,
+                    finalized_at_epoch_ms,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,?)",
+                (
+                    shadow_module._projection_id("shadow-run", relative, digest),
+                    "shadow-run",
+                    relative,
+                    digest,
+                    "file_authority_shadow",
+                    created_at,
+                ),
+            )
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+
+        with self.assertRaisesRegex(ShadowBackfillError, "non-R1 shadow parity"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": true}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+
+        self.assertFalse(artifact.exists())
+
     def test_dual_write_shadow_replay_fails_on_workflow_mode_drift(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         payload = b'{"dual": true}\n'
@@ -970,6 +1124,7 @@ class ShadowTests(unittest.TestCase):
             run_id="dual-run",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
         with sqlite3.connect(self.database) as connection:
             connection.execute(
@@ -1050,6 +1205,7 @@ class ShadowTests(unittest.TestCase):
             prepare_idempotency_key="prepare-dual",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
 
         with self.assertRaisesRegex(ShadowBackfillError, "refusing to overwrite"):
@@ -1089,6 +1245,7 @@ class ShadowTests(unittest.TestCase):
             prepare_idempotency_key="prepare-dual",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
 
         with self.assertRaisesRegex(ShadowBackfillError, "different artifact path"):
@@ -1125,6 +1282,7 @@ class ShadowTests(unittest.TestCase):
             prepare_idempotency_key="prepare-dual",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
         extra_path = "reports/extra.json"
         extra_digest = "e" * 64
@@ -1156,6 +1314,62 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(artifact.read_bytes(), payload)
 
+    def test_dual_write_shadow_replay_rejects_cross_authority_projection(
+        self,
+    ) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        payload = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+            risk_class="R1",
+            risk_dominance="R1",
+            new_workflow=True,
+        )
+        extra_path = "reports/extra-shadow.json"
+        extra_digest = "f" * 64
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,'now')",
+                (
+                    shadow_module._projection_id("dual-run", extra_path, extra_digest),
+                    "dual-run",
+                    extra_path,
+                    extra_digest,
+                    "file_authority_shadow",
+                ),
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        with self.assertRaisesRegex(ShadowBackfillError, "extra projections"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                payload,
+                workflow="heartbeat",
+                run_id="dual-run",
+                prepare_idempotency_key="prepare-dual",
+                risk_class="R1",
+                risk_dominance="R1",
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_dual_write_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+        )
+        self.assertEqual(audit.status, "fail")
+        self.assertIn("unexpected_projection", {issue.reason for issue in audit.issues})
+
     def test_dual_write_shadow_rejects_prepare_key_mismatch_on_replay(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         payload = b'{"dual": true}\n'
@@ -1168,6 +1382,7 @@ class ShadowTests(unittest.TestCase):
             prepare_idempotency_key="prepare-one",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
 
         with self.assertRaisesRegex(ShadowBackfillError, "matching shadow run"):
@@ -1193,6 +1408,7 @@ class ShadowTests(unittest.TestCase):
             run_id="dual-run",
             risk_class="R1",
             risk_dominance="R1",
+            new_workflow=True,
         )
         artifact.write_bytes(b'{"dual": "drift"}\n')
         self._checkpoint_and_remove_sidecars()
@@ -1247,6 +1463,7 @@ class ShadowTests(unittest.TestCase):
                     run_id="write-failed",
                     risk_class="R1",
                     risk_dominance="R1",
+                    new_workflow=True,
                 )
 
         self.assertFalse(artifact.exists())
@@ -1281,6 +1498,7 @@ class ShadowTests(unittest.TestCase):
                     run_id="checkpoint-busy",
                     risk_class="R1",
                     risk_dominance="R1",
+                    new_workflow=True,
                 )
 
         self.assertEqual(artifact.read_bytes(), payload)
@@ -1315,6 +1533,7 @@ class ShadowTests(unittest.TestCase):
                     str(artifact),
                     "--content",
                     payload,
+                    "--new-workflow",
                     "--repo-root",
                     str(repository_root()),
                 ]

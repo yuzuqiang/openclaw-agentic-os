@@ -68,6 +68,11 @@ def parser() -> argparse.ArgumentParser:
     content = dual_write.add_mutually_exclusive_group(required=True)
     content.add_argument("--content")
     content.add_argument("--content-file", type=Path)
+    dual_write.add_argument(
+        "--new-workflow",
+        action="store_true",
+        help="assert this workflow has no prior file-authority run evidence",
+    )
     dual_write.add_argument("--repo-root", type=Path, default=repository_root())
 
     dual_audit = commands.add_parser(
@@ -132,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             prepare_idempotency_key=args.prepare_idempotency_key,
             risk_class=args.risk_class,
             risk_dominance=args.risk_dominance,
+            new_workflow=args.new_workflow,
             repo_root_path=args.repo_root,
         )
         print(
