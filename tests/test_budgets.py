@@ -545,6 +545,62 @@ class BudgetRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(self._event_count(), 1)
 
+    def test_direct_reserve_import_after_spawn_intent_fails_closed(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-before-direct-import",
+                dedupe_key="reserve-before-direct-import",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES('intent','run',"
+                "'transition','sessions_spawn','spawn',?,'client',"
+                "'spawn-idem','phase','agent','task','{}','pending','now',"
+                "1800000000124)",
+                (reserve.budget_event_id,),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve/release"):
+                connection.execute(
+                    "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                    "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                    "spawn_request_id,provider,model,endpoint_binding_id,"
+                    "capability_class,cost_registry_id,cost_effective_at,"
+                    "cost_registry_hash,cost_confidence,event_type,time_seconds,"
+                    "input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                    "retry_units,usage_confidence,source,created_at,"
+                    "created_at_epoch_ms) VALUES('late-reserve','late-reserve-idem',"
+                    "'late-reserve-dedupe',2,'run','transition','spawn','provider',"
+                    "'model','endpoint','capability','cost-row','effective',"
+                    "'cost-hash','known','reserve',0,1,0,1,0,0,'known',"
+                    "'repair','now',1800000000125)"
+                )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,time_seconds,"
+                "input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('repair-event','repair-event-idem','repair-event-dedupe',"
+                "2,'run','transition','spawn','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known','consume',"
+                "0,1,0,1,0,0,'known','repair','now',1800000000125)"
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve/release"):
+                connection.execute(
+                    "UPDATE budget_events SET event_type='reserve' "
+                    "WHERE budget_event_id='repair-event'"
+                )
+        self.assertEqual(self._event_count(), 2)
+
     def test_release_cannot_use_another_spawn_reservation(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
@@ -918,6 +974,7 @@ class BudgetRuntimeTests(unittest.TestCase):
     def test_runtime_runs_all_pinned_blocking_budget_slos(self) -> None:
         self.assertTrue(
             {
+                "Duplicate live dispatch blocked",
                 "Model cost registry numeric bounds",
                 "`sessions_spawn` intent without exact strict prior reserve",
                 "Meaningless `sessions_spawn` reserve",
@@ -1245,6 +1302,37 @@ class BudgetRuntimeTests(unittest.TestCase):
                     )
         self.assertEqual(self._event_count(), 1)
 
+    def test_referenced_reserve_clock_context_and_replay_keys_are_immutable(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-referenced-clock",
+                dedupe_key="reserve-for-referenced-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            for assignment in (
+                "clock_context_id='post-clock'",
+                "event_idempotency_key='rewritten-reserve-key'",
+                "event_dedupe_hash='rewritten-reserve-hash'",
+            ):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve is immutable"):
+                    connection.execute(
+                        f"UPDATE budget_events SET {assignment} WHERE budget_event_id=?",
+                        (reserve.budget_event_id,),
+                    )
+        replay = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-referenced-clock",
+                dedupe_key="reserve-for-referenced-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self.assertTrue(replay.replayed)
+
     def test_consume_requires_completed_session_state(self) -> None:
         reserve = reserve_budget(
             self.database,
@@ -1394,6 +1482,89 @@ class BudgetRuntimeTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(self._event_count(), 1)
+
+    def test_duplicate_live_dispatch_blocks_post_dispatch_budget_write(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-before-duplicate-dispatch",
+                dedupe_key="reserve-before-duplicate-dispatch",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        duplicate_metadata = (
+            '{"run_id":"run","transition_id":"transition",'
+            '"client_request_id":"client-duplicate",'
+            '"idempotency_key":"spawn-idem-duplicate",'
+            '"phase":"phase","agent_id":"agent","task_digest":"task-duplicate"}'
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,"
+                "state,session_key,created_at,updated_at) VALUES("
+                "'spawn-duplicate','run','phase','agent','transition',"
+                "'client-duplicate','spawn-idem-duplicate','task-duplicate',"
+                "'pending','session-key-duplicate','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,time_seconds,"
+                "input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('duplicate-reserve','duplicate-reserve-idem',"
+                "'duplicate-reserve-dedupe',2,'run','transition','spawn-duplicate',"
+                "'provider','model','endpoint','capability','cost-row','effective',"
+                "'cost-hash','known','reserve',0,1,0,1,0,0,'known','repair',"
+                "'now',1800000000123)"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=11,"
+                "reserved_cost_microusd=2 WHERE run_id='run'"
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_client_request_id,"
+                "external_idempotency_key,external_phase,external_agent_id,"
+                "external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+                "'intent-duplicate','run','transition','sessions_spawn',"
+                "'spawn-duplicate','duplicate-reserve','client-duplicate',"
+                "'spawn-idem-duplicate','phase','agent','task-duplicate','v1',"
+                "? ,?,'run','transition','client-duplicate','spawn-idem-duplicate',"
+                "'phase','agent','task-duplicate','accepted','session-key-duplicate',"
+                "'now',1800000000124,'now',1800000000125)",
+                (duplicate_metadata, duplicate_metadata),
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+                "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+                "task_digest,state,spawned_at,completed_at) VALUES("
+                "'session-duplicate','spawn-duplicate','run','transition','phase',"
+                "'agent','client-duplicate','spawn-idem-duplicate',"
+                "'session-key-duplicate','task-duplicate','running','now',NULL)"
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET state='accepted' "
+                "WHERE spawn_request_id='spawn-duplicate'"
+            )
+        with self.assertRaisesRegex(BudgetError, "Duplicate live dispatch blocked"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="consume-with-duplicate-dispatch",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 2)
 
     def test_post_dispatch_event_persists_clock_context_and_is_immutable(self) -> None:
         reserve = reserve_budget(

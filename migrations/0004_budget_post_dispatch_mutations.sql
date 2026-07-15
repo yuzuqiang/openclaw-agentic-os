@@ -132,9 +132,9 @@ BEGIN
   SELECT RAISE(ABORT,'accepted post-dispatch budget event is immutable');
 END;
 
-CREATE TRIGGER budget_events_reject_release_after_spawn_intent_insert
+CREATE TRIGGER budget_events_reject_pre_dispatch_event_after_spawn_intent_insert
 BEFORE INSERT ON budget_events
-WHEN NEW.event_type='release'
+WHEN NEW.event_type IN ('reserve','release')
 AND EXISTS (
   SELECT 1
   FROM external_rpc_intents i
@@ -144,12 +144,12 @@ AND EXISTS (
     AND i.spawn_request_id=NEW.spawn_request_id
 )
 BEGIN
-  SELECT RAISE(ABORT,'release cannot drain referenced sessions_spawn reserve');
+  SELECT RAISE(ABORT,'reserve/release cannot mutate referenced sessions_spawn reserve after intent');
 END;
 
-CREATE TRIGGER budget_events_reject_release_after_spawn_intent_update
+CREATE TRIGGER budget_events_reject_pre_dispatch_event_after_spawn_intent_update
 BEFORE UPDATE OF event_type, run_id, transition_id, spawn_request_id ON budget_events
-WHEN NEW.event_type='release'
+WHEN NEW.event_type IN ('reserve','release')
 AND EXISTS (
   SELECT 1
   FROM external_rpc_intents i
@@ -159,7 +159,7 @@ AND EXISTS (
     AND i.spawn_request_id=NEW.spawn_request_id
 )
 BEGIN
-  SELECT RAISE(ABORT,'release cannot drain referenced sessions_spawn reserve');
+  SELECT RAISE(ABORT,'reserve/release cannot mutate referenced sessions_spawn reserve after intent');
 END;
 
 CREATE INDEX budget_events_spawn_sequence_idx

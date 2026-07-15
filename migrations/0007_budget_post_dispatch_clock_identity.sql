@@ -7,7 +7,26 @@ WHERE clock_context_id IS NOT NULL;
 
 DROP TRIGGER budget_events_preserve_accepted_post_dispatch_delete;
 DROP TRIGGER budget_events_preserve_accepted_post_dispatch_update;
+DROP TRIGGER budget_events_preserve_spawn_prior_reserve_update;
 DROP TRIGGER external_rpc_intents_preserve_spawn_acceptance_update;
+
+CREATE TRIGGER budget_events_preserve_spawn_prior_reserve_update
+BEFORE UPDATE OF budget_event_id, event_idempotency_key, event_dedupe_hash,
+  event_type, event_sequence, run_id, transition_id, spawn_request_id, provider,
+  model, endpoint_binding_id, capability_class, cost_registry_id,
+  cost_effective_at, cost_registry_hash, cost_confidence,
+  zero_reserve_policy_id, zero_reserve_policy_hash, time_seconds, input_tokens,
+  output_tokens, cost_microusd, human_attention_units, retry_units,
+  usage_confidence, source, created_at, created_at_epoch_ms, clock_context_id
+  ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM external_rpc_intents i
+  WHERE i.rpc_kind='sessions_spawn'
+    AND i.reserve_budget_event_id=OLD.budget_event_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced sessions_spawn reserve is immutable');
+END;
 
 CREATE TRIGGER budget_events_preserve_accepted_post_dispatch_delete
 BEFORE DELETE ON budget_events

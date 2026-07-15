@@ -1992,7 +1992,7 @@ class MigrationTests(unittest.TestCase):
             "'accepted-session','now',1001)",
             (external_metadata,),
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "release cannot drain"):
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve/release"):
             connection.execute(
                 "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
                 "event_dedupe_hash,event_sequence,run_id,transition_id,"

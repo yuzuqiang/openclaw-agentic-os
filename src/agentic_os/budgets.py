@@ -52,6 +52,7 @@ _MAX_EPOCH_MS = 253_402_300_799_999
 _USAGE_CONFIDENCE = {"known", "estimated"}
 _POST_DISPATCH_USAGE_CONFIDENCE = {"known", "estimated", "unknown"}
 _BUDGET_INVARIANT_QUERIES = {
+    "Duplicate live dispatch blocked",
     "Accepted `sessions_spawn` without exact accepted session identity",
     "Unknown usage blocks auto-local",
     "Model cost registry numeric bounds",
@@ -1059,6 +1060,7 @@ def record_post_dispatch_event(
                 raise BudgetError(
                     "post-dispatch budget event requires an active post-dispatch run"
                 )
+            _assert_budget_invariants(connection)
             outstanding = _spawn_outstanding(
                 connection,
                 spawn_request_id=spawn_request_id,
