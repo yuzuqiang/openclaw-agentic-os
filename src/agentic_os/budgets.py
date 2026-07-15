@@ -1402,8 +1402,6 @@ def settle_budget(
                 transition_id=transition_id,
                 selection=selection,
             )
-            if outstanding.is_zero():
-                raise BudgetError("final settlement requires an outstanding reservation")
             for field in _LIMITS:
                 if getattr(actual_usage, field) > getattr(outstanding, field):
                     raise BudgetExceeded(
@@ -1466,9 +1464,15 @@ def settle_budget(
             )
 
             event_results: list[BudgetEventResult] = []
+            zero_terminal_marker = actual_usage.is_zero() and released.is_zero()
 
-            def insert_event(event_type: str, amounts: BudgetAmounts) -> None:
-                if amounts.is_zero():
+            def insert_event(
+                event_type: str,
+                amounts: BudgetAmounts,
+                *,
+                force_zero_marker: bool = False,
+            ) -> None:
+                if amounts.is_zero() and not force_zero_marker:
                     return
                 sequence = connection.execute(
                     "SELECT COALESCE(MAX(event_sequence),0)+1 FROM budget_events "
@@ -1564,7 +1568,7 @@ def settle_budget(
                     human_attention_units=actual_usage.human_attention_units
                 ),
             )
-            insert_event("release", released)
+            insert_event("release", released, force_zero_marker=zero_terminal_marker)
             _assert_budget_invariants(connection)
             connection.execute("COMMIT")
             return BudgetSettlementResult(
