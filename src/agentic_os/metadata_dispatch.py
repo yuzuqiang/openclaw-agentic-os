@@ -61,16 +61,24 @@ class AllowLeaseIntent:
 
 @dataclass(frozen=True)
 class AllowLeaseReleaseIntent:
-    run_id: str
-    transition_id: str
+    client_lease_id: str
     idempotency_key: str
+    run_id: str
+    phase: str
+    transition_id: str
+    agent_id: str
+    requester_agent_id: str
     gateway_lease_id: str
 
     def metadata(self) -> dict[str, str]:
         return {
-            "run_id": self.run_id,
-            "transition_id": self.transition_id,
+            "client_lease_id": self.client_lease_id,
             "idempotency_key": self.idempotency_key,
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "transition_id": self.transition_id,
+            "agent_id": self.agent_id,
+            "requester_agent_id": self.requester_agent_id,
             "gateway_lease_id": self.gateway_lease_id,
         }
 
@@ -210,11 +218,7 @@ class MetadataDispatchProbe:
         acquired = self._lease_by_gateway_id.get(intent.gateway_lease_id)
         if acquired is None:
             raise MetadataContractError("release references an unknown gateway lease")
-        if (
-            intent.run_id != acquired.run_id
-            or intent.transition_id != acquired.transition_id
-        ):
-            raise MetadataContractError("release identity does not match acquired lease")
+        self._require_release_owner(intent, acquired)
         observation = self._adapter.allow_lease_release(intent)
         observed = validate_allow_lease_release_observation(
             local=intent.metadata(),
@@ -260,14 +264,20 @@ class MetadataDispatchProbe:
 
     def list_session(self, intent: SessionSpawnIntent, session_key: str) -> str:
         self._require_spawned_session(intent, session_key)
-        matches = [
-            observation
-            for observation in self._adapter.session_list(intent)
-            if observation.session_key == session_key or observation.external_id == session_key
-        ]
-        if len(matches) != 1:
+        listed = list(self._adapter.session_list(intent))
+        match_indexes = {
+            index
+            for index, observation in enumerate(listed)
+            if (
+                observation.session_key == session_key
+                or observation.external_id == session_key
+                or self._has_session_intent_metadata(intent, observation)
+            )
+        }
+        if len(match_indexes) != 1:
             raise MetadataContractError("session list must expose exactly one matching session")
-        return self._validate_session_observation(intent, matches[0], expected=session_key)
+        index = next(iter(match_indexes))
+        return self._validate_session_observation(intent, listed[index], expected=session_key)
 
     def result_session(self, intent: SessionSpawnIntent, session_key: str) -> str:
         self._require_spawned_session(intent, session_key)
@@ -308,6 +318,11 @@ class MetadataDispatchProbe:
                 raise MetadataContractError(
                     "duplicate allowLease acquire returned a different lease identity"
                 )
+        gateway_owner = self._lease_by_gateway_id.get(gateway_lease_id)
+        if gateway_owner is not None and gateway_owner != intent:
+            raise MetadataContractError(
+                "gateway lease identity is already bound to another acquire intent"
+            )
         self._lease_by_acquire_key[intent.idempotency_key] = (intent, gateway_lease_id)
         self._lease_by_gateway_id[gateway_lease_id] = intent
 
@@ -317,6 +332,30 @@ class MetadataDispatchProbe:
         acquired = self._lease_by_gateway_id.get(gateway_lease_id)
         if acquired != intent:
             raise MetadataContractError("status identity does not match acquired lease")
+
+    def _require_release_owner(
+        self, intent: AllowLeaseReleaseIntent, acquired: AllowLeaseIntent
+    ) -> None:
+        if (
+            intent.client_lease_id != acquired.client_lease_id
+            or intent.run_id != acquired.run_id
+            or intent.phase != acquired.phase
+            or intent.transition_id != acquired.transition_id
+            or intent.agent_id != acquired.agent_id
+            or intent.requester_agent_id != acquired.requester_agent_id
+        ):
+            raise MetadataContractError("release owner metadata does not match acquired lease")
+
+    def _has_session_intent_metadata(
+        self, intent: SessionSpawnIntent, observation: MetadataObservation
+    ) -> bool:
+        normalized = observation.normalized
+        if not isinstance(normalized, Mapping):
+            return False
+        expected = intent.metadata()
+        return set(normalized) == set(expected) and all(
+            normalized.get(field) == value for field, value in expected.items()
+        )
 
     def _validate_session_observation(
         self,
@@ -347,6 +386,11 @@ class MetadataDispatchProbe:
                 raise MetadataContractError("duplicate spawn identity changed")
             if prior_session_key != session_key:
                 raise MetadataContractError("duplicate spawn returned a different session identity")
+        session_owner = self._session_intent_by_key.get(session_key)
+        if session_owner is not None and session_owner != intent:
+            raise MetadataContractError(
+                "session identity is already bound to another spawn intent"
+            )
         self._session_by_spawn_key[intent.idempotency_key] = (intent, session_key)
         self._session_intent_by_key[session_key] = intent
 

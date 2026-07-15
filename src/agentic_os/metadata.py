@@ -37,12 +37,7 @@ ALLOW_LEASE_IDENTITY_FIELDS = (
 
 ALLOW_LEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("ttl_ms",)
 ALLOW_LEASE_OBSERVED_FIELDS = ALLOW_LEASE_FIELDS + ("gateway_lease_id",)
-ALLOW_LEASE_RELEASE_FIELDS = (
-    "run_id",
-    "transition_id",
-    "idempotency_key",
-    "gateway_lease_id",
-)
+ALLOW_LEASE_RELEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("gateway_lease_id",)
 MAX_LEASE_TTL_MS = 31_536_000_000
 
 

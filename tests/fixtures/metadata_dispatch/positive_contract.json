@@ -12,9 +12,13 @@
     "gateway_lease_id": "gateway-lease-1"
   },
   "allow_lease_release": {
-    "run_id": "run-1",
-    "transition_id": "transition-1",
+    "client_lease_id": "lease-client-1",
     "idempotency_key": "lease-release-idem-1",
+    "run_id": "run-1",
+    "phase": "B",
+    "transition_id": "transition-1",
+    "agent_id": "software-architect",
+    "requester_agent_id": "main",
     "gateway_lease_id": "gateway-lease-1"
   },
   "session": {
