@@ -17,6 +17,30 @@
       "name": "budget_ledger_slo_identity",
       "file": "0003_budget_ledger_slo_identity.sql",
       "sha256": "77efaab7b2ba87aaef02a89dd8dc0aa78936abc56b23759b1218d8baee541a6e"
+    },
+    {
+      "version": 4,
+      "name": "budget_post_dispatch_mutations",
+      "file": "0004_budget_post_dispatch_mutations.sql",
+      "sha256": "597b933813782ee06dbb7d7aa835213ed8f24f8a1c718f433fceca125320368f"
+    },
+    {
+      "version": 5,
+      "name": "budget_retry_prefix_spawn_scope",
+      "file": "0005_budget_retry_prefix_spawn_scope.sql",
+      "sha256": "770a7d588edb7b578954c01ee85f69cdeca1e3d1a43d43d0df7a941a6da1336c"
+    },
+    {
+      "version": 6,
+      "name": "budget_post_dispatch_slo_guards",
+      "file": "0006_budget_post_dispatch_slo_guards.sql",
+      "sha256": "34e18b105cbed15b599cb467b70de15e1276ec5167bfc641d99e4232747782fa"
+    },
+    {
+      "version": 7,
+      "name": "budget_post_dispatch_clock_identity",
+      "file": "0007_budget_post_dispatch_clock_identity.sql",
+      "sha256": "84b5a34adc999eb65f56c474a64d3c363d029f6409d89dfac750b300bcfde6ea"
     }
   ]
 }

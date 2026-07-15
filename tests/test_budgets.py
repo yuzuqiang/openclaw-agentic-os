@@ -16,8 +16,12 @@ from agentic_os.budgets import (
     BudgetSelection,
     _BUDGET_INVARIANT_QUERIES,
     _required_cost,
+    consume_budget,
+    consume_human_attention,
+    decrement_retry_budget,
     release_budget,
     reserve_budget,
+    restore_retry_budget,
 )
 from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS
@@ -164,6 +168,100 @@ class BudgetRuntimeTests(unittest.TestCase):
     def _event_count(self) -> int:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM budget_events").fetchone()[0]
+
+    def _accept_spawn(self, reserve_event_id: str, *, completed: bool) -> None:
+        external_metadata = (
+            '{"run_id":"run","transition_id":"transition",'
+            '"client_request_id":"client","idempotency_key":"spawn-idem",'
+            '"phase":"phase","agent_id":"agent","task_digest":"task"}'
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "UPDATE runs SET state=? WHERE run_id='run'",
+                ("child_completed" if completed else "running",),
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET session_key='session-key' "
+                "WHERE spawn_request_id='spawn'"
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+                "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+                "task_digest,state,spawned_at,completed_at) VALUES('session','spawn',"
+                "'run','transition','phase','agent','client','spawn-idem','session-key',"
+                "'task',?,'now',?)",
+                ("completed" if completed else "running", "now" if completed else None),
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+                "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_transition_id,"
+                "external_client_request_id,external_idempotency_key,external_phase,"
+                "external_agent_id,external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+                "'intent','run','transition','sessions_spawn','spawn',?,'client',"
+                "'spawn-idem','phase','agent','task','v1',? ,?,'run','transition',"
+                "'client','spawn-idem','phase','agent','task','accepted','session-key',"
+                "'now',1800000000124,'now',1800000000125)",
+                (reserve_event_id, external_metadata, external_metadata),
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET state=? WHERE spawn_request_id='spawn'",
+                ("completed" if completed else "accepted",),
+            )
+            connection.execute(
+                "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+                "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,"
+                "context_hash,evidence_hash,independence_class,"
+                "independence_proof_json,completed_at) VALUES("
+                "'post-verifier','run','worker-agent','post-verifier-agent',"
+                "'provider','model','post-prompt-hash','post-context-hash',"
+                "'budget-runtime-post-evidence','independent',"
+                "'{\"reviewer_session\":\"post-dispatch-clock\"}','now')"
+            )
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,"
+                "clock_context_id,verifier_run_id,decision,completed_at,"
+                "completed_at_epoch_ms,gate_version,gate_query_hash,"
+                "migration_sha256,evidence_hash,risk_dominance,created_at) "
+                "VALUES('post-gate','run','transition','post-clock','post-verifier',"
+                "'pass','now',1800000000126,'v1','post-gate-query',"
+                "'migration-sha','budget-runtime-post-evidence','R1','now')"
+            )
+            connection.execute(
+                "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+                "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,"
+                "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
+                "consumed_at_epoch_ms) VALUES('post-clock','post-gate','post-gate',"
+                "'run','transition','post-nonce',1800000000126,1800000000126,"
+                "'budget-runtime','trusted-post-clock-hash',1800000000126)"
+            )
+            connection.execute(
+                "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
+                "size_bytes,content_type,redaction_status,producer_run_id,"
+                "verifier_run_id,gate_run_id,captured_at) VALUES("
+                "'budget-runtime-post-evidence','run','budget-runtime-post-evidence.json',"
+                "'post-sha256',1,'application/json','none','run','post-verifier',"
+                "'post-gate','now')"
+            )
+
+    def _post_kwargs(
+        self,
+        *,
+        idempotency_key: str,
+        amounts: BudgetAmounts,
+    ) -> dict[str, object]:
+        return {
+            **self._kwargs(
+                idempotency_key=idempotency_key,
+                dedupe_key=f"dedupe-{idempotency_key}",
+                amounts=amounts,
+            ),
+            "source": "usage-import",
+            "clock_context_id": "post-clock",
+        }
 
     def _slo_rows(self, query_name: str) -> list[tuple[object, ...]]:
         sql = next(
@@ -418,6 +516,91 @@ class BudgetRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(self._event_count(), 1)
 
+    def test_release_after_spawn_intent_fails_closed(self) -> None:
+        kwargs = self._kwargs(
+            idempotency_key="reserve-before-release-intent",
+            dedupe_key="reserve-before-release-intent",
+            amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+        )
+        reserve = reserve_budget(self.database, **kwargs)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES('intent','run',"
+                "'transition','sessions_spawn','spawn',?,'client',"
+                "'spawn-idem','phase','agent','task','{}','pending','now',"
+                "1800000000124)",
+                (reserve.budget_event_id,),
+            )
+        with self.assertRaisesRegex(BudgetError, "existing sessions_spawn intent"):
+            release_budget(
+                self.database,
+                **self._kwargs(
+                    idempotency_key="release-after-intent",
+                    dedupe_key="release-after-intent",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
+
+    def test_direct_reserve_import_after_spawn_intent_fails_closed(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-before-direct-import",
+                dedupe_key="reserve-before-direct-import",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES('intent','run',"
+                "'transition','sessions_spawn','spawn',?,'client',"
+                "'spawn-idem','phase','agent','task','{}','pending','now',"
+                "1800000000124)",
+                (reserve.budget_event_id,),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve/release"):
+                connection.execute(
+                    "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                    "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                    "spawn_request_id,provider,model,endpoint_binding_id,"
+                    "capability_class,cost_registry_id,cost_effective_at,"
+                    "cost_registry_hash,cost_confidence,event_type,time_seconds,"
+                    "input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                    "retry_units,usage_confidence,source,created_at,"
+                    "created_at_epoch_ms) VALUES('late-reserve','late-reserve-idem',"
+                    "'late-reserve-dedupe',2,'run','transition','spawn','provider',"
+                    "'model','endpoint','capability','cost-row','effective',"
+                    "'cost-hash','known','reserve',0,1,0,1,0,0,'known',"
+                    "'repair','now',1800000000125)"
+                )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,time_seconds,"
+                "input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('repair-event','repair-event-idem','repair-event-dedupe',"
+                "2,'run','transition','spawn','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known','consume',"
+                "0,1,0,1,0,0,'known','repair','now',1800000000125)"
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve/release"):
+                connection.execute(
+                    "UPDATE budget_events SET event_type='reserve' "
+                    "WHERE budget_event_id='repair-event'"
+                )
+        self.assertEqual(self._event_count(), 2)
+
     def test_release_cannot_use_another_spawn_reservation(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
@@ -445,7 +628,7 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 1)
         self.assertEqual(self._budget_row(), (0, 10, 0, 1, 0, 0, 0, 0, 0, 0))
 
-    def test_release_counts_pure_human_attention_consumption_per_spawn(self) -> None:
+    def test_human_attention_cannot_overconsume_per_spawn(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
@@ -453,7 +636,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "created_at,updated_at) VALUES('spawn-2','run','phase','agent','transition',"
                 "'client-2','spawn-idem-2','task','pending','now','now')"
             )
-        reserve_budget(
+        reserve = reserve_budget(
             self.database,
             **self._kwargs(
                 idempotency_key="spawn-1-human-reserve",
@@ -472,26 +655,19 @@ class BudgetRuntimeTests(unittest.TestCase):
         )
         spawn_2["spawn_request_id"] = "spawn-2"
         reserve_budget(self.database, **spawn_2)
-        with closing(sqlite3.connect(self.database)) as connection, connection:
-            connection.execute(
-                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
-                "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
-                "capability_class,event_type,human_attention_units,usage_confidence,"
-                "source,created_at,created_at_epoch_ms) VALUES('human-consumed',"
-                "'human-consumed-idem','human-consumed-dedupe',3,'run','transition',"
-                "'spawn','capability','human_attention',1,'known','settlement','now',"
-                "1800000000124)"
-            )
-            connection.execute(
-                "UPDATE run_budgets SET reserved_human_attention=1,"
-                "consumed_human_attention=1 WHERE run_id='run'"
-            )
-        with self.assertRaisesRegex(BudgetExceeded, "dimension=human_attention_units"):
-            release_budget(
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        consume_human_attention(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="human-consumed",
+                amounts=BudgetAmounts(human_attention_units=1),
+            ),
+        )
+        with self.assertRaisesRegex(BudgetExceeded, "outstanding reservation"):
+            consume_human_attention(
                 self.database,
-                **self._kwargs(
-                    idempotency_key="double-release-human",
-                    dedupe_key="double-release-human",
+                **self._post_kwargs(
+                    idempotency_key="double-consume-human",
                     amounts=BudgetAmounts(human_attention_units=1),
                 ),
             )
@@ -527,7 +703,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "'endpoint','capability','cost-row','effective','cost-hash','known',"
                 "'release',1,1,'known','legacy','now',1001)"
             )
-        with self.assertRaisesRegex(BudgetError, "per-spawn"):
+        with self.assertRaisesRegex(BudgetError, "Budget prefix|per-spawn"):
             reserve_budget(
                 self.database,
                 **self._kwargs(
@@ -626,6 +802,26 @@ class BudgetRuntimeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
+
+    def test_consume_cannot_underfund_remaining_token_reservation(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-consume-cost-floor",
+                dedupe_key="reserve-consume-cost-floor",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with self.assertRaisesRegex(BudgetExceeded, "underfund"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="consume-cost-only",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._budget_row(), (0, 10, 0, 1, 0, 0, 0, 0, 0, 0))
 
     def test_reserve_and_release_require_pending_spawn_state(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
@@ -754,51 +950,31 @@ class BudgetRuntimeTests(unittest.TestCase):
         self.assertEqual(self._event_count(), 1)
         self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
 
-    def test_retry_events_must_be_composite_bound_to_selected_spawn(self) -> None:
+    def test_retry_event_without_accepted_session_proof_fails_closed(self) -> None:
+        reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="retry-proof-reserve",
+                dedupe_key="retry-proof-reserve",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
         with closing(sqlite3.connect(self.database)) as connection, connection:
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute(
-                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
-                "transition_type,action_type,risk_dominance,idempotency_key,"
-                "guard_version_before,created_at) VALUES('transition-other','run',"
-                "'before','after','dispatch','spawn','R1','transition-other-idem',0,'now')"
-            )
-            connection.execute(
-                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
-                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
-                "created_at,updated_at) VALUES('spawn-other','run','phase','agent',"
-                "'transition-other','client-other','spawn-idem-other','task','pending',"
-                "'now','now')"
-            )
-            connection.execute(
-                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
-                "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
-                "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
-                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
-                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms) "
-                "VALUES('wrong-retry','wrong-retry-idem','wrong-retry-dedupe',1,"
-                "'run','transition-other','spawn-other','provider','model','endpoint',"
-                "'capability','cost-row','effective','cost-hash','known',"
-                "'retry_decrement',1,'known','legacy','now',1000)"
-            )
-            connection.execute(
-                "UPDATE run_budgets SET consumed_retries=1 WHERE run_id='run'"
-            )
-        with self.assertRaisesRegex(BudgetError, "composite-bound"):
-            reserve_budget(
+            connection.execute("UPDATE runs SET state='running' WHERE run_id='run'")
+        with self.assertRaisesRegex(BudgetError, "accepted session proof"):
+            decrement_retry_budget(
                 self.database,
-                **self._kwargs(
-                    idempotency_key="blocked-wrong-retry",
-                    dedupe_key="blocked-wrong-retry",
-                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                **self._post_kwargs(
+                    idempotency_key="retry-without-proof",
+                    amounts=BudgetAmounts(retry_units=1),
                 ),
             )
         self.assertEqual(self._event_count(), 1)
-        self.assertEqual(self._budget_row(), (0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     def test_runtime_runs_all_pinned_blocking_budget_slos(self) -> None:
         self.assertTrue(
             {
+                "Duplicate live dispatch blocked",
                 "Model cost registry numeric bounds",
                 "`sessions_spawn` intent without exact strict prior reserve",
                 "Meaningless `sessions_spawn` reserve",
@@ -871,7 +1047,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             )
         self.assertEqual(self._event_count(), 0)
 
-    def test_prior_unknown_usage_event_blocks_without_new_writes(self) -> None:
+    def test_unknown_non_classification_event_blocks_new_writes(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
@@ -892,13 +1068,12 @@ class BudgetRuntimeTests(unittest.TestCase):
             reserve_budget(
                 self.database,
                 **self._kwargs(
-                    idempotency_key="blocked-unknown-usage",
-                    dedupe_key="blocked-unknown-usage",
+                    idempotency_key="blocked-unknown",
+                    dedupe_key="blocked-unknown",
                     amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
                 ),
             )
         self.assertEqual(self._event_count(), 1)
-        self.assertEqual(self._budget_row(), (0, 1, 0, 1, 0, 0, 0, 0, 0, 0))
 
     def test_estimated_event_conservatively_downgrades_usage_confidence(self) -> None:
         kwargs = self._kwargs(
@@ -913,6 +1088,529 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "SELECT usage_confidence FROM run_budgets WHERE run_id='run'"
             ).fetchone()[0]
         self.assertEqual(confidence, "estimated")
+
+    def test_completed_spawn_usage_consumes_reserved_amounts(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-consume",
+                dedupe_key="reserve-for-consume",
+                amounts=BudgetAmounts(
+                    time_seconds=10,
+                    input_tokens=10,
+                    output_tokens=5,
+                    cost_microusd=10,
+                ),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="consume-usage",
+                amounts=BudgetAmounts(
+                    time_seconds=4,
+                    input_tokens=4,
+                    output_tokens=2,
+                    cost_microusd=2,
+                ),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE runs SET state='finalized' WHERE run_id='run'")
+        replay = consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="consume-usage",
+                amounts=BudgetAmounts(
+                    time_seconds=4,
+                    input_tokens=4,
+                    output_tokens=2,
+                    cost_microusd=2,
+                ),
+            ),
+        )
+        self.assertFalse(result.replayed)
+        self.assertTrue(replay.replayed)
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_time_seconds,reserved_input_tokens,"
+                "reserved_output_tokens,reserved_cost_microusd,consumed_time_seconds,"
+                "consumed_input_tokens,consumed_output_tokens,consumed_cost_microusd "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (6, 6, 3, 8, 4, 4, 2, 2))
+
+    def test_referenced_spawn_counter_drift_requires_ledger_backing(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-trigger",
+                dedupe_key="reserve-for-trigger",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "ledger-backed"):
+                connection.execute(
+                    "UPDATE run_budgets SET reserved_input_tokens=11 "
+                    "WHERE run_id='run'"
+                )
+        consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="ledger-backed-consume",
+                amounts=BudgetAmounts(input_tokens=4, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_input_tokens,consumed_input_tokens "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (6, 4))
+
+    def test_unknown_completed_usage_is_durable_and_blocks_more_budget_work(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-unknown",
+                dedupe_key="reserve-for-unknown",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        kwargs = self._post_kwargs(
+            idempotency_key="unknown-usage",
+            amounts=BudgetAmounts(),
+        )
+        kwargs["usage_confidence"] = "unknown"
+        consume_budget(self.database, **kwargs)
+        consume_budget(self.database, **kwargs)
+        with self.assertRaisesRegex(BudgetError, "unknown usage confidence"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="blocked-after-unknown",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        with closing(sqlite3.connect(self.database)) as connection:
+            confidence = connection.execute(
+                "SELECT usage_confidence FROM run_budgets WHERE run_id='run'"
+            ).fetchone()[0]
+            event = connection.execute(
+                "SELECT event_type,usage_confidence,input_tokens,cost_microusd "
+                "FROM budget_events WHERE event_idempotency_key='unknown-usage'"
+            ).fetchone()
+        self.assertEqual(confidence, "unknown")
+        self.assertEqual(event, ("consume", "unknown", 0, 0))
+
+    def test_zero_unknown_usage_row_must_poison_run_budget(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-drifted-unknown",
+                dedupe_key="reserve-for-drifted-unknown",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,cost_confidence,"
+                "event_type,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('drifted-unknown','drifted-unknown-idem',"
+                "'drifted-unknown-dedupe',2,'run','transition','spawn','provider',"
+                "'model','endpoint','capability','cost-row','effective','cost-hash',"
+                "'known','consume','unknown','legacy-import','now',1800000000125)"
+            )
+        with self.assertRaisesRegex(BudgetError, "unknown usage confidence"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="blocked-after-drifted-unknown",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 2)
+
+    def test_post_dispatch_budget_mutation_rejects_manual_review_run(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-manual-review",
+                dedupe_key="reserve-for-manual-review",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE runs SET state='human_review_required' WHERE run_id='run'"
+            )
+        with self.assertRaisesRegex(BudgetError, "active post-dispatch run"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="manual-review-consume",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+
+    def test_post_dispatch_budget_mutation_requires_post_acceptance_clock(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-stale-clock",
+                dedupe_key="reserve-for-stale-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        kwargs = self._post_kwargs(
+            idempotency_key="stale-clock-consume",
+            amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+        )
+        kwargs["clock_context_id"] = "clock"
+        with self.assertRaisesRegex(BudgetError, "fresh clock"):
+            consume_budget(self.database, **kwargs)
+
+    def test_accepted_spawn_timing_is_immutable_after_acceptance(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-bad-accepted-clock",
+                dedupe_key="reserve-for-bad-accepted-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            for assignment in (
+                "requested_at_epoch_ms=1800000000126",
+                "accepted_at_epoch_ms=1800000000126",
+            ):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "external intent proof"):
+                    connection.execute(
+                        f"UPDATE external_rpc_intents SET {assignment} "
+                        "WHERE intent_id='intent'"
+                    )
+        self.assertEqual(self._event_count(), 1)
+
+    def test_referenced_reserve_clock_context_and_replay_keys_are_immutable(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-referenced-clock",
+                dedupe_key="reserve-for-referenced-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            for assignment in (
+                "clock_context_id='post-clock'",
+                "event_idempotency_key='rewritten-reserve-key'",
+                "event_dedupe_hash='rewritten-reserve-hash'",
+            ):
+                with self.assertRaisesRegex(sqlite3.IntegrityError, "reserve is immutable"):
+                    connection.execute(
+                        f"UPDATE budget_events SET {assignment} WHERE budget_event_id=?",
+                        (reserve.budget_event_id,),
+                    )
+        replay = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-referenced-clock",
+                dedupe_key="reserve-for-referenced-clock",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self.assertTrue(replay.replayed)
+
+    def test_consume_requires_completed_session_state(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-running-session",
+                dedupe_key="reserve-for-running-session",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE sessions SET state='running' WHERE session_id='session'")
+        with self.assertRaisesRegex(BudgetError, "accepted session proof"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="running-session-consume",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+
+    def test_retry_decrement_debits_reserved_retry_unit_at_budget_limit(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE run_budgets SET retry_budget=1 WHERE run_id='run'")
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-single-retry",
+                dedupe_key="reserve-single-retry",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1, retry_units=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        decrement_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="single-retry-decrement",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (0, 1))
+        restore_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="single-retry-restore",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (1, 0))
+
+    def test_retry_decrement_requires_this_spawn_retry_reservation(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-without-retry",
+                dedupe_key="reserve-without-retry",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        with self.assertRaisesRegex(BudgetExceeded, "outstanding reservation"):
+            decrement_retry_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="retry-without-reservation",
+                    amounts=BudgetAmounts(retry_units=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
+
+    def test_retry_and_human_attention_events_update_exact_counters(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-runtime-events",
+                dedupe_key="reserve-for-runtime-events",
+                amounts=BudgetAmounts(
+                    input_tokens=1,
+                    cost_microusd=1,
+                    retry_units=1,
+                    human_attention_units=2,
+                ),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        decrement_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="retry-decrement",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries "
+                "FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (0, 1))
+        consume_human_attention(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="human-attention",
+                amounts=BudgetAmounts(human_attention_units=1),
+            ),
+        )
+        restore_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="retry-restore",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT reserved_retries,consumed_retries,reserved_human_attention,"
+                "consumed_human_attention FROM run_budgets WHERE run_id='run'"
+            ).fetchone()
+        self.assertEqual(row, (1, 0, 1, 1))
+
+    def test_post_dispatch_event_without_accepted_session_proof_fails_closed(self) -> None:
+        reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-without-proof",
+                dedupe_key="reserve-without-proof",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE runs SET state='running' WHERE run_id='run'")
+        with self.assertRaisesRegex(BudgetError, "accepted session proof"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="consume-without-proof",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 1)
+
+    def test_duplicate_live_dispatch_blocks_post_dispatch_budget_write(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-before-duplicate-dispatch",
+                dedupe_key="reserve-before-duplicate-dispatch",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        duplicate_metadata = (
+            '{"run_id":"run","transition_id":"transition",'
+            '"client_request_id":"client-duplicate",'
+            '"idempotency_key":"spawn-idem-duplicate",'
+            '"phase":"phase","agent_id":"agent","task_digest":"task-duplicate"}'
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,"
+                "state,session_key,created_at,updated_at) VALUES("
+                "'spawn-duplicate','run','phase','agent','transition',"
+                "'client-duplicate','spawn-idem-duplicate','task-duplicate',"
+                "'pending','session-key-duplicate','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,time_seconds,"
+                "input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('duplicate-reserve','duplicate-reserve-idem',"
+                "'duplicate-reserve-dedupe',2,'run','transition','spawn-duplicate',"
+                "'provider','model','endpoint','capability','cost-row','effective',"
+                "'cost-hash','known','reserve',0,1,0,1,0,0,'known','repair',"
+                "'now',1800000000123)"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=11,"
+                "reserved_cost_microusd=2 WHERE run_id='run'"
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_client_request_id,"
+                "external_idempotency_key,external_phase,external_agent_id,"
+                "external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+                "'intent-duplicate','run','transition','sessions_spawn',"
+                "'spawn-duplicate','duplicate-reserve','client-duplicate',"
+                "'spawn-idem-duplicate','phase','agent','task-duplicate','v1',"
+                "? ,?,'run','transition','client-duplicate','spawn-idem-duplicate',"
+                "'phase','agent','task-duplicate','accepted','session-key-duplicate',"
+                "'now',1800000000124,'now',1800000000125)",
+                (duplicate_metadata, duplicate_metadata),
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+                "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+                "task_digest,state,spawned_at,completed_at) VALUES("
+                "'session-duplicate','spawn-duplicate','run','transition','phase',"
+                "'agent','client-duplicate','spawn-idem-duplicate',"
+                "'session-key-duplicate','task-duplicate','running','now',NULL)"
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET state='accepted' "
+                "WHERE spawn_request_id='spawn-duplicate'"
+            )
+        with self.assertRaisesRegex(BudgetError, "Duplicate live dispatch blocked"):
+            consume_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="consume-with-duplicate-dispatch",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+            )
+        self.assertEqual(self._event_count(), 2)
+
+    def test_post_dispatch_event_persists_clock_context_and_is_immutable(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-post-clock",
+                dedupe_key="reserve-for-post-clock",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="clock-bound-consume",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT clock_context_id FROM budget_events WHERE budget_event_id=?",
+                (result.budget_event_id,),
+            ).fetchone()
+            self.assertEqual(row, ("post-clock",))
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_events SET source='repair' WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_events SET event_idempotency_key='rewritten-key' "
+                    "WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_events SET event_dedupe_hash='rewritten-hash' "
+                    "WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "DELETE FROM budget_events WHERE budget_event_id=?",
+                    (result.budget_event_id,),
+                )
 
     def test_missing_database_is_not_created(self) -> None:
         missing = Path(self.temporary.name) / "missing.db"

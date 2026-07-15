@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `6690f8cd77e6d58d5c12f9639128bce72dfb15568abcd4a7ae28f414d50d300f`
+- Current design artifact SHA-256: `e1fb5b005fc6ba2ab15d0afca550d3d7c4c5f5baab47e4e65533678d81f595b5`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `77efaab7b2ba87aaef02a89dd8dc0aa78936abc56b23759b1218d8baee541a6e`
-- Current migration manifest SHA-256: `26222783297cd70b5f6eb7064d6196dd25d5c5ea8c177f5f01a0bbb582e4ca13`
+- Current latest migration SHA-256: `84b5a34adc999eb65f56c474a64d3c363d029f6409d89dfac750b300bcfde6ea`
+- Current migration manifest SHA-256: `20233457f7f8657b5456f406756cf2c33df5af003e2d0994b5bb21e02c147fa1`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -58,19 +58,41 @@ the selected transition and endpoint-bound cost row, derives a conservative
 integer-microusd cost floor from that registry row, requires an exact
 same-run/same-transition spawn request, stamps events only from a persisted
 same-run/same-transition trusted gate/order clock context, requires the owning
-run to remain in pre-dispatch `candidate` state, refuses prior unknown usage or
-post-intent reserve writes, and re-runs every pinned blocking budget SLO plus
-runtime ledger-contamination checks before commit. Those contamination checks
-include per-spawn reserve/release, retry, and pure `human_attention` bindings.
+run to remain in pre-dispatch `candidate` state, refuses prior unknown usage and
+post-intent reserve or release writes, and re-runs every pinned blocking budget
+SLO, including duplicate live dispatch, plus runtime ledger-contamination checks
+before commit. Those contamination checks include per-spawn reserve/release,
+retry, and pure `human_attention` bindings.
 Release checks outstanding amounts, including pure `human_attention`
 consumption rows, and the remaining token-cost floor per spawn request, so one
 request cannot release another request's reservation or leave its remaining tokens
-underfunded. The
-API is idempotent on a caller key and separately rejects
-reused source dedupe identities. It does not yet claim end-to-end `sessions_spawn`
-settlement: migration v3 deliberately freezes a referenced prior-reserve row
-and its counters, so a follow-up reviewed migration/SLO change is required
-before consume/settle can account for an accepted spawn safely.
+underfunded. The API is idempotent on a caller key and separately rejects
+reused source dedupe identities. It does not yet claim end-to-end
+`sessions_spawn` settlement. Migration v4 keeps the referenced reserve selection
+immutable, rejects direct post-intent reserve/release imports, and permits only
+ledger-backed atomic counter cache changes for post-dispatch events. The runtime now records `consume`, retry
+decrement/restore, and pure
+`human_attention` only for an exact accepted session/spawn/intent tuple;
+`consume` additionally requires a completed session. These post-dispatch
+mutations require an active automatic dispatch state, no duplicate live dispatch,
+a fresh trusted clock after both the spawn request and accepted session proof, and
+no prior unknown usage poison except for exact idempotent replay. Known and
+estimated usage move outstanding
+reservations into consumed counters, while unknown completed usage is persisted
+only as a zero-amount classification and marks the run budget unknown so later
+automatic budget work fails closed. Migration v5 versions the retry prefix SLO
+so every reserve/consume/release/retry/human-attention prefix window is scoped
+by run, transition, spawn request, and capability; migration v6 versions the
+post-dispatch SLO guards for request/accepted timing, selected cost-row binding,
+and consume confidence/amount pairing. Migration v7 records the trusted clock
+context on post-dispatch budget events, re-freezes referenced reserve identity
+including replay and clock keys, freezes accepted post-dispatch usage ledger rows
+against update/delete, and versions the current SLO proof so post-dispatch events
+must bind to the selected reserve transition and one-use trusted clock. Accepted
+post-dispatch replay keys and accepted `sessions_spawn` request/accepted epoch
+timing are immutable once they become settlement proof.
+Atomic final settlement of unused reservation, legacy-money import conversion,
+and the remaining adversarial fixture matrix remain open in Issue #4.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API
@@ -89,7 +111,8 @@ integration proof.
 - `main` contains reviewed project state.
 - Implementation work should use focused branches and pull requests.
 - Every PR must wait for a completed GitHub Codex review; any P0/P1 finding blocks merge.
-- After Codex is clean, River performs the final audit and merges into `main`.
+- After Codex is clean for the exact current head, the watcher CAS-checks the
+  head and required checks, then auto-merges into `main`; ambiguity fails closed.
 - Design changes must preserve executable DDL/SLO validation and adversarial fixtures.
 - Production readiness must be backed by runtime evidence, not document-only acceptance.
 

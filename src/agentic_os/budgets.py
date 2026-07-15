@@ -50,7 +50,10 @@ _LIMITS = {
 _MAX_EVENT_SEQUENCE = 1_000_000
 _MAX_EPOCH_MS = 253_402_300_799_999
 _USAGE_CONFIDENCE = {"known", "estimated"}
+_POST_DISPATCH_USAGE_CONFIDENCE = {"known", "estimated", "unknown"}
 _BUDGET_INVARIANT_QUERIES = {
+    "Duplicate live dispatch blocked",
+    "Accepted `sessions_spawn` without exact accepted session identity",
     "Unknown usage blocks auto-local",
     "Model cost registry numeric bounds",
     "Endpoint-bound budget event cost row blocks dispatch",
@@ -66,6 +69,14 @@ _BUDGET_INVARIANT_QUERIES = {
     "Budget event count bounded for SUM safety",
 }
 _BUDGET_MUTATION_RUN_STATES = {"candidate"}
+_POST_DISPATCH_RUN_STATES = {
+    "dispatched",
+    "first_output_waiting",
+    "running",
+    "child_completed",
+    "child_failed",
+    "aggregation_completed",
+}
 
 
 @dataclass(frozen=True)
@@ -237,7 +248,11 @@ def _selected_binding(
     *,
     run_id: str,
     transition_id: str,
+    allow_unknown_usage: bool = False,
 ) -> BudgetSelection:
+    usage_clause = "" if allow_unknown_usage else (
+        " AND rb.usage_confidence IN ('known','estimated')"
+    )
     row = connection.execute(
         "SELECT rb.selected_provider,rb.selected_model,"
         "rb.selected_endpoint_binding_id,rb.capability_class,"
@@ -258,7 +273,7 @@ def _selected_binding(
         " AND m.confidence=rb.selected_cost_confidence "
         "WHERE rb.run_id=? AND rb.selected_reserve_transition_id=? "
         " AND rb.selected_cost_confidence IN ('known','estimated') "
-        " AND rb.usage_confidence IN ('known','estimated')",
+        + usage_clause,
         (run_id, transition_id),
     ).fetchone()
     if row is None:
@@ -286,8 +301,15 @@ def _required_cost(selection: BudgetSelection, amounts: BudgetAmounts) -> int:
 
 def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
     unknown_usage = connection.execute(
-        "SELECT budget_event_id FROM budget_events "
-        "WHERE usage_confidence='unknown' LIMIT 1"
+        "SELECT be.budget_event_id FROM budget_events be "
+        "JOIN runs r ON r.run_id=be.run_id "
+        "LEFT JOIN run_budgets rb ON rb.run_id=be.run_id "
+        "WHERE be.usage_confidence='unknown' AND ("
+        "rb.run_id IS NULL OR rb.usage_confidence IS NOT 'unknown' OR "
+        "r.state IN ('gate_passed','release_pending','finalized') OR NOT ("
+        "be.event_type='consume' AND be.time_seconds=0 AND be.input_tokens=0 "
+        "AND be.output_tokens=0 AND be.cost_microusd=0 "
+        "AND be.retry_units=0 AND be.human_attention_units=0)) LIMIT 1"
     ).fetchone()
     if unknown_usage is not None:
         raise BudgetError("unknown usage confidence already exists in budget ledger")
@@ -338,7 +360,8 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
         "WHEN event_type IN ('consume','release') THEN -cost_microusd ELSE 0 END) "
         "OVER ledger_window AS net_cost,"
         "SUM(CASE WHEN event_type='reserve' THEN retry_units "
-        "WHEN event_type='release' THEN -retry_units ELSE 0 END) "
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) "
         "OVER ledger_window AS net_retry,"
         "SUM(CASE WHEN event_type='retry_decrement' THEN retry_units "
         "WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) "
@@ -381,7 +404,8 @@ def _spawn_outstanding(
         "COALESCE(SUM(CASE WHEN event_type='reserve' THEN cost_microusd "
         "WHEN event_type IN ('consume','release') THEN -cost_microusd ELSE 0 END),0),"
         "COALESCE(SUM(CASE WHEN event_type='reserve' THEN retry_units "
-        "WHEN event_type='release' THEN -retry_units ELSE 0 END),0),"
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END),0),"
         "COALESCE(SUM(CASE WHEN event_type='reserve' THEN human_attention_units "
         "WHEN event_type IN ('release','human_attention') "
         "THEN -human_attention_units ELSE 0 END),0) "
@@ -437,7 +461,7 @@ _EVENT_COMPARE_COLUMNS = (
     "cost_effective_at,cost_registry_hash,cost_confidence,zero_reserve_policy_id,"
     "zero_reserve_policy_hash,event_type,time_seconds,input_tokens,output_tokens,"
     "cost_microusd,human_attention_units,retry_units,usage_confidence,source,"
-    "created_at,created_at_epoch_ms"
+    "created_at,created_at_epoch_ms,clock_context_id"
 )
 
 
@@ -631,6 +655,7 @@ def record_budget_event(
                 source,
                 created_at,
                 created_at_epoch_ms,
+                None,
             )
             replay = _existing_event(
                 connection, idempotency_key=idempotency_key, expected=expected
@@ -647,7 +672,7 @@ def record_budget_event(
                 raise BudgetError(
                     f"{event_type} requires an owning run in pre-dispatch state"
                 )
-            if event_type == "reserve":
+            if event_type in {"reserve", "release"}:
                 prior_intent = connection.execute(
                     "SELECT intent_id FROM external_rpc_intents "
                     "WHERE rpc_kind='sessions_spawn' AND run_id=? "
@@ -656,8 +681,8 @@ def record_budget_event(
                 ).fetchone()
                 if prior_intent is not None:
                     raise BudgetError(
-                        "reserve requires no existing sessions_spawn intent for "
-                        "the spawn request"
+                        f"{event_type} requires no existing sessions_spawn intent "
+                        "for the spawn request"
                     )
             if event_type == "release":
                 outstanding = _spawn_outstanding(
@@ -697,8 +722,9 @@ def record_budget_event(
                 "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
                 "cost_confidence,zero_reserve_policy_id,zero_reserve_policy_hash,event_type,"
                 "time_seconds,input_tokens,output_tokens,cost_microusd,human_attention_units,"
-                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms,"
+                "clock_context_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     budget_event_id,
                     idempotency_key,
@@ -736,3 +762,388 @@ def reserve_budget(database: Path, **kwargs: object) -> BudgetEventResult:
 
 def release_budget(database: Path, **kwargs: object) -> BudgetEventResult:
     return record_budget_event(database, event_type="release", **kwargs)  # type: ignore[arg-type]
+
+
+def _update_post_dispatch_counters(
+    connection: sqlite3.Connection,
+    *,
+    event_type: str,
+    run_id: str,
+    amounts: BudgetAmounts,
+    usage_confidence: str,
+    updated_at: str,
+) -> None:
+    if event_type == "consume":
+        values = (
+            amounts.time_seconds,
+            amounts.input_tokens,
+            amounts.output_tokens,
+            amounts.cost_microusd,
+        )
+        cursor = connection.execute(
+            "UPDATE run_budgets SET "
+            "reserved_time_seconds=reserved_time_seconds-?,"
+            "reserved_input_tokens=reserved_input_tokens-?,"
+            "reserved_output_tokens=reserved_output_tokens-?,"
+            "reserved_cost_microusd=reserved_cost_microusd-?,"
+            "consumed_time_seconds=consumed_time_seconds+?,"
+            "consumed_input_tokens=consumed_input_tokens+?,"
+            "consumed_output_tokens=consumed_output_tokens+?,"
+            "consumed_cost_microusd=consumed_cost_microusd+?,"
+            "usage_confidence=CASE WHEN ?='unknown' THEN 'unknown' "
+            "WHEN usage_confidence='known' AND ?='estimated' THEN 'estimated' "
+            "ELSE usage_confidence END,updated_at=? "
+            "WHERE run_id=? AND reserved_time_seconds>=? "
+            "AND reserved_input_tokens>=? AND reserved_output_tokens>=? "
+            "AND reserved_cost_microusd>=? "
+            "AND consumed_time_seconds+?<=time_budget_seconds "
+            "AND consumed_input_tokens+?<=input_token_budget "
+            "AND consumed_output_tokens+?<=output_token_budget "
+            "AND consumed_cost_microusd+?<=cost_budget_microusd",
+            (
+                *values,
+                *values,
+                usage_confidence,
+                usage_confidence,
+                updated_at,
+                run_id,
+                *values,
+                *values,
+            ),
+        )
+    elif event_type == "retry_decrement":
+        cursor = connection.execute(
+            "UPDATE run_budgets SET reserved_retries=reserved_retries-?,"
+            "consumed_retries=consumed_retries+?,"
+            "usage_confidence=CASE WHEN usage_confidence='known' AND ?='estimated' "
+            "THEN 'estimated' ELSE usage_confidence END,updated_at=? "
+            "WHERE run_id=? AND reserved_retries>=? "
+            "AND consumed_retries+?<=retry_budget",
+            (
+                amounts.retry_units,
+                amounts.retry_units,
+                usage_confidence,
+                updated_at,
+                run_id,
+                amounts.retry_units,
+                amounts.retry_units,
+            ),
+        )
+    elif event_type == "retry_restore":
+        cursor = connection.execute(
+            "UPDATE run_budgets SET reserved_retries=reserved_retries+?,"
+            "consumed_retries=consumed_retries-?,"
+            "usage_confidence=CASE WHEN usage_confidence='known' AND ?='estimated' "
+            "THEN 'estimated' ELSE usage_confidence END,updated_at=? "
+            "WHERE run_id=? AND consumed_retries>=? "
+            "AND reserved_retries+?<=retry_budget",
+            (
+                amounts.retry_units,
+                amounts.retry_units,
+                usage_confidence,
+                updated_at,
+                run_id,
+                amounts.retry_units,
+                amounts.retry_units,
+            ),
+        )
+    else:
+        cursor = connection.execute(
+            "UPDATE run_budgets SET "
+            "reserved_human_attention=reserved_human_attention-?,"
+            "consumed_human_attention=consumed_human_attention+?,"
+            "usage_confidence=CASE WHEN usage_confidence='known' AND ?='estimated' "
+            "THEN 'estimated' ELSE usage_confidence END,updated_at=? "
+            "WHERE run_id=? AND reserved_human_attention>=? "
+            "AND consumed_human_attention+?<=human_attention_budget",
+            (
+                amounts.human_attention_units,
+                amounts.human_attention_units,
+                usage_confidence,
+                updated_at,
+                run_id,
+                amounts.human_attention_units,
+                amounts.human_attention_units,
+            ),
+        )
+    if cursor.rowcount != 1:
+        raise BudgetExceeded(
+            f"{event_type} exceeds the selected budget or outstanding reservation"
+        )
+
+
+def record_post_dispatch_event(
+    database: Path,
+    *,
+    event_type: Literal[
+        "consume", "retry_decrement", "retry_restore", "human_attention"
+    ],
+    run_id: str,
+    transition_id: str,
+    selection: BudgetSelection,
+    amounts: BudgetAmounts,
+    idempotency_key: str,
+    dedupe_key: str,
+    source: str,
+    spawn_request_id: str,
+    clock_context_id: str,
+    usage_confidence: Literal["known", "estimated", "unknown"] = "known",
+) -> BudgetEventResult:
+    """Record one accepted-spawn usage, retry, or human-attention event."""
+
+    if event_type not in {
+        "consume",
+        "retry_decrement",
+        "retry_restore",
+        "human_attention",
+    }:
+        raise BudgetError(f"unsupported post-dispatch event type: {event_type!r}")
+    run_id = _required_text("run_id", run_id)
+    transition_id = _required_text("transition_id", transition_id)
+    idempotency_key = _required_text("idempotency_key", idempotency_key)
+    dedupe_key = _required_text("dedupe_key", dedupe_key)
+    source = _required_text("source", source)
+    spawn_request_id = _required_text("spawn_request_id", spawn_request_id)
+    clock_context_id = _required_text("clock_context_id", clock_context_id)
+    if usage_confidence not in _POST_DISPATCH_USAGE_CONFIDENCE:
+        raise BudgetError("invalid post-dispatch usage confidence")
+    if event_type == "consume":
+        if amounts.retry_units or amounts.human_attention_units:
+            raise BudgetError("consume cannot carry retry or human-attention units")
+        if usage_confidence == "unknown":
+            if not amounts.is_zero():
+                raise BudgetError("unknown usage must use a zero-amount classification")
+        elif amounts.is_zero():
+            raise BudgetError("known or estimated usage must carry a non-zero amount")
+    elif event_type in {"retry_decrement", "retry_restore"}:
+        if amounts != BudgetAmounts(retry_units=amounts.retry_units) or not amounts.retry_units:
+            raise BudgetError(f"{event_type} must carry retry units only")
+        if usage_confidence == "unknown":
+            raise BudgetError("retry events require known or estimated usage")
+    else:
+        if amounts != BudgetAmounts(
+            human_attention_units=amounts.human_attention_units
+        ) or not amounts.human_attention_units:
+            raise BudgetError("human_attention must carry human-attention units only")
+        if usage_confidence == "unknown":
+            raise BudgetError("human-attention events require known or estimated usage")
+
+    connection = _connect(Path(database))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _verify_schema_identity(connection)
+            actual_selection = _selected_binding(
+                connection,
+                run_id=run_id,
+                transition_id=transition_id,
+                allow_unknown_usage=True,
+            )
+            if actual_selection != selection:
+                raise BudgetConflict(
+                    "requested budget selection differs from persisted selected cost row"
+                )
+            proof = connection.execute(
+                "SELECT sr.state,r.state,i.accepted_at_epoch_ms,"
+                "i.requested_at_epoch_ms FROM spawn_requests sr "
+                "JOIN runs r ON r.run_id=sr.run_id "
+                "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
+                "AND i.state IN ('accepted','reconciled') "
+                "AND i.spawn_request_id=sr.spawn_request_id AND i.run_id=sr.run_id "
+                "AND i.transition_id=sr.transition_id "
+                "AND i.client_request_id=sr.client_request_id "
+                "AND i.idempotency_key=sr.spawn_idempotency_key "
+                "AND i.phase=sr.phase AND i.agent_id=sr.agent_id "
+                "AND i.task_digest=sr.task_digest AND i.external_id=sr.session_key "
+                "JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id "
+                "AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id "
+                "AND s.client_request_id=sr.client_request_id "
+                "AND s.spawn_idempotency_key=sr.spawn_idempotency_key "
+                "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
+                "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
+                "WHERE sr.spawn_request_id=? AND sr.run_id=? AND sr.transition_id=? "
+                "AND sr.state IN ('accepted','completed') "
+                "AND (?<>'consume' OR (sr.state='completed' "
+                "AND s.state='completed' "
+                "AND s.completed_at IS NOT NULL AND s.completed_at<>''))",
+                (spawn_request_id, run_id, transition_id, event_type),
+            ).fetchone()
+            if proof is None:
+                raise BudgetError(
+                    "post-dispatch budget event requires exact accepted session proof"
+                )
+            created_at, created_at_epoch_ms = _trusted_created_at(
+                connection,
+                run_id=run_id,
+                transition_id=transition_id,
+                clock_context_id=clock_context_id,
+            )
+            accepted_at_epoch_ms = proof[2]
+            requested_at_epoch_ms = proof[3]
+            if (
+                type(requested_at_epoch_ms) is not int
+                or requested_at_epoch_ms < 1
+                or requested_at_epoch_ms > _MAX_EPOCH_MS
+                or type(accepted_at_epoch_ms) is not int
+                or accepted_at_epoch_ms <= requested_at_epoch_ms
+                or created_at_epoch_ms <= accepted_at_epoch_ms
+                or created_at_epoch_ms <= requested_at_epoch_ms
+            ):
+                raise BudgetError(
+                    "post-dispatch budget event requires a fresh clock after "
+                    "the sessions_spawn request and accepted session proof"
+                )
+            if event_type == "consume" and usage_confidence != "unknown":
+                if amounts.cost_microusd < _required_cost(selection, amounts):
+                    raise BudgetExceeded(
+                        "usage cost is below the selected registry price for token amounts"
+                    )
+            event_dedupe_hash = _dedupe_hash(dedupe_key)
+            budget_event_id = _event_id(idempotency_key)
+            expected = (
+                budget_event_id,
+                event_dedupe_hash,
+                run_id,
+                transition_id,
+                spawn_request_id,
+                selection.provider,
+                selection.model,
+                selection.endpoint_binding_id,
+                selection.capability_class,
+                selection.cost_registry_id,
+                selection.cost_effective_at,
+                selection.cost_registry_hash,
+                selection.cost_confidence,
+                None,
+                None,
+                event_type,
+                amounts.time_seconds,
+                amounts.input_tokens,
+                amounts.output_tokens,
+                amounts.cost_microusd,
+                amounts.human_attention_units,
+                amounts.retry_units,
+                usage_confidence,
+                source,
+                created_at,
+                created_at_epoch_ms,
+                clock_context_id,
+            )
+            replay = _existing_event(
+                connection, idempotency_key=idempotency_key, expected=expected
+            )
+            if replay is not None:
+                _assert_budget_invariants(connection)
+                connection.execute("COMMIT")
+                return replay
+            poisoned_usage = connection.execute(
+                "SELECT 1 FROM run_budgets rb "
+                "WHERE rb.run_id=? AND rb.usage_confidence='unknown' "
+                "UNION ALL "
+                "SELECT 1 FROM budget_events be "
+                "WHERE be.run_id=? AND be.usage_confidence='unknown' LIMIT 1",
+                (run_id, run_id),
+            ).fetchone()
+            if poisoned_usage is not None:
+                raise BudgetError(
+                    "unknown usage confidence blocks post-dispatch budget mutation"
+                )
+            usage_row = connection.execute(
+                "SELECT usage_confidence FROM run_budgets WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if usage_row is None or usage_row[0] == "unknown":
+                raise BudgetError(
+                    "unknown usage confidence blocks post-dispatch budget mutation"
+                )
+            if proof[1] not in _POST_DISPATCH_RUN_STATES:
+                raise BudgetError(
+                    "post-dispatch budget event requires an active post-dispatch run"
+                )
+            _assert_budget_invariants(connection)
+            outstanding = _spawn_outstanding(
+                connection,
+                spawn_request_id=spawn_request_id,
+                run_id=run_id,
+                transition_id=transition_id,
+                selection=selection,
+            )
+            if event_type == "consume":
+                for field in ("time_seconds", "input_tokens", "output_tokens", "cost_microusd"):
+                    if getattr(amounts, field) > getattr(outstanding, field):
+                        raise BudgetExceeded(
+                            f"consume exceeds outstanding reservation dimension={field}"
+                        )
+                remaining = BudgetAmounts(
+                    **{
+                        field: getattr(outstanding, field) - getattr(amounts, field)
+                        for field in _LIMITS
+                    }
+                )
+                if remaining.cost_microusd < _required_cost(selection, remaining):
+                    raise BudgetExceeded(
+                        "consume would underfund the remaining per-spawn token reservation"
+                    )
+            elif event_type == "retry_decrement" and (
+                amounts.retry_units > outstanding.retry_units
+            ):
+                raise BudgetExceeded("retry_decrement exceeds outstanding reservation")
+            elif event_type == "human_attention" and (
+                amounts.human_attention_units > outstanding.human_attention_units
+            ):
+                raise BudgetExceeded("human_attention exceeds outstanding reservation")
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(event_sequence),0)+1 FROM budget_events WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+            if type(sequence) is not int or not 1 <= sequence <= _MAX_EVENT_SEQUENCE:
+                raise BudgetExceeded("budget event sequence limit reached")
+            connection.execute(
+                "INSERT INTO budget_events("
+                "budget_event_id,event_idempotency_key,event_dedupe_hash,event_sequence,"
+                "run_id,transition_id,spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,cost_registry_hash,"
+                "cost_confidence,zero_reserve_policy_id,zero_reserve_policy_hash,event_type,"
+                "time_seconds,input_tokens,output_tokens,cost_microusd,human_attention_units,"
+                "retry_units,usage_confidence,source,created_at,created_at_epoch_ms,"
+                "clock_context_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (budget_event_id, idempotency_key, event_dedupe_hash, sequence, *expected[2:]),
+            )
+            _update_post_dispatch_counters(
+                connection,
+                event_type=event_type,
+                run_id=run_id,
+                amounts=amounts,
+                usage_confidence=usage_confidence,
+                updated_at=created_at,
+            )
+            _assert_budget_invariants(connection)
+            connection.execute("COMMIT")
+            return BudgetEventResult(budget_event_id, sequence, False)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+    except sqlite3.IntegrityError as exc:
+        raise BudgetConflict(f"post-dispatch event violates ledger contract: {exc}") from exc
+    except sqlite3.Error as exc:
+        raise BudgetError(f"post-dispatch budget transaction failed: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def consume_budget(database: Path, **kwargs: object) -> BudgetEventResult:
+    return record_post_dispatch_event(database, event_type="consume", **kwargs)  # type: ignore[arg-type]
+
+
+def decrement_retry_budget(database: Path, **kwargs: object) -> BudgetEventResult:
+    return record_post_dispatch_event(database, event_type="retry_decrement", **kwargs)  # type: ignore[arg-type]
+
+
+def restore_retry_budget(database: Path, **kwargs: object) -> BudgetEventResult:
+    return record_post_dispatch_event(database, event_type="retry_restore", **kwargs)  # type: ignore[arg-type]
+
+
+def consume_human_attention(database: Path, **kwargs: object) -> BudgetEventResult:
+    return record_post_dispatch_event(database, event_type="human_attention", **kwargs)  # type: ignore[arg-type]

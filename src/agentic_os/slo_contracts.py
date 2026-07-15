@@ -19,6 +19,7 @@ def slo_query_hash(sql_text: str) -> str:
 
 
 _BUDGET_LEDGER_RECONCILES_NAME = "Budget ledger reconciles to counters and budgets"
+_BUDGET_PREFIX_NAME = "Budget prefix over-release or over-restore"
 _BUDGET_LEDGER_RECONCILES_LEGACY_V1_V2_HASH = (
     "229ffe243ba24944c0da458e2d0986ea46de1471025cf95f9604bbe6a4dd9f7b"
 )
@@ -41,10 +42,10 @@ SLO_QUERY_CONTRACTS: tuple[SloQueryContract, ...] = (
     SloQueryContract('Meaningless `sessions_spawn` reserve', "SELECT eri.intent_id FROM external_rpc_intents eri JOIN budget_events be ON be.budget_event_id=eri.reserve_budget_event_id LEFT JOIN endpoint_zero_reserve_policies zp ON zp.zero_reserve_policy_id=be.zero_reserve_policy_id WHERE eri.rpc_kind='sessions_spawn' AND be.event_type='reserve' AND ((be.input_tokens=0 AND be.output_tokens=0 AND be.cost_microusd=0 AND be.zero_reserve_policy_id IS NULL) OR (be.input_tokens=0 AND be.output_tokens=0 AND be.cost_microusd=0 AND be.time_seconds=0 AND be.human_attention_units=0 AND be.retry_units=0) OR (be.zero_reserve_policy_id IS NOT NULL AND (zp.zero_reserve_policy_id IS NULL OR zp.enabled<>1 OR zp.endpoint_binding_id<>be.endpoint_binding_id OR zp.capability_class<>be.capability_class OR zp.policy_hash<>be.zero_reserve_policy_hash OR be.created_at_epoch_ms<zp.effective_from_epoch_ms OR (zp.effective_until_epoch_ms IS NOT NULL AND be.created_at_epoch_ms>=zp.effective_until_epoch_ms) OR (zp.min_retry_units<=0 AND zp.min_time_seconds<=0 AND zp.min_human_attention_units<=0) OR (zp.min_retry_units>0 AND be.retry_units<zp.min_retry_units) OR (zp.min_time_seconds>0 AND be.time_seconds<zp.min_time_seconds) OR (zp.min_human_attention_units>0 AND be.human_attention_units<zp.min_human_attention_units))));"),
     SloQueryContract('Budget event amount malformed or out of range', "SELECT budget_event_id FROM budget_events WHERE typeof(event_sequence)<>'integer' OR event_sequence<1 OR event_sequence>1000000 OR typeof(created_at_epoch_ms)<>'integer' OR created_at_epoch_ms<1 OR created_at_epoch_ms>253402300799999 OR typeof(time_seconds)<>'integer' OR time_seconds<0 OR time_seconds>31536000 OR typeof(input_tokens)<>'integer' OR input_tokens<0 OR input_tokens>1000000000 OR typeof(output_tokens)<>'integer' OR output_tokens<0 OR output_tokens>1000000000 OR typeof(cost_microusd)<>'integer' OR cost_microusd<0 OR cost_microusd>100000000000 OR typeof(human_attention_units)<>'integer' OR human_attention_units<0 OR human_attention_units>1000000 OR typeof(retry_units)<>'integer' OR retry_units<0 OR retry_units>1000000 OR (event_type='consume' AND (retry_units<>0 OR human_attention_units<>0)) OR (event_type='human_attention' AND (time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 OR cost_microusd<>0 OR retry_units<>0 OR human_attention_units<=0)) OR (event_type='retry_decrement' AND (retry_units=0 OR time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 OR cost_microusd<>0 OR human_attention_units<>0)) OR (event_type='retry_restore' AND (retry_units=0 OR time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 OR cost_microusd<>0 OR human_attention_units<>0));"),
     SloQueryContract('Budget counters outside selected budget', "SELECT run_id FROM run_budgets WHERE typeof(time_budget_seconds)<>'integer' OR time_budget_seconds<0 OR time_budget_seconds>31536000 OR typeof(input_token_budget)<>'integer' OR input_token_budget<0 OR input_token_budget>1000000000 OR typeof(output_token_budget)<>'integer' OR output_token_budget<0 OR output_token_budget>1000000000 OR typeof(cost_budget_microusd)<>'integer' OR cost_budget_microusd<0 OR cost_budget_microusd>100000000000 OR typeof(retry_budget)<>'integer' OR retry_budget<0 OR retry_budget>1000000 OR typeof(human_attention_budget)<>'integer' OR human_attention_budget<0 OR human_attention_budget>1000000 OR typeof(reserved_time_seconds)<>'integer' OR reserved_time_seconds<0 OR reserved_time_seconds>time_budget_seconds OR typeof(reserved_input_tokens)<>'integer' OR reserved_input_tokens<0 OR reserved_input_tokens>input_token_budget OR typeof(reserved_output_tokens)<>'integer' OR reserved_output_tokens<0 OR reserved_output_tokens>output_token_budget OR typeof(reserved_cost_microusd)<>'integer' OR reserved_cost_microusd<0 OR reserved_cost_microusd>cost_budget_microusd OR typeof(reserved_retries)<>'integer' OR reserved_retries<0 OR reserved_retries>retry_budget OR typeof(reserved_human_attention)<>'integer' OR reserved_human_attention<0 OR reserved_human_attention>human_attention_budget OR typeof(consumed_time_seconds)<>'integer' OR consumed_time_seconds<0 OR consumed_time_seconds>time_budget_seconds OR typeof(consumed_input_tokens)<>'integer' OR consumed_input_tokens<0 OR consumed_input_tokens>input_token_budget OR typeof(consumed_output_tokens)<>'integer' OR consumed_output_tokens<0 OR consumed_output_tokens>output_token_budget OR typeof(consumed_cost_microusd)<>'integer' OR consumed_cost_microusd<0 OR consumed_cost_microusd>cost_budget_microusd OR typeof(consumed_retries)<>'integer' OR consumed_retries<0 OR consumed_retries>retry_budget OR typeof(consumed_human_attention)<>'integer' OR consumed_human_attention<0 OR consumed_human_attention>human_attention_budget OR reserved_time_seconds+consumed_time_seconds>time_budget_seconds OR reserved_input_tokens+consumed_input_tokens>input_token_budget OR reserved_output_tokens+consumed_output_tokens>output_token_budget OR reserved_cost_microusd+consumed_cost_microusd>cost_budget_microusd OR reserved_retries+consumed_retries>retry_budget OR reserved_human_attention+consumed_human_attention>human_attention_budget;"),
-    SloQueryContract('Budget ledger reconciles to counters and budgets', "WITH event_sums AS (SELECT run_id, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) AS net_reserved_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) AS net_reserved_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) AS net_reserved_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) AS net_reserved_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type='release' THEN -retry_units ELSE 0 END) AS net_reserved_retries, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) AS net_reserved_human, SUM(CASE WHEN event_type='consume' THEN time_seconds ELSE 0 END) AS consumed_time, SUM(CASE WHEN event_type='consume' THEN input_tokens ELSE 0 END) AS consumed_input, SUM(CASE WHEN event_type='consume' THEN output_tokens ELSE 0 END) AS consumed_output, SUM(CASE WHEN event_type='consume' THEN cost_microusd ELSE 0 END) AS consumed_cost, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) AS consumed_retries, SUM(CASE WHEN event_type='human_attention' THEN human_attention_units ELSE 0 END) AS consumed_human FROM budget_events GROUP BY run_id), missing_budgets AS (SELECT DISTINCT be.run_id FROM budget_events be LEFT JOIN run_budgets rb ON rb.run_id=be.run_id WHERE rb.run_id IS NULL) SELECT run_id FROM missing_budgets UNION SELECT rb.run_id FROM run_budgets rb LEFT JOIN event_sums s USING(run_id) WHERE COALESCE(s.net_reserved_time,0)<0 OR COALESCE(s.net_reserved_input,0)<0 OR COALESCE(s.net_reserved_output,0)<0 OR COALESCE(s.net_reserved_cost,0)<0 OR COALESCE(s.net_reserved_retries,0)<0 OR COALESCE(s.net_reserved_human,0)<0 OR (COALESCE(s.net_reserved_time,0)>=0 AND COALESCE(s.net_reserved_time,0)<>rb.reserved_time_seconds) OR (COALESCE(s.net_reserved_input,0)>=0 AND COALESCE(s.net_reserved_input,0)<>rb.reserved_input_tokens) OR (COALESCE(s.net_reserved_output,0)>=0 AND COALESCE(s.net_reserved_output,0)<>rb.reserved_output_tokens) OR (COALESCE(s.net_reserved_cost,0)>=0 AND COALESCE(s.net_reserved_cost,0)<>rb.reserved_cost_microusd) OR (COALESCE(s.net_reserved_retries,0)>=0 AND COALESCE(s.net_reserved_retries,0)<>rb.reserved_retries) OR (COALESCE(s.net_reserved_human,0)>=0 AND COALESCE(s.net_reserved_human,0)<>rb.reserved_human_attention) OR COALESCE(s.consumed_time,0)<>rb.consumed_time_seconds OR COALESCE(s.consumed_input,0)<>rb.consumed_input_tokens OR COALESCE(s.consumed_output,0)<>rb.consumed_output_tokens OR COALESCE(s.consumed_cost,0)<>rb.consumed_cost_microusd OR COALESCE(s.consumed_retries,0)<>rb.consumed_retries OR COALESCE(s.consumed_human,0)<>rb.consumed_human_attention OR COALESCE(s.net_reserved_time,0)>rb.time_budget_seconds OR COALESCE(s.net_reserved_input,0)>rb.input_token_budget OR COALESCE(s.net_reserved_output,0)>rb.output_token_budget OR COALESCE(s.net_reserved_cost,0)>rb.cost_budget_microusd OR COALESCE(s.net_reserved_retries,0)>rb.retry_budget OR COALESCE(s.net_reserved_human,0)>rb.human_attention_budget OR COALESCE(s.consumed_time,0)>rb.time_budget_seconds OR COALESCE(s.consumed_input,0)>rb.input_token_budget OR COALESCE(s.consumed_output,0)>rb.output_token_budget OR COALESCE(s.consumed_cost,0)>rb.cost_budget_microusd OR COALESCE(s.consumed_retries,0)>rb.retry_budget OR COALESCE(s.consumed_human,0)>rb.human_attention_budget OR COALESCE(s.net_reserved_time,0)+COALESCE(s.consumed_time,0)>rb.time_budget_seconds OR COALESCE(s.net_reserved_input,0)+COALESCE(s.consumed_input,0)>rb.input_token_budget OR COALESCE(s.net_reserved_output,0)+COALESCE(s.consumed_output,0)>rb.output_token_budget OR COALESCE(s.net_reserved_cost,0)+COALESCE(s.consumed_cost,0)>rb.cost_budget_microusd OR COALESCE(s.net_reserved_retries,0)+COALESCE(s.consumed_retries,0)>rb.retry_budget OR COALESCE(s.net_reserved_human,0)+COALESCE(s.consumed_human,0)>rb.human_attention_budget;"),
+    SloQueryContract('Budget ledger reconciles to counters and budgets', "WITH event_sums AS (SELECT run_id, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) AS net_reserved_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) AS net_reserved_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) AS net_reserved_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) AS net_reserved_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type IN ('release','retry_decrement') THEN -retry_units WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) AS net_reserved_retries, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) AS net_reserved_human, SUM(CASE WHEN event_type='consume' THEN time_seconds ELSE 0 END) AS consumed_time, SUM(CASE WHEN event_type='consume' THEN input_tokens ELSE 0 END) AS consumed_input, SUM(CASE WHEN event_type='consume' THEN output_tokens ELSE 0 END) AS consumed_output, SUM(CASE WHEN event_type='consume' THEN cost_microusd ELSE 0 END) AS consumed_cost, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) AS consumed_retries, SUM(CASE WHEN event_type='human_attention' THEN human_attention_units ELSE 0 END) AS consumed_human FROM budget_events GROUP BY run_id), missing_budgets AS (SELECT DISTINCT be.run_id FROM budget_events be LEFT JOIN run_budgets rb ON rb.run_id=be.run_id WHERE rb.run_id IS NULL) SELECT run_id FROM missing_budgets UNION SELECT rb.run_id FROM run_budgets rb LEFT JOIN event_sums s USING(run_id) WHERE COALESCE(s.net_reserved_time,0)<0 OR COALESCE(s.net_reserved_input,0)<0 OR COALESCE(s.net_reserved_output,0)<0 OR COALESCE(s.net_reserved_cost,0)<0 OR COALESCE(s.net_reserved_retries,0)<0 OR COALESCE(s.net_reserved_human,0)<0 OR (COALESCE(s.net_reserved_time,0)>=0 AND COALESCE(s.net_reserved_time,0)<>rb.reserved_time_seconds) OR (COALESCE(s.net_reserved_input,0)>=0 AND COALESCE(s.net_reserved_input,0)<>rb.reserved_input_tokens) OR (COALESCE(s.net_reserved_output,0)>=0 AND COALESCE(s.net_reserved_output,0)<>rb.reserved_output_tokens) OR (COALESCE(s.net_reserved_cost,0)>=0 AND COALESCE(s.net_reserved_cost,0)<>rb.reserved_cost_microusd) OR (COALESCE(s.net_reserved_retries,0)>=0 AND COALESCE(s.net_reserved_retries,0)<>rb.reserved_retries) OR (COALESCE(s.net_reserved_human,0)>=0 AND COALESCE(s.net_reserved_human,0)<>rb.reserved_human_attention) OR COALESCE(s.consumed_time,0)<>rb.consumed_time_seconds OR COALESCE(s.consumed_input,0)<>rb.consumed_input_tokens OR COALESCE(s.consumed_output,0)<>rb.consumed_output_tokens OR COALESCE(s.consumed_cost,0)<>rb.consumed_cost_microusd OR COALESCE(s.consumed_retries,0)<>rb.consumed_retries OR COALESCE(s.consumed_human,0)<>rb.consumed_human_attention OR COALESCE(s.net_reserved_time,0)>rb.time_budget_seconds OR COALESCE(s.net_reserved_input,0)>rb.input_token_budget OR COALESCE(s.net_reserved_output,0)>rb.output_token_budget OR COALESCE(s.net_reserved_cost,0)>rb.cost_budget_microusd OR COALESCE(s.net_reserved_retries,0)>rb.retry_budget OR COALESCE(s.net_reserved_human,0)>rb.human_attention_budget OR COALESCE(s.consumed_time,0)>rb.time_budget_seconds OR COALESCE(s.consumed_input,0)>rb.input_token_budget OR COALESCE(s.consumed_output,0)>rb.output_token_budget OR COALESCE(s.consumed_cost,0)>rb.cost_budget_microusd OR COALESCE(s.consumed_retries,0)>rb.retry_budget OR COALESCE(s.consumed_human,0)>rb.human_attention_budget OR COALESCE(s.net_reserved_time,0)+COALESCE(s.consumed_time,0)>rb.time_budget_seconds OR COALESCE(s.net_reserved_input,0)+COALESCE(s.consumed_input,0)>rb.input_token_budget OR COALESCE(s.net_reserved_output,0)+COALESCE(s.consumed_output,0)>rb.output_token_budget OR COALESCE(s.net_reserved_cost,0)+COALESCE(s.consumed_cost,0)>rb.cost_budget_microusd OR COALESCE(s.net_reserved_retries,0)+COALESCE(s.consumed_retries,0)>rb.retry_budget OR COALESCE(s.net_reserved_human,0)+COALESCE(s.consumed_human,0)>rb.human_attention_budget;"),
     SloQueryContract(
         'Budget prefix over-release or over-restore',
-        "WITH ordered AS (SELECT budget_event_id, run_id, event_sequence, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type='release' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_human FROM budget_events) SELECT o.budget_event_id FROM ordered o LEFT JOIN run_budgets rb ON rb.run_id=o.run_id WHERE rb.run_id IS NULL OR o.net_time<0 OR o.net_input<0 OR o.net_output<0 OR o.net_cost<0 OR o.net_reserved_retry<0 OR o.net_retry_consumed<0 OR o.net_human<0 OR o.net_time>rb.time_budget_seconds OR o.net_input>rb.input_token_budget OR o.net_output>rb.output_token_budget OR o.net_cost>rb.cost_budget_microusd OR o.net_reserved_retry>rb.retry_budget OR o.net_retry_consumed>rb.retry_budget OR o.net_human>rb.human_attention_budget;",
+        "WITH ordered AS (SELECT budget_event_id, run_id, event_sequence, SUM(CASE WHEN event_type='reserve' THEN time_seconds WHEN event_type IN ('release','consume') THEN -time_seconds ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_time, SUM(CASE WHEN event_type='reserve' THEN input_tokens WHEN event_type IN ('release','consume') THEN -input_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_input, SUM(CASE WHEN event_type='reserve' THEN output_tokens WHEN event_type IN ('release','consume') THEN -output_tokens ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_output, SUM(CASE WHEN event_type='reserve' THEN cost_microusd WHEN event_type IN ('release','consume') THEN -cost_microusd ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_cost, SUM(CASE WHEN event_type='reserve' THEN retry_units WHEN event_type IN ('release','retry_decrement') THEN -retry_units WHEN event_type='retry_restore' THEN retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_reserved_retry, SUM(CASE WHEN event_type='retry_decrement' THEN retry_units WHEN event_type='retry_restore' THEN -retry_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_retry_consumed, SUM(CASE WHEN event_type='reserve' THEN human_attention_units WHEN event_type IN ('release','human_attention') THEN -human_attention_units ELSE 0 END) OVER (PARTITION BY run_id ORDER BY event_sequence) AS net_human FROM budget_events) SELECT o.budget_event_id FROM ordered o LEFT JOIN run_budgets rb ON rb.run_id=o.run_id WHERE rb.run_id IS NULL OR o.net_time<0 OR o.net_input<0 OR o.net_output<0 OR o.net_cost<0 OR o.net_reserved_retry<0 OR o.net_retry_consumed<0 OR o.net_human<0 OR o.net_time>rb.time_budget_seconds OR o.net_input>rb.input_token_budget OR o.net_output>rb.output_token_budget OR o.net_cost>rb.cost_budget_microusd OR o.net_reserved_retry>rb.retry_budget OR o.net_retry_consumed>rb.retry_budget OR o.net_human>rb.human_attention_budget;",
     ),
     SloQueryContract('Duplicate or replayed budget events', 'SELECT event_dedupe_hash FROM budget_events GROUP BY event_dedupe_hash HAVING COUNT(*)>1;'),
     SloQueryContract('Budget event count bounded for SUM safety', 'SELECT run_id FROM budget_events GROUP BY run_id HAVING COUNT(*)>1000000 OR MIN(event_sequence)<1 OR MAX(event_sequence)>1000000;'),
@@ -70,8 +71,20 @@ def _contract_by_name(query_name: str) -> SloQueryContract:
     raise RuntimeError(f"missing required SLO query contract: {query_name}")
 
 
+def _legacy_retry_reservation_sql(sql_text: str) -> str:
+    return sql_text.replace(
+        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
+        "WHEN event_type IN ('release','retry_decrement') THEN -retry_units "
+        "WHEN event_type='retry_restore' THEN retry_units ELSE 0 END)",
+        "SUM(CASE WHEN event_type='reserve' THEN retry_units "
+        "WHEN event_type='release' THEN -retry_units ELSE 0 END)",
+    )
+
+
 def _legacy_budget_ledger_reconciles_sql() -> str:
-    sql_text = _contract_by_name(_BUDGET_LEDGER_RECONCILES_NAME).sql_text
+    sql_text = _legacy_retry_reservation_sql(
+        _contract_by_name(_BUDGET_LEDGER_RECONCILES_NAME).sql_text
+    )
     for column in (
         "reserved_time_seconds",
         "reserved_input_tokens",
@@ -102,6 +115,184 @@ def _legacy_budget_ledger_reconciles_sql() -> str:
     return sql_text
 
 
+def _legacy_retry_reservation_contract(query_name: str) -> SloQueryContract:
+    contract = _contract_by_name(query_name)
+    return SloQueryContract(
+        contract.query_name,
+        _legacy_retry_reservation_sql(contract.sql_text),
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
+def _post_dispatch_session_proof_contract(
+    *,
+    require_accepted_timing: bool = False,
+    require_selected_cost: bool = False,
+    require_selected_transition: bool = False,
+    require_trusted_clock: bool = False,
+) -> SloQueryContract:
+    contract = _contract_by_name(
+        'Accepted `sessions_spawn` without exact accepted session identity'
+    )
+    base_sql = contract.sql_text.rstrip()
+    if base_sql.endswith(";"):
+        base_sql = base_sql[:-1]
+    timing_predicate = (
+        "OR typeof(eri.accepted_at_epoch_ms)<>'integer' "
+        "OR eri.accepted_at_epoch_ms<1 "
+        "OR eri.accepted_at_epoch_ms>253402300799999 "
+        "OR typeof(eri.requested_at_epoch_ms)<>'integer' "
+        "OR eri.requested_at_epoch_ms<1 "
+        "OR eri.requested_at_epoch_ms>253402300799999 "
+        "OR eri.accepted_at_epoch_ms<=eri.requested_at_epoch_ms "
+        "OR typeof(be.created_at_epoch_ms)<>'integer' "
+        "OR be.created_at_epoch_ms<1 "
+        "OR be.created_at_epoch_ms>253402300799999 "
+        "OR be.created_at_epoch_ms<=eri.accepted_at_epoch_ms "
+        "OR be.created_at_epoch_ms<=eri.requested_at_epoch_ms "
+        if require_accepted_timing
+        else ""
+    )
+    selected_transition_predicate = (
+        "OR be.transition_id IS NOT rb.selected_reserve_transition_id "
+        if require_selected_transition
+        else ""
+    )
+    selected_cost_predicate = (
+        "OR rb.run_id IS NULL OR be.provider IS NOT rb.selected_provider "
+        "OR be.model IS NOT rb.selected_model "
+        "OR be.endpoint_binding_id IS NOT rb.selected_endpoint_binding_id "
+        "OR be.capability_class IS NOT rb.capability_class "
+        "OR be.cost_registry_id IS NOT rb.selected_cost_registry_id "
+        "OR be.cost_effective_at IS NOT rb.selected_cost_effective_at "
+        "OR be.cost_registry_hash IS NOT rb.selected_cost_registry_hash "
+        "OR be.cost_confidence IS NOT rb.selected_cost_confidence "
+        f"{selected_transition_predicate}"
+        if require_selected_cost
+        else ""
+    )
+    selected_cost_join = (
+        "LEFT JOIN run_budgets rb ON rb.run_id=be.run_id "
+        if require_selected_cost
+        else ""
+    )
+    trusted_clock_join = (
+        "LEFT JOIN gate_clock_context c ON c.clock_context_id=be.clock_context_id "
+        "AND c.run_id=be.run_id AND c.transition_id=be.transition_id "
+        "LEFT JOIN gate_runs g ON g.gate_run_id=c.gate_run_id "
+        "AND g.clock_context_id=c.clock_context_id "
+        "AND g.run_id=c.run_id AND g.transition_id=c.transition_id "
+        if require_trusted_clock
+        else ""
+    )
+    trusted_clock_predicate = (
+        "OR be.clock_context_id IS NULL OR be.clock_context_id='' "
+        "OR c.clock_context_id IS NULL "
+        "OR c.gate_run_id IS NULL OR c.consumed_by_gate_run_id IS NULL "
+        "OR c.consumed_by_gate_run_id IS NOT c.gate_run_id "
+        "OR typeof(c.now_epoch_ms)<>'integer' "
+        "OR c.now_epoch_ms<1 OR c.now_epoch_ms>253402300799999 "
+        "OR typeof(c.bound_at_epoch_ms)<>'integer' "
+        "OR c.bound_at_epoch_ms<1 "
+        "OR c.bound_at_epoch_ms>253402300799999 "
+        "OR c.bound_at_epoch_ms IS NOT c.now_epoch_ms "
+        "OR typeof(c.consumed_at_epoch_ms)<>'integer' "
+        "OR c.consumed_at_epoch_ms<1 "
+        "OR c.consumed_at_epoch_ms>253402300799999 "
+        "OR c.consumed_at_epoch_ms IS NOT c.now_epoch_ms "
+        "OR c.trusted_clock_source_hash IS NULL "
+        "OR c.trusted_clock_source_hash='' "
+        "OR c.gate_nonce IS NULL OR c.gate_nonce='' "
+        "OR g.gate_run_id IS NULL OR g.decision<>'pass' "
+        "OR typeof(g.completed_at_epoch_ms)<>'integer' "
+        "OR g.completed_at_epoch_ms<1 "
+        "OR g.completed_at_epoch_ms>253402300799999 "
+        "OR g.completed_at_epoch_ms IS NOT c.now_epoch_ms "
+        "OR be.created_at_epoch_ms IS NOT c.now_epoch_ms "
+        if require_trusted_clock
+        else ""
+    )
+    post_dispatch_sql = (
+        " UNION SELECT be.budget_event_id FROM budget_events be "
+        "LEFT JOIN spawn_requests sr ON sr.spawn_request_id=be.spawn_request_id "
+        "AND sr.run_id=be.run_id AND sr.transition_id=be.transition_id "
+        "LEFT JOIN external_rpc_intents eri ON eri.rpc_kind='sessions_spawn' "
+        "AND eri.state IN ('accepted','reconciled') "
+        "AND eri.spawn_request_id=sr.spawn_request_id AND eri.run_id=sr.run_id "
+        "AND eri.transition_id=sr.transition_id "
+        "AND eri.client_request_id=sr.client_request_id "
+        "AND eri.idempotency_key=sr.spawn_idempotency_key "
+        "AND eri.phase=sr.phase AND eri.agent_id=sr.agent_id "
+        "AND eri.task_digest=sr.task_digest AND eri.external_id=sr.session_key "
+        "LEFT JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id "
+        "AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id "
+        "AND s.client_request_id=sr.client_request_id "
+        "AND s.spawn_idempotency_key=sr.spawn_idempotency_key "
+        "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
+        "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
+        "AND s.session_key=eri.external_id "
+        f"{trusted_clock_join}"
+        f"{selected_cost_join}"
+        "WHERE be.event_type IN ('consume','retry_decrement','retry_restore',"
+        "'human_attention') AND (be.spawn_request_id IS NULL "
+        "OR sr.spawn_request_id IS NULL OR sr.state NOT IN ('accepted','completed') "
+        "OR sr.session_key IS NULL OR sr.session_key='' "
+        "OR eri.intent_id IS NULL OR eri.external_id IS NULL OR eri.external_id='' "
+        f"{timing_predicate}"
+        f"{trusted_clock_predicate}"
+        f"{selected_cost_predicate}"
+        "OR s.session_id IS NULL OR (be.event_type='consume' "
+        "AND (sr.state<>'completed' OR s.state<>'completed' "
+        "OR s.completed_at IS NULL OR s.completed_at='')))"
+    )
+    return SloQueryContract(
+        contract.query_name,
+        base_sql + post_dispatch_sql,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
+def _spawn_partition_budget_prefix_contract() -> SloQueryContract:
+    contract = _contract_by_name(_BUDGET_PREFIX_NAME)
+    old_window = "OVER (PARTITION BY run_id ORDER BY event_sequence)"
+    new_window = (
+        "OVER (PARTITION BY run_id,transition_id,spawn_request_id,capability_class "
+        "ORDER BY event_sequence)"
+    )
+    if contract.sql_text.count(old_window) != 7:
+        raise RuntimeError("budget prefix SLO partition replacement count changed")
+    sql_text = contract.sql_text.replace(old_window, new_window)
+    return SloQueryContract(
+        contract.query_name,
+        sql_text,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
+def _consume_confidence_amount_contract() -> SloQueryContract:
+    contract = _contract_by_name("Budget event amount malformed or out of range")
+    sql_text = contract.sql_text.rstrip()
+    if sql_text.endswith(";"):
+        sql_text = sql_text[:-1]
+    sql_text += (
+        " OR (event_type='consume' AND usage_confidence='unknown' "
+        "AND (time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 "
+        "OR cost_microusd<>0)) "
+        "OR (event_type='consume' AND usage_confidence IN ('known','estimated') "
+        "AND time_seconds=0 AND input_tokens=0 AND output_tokens=0 "
+        "AND cost_microusd=0);"
+    )
+    return SloQueryContract(
+        contract.query_name,
+        sql_text,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
 def _replace_contract(
     contracts: tuple[SloQueryContract, ...],
     replacement: SloQueryContract,
@@ -112,17 +303,59 @@ def _replace_contract(
     )
 
 
+_SLO_QUERY_CONTRACTS_V3 = _replace_contract(
+    _replace_contract(
+        SLO_QUERY_CONTRACTS,
+        _legacy_retry_reservation_contract(_BUDGET_LEDGER_RECONCILES_NAME),
+    ),
+    _legacy_retry_reservation_contract(_BUDGET_PREFIX_NAME),
+)
+
 _SLO_QUERY_CONTRACTS_V1_V2 = _replace_contract(
-    SLO_QUERY_CONTRACTS,
-    SloQueryContract(
-        _BUDGET_LEDGER_RECONCILES_NAME,
-        _legacy_budget_ledger_reconciles_sql(),
+    _replace_contract(
+        SLO_QUERY_CONTRACTS,
+        SloQueryContract(
+            _BUDGET_LEDGER_RECONCILES_NAME,
+            _legacy_budget_ledger_reconciles_sql(),
+        ),
+    ),
+    _legacy_retry_reservation_contract(_BUDGET_PREFIX_NAME),
+)
+
+_SLO_QUERY_CONTRACTS_V4 = SLO_QUERY_CONTRACTS
+_SLO_QUERY_CONTRACTS_V5 = _replace_contract(
+    _replace_contract(
+        SLO_QUERY_CONTRACTS,
+        _spawn_partition_budget_prefix_contract(),
+    ),
+    _post_dispatch_session_proof_contract(),
+)
+_SLO_QUERY_CONTRACTS_V6 = _replace_contract(
+    _replace_contract(
+        _SLO_QUERY_CONTRACTS_V5,
+        _post_dispatch_session_proof_contract(
+            require_accepted_timing=True, require_selected_cost=True
+        ),
+    ),
+    _consume_confidence_amount_contract(),
+)
+SLO_QUERY_CONTRACTS = _replace_contract(
+    _SLO_QUERY_CONTRACTS_V6,
+    _post_dispatch_session_proof_contract(
+        require_accepted_timing=True,
+        require_selected_cost=True,
+        require_selected_transition=True,
+        require_trusted_clock=True,
     ),
 )
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
     2: _SLO_QUERY_CONTRACTS_V1_V2,
+    3: _SLO_QUERY_CONTRACTS_V3,
+    4: _SLO_QUERY_CONTRACTS_V4,
+    5: _SLO_QUERY_CONTRACTS_V5,
+    6: _SLO_QUERY_CONTRACTS_V6,
 }
 
 
