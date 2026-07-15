@@ -7,6 +7,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+import agentic_os.runtime_dispatch as runtime_dispatch
 from agentic_os.migrations import apply_migrations
 from agentic_os.openclaw_adapter import AdapterContractError, MetadataObservation
 from agentic_os.reconciliation import reconcile_unknown_metadata
@@ -15,6 +16,7 @@ from agentic_os.runtime_dispatch import (
     RuntimeDispatchError,
     dispatch_with_metadata,
     lease_metadata,
+    release_metadata,
     spawn_metadata,
     stable_json,
 )
@@ -36,9 +38,11 @@ class ScriptedAdapter:
         self.leases = list(leases or [])
         self.sessions = list(sessions or [])
         self.calls: list[str] = []
+        self.params: list[tuple[str, dict[str, object]]] = []
 
     def allow_lease_acquire(self, params):
         self.calls.append("allow_lease_acquire")
+        self.params.append(("allow_lease_acquire", dict(params)))
         return self.acquire.pop(0)
 
     def allow_lease_list(self):
@@ -47,10 +51,12 @@ class ScriptedAdapter:
 
     def allow_lease_release(self, params):
         self.calls.append("allow_lease_release")
+        self.params.append(("allow_lease_release", dict(params)))
         return self.release.pop(0)
 
     def sessions_spawn(self, params):
         self.calls.append("sessions_spawn")
+        self.params.append(("sessions_spawn", dict(params)))
         return self.spawn.pop(0)
 
     def sessions_list(self):
@@ -67,21 +73,23 @@ class ContractFailingAdapter(ScriptedAdapter):
         super().__init__(**kwargs)
         self.fail_on = fail_on
 
-    def _maybe_fail(self, call: str) -> None:
+    def _maybe_fail(self, call: str, params=None) -> None:
         if call in self.fail_on:
             self.calls.append(call)
+            if params is not None:
+                self.params.append((call, dict(params)))
             raise AdapterContractError(f"{call} response missing metadata")
 
     def allow_lease_acquire(self, params):
-        self._maybe_fail("allow_lease_acquire")
+        self._maybe_fail("allow_lease_acquire", params)
         return super().allow_lease_acquire(params)
 
     def allow_lease_release(self, params):
-        self._maybe_fail("allow_lease_release")
+        self._maybe_fail("allow_lease_release", params)
         return super().allow_lease_release(params)
 
     def sessions_spawn(self, params):
-        self._maybe_fail("sessions_spawn")
+        self._maybe_fail("sessions_spawn", params)
         return super().sessions_spawn(params)
 
 
@@ -90,22 +98,24 @@ class TransportFailingAdapter(ScriptedAdapter):
         super().__init__(**kwargs)
         self.fail_on = fail_on
 
-    def _maybe_fail(self, call: str) -> None:
+    def _maybe_fail(self, call: str, params=None) -> None:
         error = self.fail_on.get(call)
         if error is not None:
             self.calls.append(call)
+            if params is not None:
+                self.params.append((call, dict(params)))
             raise error
 
     def allow_lease_acquire(self, params):
-        self._maybe_fail("allow_lease_acquire")
+        self._maybe_fail("allow_lease_acquire", params)
         return super().allow_lease_acquire(params)
 
     def allow_lease_release(self, params):
-        self._maybe_fail("allow_lease_release")
+        self._maybe_fail("allow_lease_release", params)
         return super().allow_lease_release(params)
 
     def sessions_spawn(self, params):
-        self._maybe_fail("sessions_spawn")
+        self._maybe_fail("sessions_spawn", params)
         return super().sessions_spawn(params)
 
 
@@ -259,6 +269,38 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ("session-key", "running"),
             )
 
+    def test_dispatch_acceptance_timestamps_are_strictly_after_request(self) -> None:
+        original_now = runtime_dispatch.now_utc
+        runtime_dispatch.now_utc = lambda: ("1970-01-01T00:00:01Z", 1000)
+        try:
+            dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        finally:
+            runtime_dispatch.now_utc = original_now
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT rpc_kind,requested_at_epoch_ms,accepted_at_epoch_ms "
+                    "FROM external_rpc_intents "
+                    "WHERE rpc_kind IN ('allow_lease_acquire','sessions_spawn') "
+                    "ORDER BY rpc_kind"
+                ).fetchall(),
+                [
+                    ("allow_lease_acquire", 1000, 1001),
+                    ("sessions_spawn", 1000, 1001),
+                ],
+            )
+
+    def test_runtime_schema_verification_runs_before_adapter_call(self) -> None:
+        bad_dir = Path(self.tmp.name) / "bad"
+        bad_dir.mkdir()
+        bad_database = bad_dir / "control.db"
+        with sqlite3.connect(bad_database) as connection:
+            connection.execute("CREATE TABLE schema_migrations(version INTEGER)")
+        adapter = self._accepted_adapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "schema verification"):
+            dispatch_with_metadata(bad_database, adapter, self.request)
+        self.assertEqual(adapter.calls, [])
+
     def test_missing_lease_metadata_fails_closed_before_spawn(self) -> None:
         adapter = ScriptedAdapter(
             acquire=[
@@ -346,6 +388,13 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ).fetchone(),
                 ("released", "release-idem"),
             )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone()[0],
+                "accepted",
+            )
 
     def test_spawn_metadata_mismatch_releases_only_owned_lease(self) -> None:
         wrong = dict(spawn_metadata(self.request))
@@ -363,6 +412,10 @@ class RuntimeDispatchTests(unittest.TestCase):
         with self.assertRaises(RuntimeDispatchError):
             dispatch_with_metadata(self.database, adapter, self.request)
         self.assertEqual(Counter(adapter.calls)["allow_lease_release"], 1)
+        self.assertEqual(
+            [params for call, params in adapter.params if call == "allow_lease_release"],
+            [release_metadata(self.request, "lease-gateway")],
+        )
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
@@ -414,10 +467,52 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE client_lease_id='client-lease'"
                 ).fetchone(),
                 (
-                    "acquired",
+                    "release_pending",
                     "release-idem",
                     "allow_lease_release response missing metadata",
                 ),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_release_transport_failure_keeps_pending_release_intent_unknown(self) -> None:
+        wrong = dict(spawn_metadata(self.request))
+        wrong["task_digest"] = "other-task"
+        adapter = TransportFailingAdapter(
+            {"allow_lease_release": TimeoutError("release timed out")},
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            spawn=[observation(wrong, external_id="session-key")],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "release outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(
+            [params for call, params in adapter.params if call == "allow_lease_release"],
+            [release_metadata(self.request, "lease-gateway")],
+        )
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,release_idempotency_key,reconciliation_status "
+                    "FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("release_pending", "release-idem", "release timed out"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone()[0],
+                "unknown",
             )
 
     def test_identical_dispatch_replay_skips_adapter_and_conflicting_reuse_fails(self) -> None:
@@ -432,9 +527,35 @@ class RuntimeDispatchTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeDispatchError, "conflicting reuse"):
             dispatch_with_metadata(self.database, ScriptedAdapter(), conflicting)
+        for field in ("spawn_request_id", "reserve_budget_event_id"):
+            with self.subTest(field=field):
+                changed = DispatchRequest(
+                    **{**self.request.__dict__, field: f"other-{field}"}
+                )
+                adapter = ScriptedAdapter()
+                with self.assertRaisesRegex(RuntimeDispatchError, "conflicting reuse"):
+                    dispatch_with_metadata(self.database, adapter, changed)
+                self.assertEqual(adapter.calls, [])
+
+    def test_conflicting_acquire_intent_reuse_fails_before_adapter_call(self) -> None:
+        with self._connect() as connection:
+            conflict = dict(lease_metadata(self.request, "pending"))
+            conflict["idempotency_key"] = "other-acquire-idem"
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,phase,agent_id,requester_agent_id,ttl_ms,"
+                "metadata_json,state,requested_at,requested_at_epoch_ms) VALUES("
+                "'acquire:other','run','transition','allow_lease_acquire','client-lease',"
+                "'other-acquire-idem','phase','agent','requester',60000,?,'pending','now',10)",
+                (stable_json(conflict),),
+            )
+        adapter = self._accepted_adapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "allow_lease_acquire identity"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, [])
 
     def test_failed_spawn_replay_preserves_review_state_without_adapter_call(self) -> None:
-        for state in ("unknown", "failed", "human_review_required"):
+        for state in ("pending", "unknown", "failed", "human_review_required"):
             with self.subTest(state=state):
                 self.tearDown()
                 self.setUp()
@@ -595,6 +716,37 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE rpc_kind='sessions_spawn'"
                 ).fetchone(),
                 ("reconciled", "session-key"),
+            )
+
+    def test_reconcile_unknown_acquire_requires_local_lease_row(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,phase,agent_id,requester_agent_id,ttl_ms,"
+                "metadata_json,state,requested_at,requested_at_epoch_ms) VALUES("
+                "'acquire:acquire-idem','run','transition','allow_lease_acquire',"
+                "'client-lease','acquire-idem','phase','agent','requester',60000,?,"
+                "'unknown','now',1800000000001)",
+                (stable_json(lease_metadata(self.request, "pending")),),
+            )
+        adapter = ScriptedAdapter(
+            leases=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ]
+        )
+        summary = reconcile_unknown_metadata(self.database, adapter)
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 1)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone()[0],
+                "human_review_required",
             )
 
     def test_reconcile_unknown_spawn_requires_full_session_identity(self) -> None:

@@ -18,7 +18,7 @@ from agentic_os.metadata import (
     validate_allow_lease_release_observation,
     validate_session_observation,
 )
-from agentic_os.migrations import repository_root
+from agentic_os.migrations import MigrationError, repository_root, verify_database_connection
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
     MetadataCapableOpenClawAdapter,
@@ -70,7 +70,11 @@ class DispatchResult:
 
 def now_utc() -> tuple[str, int]:
     epoch_ms = int(time.time() * 1000)
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_ms / 1000)), epoch_ms
+    return utc_from_epoch_ms(epoch_ms), epoch_ms
+
+
+def utc_from_epoch_ms(epoch_ms: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_ms / 1000))
 
 
 def stable_json(value: dict[str, Any]) -> str:
@@ -83,13 +87,26 @@ def connect_runtime_db(path: Path) -> sqlite3.Connection:
         assert_privacy_preflight(repository_root(), database_paths=(database,))
     except PrivacyPreflightError as exc:
         raise RuntimeDispatchError("runtime dispatch database privacy preflight failed") from exc
-    connection = sqlite3.connect(database, isolation_level=None)
+    try:
+        connection = sqlite3.connect(
+            f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
+        )
+    except sqlite3.Error as exc:
+        raise RuntimeDispatchError("runtime dispatch database open failed") from exc
     connection.execute("PRAGMA busy_timeout=10000")
     journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
     if str(journal_mode[0] if journal_mode else "").casefold() != "wal":
         connection.close()
         raise RuntimeDispatchError("SQLite WAL journal mode is unavailable")
     connection.execute("PRAGMA foreign_keys=ON")
+    if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        connection.close()
+        raise RuntimeDispatchError("SQLite foreign key enforcement is unavailable")
+    try:
+        verify_database_connection(connection)
+    except (MigrationError, sqlite3.Error) as exc:
+        connection.close()
+        raise RuntimeDispatchError("runtime dispatch database schema verification failed") from exc
     return connection
 
 
@@ -148,8 +165,9 @@ def _existing_spawn_replay_result(
     connection: sqlite3.Connection, request: DispatchRequest
 ) -> DispatchResult | None:
     row = connection.execute(
-        "SELECT run_id,transition_id,client_request_id,phase,agent_id,task_digest,"
-        "state,external_id FROM external_rpc_intents "
+        "SELECT run_id,transition_id,spawn_request_id,reserve_budget_event_id,"
+        "client_request_id,phase,agent_id,task_digest,state,external_id "
+        "FROM external_rpc_intents "
         "WHERE rpc_kind='sessions_spawn' AND idempotency_key=?",
         (request.spawn_idempotency_key,),
     ).fetchone()
@@ -158,15 +176,17 @@ def _existing_spawn_replay_result(
     expected = (
         request.run_id,
         request.transition_id,
+        request.spawn_request_id,
+        request.reserve_budget_event_id,
         request.spawn_client_request_id,
         request.phase,
         request.agent_id,
         request.task_digest,
     )
-    if row[:6] != expected:
+    if row[:8] != expected:
         raise RuntimeDispatchError("conflicting reuse of sessions_spawn idempotency key")
-    state = row[6]
-    external_id = row[7]
+    state = row[8]
+    external_id = row[9]
     if state in ("accepted", "reconciled"):
         session_key = validate_accepted_session_identity(
             external_id=external_id,
@@ -182,7 +202,7 @@ def _existing_spawn_replay_result(
             gateway_lease_id=lease[0] if lease else "",
             status="replayed",
         )
-    if state in ("unknown", "failed", "human_review_required"):
+    if state in ("pending", "unknown", "failed", "human_review_required"):
         raise RuntimeDispatchError(
             f"sessions_spawn replay is already {state}; external RPC will not be retried"
         )
@@ -192,34 +212,53 @@ def _existing_spawn_replay_result(
 def _assert_no_conflicting_spawn_replay(
     connection: sqlite3.Connection, request: DispatchRequest
 ) -> None:
-    row = connection.execute(
-        "SELECT run_id,transition_id,client_request_id,phase,agent_id,task_digest "
-        "FROM external_rpc_intents WHERE rpc_kind='sessions_spawn' AND idempotency_key=?",
-        (request.spawn_idempotency_key,),
-    ).fetchone()
-    if row is None:
-        return
+    rows = connection.execute(
+        "SELECT run_id,transition_id,spawn_request_id,reserve_budget_event_id,"
+        "client_request_id,idempotency_key,phase,agent_id,task_digest "
+        "FROM external_rpc_intents WHERE rpc_kind='sessions_spawn' "
+        "AND (client_request_id=? OR idempotency_key=?)",
+        (request.spawn_client_request_id, request.spawn_idempotency_key),
+    ).fetchall()
     expected = (
         request.run_id,
         request.transition_id,
+        request.spawn_request_id,
+        request.reserve_budget_event_id,
         request.spawn_client_request_id,
+        request.spawn_idempotency_key,
         request.phase,
         request.agent_id,
         request.task_digest,
     )
-    if row != expected:
+    if any(row != expected for row in rows):
         raise RuntimeDispatchError("conflicting reuse of sessions_spawn idempotency key")
 
 
-def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchRequest) -> None:
-    _assert_no_conflicting_spawn_replay(connection, request)
-    now, now_ms = now_utc()
-    expires_ms = now_ms + request.ttl_ms
-    expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_ms / 1000))
-    lease_id = request.lease_id or request.client_lease_id
-
+def _assert_or_insert_spawn_request(
+    connection: sqlite3.Connection, request: DispatchRequest, now: str
+) -> None:
+    row = connection.execute(
+        "SELECT run_id,phase,agent_id,transition_id,client_request_id,"
+        "spawn_idempotency_key,task_digest,state FROM spawn_requests "
+        "WHERE spawn_request_id=?",
+        (request.spawn_request_id,),
+    ).fetchone()
+    expected = (
+        request.run_id,
+        request.phase,
+        request.agent_id,
+        request.transition_id,
+        request.spawn_client_request_id,
+        request.spawn_idempotency_key,
+        request.task_digest,
+        "pending",
+    )
+    if row is not None:
+        if row != expected:
+            raise RuntimeDispatchError("conflicting reuse of spawn_request_id")
+        return
     connection.execute(
-        "INSERT OR IGNORE INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+        "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
         "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
         "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (
@@ -236,8 +275,41 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             now,
         ),
     )
+
+
+def _assert_or_insert_lease(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    *,
+    now: str,
+    expires: str,
+    expires_ms: int,
+    lease_id: str,
+) -> None:
+    rows = connection.execute(
+        "SELECT lease_id,run_id,phase,transition_id,agent_id,requester_agent_id,"
+        "state,client_lease_id,acquire_idempotency_key,ttl_ms FROM leases "
+        "WHERE lease_id=? OR client_lease_id=? OR acquire_idempotency_key=?",
+        (lease_id, request.client_lease_id, request.acquire_idempotency_key),
+    ).fetchall()
+    expected = (
+        lease_id,
+        request.run_id,
+        request.phase,
+        request.transition_id,
+        request.agent_id,
+        request.requester_agent_id,
+        "acquire_pending",
+        request.client_lease_id,
+        request.acquire_idempotency_key,
+        request.ttl_ms,
+    )
+    if rows:
+        if len(rows) != 1 or rows[0] != expected:
+            raise RuntimeDispatchError("conflicting reuse of allow lease identity")
+        return
     connection.execute(
-        "INSERT OR IGNORE INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+        "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
         "requester_agent_id,state,client_lease_id,acquire_idempotency_key,ttl_ms,"
         "acquire_requested_at,expires_at,expires_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
@@ -256,8 +328,39 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             expires_ms,
         ),
     )
+
+
+def _assert_or_insert_acquire_intent(
+    connection: sqlite3.Connection, request: DispatchRequest, *, now: str, now_ms: int
+) -> None:
+    rows = connection.execute(
+        "SELECT intent_id,run_id,transition_id,rpc_kind,client_request_id,"
+        "idempotency_key,phase,agent_id,requester_agent_id,ttl_ms,metadata_json,state "
+        "FROM external_rpc_intents WHERE rpc_kind='allow_lease_acquire' "
+        "AND (client_request_id=? OR idempotency_key=?)",
+        (request.client_lease_id, request.acquire_idempotency_key),
+    ).fetchall()
+    metadata = stable_json(lease_metadata(request, "pending"))
+    expected = (
+        f"acquire:{request.acquire_idempotency_key}",
+        request.run_id,
+        request.transition_id,
+        "allow_lease_acquire",
+        request.client_lease_id,
+        request.acquire_idempotency_key,
+        request.phase,
+        request.agent_id,
+        request.requester_agent_id,
+        request.ttl_ms,
+        metadata,
+        "pending",
+    )
+    if rows:
+        if len(rows) != 1 or rows[0] != expected:
+            raise RuntimeDispatchError("conflicting reuse of allow_lease_acquire identity")
+        return
     connection.execute(
-        "INSERT OR IGNORE INTO external_rpc_intents(intent_id,run_id,transition_id,"
+        "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
         "rpc_kind,client_request_id,idempotency_key,phase,agent_id,requester_agent_id,"
         "ttl_ms,metadata_json,state,requested_at,requested_at_epoch_ms) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -272,14 +375,48 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             request.agent_id,
             request.requester_agent_id,
             request.ttl_ms,
-            stable_json(lease_metadata(request, "pending")),
+            metadata,
             "pending",
             now,
             now_ms,
         ),
     )
+
+
+def _strictly_after_requested_time(
+    connection: sqlite3.Connection, *, rpc_kind: str, idempotency_key: str
+) -> tuple[str, int]:
+    requested = connection.execute(
+        "SELECT requested_at_epoch_ms FROM external_rpc_intents "
+        "WHERE rpc_kind=? AND idempotency_key=?",
+        (rpc_kind, idempotency_key),
+    ).fetchone()
+    if requested is None or type(requested[0]) is not int:
+        raise RuntimeDispatchError("missing requested timestamp for accepted RPC")
+    _, now_ms = now_utc()
+    accepted_ms = max(now_ms, requested[0] + 1)
+    return utc_from_epoch_ms(accepted_ms), accepted_ms
+
+
+def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchRequest) -> None:
+    _assert_no_conflicting_spawn_replay(connection, request)
+    now, now_ms = now_utc()
+    expires_ms = now_ms + request.ttl_ms
+    expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_ms / 1000))
+    lease_id = request.lease_id or request.client_lease_id
+
+    _assert_or_insert_spawn_request(connection, request, now)
+    _assert_or_insert_lease(
+        connection,
+        request,
+        now=now,
+        expires=expires,
+        expires_ms=expires_ms,
+        lease_id=lease_id,
+    )
+    _assert_or_insert_acquire_intent(connection, request, now=now, now_ms=now_ms)
     connection.execute(
-        "INSERT OR IGNORE INTO external_rpc_intents(intent_id,run_id,transition_id,"
+        "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
         "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
         "idempotency_key,phase,agent_id,task_digest,metadata_json,state,requested_at,"
         "requested_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -311,7 +448,11 @@ def persist_acquired_lease(
     *,
     reconciled: bool = False,
 ) -> None:
-    now, now_ms = now_utc()
+    now, now_ms = _strictly_after_requested_time(
+        connection,
+        rpc_kind="allow_lease_acquire",
+        idempotency_key=request.acquire_idempotency_key,
+    )
     observed = validate_allow_lease_observation(
         local=lease_metadata(request, gateway_lease_id),
         normalized=observation.normalized,
@@ -319,7 +460,7 @@ def persist_acquired_lease(
         metadata_contract_version=observation.metadata_contract_version,
     )
     state = "reconciled" if reconciled else "accepted"
-    connection.execute(
+    intent_cursor = connection.execute(
         "UPDATE external_rpc_intents SET state=?,metadata_contract_version=?,"
         "external_metadata_json=?,external_run_id=?,external_transition_id=?,"
         "external_client_request_id=?,external_idempotency_key=?,external_phase=?,"
@@ -345,7 +486,9 @@ def persist_acquired_lease(
             request.acquire_idempotency_key,
         ),
     )
-    connection.execute(
+    if intent_cursor.rowcount != 1:
+        raise RuntimeDispatchError("allow_lease_acquire intent update did not match exactly one row")
+    lease_cursor = connection.execute(
         "UPDATE leases SET state='acquired',gateway_lease_id=?,metadata_contract_version=?,"
         "metadata_observed_at=?,external_metadata_json=?,external_client_lease_id=?,"
         "external_idempotency_key=?,external_run_id=?,external_phase=?,external_transition_id=?,"
@@ -368,6 +511,8 @@ def persist_acquired_lease(
             request.client_lease_id,
         ),
     )
+    if lease_cursor.rowcount != 1:
+        raise RuntimeDispatchError("allow_lease_acquire lease update did not match exactly one row")
 
 
 def persist_spawn_acceptance(
@@ -378,7 +523,11 @@ def persist_spawn_acceptance(
     *,
     reconciled: bool = False,
 ) -> None:
-    now, now_ms = now_utc()
+    now, now_ms = _strictly_after_requested_time(
+        connection,
+        rpc_kind="sessions_spawn",
+        idempotency_key=request.spawn_idempotency_key,
+    )
     observed = validate_session_observation(
         local=spawn_metadata(request),
         normalized=observation.normalized,
@@ -522,7 +671,13 @@ def mark_owned_lease_release_review(
     *,
     reason: str,
 ) -> None:
-    now, _ = now_utc()
+    now, now_ms = now_utc()
+    connection.execute(
+        "UPDATE external_rpc_intents SET state='human_review_required',resolved_at=?,"
+        "resolved_at_epoch_ms=? WHERE rpc_kind='allow_lease_release' AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled')",
+        (now, now_ms, request.release_idempotency_key),
+    )
     connection.execute(
         "UPDATE leases SET release_idempotency_key=?,release_requested_at=?,"
         "reconciliation_status=? "
@@ -540,9 +695,39 @@ def mark_owned_lease_release_review(
     )
 
 
-def release_owned_lease(
+def mark_owned_lease_release_unknown(
     connection: sqlite3.Connection,
-    adapter: MetadataCapableOpenClawAdapter,
+    request: DispatchRequest,
+    gateway_lease_id: str,
+    *,
+    reason: str,
+) -> None:
+    now, now_ms = now_utc()
+    connection.execute(
+        "UPDATE external_rpc_intents SET state='unknown',resolved_at=?,"
+        "resolved_at_epoch_ms=? WHERE rpc_kind='allow_lease_release' AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled','human_review_required','failed')",
+        (now, now_ms, request.release_idempotency_key),
+    )
+    connection.execute(
+        "UPDATE leases SET state='release_pending',release_idempotency_key=?,"
+        "release_requested_at=COALESCE(release_requested_at,?),reconciliation_status=? "
+        "WHERE client_lease_id=? AND run_id=? AND transition_id=? "
+        "AND gateway_lease_id=? AND state IN ('acquired','release_pending')",
+        (
+            request.release_idempotency_key,
+            now,
+            reason,
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    )
+
+
+def prepare_owned_lease_release(
+    connection: sqlite3.Connection,
     request: DispatchRequest,
     gateway_lease_id: str,
 ) -> None:
@@ -553,32 +738,29 @@ def release_owned_lease(
     ).fetchone()
     if row != ("acquired", gateway_lease_id):
         raise RuntimeDispatchError("refusing to release a lease not exactly owned by this run")
-    observation = adapter.allow_lease_release(
-        {
-            "run_id": request.run_id,
-            "transition_id": request.transition_id,
-            "gateway_lease_id": gateway_lease_id,
-            "idempotency_key": request.release_idempotency_key,
-        }
-    )
-    observed = validate_allow_lease_release_observation(
-        local=release_metadata(request, gateway_lease_id),
-        normalized=observation.normalized,
-        raw_json=observation.raw_json,
-        metadata_contract_version=observation.metadata_contract_version,
-    )
     now, now_ms = now_utc()
-    connection.execute(
-        "UPDATE leases SET release_idempotency_key=?,release_requested_at=? "
-        "WHERE client_lease_id=?",
-        (request.release_idempotency_key, now, request.client_lease_id),
+    metadata = stable_json(release_metadata(request, gateway_lease_id))
+    lease_cursor = connection.execute(
+        "UPDATE leases SET state='release_pending',release_idempotency_key=?,"
+        "release_requested_at=?,reconciliation_status='release_pending' "
+        "WHERE client_lease_id=? AND run_id=? AND transition_id=? "
+        "AND gateway_lease_id=? AND state='acquired'",
+        (
+            request.release_idempotency_key,
+            now,
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
     )
+    if lease_cursor.rowcount != 1:
+        raise RuntimeDispatchError("release_pending lease update did not match exactly one row")
     connection.execute(
         "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
-        "client_request_id,idempotency_key,metadata_contract_version,metadata_json,"
-        "external_metadata_json,external_run_id,external_transition_id,"
-        "external_idempotency_key,state,external_id,requested_at,requested_at_epoch_ms,"
-        "accepted_at,accepted_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "client_request_id,idempotency_key,phase,agent_id,requester_agent_id,"
+        "metadata_json,state,requested_at,requested_at_epoch_ms) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             f"release:{request.release_idempotency_key}",
             request.run_id,
@@ -586,24 +768,86 @@ def release_owned_lease(
             "allow_lease_release",
             request.release_idempotency_key,
             request.release_idempotency_key,
-            observation.metadata_contract_version,
-            stable_json(release_metadata(request, gateway_lease_id)),
-            observation.raw_json,
-            observed["run_id"],
-            observed["transition_id"],
-            observed["idempotency_key"],
-            "accepted",
-            observed["gateway_lease_id"],
-            now,
-            now_ms,
+            request.phase,
+            request.agent_id,
+            request.requester_agent_id,
+            metadata,
+            "pending",
             now,
             now_ms,
         ),
     )
-    connection.execute(
-        "UPDATE leases SET state='released',released_at=? WHERE client_lease_id=?",
-        (now, request.client_lease_id),
+
+
+def persist_released_lease(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    observation: MetadataObservation,
+    gateway_lease_id: str,
+) -> None:
+    observed = validate_allow_lease_release_observation(
+        local=release_metadata(request, gateway_lease_id),
+        normalized=observation.normalized,
+        raw_json=observation.raw_json,
+        metadata_contract_version=observation.metadata_contract_version,
     )
+    now, now_ms = _strictly_after_requested_time(
+        connection,
+        rpc_kind="allow_lease_release",
+        idempotency_key=request.release_idempotency_key,
+    )
+    intent_cursor = connection.execute(
+        "UPDATE external_rpc_intents SET state='accepted',metadata_contract_version=?,"
+        "external_metadata_json=?,external_run_id=?,external_transition_id=?,"
+        "external_client_request_id=?,external_idempotency_key=?,external_phase=?,"
+        "external_agent_id=?,external_requester_agent_id=?,external_id=?,"
+        "accepted_at=?,accepted_at_epoch_ms=? "
+        "WHERE rpc_kind='allow_lease_release' AND idempotency_key=? AND state='pending'",
+        (
+            observation.metadata_contract_version,
+            observation.raw_json,
+            observed["run_id"],
+            observed["transition_id"],
+            observed["client_lease_id"],
+            observed["idempotency_key"],
+            observed["phase"],
+            observed["agent_id"],
+            observed["requester_agent_id"],
+            observed["gateway_lease_id"],
+            now,
+            now_ms,
+            request.release_idempotency_key,
+        ),
+    )
+    if intent_cursor.rowcount != 1:
+        raise RuntimeDispatchError("allow_lease_release intent update did not match exactly one row")
+    lease_cursor = connection.execute(
+        "UPDATE leases SET state='released',released_at=?,reconciliation_status='not_needed' "
+        "WHERE client_lease_id=? AND run_id=? AND transition_id=? "
+        "AND gateway_lease_id=? AND state='release_pending'",
+        (
+            now,
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    )
+    if lease_cursor.rowcount != 1:
+        raise RuntimeDispatchError("released lease update did not match exactly one row")
+
+
+def release_owned_lease(
+    connection: sqlite3.Connection,
+    adapter: MetadataCapableOpenClawAdapter,
+    request: DispatchRequest,
+    gateway_lease_id: str,
+) -> None:
+    with immediate_transaction(connection):
+        prepare_owned_lease_release(connection, request, gateway_lease_id)
+    observation = adapter.allow_lease_release(release_metadata(request, gateway_lease_id))
+    with immediate_transaction(connection):
+        persist_released_lease(connection, request, observation, gateway_lease_id)
 
 
 def dispatch_with_metadata(
@@ -707,8 +951,19 @@ def dispatch_with_metadata(
                     reason=str(exc),
                 )
             try:
+                release_owned_lease(connection, adapter, request, gateway_lease_id)
+            except AMBIGUOUS_TRANSPORT_ERRORS as release_exc:
                 with immediate_transaction(connection):
-                    release_owned_lease(connection, adapter, request, gateway_lease_id)
+                    mark_owned_lease_release_unknown(
+                        connection,
+                        request,
+                        gateway_lease_id,
+                        reason=str(release_exc),
+                    )
+                raise RuntimeDispatchError(
+                    "sessions_spawn metadata validation failed; "
+                    "owned lease release outcome unknown"
+                ) from exc
             except RELEASE_FAILURE_ERRORS as release_exc:
                 with immediate_transaction(connection):
                     mark_owned_lease_release_review(
