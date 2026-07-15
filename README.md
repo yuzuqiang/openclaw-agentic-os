@@ -31,6 +31,8 @@ PYTHONPATH=src python3 -m agentic_os.cli preflight
 PYTHONPATH=src python3 -m agentic_os.cli migrate --test-db
 PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --prepare-idempotency-key file-shadow:shadow-demo --artifact README.md
+PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
+PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
@@ -44,6 +46,14 @@ explicit file artifacts into `file_authority_shadow` rows and compare current
 file hashes, prepare identity, workflow mode, and deterministic projection IDs
 back to those rows; they do not enable database authority or feed dispatch
 decisions.
+
+`dual-write-shadow` is the first executable P1.0 shadow-mode slice. It writes a
+single file-authority artifact and records matching `dual_write_shadow` SQLite
+projection evidence in the same local operation. Exact replay with the same
+prepare key, run, artifact path, and content is a no-op; changed replay or
+file/SQLite drift fails closed and refuses to overwrite file authority. This is
+parity evidence only: it does not create `db_authority_canary` or `db_authority`
+runs, does not call OpenClaw or Gateway, and does not claim canary readiness.
 
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.

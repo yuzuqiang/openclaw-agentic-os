@@ -38,6 +38,14 @@ class ShadowBackfillResult:
 
 
 @dataclass(frozen=True)
+class DualWriteShadowResult:
+    workflow: str
+    run_id: str
+    projection: ShadowProjection
+    status: str
+
+
+@dataclass(frozen=True)
 class ShadowAuditIssue:
     path: str
     reason: str
@@ -112,19 +120,20 @@ def _run_is_finalized_shadow(
     row: tuple[object, ...] | None,
     *,
     workflow: str,
+    authority_mode: str = "file_authority_shadow",
     prepare_idempotency_key: str | None = None,
 ) -> bool:
     if row is None:
         return False
     if prepare_idempotency_key is None:
-        expected = (workflow, "file_authority_shadow", "finalized", "R1", "R1")
+        expected = (workflow, authority_mode, "finalized", "R1", "R1")
         identity = row[:5]
         finalized_at = row[5]
         finalized_epoch_ms = row[6]
     else:
         expected = (
             workflow,
-            "file_authority_shadow",
+            authority_mode,
             prepare_idempotency_key,
             "finalized",
             "R1",
@@ -164,6 +173,25 @@ def _normalize_artifacts(
     return tuple(normalized)
 
 
+def _normalize_artifact_target(
+    artifact: str | Path, *, repo_root_path: Path
+) -> tuple[Path, str]:
+    path = Path(artifact).expanduser()
+    explicit_relative = _repo_relative(repo_root_path, path, resolve=False)
+    absolute = path if path.is_absolute() else repo_root_path / path
+    if absolute.exists():
+        resolved = absolute.resolve()
+        resolved_relative = _repo_relative(repo_root_path, resolved)
+        assert_paths_retrievable(
+            (path, explicit_relative, resolved, resolved_relative)
+        )
+    else:
+        parent = absolute.parent.resolve()
+        parent_relative = _repo_relative(repo_root_path, parent)
+        assert_paths_retrievable((path, explicit_relative, parent, parent_relative))
+    return absolute, explicit_relative
+
+
 def _connect(database: Path, *, existing: bool = False) -> sqlite3.Connection:
     if existing:
         connection = sqlite3.connect(
@@ -201,6 +229,7 @@ def _ensure_shadow_run(
     workflow: str,
     run_id: str,
     prepare_idempotency_key: str,
+    authority_mode: str = "file_authority_shadow",
     created_at: str,
     finalized_at_epoch_ms: int,
 ) -> None:
@@ -215,18 +244,18 @@ def _ensure_shadow_run(
     if existing_workflow is None:
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
-            "VALUES(?,'file_authority_shadow',?)",
-            (workflow, created_at),
+            "VALUES(?,?,?)",
+            (workflow, authority_mode, created_at),
         )
-    elif existing_workflow[0] == "file_authority":
+    elif existing_workflow[0] in ("file_authority", "file_authority_shadow"):
         connection.execute(
-            "UPDATE workflow_authority SET mode='file_authority_shadow',updated_at=? "
+            "UPDATE workflow_authority SET mode=?,updated_at=? "
             "WHERE workflow=?",
-            (created_at, workflow),
+            (authority_mode, created_at, workflow),
         )
-    elif existing_workflow[0] != "file_authority_shadow":
+    elif existing_workflow[0] != authority_mode:
         raise ShadowBackfillError(
-            f"workflow {workflow!r} is not in file-authority shadow mode"
+            f"workflow {workflow!r} is not in {authority_mode} mode"
         )
 
     existing_run = connection.execute(
@@ -238,6 +267,7 @@ def _ensure_shadow_run(
         if not _run_is_finalized_shadow(
             existing_run,
             workflow=workflow,
+            authority_mode=authority_mode,
             prepare_idempotency_key=prepare_idempotency_key,
         ):
             raise ShadowBackfillError(f"run {run_id!r} is not a matching shadow run")
@@ -246,12 +276,12 @@ def _ensure_shadow_run(
     connection.execute(
         "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
         "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
-        "finalized_at_epoch_ms) VALUES(?,?,?,'file_authority_shadow','finalized',"
-        "'R1','R1',?,?,?,?)",
+        "finalized_at_epoch_ms) VALUES(?,?,?,?,'finalized','R1','R1',?,?,?,?)",
         (
             run_id,
             prepare_idempotency_key,
             workflow,
+            authority_mode,
             created_at,
             created_at,
             created_at,
@@ -351,6 +381,147 @@ def backfill_file_authority_shadow(
         if checkpointed:
             _remove_checkpointed_sidecars(database_path)
     return ShadowBackfillResult(workflow=workflow, run_id=run_id, projections=tuple(projections))
+
+
+def dual_write_shadow_artifact(
+    database: Path,
+    artifact: str | Path,
+    content: bytes,
+    *,
+    workflow: str,
+    run_id: str,
+    prepare_idempotency_key: str | None = None,
+    repo_root_path: Path | None = None,
+) -> DualWriteShadowResult:
+    """Write one file-authority artifact plus SQLite parity evidence.
+
+    File content remains the operational artifact. SQLite receives only
+    `dual_write_shadow` parity evidence and never becomes dispatch authority.
+    """
+
+    workflow = _normalize_required_identity("workflow", workflow)
+    run_id = _normalize_required_identity("run_id", run_id)
+    if not content:
+        raise ShadowBackfillError("content must be non-empty")
+    prepare_key = (
+        _normalize_required_identity("prepare_idempotency_key", prepare_idempotency_key)
+        if prepare_idempotency_key is not None
+        else f"dual-write-shadow:{run_id}"
+    )
+    root = Path(repo_root_path or repository_root()).resolve()
+    target, relative = _normalize_artifact_target(artifact, repo_root_path=root)
+    digest = hashlib.sha256(content).hexdigest()
+    projection = ShadowProjection(
+        path=relative,
+        sha256=digest,
+        projection_id=_projection_id(run_id, relative, digest),
+    )
+    database_path = Path(database).expanduser().resolve()
+    apply_migrations(database_path, repo_root=root)
+    created_at, finalized_at_epoch_ms = _utc_now()
+    connection = _connect(database_path)
+    checkpointed = False
+    created_file = False
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            rows = connection.execute(
+                "SELECT projection_id,sha256 FROM artifact_projections "
+                "WHERE run_id=? AND path=? AND source_authority='dual_write_shadow'",
+                (run_id, relative),
+            ).fetchall()
+            if rows:
+                existing_ids = {row[0] for row in rows}
+                existing_digests = {row[1] for row in rows}
+                if existing_ids != {projection.projection_id} or existing_digests != {
+                    digest
+                }:
+                    raise ShadowBackfillError(
+                        "dual-write shadow replay drift for "
+                        f"{relative}; refusing to overwrite file authority"
+                    )
+                if not target.exists():
+                    raise ShadowBackfillError(
+                        f"dual-write shadow artifact is missing: {relative}"
+                    )
+                actual_digest = _sha256(target)
+                if actual_digest != digest:
+                    raise ShadowBackfillError(
+                        "dual-write shadow artifact drift for "
+                        f"{relative}; refusing to overwrite file authority"
+                    )
+                _ensure_shadow_run(
+                    connection,
+                    workflow=workflow,
+                    run_id=run_id,
+                    prepare_idempotency_key=prepare_key,
+                    authority_mode="dual_write_shadow",
+                    created_at=created_at,
+                    finalized_at_epoch_ms=finalized_at_epoch_ms,
+                )
+                connection.execute("COMMIT")
+                _checkpoint_offline_snapshot(connection)
+                checkpointed = True
+                return DualWriteShadowResult(
+                    workflow=workflow,
+                    run_id=run_id,
+                    projection=projection,
+                    status="replayed",
+                )
+
+            if target.exists() and _sha256(target) != digest:
+                raise ShadowBackfillError(
+                    f"existing artifact differs for {relative}; refusing to overwrite"
+                )
+            _ensure_shadow_run(
+                connection,
+                workflow=workflow,
+                run_id=run_id,
+                prepare_idempotency_key=prepare_key,
+                authority_mode="dual_write_shadow",
+                created_at=created_at,
+                finalized_at_epoch_ms=finalized_at_epoch_ms,
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections("
+                "projection_id,run_id,path,sha256,source_authority,generated_at"
+                ") VALUES(?,?,?,?,?,?)",
+                (
+                    projection.projection_id,
+                    run_id,
+                    relative,
+                    digest,
+                    "dual_write_shadow",
+                    created_at,
+                ),
+            )
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as destination:
+                    destination.write(content)
+                created_file = True
+            connection.execute("COMMIT")
+            _checkpoint_offline_snapshot(connection)
+            checkpointed = True
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            if created_file:
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+    finally:
+        connection.close()
+        if checkpointed:
+            _remove_checkpointed_sidecars(database_path)
+    return DualWriteShadowResult(
+        workflow=workflow,
+        run_id=run_id,
+        projection=projection,
+        status="written",
+    )
 
 
 def _projection_rows_by_path(
@@ -453,6 +624,111 @@ def audit_file_authority_shadow(
         rows = connection.execute(
             "SELECT projection_id,path,sha256 FROM artifact_projections "
             "WHERE run_id=? AND source_authority='file_authority_shadow'",
+            (run_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    projected, projection_issues = _projection_rows_by_path(rows, run_id=run_id)
+    issues.extend(projection_issues)
+    for path, digest in expected.items():
+        if any(issue.path == path and issue.reason == "duplicate_projection" for issue in issues):
+            continue
+        actual = projected.get(path)
+        if actual is None:
+            issues.append(
+                ShadowAuditIssue(path=path, reason="missing_projection", expected_sha256=digest)
+            )
+        elif actual != digest:
+            issues.append(
+                ShadowAuditIssue(
+                    path=path,
+                    reason="sha256_mismatch",
+                    expected_sha256=digest,
+                    actual_sha256=actual,
+                )
+            )
+    for path, digest in projected.items():
+        if path not in expected:
+            issues.append(
+                ShadowAuditIssue(path=path, reason="unexpected_projection", actual_sha256=digest)
+            )
+    return ShadowAuditResult(
+        workflow=workflow,
+        run_id=run_id,
+        status="pass" if not issues else "fail",
+        checked_count=len(expected),
+        issues=tuple(issues),
+    )
+
+
+def audit_dual_write_shadow(
+    database: Path,
+    artifacts: Iterable[str | Path],
+    *,
+    workflow: str,
+    run_id: str,
+    prepare_idempotency_key: str | None = None,
+    repo_root_path: Path | None = None,
+) -> ShadowAuditResult:
+    """Compare current file artifacts with `dual_write_shadow` parity evidence."""
+
+    workflow = _normalize_required_identity("workflow", workflow)
+    run_id = _normalize_required_identity("run_id", run_id)
+    prepare_key = (
+        _normalize_required_identity("prepare_idempotency_key", prepare_idempotency_key)
+        if prepare_idempotency_key is not None
+        else f"dual-write-shadow:{run_id}"
+    )
+    root = Path(repo_root_path or repository_root()).resolve()
+    normalized = _normalize_artifacts(artifacts, repo_root_path=root)
+    expected = {relative: digest for _path, relative, digest in normalized}
+    database_path = Path(database).expanduser().resolve()
+    issues: list[ShadowAuditIssue] = []
+    if not database_path.is_file():
+        issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
+        return ShadowAuditResult(
+            workflow=workflow,
+            run_id=run_id,
+            status="fail",
+            checked_count=len(expected),
+            issues=tuple(issues),
+        )
+    try:
+        verify_database(database_path)
+    except (MigrationError, sqlite3.DatabaseError):
+        issues.append(ShadowAuditIssue(path=str(database_path), reason="invalid_schema"))
+        return ShadowAuditResult(
+            workflow=workflow,
+            run_id=run_id,
+            status="fail",
+            checked_count=len(expected),
+            issues=tuple(issues),
+        )
+
+    connection = _connect(database_path, existing=True)
+    try:
+        run = connection.execute(
+            "SELECT workflow,authority_mode,prepare_idempotency_key,state,"
+            "risk_class,risk_dominance,"
+            "finalized_at,finalized_at_epoch_ms FROM runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if not _run_is_finalized_shadow(
+            run,
+            workflow=workflow,
+            authority_mode="dual_write_shadow",
+            prepare_idempotency_key=prepare_key,
+        ):
+            issues.append(ShadowAuditIssue(path="", reason="missing_shadow_run"))
+        workflow_mode = connection.execute(
+            "SELECT mode FROM workflow_authority WHERE workflow=?", (workflow,)
+        ).fetchone()
+        if workflow_mode != ("dual_write_shadow",):
+            issues.append(ShadowAuditIssue(path="", reason="workflow_not_shadow"))
+        rows = connection.execute(
+            "SELECT projection_id,path,sha256 FROM artifact_projections "
+            "WHERE run_id=? AND source_authority='dual_write_shadow'",
             (run_id,),
         ).fetchall()
     finally:

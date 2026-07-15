@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 
+import agentic_os
+from agentic_os.cli import main as cli_main
 from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.privacy import PrivacyPreflightError
 from agentic_os.shadow import (
     ShadowBackfillError,
     _projection_rows_by_path,
+    audit_dual_write_shadow,
     audit_file_authority_shadow,
     backfill_file_authority_shadow,
+    dual_write_shadow_artifact,
 )
 
 
@@ -681,6 +687,226 @@ class ShadowTests(unittest.TestCase):
                     workflow="heartbeat",
                     run_id="shadow-run",
                 )
+
+    def test_dual_write_shadow_first_write_replay_and_authority_disabled(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        payload = b'{"dual": true}\n'
+
+        result = dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+        )
+
+        self.assertFalse(agentic_os.DB_AUTHORITY_ENABLED)
+        self.assertEqual(result.status, "written")
+        self.assertEqual(artifact.read_bytes(), payload)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("dual_write_shadow",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT authority_mode,state FROM runs WHERE run_id='dual-run'"
+                ).fetchone(),
+                ("dual_write_shadow", "finalized"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT sha256,source_authority FROM artifact_projections "
+                    "WHERE run_id='dual-run'"
+                ).fetchone(),
+                (hashlib.sha256(payload).hexdigest(), "dual_write_shadow"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_authority "
+                    "WHERE mode IN ('db_authority_canary','db_authority')"
+                ).fetchone(),
+                (0,),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM runs "
+                    "WHERE authority_mode IN ('db_authority_canary','db_authority')"
+                ).fetchone(),
+                (0,),
+            )
+
+        replay = dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+        )
+        self.assertEqual(replay.status, "replayed")
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE run_id='dual-run' AND source_authority='dual_write_shadow'"
+                ).fetchone(),
+                (1,),
+            )
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_dual_write_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="dual-run",
+        )
+        self.assertEqual(audit.status, "pass", audit.issues)
+
+    def test_dual_write_shadow_changed_replay_fails_before_overwrite(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        original = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            original,
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-dual",
+        )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "refusing to overwrite"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                b'{"dual": false}\n',
+                workflow="heartbeat",
+                run_id="dual-run",
+                prepare_idempotency_key="prepare-dual",
+            )
+
+        self.assertEqual(artifact.read_bytes(), original)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT sha256 FROM artifact_projections "
+                    "WHERE run_id='dual-run' AND source_authority='dual_write_shadow'"
+                ).fetchone(),
+                (hashlib.sha256(original).hexdigest(),),
+            )
+
+    def test_dual_write_shadow_rejects_prepare_key_mismatch_on_replay(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        payload = b'{"dual": true}\n'
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            payload,
+            workflow="heartbeat",
+            run_id="dual-run",
+            prepare_idempotency_key="prepare-one",
+        )
+
+        with self.assertRaisesRegex(ShadowBackfillError, "matching shadow run"):
+            dual_write_shadow_artifact(
+                self.database,
+                artifact,
+                payload,
+                workflow="heartbeat",
+                run_id="dual-run",
+                prepare_idempotency_key="prepare-two",
+            )
+        self.assertEqual(artifact.read_bytes(), payload)
+
+    def test_dual_write_shadow_audit_detects_file_db_drift(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "dual.json"
+        dual_write_shadow_artifact(
+            self.database,
+            artifact,
+            b'{"dual": true}\n',
+            workflow="heartbeat",
+            run_id="dual-run",
+        )
+        artifact.write_bytes(b'{"dual": "drift"}\n')
+        self._checkpoint_and_remove_sidecars()
+
+        audit = audit_dual_write_shadow(
+            self.database,
+            [artifact],
+            workflow="heartbeat",
+            run_id="dual-run",
+        )
+
+        self.assertEqual(audit.status, "fail")
+        self.assertEqual({issue.reason for issue in audit.issues}, {"sha256_mismatch"})
+
+    def test_cli_dual_write_shadow_positive_and_negative_paths(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "cli-dual.json"
+        payload = '{"cli": true}\n'
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = cli_main(
+                [
+                    "dual-write-shadow",
+                    "--db",
+                    str(self.database),
+                    "--workflow",
+                    "heartbeat",
+                    "--run-id",
+                    "cli-dual",
+                    "--artifact",
+                    str(artifact),
+                    "--content",
+                    payload,
+                    "--repo-root",
+                    str(repository_root()),
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("dual-write shadow written", output.getvalue())
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = cli_main(
+                [
+                    "dual-write-shadow-audit",
+                    "--db",
+                    str(self.database),
+                    "--workflow",
+                    "heartbeat",
+                    "--run-id",
+                    "cli-dual",
+                    "--artifact",
+                    str(artifact),
+                    "--repo-root",
+                    str(repository_root()),
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("shadow audit pass", output.getvalue())
+
+        artifact.write_text('{"cli": false}\n', encoding="utf-8")
+        self._checkpoint_and_remove_sidecars()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = cli_main(
+                [
+                    "dual-write-shadow-audit",
+                    "--db",
+                    str(self.database),
+                    "--workflow",
+                    "heartbeat",
+                    "--run-id",
+                    "cli-dual",
+                    "--artifact",
+                    str(artifact),
+                    "--repo-root",
+                    str(repository_root()),
+                ]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("sha256_mismatch", output.getvalue())
 
 
 if __name__ == "__main__":
