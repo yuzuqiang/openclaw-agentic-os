@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from .migrations import apply_migrations, repository_root, verify_database
-from .privacy import assert_privacy_preflight
+from .privacy import assert_paths_retrievable, assert_privacy_preflight
 from .shadow import (
     audit_dual_write_shadow,
     audit_file_authority_shadow,
@@ -116,7 +116,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "dual-write-shadow":
         if args.content_file is not None:
-            content = args.content_file.read_bytes()
+            content_file = args.content_file.expanduser()
+            assert_paths_retrievable((content_file, content_file.resolve()))
+            content = content_file.read_bytes()
         else:
             content = args.content.encode("utf-8")
         result = dual_write_shadow_artifact(

@@ -8,8 +8,10 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 import agentic_os
+import agentic_os.shadow as shadow_module
 from agentic_os.cli import main as cli_main
 from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.privacy import PrivacyPreflightError
@@ -841,6 +843,78 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(audit.status, "fail")
         self.assertEqual({issue.reason for issue in audit.issues}, {"sha256_mismatch"})
 
+    def test_dual_write_shadow_cleans_created_file_after_write_failure(self) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "partial.json"
+        original_open = Path.open
+
+        class FailingDestination:
+            def __enter__(self) -> "FailingDestination":
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                with original_open(artifact, "xb"):
+                    pass
+                return self
+
+            def write(self, _content: bytes) -> int:
+                raise OSError("disk full")
+
+            def __exit__(self, *_exc: object) -> bool:
+                return False
+
+        def flaky_open(path: Path, mode: str = "r", *args: object, **kwargs: object):
+            if path == artifact and mode == "xb":
+                return FailingDestination()
+            return original_open(path, mode, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", flaky_open):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                dual_write_shadow_artifact(
+                    self.database,
+                    artifact,
+                    b'{"partial": true}\n',
+                    workflow="heartbeat",
+                    run_id="write-failed",
+                )
+
+        self.assertFalse(artifact.exists())
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM artifact_projections "
+                    "WHERE run_id='write-failed'"
+                ).fetchone(),
+                (0,),
+            )
+
+    def test_dual_write_shadow_preserves_committed_file_after_checkpoint_failure(
+        self,
+    ) -> None:
+        artifact = Path(self.temporary.name) / "reports" / "checkpoint.json"
+        payload = b'{"checkpoint": true}\n'
+
+        with mock.patch.object(
+            shadow_module,
+            "_checkpoint_offline_snapshot",
+            side_effect=ShadowBackfillError("checkpoint busy"),
+        ):
+            with self.assertRaisesRegex(ShadowBackfillError, "checkpoint busy"):
+                dual_write_shadow_artifact(
+                    self.database,
+                    artifact,
+                    payload,
+                    workflow="heartbeat",
+                    run_id="checkpoint-busy",
+                )
+
+        self.assertEqual(artifact.read_bytes(), payload)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT sha256,source_authority FROM artifact_projections "
+                    "WHERE run_id='checkpoint-busy'"
+                ).fetchone(),
+                (hashlib.sha256(payload).hexdigest(), "dual_write_shadow"),
+            )
+
     def test_cli_dual_write_shadow_positive_and_negative_paths(self) -> None:
         artifact = Path(self.temporary.name) / "reports" / "cli-dual.json"
         payload = '{"cli": true}\n'
@@ -907,6 +981,35 @@ class ShadowTests(unittest.TestCase):
             )
         self.assertEqual(status, 1)
         self.assertIn("sha256_mismatch", output.getvalue())
+
+    def test_cli_dual_write_shadow_rejects_raw_state_content_file_before_copying(
+        self,
+    ) -> None:
+        raw_state = self.state_root / "control.db"
+        raw_state.write_bytes(b"raw sqlite bytes")
+        self.addCleanup(raw_state.unlink, missing_ok=True)
+        artifact = Path(self.temporary.name) / "reports" / "copied.json"
+
+        with self.assertRaisesRegex(PrivacyPreflightError, "raw database state"):
+            cli_main(
+                [
+                    "dual-write-shadow",
+                    "--db",
+                    str(self.database),
+                    "--workflow",
+                    "heartbeat",
+                    "--run-id",
+                    "raw-state-copy",
+                    "--artifact",
+                    str(artifact),
+                    "--content-file",
+                    str(raw_state),
+                    "--repo-root",
+                    str(repository_root()),
+                ]
+            )
+
+        self.assertFalse(artifact.exists())
 
 
 if __name__ == "__main__":

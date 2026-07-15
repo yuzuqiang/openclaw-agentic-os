@@ -421,6 +421,7 @@ def dual_write_shadow_artifact(
     created_at, finalized_at_epoch_ms = _utc_now()
     connection = _connect(database_path)
     checkpointed = False
+    committed = False
     created_file = False
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -498,15 +499,16 @@ def dual_write_shadow_artifact(
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with target.open("xb") as destination:
+                    created_file = True
                     destination.write(content)
-                created_file = True
             connection.execute("COMMIT")
+            committed = True
             _checkpoint_offline_snapshot(connection)
             checkpointed = True
         except Exception:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
-            if created_file:
+            if created_file and not committed:
                 try:
                     target.unlink()
                 except FileNotFoundError:

@@ -51,9 +51,12 @@ decisions.
 single file-authority artifact and records matching `dual_write_shadow` SQLite
 projection evidence in the same local operation. Exact replay with the same
 prepare key, run, artifact path, and content is a no-op; changed replay or
-file/SQLite drift fails closed and refuses to overwrite file authority. This is
-parity evidence only: it does not create `db_authority_canary` or `db_authority`
-runs, does not call OpenClaw or Gateway, and does not claim canary readiness.
+file/SQLite drift fails closed and refuses to overwrite file authority.
+`--content-file` is subject to the raw-state denylist before bytes are read, and
+a post-commit checkpoint failure must not delete the committed authority file.
+This is parity evidence only: it does not create `db_authority_canary` or
+`db_authority` runs, does not call OpenClaw or Gateway, and does not claim
+canary readiness.
 
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
