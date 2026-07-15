@@ -3156,6 +3156,103 @@ Schema version 7 keeps its historical SLO query hashes; version 8 and later use
 the atomic-settlement completeness contract. This runtime slice does not cover
 legacy-money conversion and does not enable production database authority.
 
+The v8 executable overlay for `Budget event amount malformed or out of range`
+adds this settlement proof check to the baseline amount query:
+
+```sql
+UNION ALL
+SELECT bs.settlement_id
+FROM budget_settlements bs
+WHERE ((bs.actual_time_seconds>0 OR bs.actual_input_tokens>0
+        OR bs.actual_output_tokens>0 OR bs.actual_cost_microusd>0)
+       IS NOT (SELECT COUNT(*)=1 FROM budget_events be
+               WHERE be.settlement_id=bs.settlement_id
+                 AND be.event_type='consume'))
+   OR ((bs.actual_retry_units>0)
+       IS NOT (SELECT COUNT(*)=1 FROM budget_events be
+               WHERE be.settlement_id=bs.settlement_id
+                 AND be.event_type='retry_decrement'))
+   OR ((bs.actual_human_attention_units>0)
+       IS NOT (SELECT COUNT(*)=1 FROM budget_events be
+               WHERE be.settlement_id=bs.settlement_id
+                 AND be.event_type='human_attention'))
+   OR ((bs.released_time_seconds>0 OR bs.released_input_tokens>0
+        OR bs.released_output_tokens>0 OR bs.released_cost_microusd>0
+        OR bs.released_retry_units>0
+        OR bs.released_human_attention_units>0)
+       IS NOT (SELECT COUNT(*)=1 FROM budget_events be
+               WHERE be.settlement_id=bs.settlement_id
+                 AND be.event_type='release'))
+   OR EXISTS (
+       SELECT 1 FROM budget_events be
+       WHERE be.settlement_id=bs.settlement_id
+         AND be.event_type NOT IN (
+           'consume','retry_decrement','human_attention','release'
+         ))
+   OR NOT EXISTS (
+       SELECT 1
+       FROM spawn_requests sr
+       JOIN runs r ON r.run_id=sr.run_id
+       JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id
+        AND s.run_id=sr.run_id
+        AND s.transition_id=sr.transition_id
+        AND s.client_request_id=sr.client_request_id
+        AND s.spawn_idempotency_key=sr.spawn_idempotency_key
+        AND s.phase=sr.phase
+        AND s.agent_id=sr.agent_id
+        AND s.task_digest=sr.task_digest
+        AND s.session_key=sr.session_key
+       JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn'
+        AND i.state IN ('accepted','reconciled')
+        AND i.spawn_request_id=sr.spawn_request_id
+        AND i.run_id=sr.run_id
+        AND i.transition_id=sr.transition_id
+        AND i.client_request_id=sr.client_request_id
+        AND i.idempotency_key=sr.spawn_idempotency_key
+        AND i.phase=sr.phase
+        AND i.agent_id=sr.agent_id
+        AND i.task_digest=sr.task_digest
+        AND i.external_id=sr.session_key
+       JOIN run_budgets rb ON rb.run_id=sr.run_id
+       JOIN gate_clock_context c ON c.clock_context_id=bs.clock_context_id
+        AND c.run_id=sr.run_id
+        AND c.transition_id=sr.transition_id
+       JOIN gate_runs g ON g.gate_run_id=c.gate_run_id
+        AND g.clock_context_id=c.clock_context_id
+        AND g.run_id=c.run_id
+        AND g.transition_id=c.transition_id
+       WHERE sr.spawn_request_id=bs.spawn_request_id
+         AND sr.run_id=bs.run_id
+         AND sr.transition_id=bs.transition_id
+         AND sr.state='completed'
+         AND s.state='completed'
+         AND s.completed_at IS NOT NULL
+         AND s.completed_at<>''
+         AND r.state IN (
+           'child_completed','child_failed','aggregation_completed'
+         )
+         AND rb.selected_reserve_transition_id=bs.transition_id
+         AND rb.selected_provider=bs.provider
+         AND rb.selected_model=bs.model
+         AND rb.selected_endpoint_binding_id=bs.endpoint_binding_id
+         AND rb.capability_class=bs.capability_class
+         AND rb.selected_cost_registry_id=bs.cost_registry_id
+         AND rb.selected_cost_effective_at=bs.cost_effective_at
+         AND rb.selected_cost_registry_hash=bs.cost_registry_hash
+         AND rb.selected_cost_confidence=bs.cost_confidence
+         AND rb.usage_confidence IN ('known','estimated')
+         AND i.requested_at_epoch_ms<i.accepted_at_epoch_ms
+         AND i.accepted_at_epoch_ms<bs.created_at_epoch_ms
+         AND c.gate_run_id=c.consumed_by_gate_run_id
+         AND c.bound_at_epoch_ms=c.now_epoch_ms
+         AND c.consumed_at_epoch_ms=c.now_epoch_ms
+         AND c.now_epoch_ms=bs.created_at_epoch_ms
+         AND c.trusted_clock_source_hash<>''
+         AND c.gate_nonce<>''
+         AND g.decision='pass'
+         AND g.completed_at_epoch_ms=c.now_epoch_ms);
+```
+
 Gate-critical time authority:
 
 - Approval expiry authority is `approvals.expires_at_epoch_ms` only. It is stored in a `STRICT` table `ANY` column, must have integer storage class by `typeof(...)= 'integer'`, and is compared only to the trusted gate-context integer `gate_clock_context.now_epoch_ms`.

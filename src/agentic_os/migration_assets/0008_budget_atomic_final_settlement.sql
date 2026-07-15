@@ -142,6 +142,13 @@ WHEN NOT EXISTS (
       FROM budget_events be WHERE be.run_id=NEW.run_id
         AND be.transition_id=NEW.transition_id
         AND be.spawn_request_id=NEW.spawn_request_id
+        AND be.provider=NEW.provider AND be.model=NEW.model
+        AND be.endpoint_binding_id=NEW.endpoint_binding_id
+        AND be.capability_class=NEW.capability_class
+        AND be.cost_registry_id=NEW.cost_registry_id
+        AND be.cost_effective_at=NEW.cost_effective_at
+        AND be.cost_registry_hash=NEW.cost_registry_hash
+        AND be.cost_confidence=NEW.cost_confidence
     )=NEW.actual_time_seconds+NEW.released_time_seconds
     AND (
       SELECT COALESCE(SUM(CASE WHEN event_type='reserve' THEN input_tokens
@@ -149,6 +156,13 @@ WHEN NOT EXISTS (
       FROM budget_events be WHERE be.run_id=NEW.run_id
         AND be.transition_id=NEW.transition_id
         AND be.spawn_request_id=NEW.spawn_request_id
+        AND be.provider=NEW.provider AND be.model=NEW.model
+        AND be.endpoint_binding_id=NEW.endpoint_binding_id
+        AND be.capability_class=NEW.capability_class
+        AND be.cost_registry_id=NEW.cost_registry_id
+        AND be.cost_effective_at=NEW.cost_effective_at
+        AND be.cost_registry_hash=NEW.cost_registry_hash
+        AND be.cost_confidence=NEW.cost_confidence
     )=NEW.actual_input_tokens+NEW.released_input_tokens
     AND (
       SELECT COALESCE(SUM(CASE WHEN event_type='reserve' THEN output_tokens
@@ -156,6 +170,13 @@ WHEN NOT EXISTS (
       FROM budget_events be WHERE be.run_id=NEW.run_id
         AND be.transition_id=NEW.transition_id
         AND be.spawn_request_id=NEW.spawn_request_id
+        AND be.provider=NEW.provider AND be.model=NEW.model
+        AND be.endpoint_binding_id=NEW.endpoint_binding_id
+        AND be.capability_class=NEW.capability_class
+        AND be.cost_registry_id=NEW.cost_registry_id
+        AND be.cost_effective_at=NEW.cost_effective_at
+        AND be.cost_registry_hash=NEW.cost_registry_hash
+        AND be.cost_confidence=NEW.cost_confidence
     )=NEW.actual_output_tokens+NEW.released_output_tokens
     AND (
       SELECT COALESCE(SUM(CASE WHEN event_type='reserve' THEN cost_microusd
@@ -163,6 +184,13 @@ WHEN NOT EXISTS (
       FROM budget_events be WHERE be.run_id=NEW.run_id
         AND be.transition_id=NEW.transition_id
         AND be.spawn_request_id=NEW.spawn_request_id
+        AND be.provider=NEW.provider AND be.model=NEW.model
+        AND be.endpoint_binding_id=NEW.endpoint_binding_id
+        AND be.capability_class=NEW.capability_class
+        AND be.cost_registry_id=NEW.cost_registry_id
+        AND be.cost_effective_at=NEW.cost_effective_at
+        AND be.cost_registry_hash=NEW.cost_registry_hash
+        AND be.cost_confidence=NEW.cost_confidence
     )=NEW.actual_cost_microusd+NEW.released_cost_microusd
     AND (
       SELECT COALESCE(SUM(CASE WHEN event_type='reserve' THEN retry_units
@@ -171,6 +199,13 @@ WHEN NOT EXISTS (
       FROM budget_events be WHERE be.run_id=NEW.run_id
         AND be.transition_id=NEW.transition_id
         AND be.spawn_request_id=NEW.spawn_request_id
+        AND be.provider=NEW.provider AND be.model=NEW.model
+        AND be.endpoint_binding_id=NEW.endpoint_binding_id
+        AND be.capability_class=NEW.capability_class
+        AND be.cost_registry_id=NEW.cost_registry_id
+        AND be.cost_effective_at=NEW.cost_effective_at
+        AND be.cost_registry_hash=NEW.cost_registry_hash
+        AND be.cost_confidence=NEW.cost_confidence
     )=NEW.actual_retry_units+NEW.released_retry_units
     AND (
       SELECT COALESCE(SUM(CASE WHEN event_type='reserve' THEN human_attention_units
@@ -179,6 +214,13 @@ WHEN NOT EXISTS (
       FROM budget_events be WHERE be.run_id=NEW.run_id
         AND be.transition_id=NEW.transition_id
         AND be.spawn_request_id=NEW.spawn_request_id
+        AND be.provider=NEW.provider AND be.model=NEW.model
+        AND be.endpoint_binding_id=NEW.endpoint_binding_id
+        AND be.capability_class=NEW.capability_class
+        AND be.cost_registry_id=NEW.cost_registry_id
+        AND be.cost_effective_at=NEW.cost_effective_at
+        AND be.cost_registry_hash=NEW.cost_registry_hash
+        AND be.cost_confidence=NEW.cost_confidence
     )=NEW.actual_human_attention_units+NEW.released_human_attention_units
 )
 BEGIN

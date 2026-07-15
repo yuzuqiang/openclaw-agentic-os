@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `6af1c36169983d69aa9bd7920745c1dc6061e4fffde78aa15071451e08f0c1ad`
+- Current design artifact SHA-256: `f2f26215350e7eeb949c4b62f01ea771566b0c5e1cdadab3d3e93b4bdc32be8f`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `b294119716045ec080456b4e32b37b541c4bd9b31185e4654d46d50ad2757fab`
-- Current migration manifest SHA-256: `bab25fa5a66a7681b999859568549217fdc06fcbecd4655f1b0f26600a7a4bb9`
+- Current latest migration SHA-256: `f0739d6a981905a4cbee429d73e816fb4f09b89576f6f0769eefb3112b26839f`
+- Current migration manifest SHA-256: `c7a68a6293b311fb1dcfa9af2e12925376b5680e62a9c5f301cac9210bcbe6f1`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table and one settlement proof table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -96,9 +96,12 @@ Migration v8 adds immutable, exactly-once `budget_settlements` proof. The
 clock, then atomically records remaining terminal usage and releases every
 unused reservation dimension under one `BEGIN IMMEDIATE` transaction. Linked
 ledger events share a settlement identity; incomplete direct imports are
-blocking SLO evidence, conflicting replays fail closed, and concurrent final
-settlements cannot create two terminal proofs. Legacy-money import conversion
-and the remaining adversarial fixture matrix remain open in Issue #4.
+blocking SLO evidence, selected cost-row outstanding proof is rechecked in the
+database trigger, source dedupe identity is shared with post-dispatch events,
+completed-session proof is revalidated by the v8 SLO, conflicting replays fail
+closed, and concurrent final settlements cannot create two terminal proofs.
+Legacy-money import conversion and the remaining adversarial fixture matrix
+remain open in Issue #4.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

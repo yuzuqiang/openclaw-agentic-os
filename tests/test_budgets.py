@@ -1846,6 +1846,174 @@ class BudgetRuntimeTests(unittest.TestCase):
             settle_budget(self.database, **{**common, "clock_context_id": "clock"})
         self.assertEqual(self._settlement_count(), 0)
 
+    def test_final_settlement_slo_revalidates_completed_session_after_drift(
+        self,
+    ) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-session-drift-final",
+                dedupe_key="reserve-for-session-drift-final",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(),
+            idempotency_key="release-only-session-drift-final",
+            dedupe_key="release-only-session-drift-final",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        self.assertEqual(len(result.events), 1)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE sessions SET state='running',completed_at=NULL "
+                "WHERE session_id='session'"
+            )
+        rows = self._slo_rows("Budget event amount malformed or out of range")
+        self.assertIn((result.settlement_id,), rows)
+        with self.assertRaisesRegex(BudgetError, "completed session proof"):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(),
+                idempotency_key="release-only-session-drift-final",
+                dedupe_key="release-only-session-drift-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+
+    def test_final_settlement_rejects_outstanding_from_unselected_cost_row(
+        self,
+    ) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-selected-before-final",
+                dedupe_key="reserve-selected-before-final",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('cost-row-other','other-provider',"
+                "'other-model','endpoint','capability',100,200,'known','effective',"
+                "'cost-hash-other')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,input_tokens,"
+                "cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('wrong-cost-reserve',"
+                "'wrong-cost-reserve-idem','wrong-cost-reserve-dedupe',2,'run',"
+                "'transition','spawn','other-provider','other-model','endpoint',"
+                "'capability','cost-row-other','effective','cost-hash-other',"
+                "'known','reserve',1,1,'known','test','now',1800000000123)"
+            )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "final settlement requires exact completed-session",
+            ):
+                connection.execute(
+                    "INSERT INTO budget_settlements("
+                    "settlement_id,settlement_idempotency_key,"
+                    "settlement_dedupe_hash,run_id,transition_id,"
+                    "spawn_request_id,provider,model,endpoint_binding_id,"
+                    "capability_class,cost_registry_id,cost_effective_at,"
+                    "cost_registry_hash,cost_confidence,actual_time_seconds,"
+                    "actual_input_tokens,actual_output_tokens,actual_cost_microusd,"
+                    "actual_retry_units,actual_human_attention_units,"
+                    "released_time_seconds,released_input_tokens,"
+                    "released_output_tokens,released_cost_microusd,"
+                    "released_retry_units,released_human_attention_units,"
+                    "usage_confidence,source,created_at,created_at_epoch_ms,"
+                    "clock_context_id) VALUES('wrong-cost-settlement',"
+                    "'wrong-cost-settlement-idem','wrong-cost-settlement-dedupe',"
+                    "'run','transition','spawn','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known',"
+                    "0,0,0,0,0,0,0,2,0,2,0,0,'known','imported','now',"
+                    "1800000000126,'post-clock')"
+                )
+        self.assertEqual(self._settlement_count(), 0)
+
+    def test_final_settlement_source_dedupe_is_shared_with_budget_events(
+        self,
+    ) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-settlement-dedupe",
+                dedupe_key="reserve-for-settlement-dedupe",
+                amounts=BudgetAmounts(input_tokens=3, cost_microusd=3),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        consume_budget(
+            self.database,
+            **{
+                **self._post_kwargs(
+                    idempotency_key="consume-before-final-dedupe",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+                "dedupe_key": "shared-terminal-source",
+            },
+        )
+        with self.assertRaisesRegex(BudgetConflict, "budget event"):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                idempotency_key="final-reuses-consume-source",
+                dedupe_key="shared-terminal-source",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+        settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            idempotency_key="final-owns-source",
+            dedupe_key="final-owned-source",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        with self.assertRaisesRegex(BudgetConflict, "final settlement"):
+            consume_budget(
+                self.database,
+                **{
+                    **self._post_kwargs(
+                        idempotency_key="consume-reuses-final-source",
+                        amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                    ),
+                    "dedupe_key": "final-owned-source",
+                },
+            )
+
     def test_concurrent_final_settlements_create_exactly_one_terminal_proof(self) -> None:
         reserve = reserve_budget(
             self.database,

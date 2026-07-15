@@ -388,7 +388,53 @@ def _assert_budget_invariants(connection: sqlite3.Connection) -> None:
             "OR EXISTS (SELECT 1 FROM budget_events be "
             "WHERE be.settlement_id=bs.settlement_id "
             "AND be.event_type NOT IN ('consume','retry_decrement',"
-            "'human_attention','release')) LIMIT 1"
+            "'human_attention','release')) "
+            "OR NOT EXISTS (SELECT 1 FROM spawn_requests sr "
+            "JOIN runs r ON r.run_id=sr.run_id "
+            "JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id "
+            "AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id "
+            "AND s.client_request_id=sr.client_request_id "
+            "AND s.spawn_idempotency_key=sr.spawn_idempotency_key "
+            "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
+            "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
+            "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
+            "AND i.state IN ('accepted','reconciled') "
+            "AND i.spawn_request_id=sr.spawn_request_id AND i.run_id=sr.run_id "
+            "AND i.transition_id=sr.transition_id "
+            "AND i.client_request_id=sr.client_request_id "
+            "AND i.idempotency_key=sr.spawn_idempotency_key "
+            "AND i.phase=sr.phase AND i.agent_id=sr.agent_id "
+            "AND i.task_digest=sr.task_digest AND i.external_id=sr.session_key "
+            "JOIN run_budgets rb ON rb.run_id=sr.run_id "
+            "JOIN gate_clock_context c ON c.clock_context_id=bs.clock_context_id "
+            "AND c.run_id=sr.run_id AND c.transition_id=sr.transition_id "
+            "JOIN gate_runs g ON g.gate_run_id=c.gate_run_id "
+            "AND g.clock_context_id=c.clock_context_id "
+            "AND g.run_id=c.run_id AND g.transition_id=c.transition_id "
+            "WHERE sr.spawn_request_id=bs.spawn_request_id "
+            "AND sr.run_id=bs.run_id AND sr.transition_id=bs.transition_id "
+            "AND sr.state='completed' AND s.state='completed' "
+            "AND s.completed_at IS NOT NULL AND s.completed_at<>'' "
+            "AND r.state IN ('child_completed','child_failed',"
+            "'aggregation_completed') "
+            "AND rb.selected_reserve_transition_id=bs.transition_id "
+            "AND rb.selected_provider=bs.provider AND rb.selected_model=bs.model "
+            "AND rb.selected_endpoint_binding_id=bs.endpoint_binding_id "
+            "AND rb.capability_class=bs.capability_class "
+            "AND rb.selected_cost_registry_id=bs.cost_registry_id "
+            "AND rb.selected_cost_effective_at=bs.cost_effective_at "
+            "AND rb.selected_cost_registry_hash=bs.cost_registry_hash "
+            "AND rb.selected_cost_confidence=bs.cost_confidence "
+            "AND rb.usage_confidence IN ('known','estimated') "
+            "AND i.requested_at_epoch_ms<i.accepted_at_epoch_ms "
+            "AND i.accepted_at_epoch_ms<bs.created_at_epoch_ms "
+            "AND c.gate_run_id=c.consumed_by_gate_run_id "
+            "AND c.bound_at_epoch_ms=c.now_epoch_ms "
+            "AND c.consumed_at_epoch_ms=c.now_epoch_ms "
+            "AND c.now_epoch_ms=bs.created_at_epoch_ms "
+            "AND c.trusted_clock_source_hash<>'' AND c.gate_nonce<>'' "
+            "AND g.decision='pass' AND g.completed_at_epoch_ms=c.now_epoch_ms) "
+            "LIMIT 1"
         ).fetchone()
         if invalid_settlement is not None:
             raise BudgetError("atomic final settlement ledger is incomplete or malformed")
@@ -529,6 +575,30 @@ def _existing_event(
     if row[:-1] != expected:
         raise BudgetConflict("budget event idempotency key was reused with another payload")
     return BudgetEventResult(row[0], row[-1], True)
+
+
+def _reject_settlement_dedupe_collision(
+    connection: sqlite3.Connection, event_dedupe_hash: str
+) -> None:
+    row = connection.execute(
+        "SELECT settlement_id FROM budget_settlements "
+        "WHERE settlement_dedupe_hash=? LIMIT 1",
+        (event_dedupe_hash,),
+    ).fetchone()
+    if row is not None:
+        raise BudgetConflict("dedupe key was already used by a final settlement")
+
+
+def _reject_event_dedupe_collision(
+    connection: sqlite3.Connection, settlement_dedupe_hash: str
+) -> None:
+    row = connection.execute(
+        "SELECT budget_event_id FROM budget_events "
+        "WHERE event_dedupe_hash=? LIMIT 1",
+        (settlement_dedupe_hash,),
+    ).fetchone()
+    if row is not None:
+        raise BudgetConflict("settlement dedupe key was already used by a budget event")
 
 
 def _update_counters(
@@ -712,6 +782,7 @@ def record_budget_event(
                 _assert_budget_invariants(connection)
                 connection.execute("COMMIT")
                 return replay
+            _reject_settlement_dedupe_collision(connection, event_dedupe_hash)
             if spawn_identity[0] != "pending":
                 raise BudgetError(
                     f"{event_type} requires a pending pre-RPC spawn request"
@@ -1084,6 +1155,7 @@ def record_post_dispatch_event(
                 _assert_budget_invariants(connection)
                 connection.execute("COMMIT")
                 return replay
+            _reject_settlement_dedupe_collision(connection, event_dedupe_hash)
             poisoned_usage = connection.execute(
                 "SELECT 1 FROM run_budgets rb "
                 "WHERE rb.run_id=? AND rb.usage_confidence='unknown' "
@@ -1357,6 +1429,7 @@ def settle_budget(
                 return BudgetSettlementResult(
                     settlement_id, events, released, True
                 )
+            _reject_event_dedupe_collision(connection, settlement_dedupe_hash)
 
             if proof[1] not in _FINAL_SETTLEMENT_RUN_STATES:
                 raise BudgetError(
