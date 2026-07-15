@@ -116,7 +116,10 @@ WHEN NOT EXISTS (
     AND sr.run_id=NEW.run_id AND sr.transition_id=NEW.transition_id
     AND sr.state='completed' AND s.state='completed'
     AND s.completed_at IS NOT NULL AND s.completed_at<>''
-    AND r.state IN ('child_completed','child_failed','aggregation_completed')
+    AND r.state IN (
+      'child_completed','child_failed','aggregation_completed',
+      'release_pending','finalized'
+    )
     AND rb.selected_reserve_transition_id=NEW.transition_id
     AND rb.selected_provider=NEW.provider AND rb.selected_model=NEW.model
     AND rb.selected_endpoint_binding_id=NEW.endpoint_binding_id
@@ -276,7 +279,9 @@ END;
 CREATE TRIGGER budget_events_reject_after_final_settlement_insert
 BEFORE INSERT ON budget_events
 WHEN NEW.settlement_id IS NULL
-AND NEW.event_type IN ('consume','retry_decrement','retry_restore','human_attention')
+AND NEW.event_type IN (
+  'reserve','consume','release','retry_decrement','retry_restore','human_attention'
+)
 AND NOT EXISTS (
   SELECT 1 FROM budget_settlements bs
   WHERE bs.settlement_dedupe_hash=NEW.event_dedupe_hash
