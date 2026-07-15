@@ -18,11 +18,13 @@ from agentic_os.metadata import (
     validate_allow_lease_release_observation,
     validate_session_observation,
 )
+from agentic_os.migrations import repository_root
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
     MetadataCapableOpenClawAdapter,
     MetadataObservation,
 )
+from agentic_os.privacy import PrivacyPreflightError, assert_privacy_preflight
 
 
 class RuntimeDispatchError(RuntimeError):
@@ -35,6 +37,9 @@ METADATA_RUNTIME_ERRORS = (
     RuntimeDispatchError,
     sqlite3.Error,
 )
+
+AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError)
+RELEASE_FAILURE_ERRORS = METADATA_RUNTIME_ERRORS + AMBIGUOUS_TRANSPORT_ERRORS
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,12 @@ def stable_json(value: dict[str, Any]) -> str:
 
 
 def connect_runtime_db(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path, isolation_level=None)
+    database = Path(path).expanduser().resolve()
+    try:
+        assert_privacy_preflight(repository_root(), database_paths=(database,))
+    except PrivacyPreflightError as exc:
+        raise RuntimeDispatchError("runtime dispatch database privacy preflight failed") from exc
+    connection = sqlite3.connect(database, isolation_level=None)
     connection.execute("PRAGMA busy_timeout=10000")
     journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
     if str(journal_mode[0] if journal_mode else "").casefold() != "wal":
@@ -134,15 +144,49 @@ def spawn_metadata(request: DispatchRequest) -> dict[str, str]:
     }
 
 
-def _existing_external_id(
-    connection: sqlite3.Connection, *, rpc_kind: str, idempotency_key: str
-) -> str | None:
+def _existing_spawn_replay_result(
+    connection: sqlite3.Connection, request: DispatchRequest
+) -> DispatchResult | None:
     row = connection.execute(
-        "SELECT external_id FROM external_rpc_intents "
-        "WHERE rpc_kind=? AND idempotency_key=? AND state IN ('accepted','reconciled')",
-        (rpc_kind, idempotency_key),
+        "SELECT run_id,transition_id,client_request_id,phase,agent_id,task_digest,"
+        "state,external_id FROM external_rpc_intents "
+        "WHERE rpc_kind='sessions_spawn' AND idempotency_key=?",
+        (request.spawn_idempotency_key,),
     ).fetchone()
-    return row[0] if row else None
+    if row is None:
+        return None
+    expected = (
+        request.run_id,
+        request.transition_id,
+        request.spawn_client_request_id,
+        request.phase,
+        request.agent_id,
+        request.task_digest,
+    )
+    if row[:6] != expected:
+        raise RuntimeDispatchError("conflicting reuse of sessions_spawn idempotency key")
+    state = row[6]
+    external_id = row[7]
+    if state in ("accepted", "reconciled"):
+        session_key = validate_accepted_session_identity(
+            external_id=external_id,
+            spawn_request_session_key=external_id,
+            session_key=external_id,
+        )
+        lease = connection.execute(
+            "SELECT gateway_lease_id FROM leases WHERE client_lease_id=?",
+            (request.client_lease_id,),
+        ).fetchone()
+        return DispatchResult(
+            session_key=session_key,
+            gateway_lease_id=lease[0] if lease else "",
+            status="replayed",
+        )
+    if state in ("unknown", "failed", "human_review_required"):
+        raise RuntimeDispatchError(
+            f"sessions_spawn replay is already {state}; external RPC will not be retried"
+        )
+    return None
 
 
 def _assert_no_conflicting_spawn_replay(
@@ -437,6 +481,40 @@ def mark_human_review(
         )
 
 
+def mark_unknown(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    *,
+    rpc_kind: str,
+    reason: str,
+) -> None:
+    now, now_ms = now_utc()
+    key = (
+        request.acquire_idempotency_key
+        if rpc_kind == "allow_lease_acquire"
+        else request.spawn_idempotency_key
+    )
+    connection.execute(
+        "UPDATE external_rpc_intents SET state='unknown',resolved_at=?,"
+        "resolved_at_epoch_ms=? WHERE rpc_kind=? AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled','human_review_required','failed')",
+        (now, now_ms, rpc_kind, key),
+    )
+    if rpc_kind == "sessions_spawn":
+        connection.execute(
+            "UPDATE spawn_requests SET state='unknown',ambiguity_reason=?,"
+            "updated_at=? WHERE spawn_request_id=? "
+            "AND state NOT IN ('accepted','completed','human_review_required','failed')",
+            (reason, now, request.spawn_request_id),
+        )
+    else:
+        connection.execute(
+            "UPDATE leases SET reconciliation_status=? "
+            "WHERE client_lease_id=? AND gateway_lease_id IS NULL",
+            (reason, request.client_lease_id),
+        )
+
+
 def mark_owned_lease_release_review(
     connection: sqlite3.Connection,
     request: DispatchRequest,
@@ -533,22 +611,10 @@ def dispatch_with_metadata(
 ) -> DispatchResult:
     with connect_runtime_db(database) as connection:
         with immediate_transaction(connection):
+            existing = _existing_spawn_replay_result(connection, request)
+            if existing is not None:
+                return existing
             insert_pending_dispatch(connection, request)
-            existing = _existing_external_id(
-                connection,
-                rpc_kind="sessions_spawn",
-                idempotency_key=request.spawn_idempotency_key,
-            )
-            if existing:
-                lease = connection.execute(
-                    "SELECT gateway_lease_id FROM leases WHERE client_lease_id=?",
-                    (request.client_lease_id,),
-                ).fetchone()
-                return DispatchResult(
-                    session_key=existing,
-                    gateway_lease_id=lease[0] if lease else "",
-                    status="replayed",
-                )
 
         try:
             acquire_observation = adapter.allow_lease_acquire(
@@ -570,6 +636,21 @@ def dispatch_with_metadata(
                 persist_acquired_lease(
                     connection, request, acquire_observation, gateway_lease_id
                 )
+        except AMBIGUOUS_TRANSPORT_ERRORS as exc:
+            with immediate_transaction(connection):
+                mark_unknown(
+                    connection,
+                    request,
+                    rpc_kind="allow_lease_acquire",
+                    reason=str(exc),
+                )
+                mark_human_review(
+                    connection,
+                    request,
+                    rpc_kind="sessions_spawn",
+                    reason="spawn blocked by allow lease transport uncertainty",
+                )
+            raise RuntimeDispatchError("allow lease transport outcome unknown") from exc
         except METADATA_RUNTIME_ERRORS as exc:
             with immediate_transaction(connection):
                 mark_human_review(
@@ -606,6 +687,17 @@ def dispatch_with_metadata(
             )
             with immediate_transaction(connection):
                 persist_spawn_acceptance(connection, request, spawn_observation, session_key)
+        except AMBIGUOUS_TRANSPORT_ERRORS as exc:
+            with immediate_transaction(connection):
+                mark_unknown(
+                    connection,
+                    request,
+                    rpc_kind="sessions_spawn",
+                    reason=str(exc),
+                )
+            raise RuntimeDispatchError(
+                "sessions_spawn transport outcome unknown; reconciliation required"
+            ) from exc
         except METADATA_RUNTIME_ERRORS as exc:
             with immediate_transaction(connection):
                 mark_human_review(
@@ -617,7 +709,7 @@ def dispatch_with_metadata(
             try:
                 with immediate_transaction(connection):
                     release_owned_lease(connection, adapter, request, gateway_lease_id)
-            except METADATA_RUNTIME_ERRORS as release_exc:
+            except RELEASE_FAILURE_ERRORS as release_exc:
                 with immediate_transaction(connection):
                     mark_owned_lease_release_review(
                         connection,

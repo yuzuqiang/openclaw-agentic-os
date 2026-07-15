@@ -8,6 +8,7 @@ from pathlib import Path
 
 from agentic_os.metadata import (
     MetadataContractError,
+    validate_accepted_session_identity,
     validate_allow_lease_observation,
     validate_session_observation,
 )
@@ -97,8 +98,8 @@ def _unknown_lease_requests(connection: sqlite3.Connection) -> list[DispatchRequ
 
 def _matching_sessions(
     request: DispatchRequest, observations: list[MetadataObservation]
-) -> list[MetadataObservation]:
-    matches: list[MetadataObservation] = []
+) -> list[tuple[MetadataObservation, str]]:
+    matches: list[tuple[MetadataObservation, str]] = []
     for observation in observations:
         try:
             validate_session_observation(
@@ -107,9 +108,14 @@ def _matching_sessions(
                 raw_json=observation.raw_json,
                 metadata_contract_version=observation.metadata_contract_version,
             )
+            session_key = validate_accepted_session_identity(
+                external_id=observation.external_id,
+                spawn_request_session_key=observation.spawn_request_session_key,
+                session_key=observation.session_key,
+            )
         except MetadataContractError:
             continue
-        matches.append(observation)
+        matches.append((observation, session_key))
     return matches
 
 
@@ -165,7 +171,7 @@ def reconcile_unknown_metadata(
 
             for request in _unknown_spawn_requests(connection):
                 matches = _matching_sessions(request, session_observations)
-                if len(matches) != 1 or not matches[0].external_id:
+                if len(matches) != 1:
                     mark_human_review(
                         connection,
                         request,
@@ -174,11 +180,12 @@ def reconcile_unknown_metadata(
                     )
                     human_review += 1
                     continue
+                observation, session_key = matches[0]
                 persist_spawn_acceptance(
                     connection,
                     request,
-                    matches[0],
-                    matches[0].external_id,
+                    observation,
+                    session_key,
                     reconciled=True,
                 )
                 reconciled += 1

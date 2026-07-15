@@ -13,21 +13,25 @@ class CannedTransport:
     def call(self, method, params):
         self.calls.append((method, dict(params)))
         if method == "subagents.allowLease.acquire":
+            metadata = {
+                "client_lease_id": "client-lease",
+                "idempotency_key": "acquire-idem",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
+                "gateway_lease_id": "lease-gateway",
+            }
             return {
                 "lease": {"lease_id": "lease-gateway"},
                 "metadata": {
                     "metadata_contract_version": "v1",
-                    "normalized": {
-                        "client_lease_id": "client-lease",
-                        "idempotency_key": "acquire-idem",
-                        "run_id": "run",
-                        "phase": "phase",
-                        "transition_id": "transition",
-                        "agent_id": "agent",
-                        "requester_agent_id": "requester",
-                        "ttl_ms": 60000,
-                        "gateway_lease_id": "lease-gateway",
-                    },
+                    "normalized": metadata,
+                    "raw_json": json.dumps(
+                        metadata, sort_keys=True, separators=(",", ":")
+                    ),
                 },
             }
         if method == "sessions_spawn":
@@ -67,6 +71,19 @@ class CannedTransport:
                                 "agent_id": "agent",
                                 "task_digest": "task",
                             },
+                            "raw_metadata_json": json.dumps(
+                                {
+                                    "run_id": "run",
+                                    "transition_id": "transition",
+                                    "client_request_id": "client",
+                                    "idempotency_key": "spawn-idem",
+                                    "phase": "phase",
+                                    "agent_id": "agent",
+                                    "task_digest": "task",
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
                         },
                     }
                 ]
@@ -98,6 +115,31 @@ class OpenClawAdapterTests(unittest.TestCase):
 
         with self.assertRaises(AdapterContractError):
             OpenClawAdapter(BadTransport()).sessions_spawn({})
+
+    def test_normalized_metadata_without_raw_json_fails_contract(self) -> None:
+        class MissingRawTransport:
+            def call(self, method, params):
+                return {
+                    "session": {
+                        "session_key": "session-key",
+                        "spawn_request_session_key": "session-key",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": {
+                            "run_id": "run",
+                            "transition_id": "transition",
+                            "client_request_id": "client",
+                            "idempotency_key": "spawn-idem",
+                            "phase": "phase",
+                            "agent_id": "agent",
+                            "task_digest": "task",
+                        },
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
+            OpenClawAdapter(MissingRawTransport()).sessions_spawn({})
 
 
 if __name__ == "__main__":

@@ -178,8 +178,14 @@ scanner, or enabling database authority.
 metadata-capable adapter contract, a DB-persisted pending-intent runtime
 dispatcher, exact accepted lease/session persistence, owned-lease cleanup on
 spawn metadata failure, and a fail-closed scanner that reconciles unknown
-outcomes only from list/status metadata. Unknown `sessions_spawn` outcomes are
-never retried; zero, ambiguous, or mismatched observations move to human review.
+outcomes only from list/status metadata. Normalized metadata is never promoted
+to raw evidence; OpenClaw responses must expose raw metadata JSON from the
+external boundary. Ambiguous transport failures become unknown outcomes for
+reconciliation instead of adapter retries, and prior `unknown`, `failed`, or
+`human_review_required` spawn attempts are preserved without crossing
+`sessions_spawn` again. Unknown `sessions_spawn` outcomes are never retried;
+zero, ambiguous, mismatched, or incomplete session-identity observations move to
+human review.
 
 ## Version-management policy
 

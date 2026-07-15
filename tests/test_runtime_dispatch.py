@@ -85,6 +85,30 @@ class ContractFailingAdapter(ScriptedAdapter):
         return super().sessions_spawn(params)
 
 
+class TransportFailingAdapter(ScriptedAdapter):
+    def __init__(self, fail_on: dict[str, BaseException], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.fail_on = fail_on
+
+    def _maybe_fail(self, call: str) -> None:
+        error = self.fail_on.get(call)
+        if error is not None:
+            self.calls.append(call)
+            raise error
+
+    def allow_lease_acquire(self, params):
+        self._maybe_fail("allow_lease_acquire")
+        return super().allow_lease_acquire(params)
+
+    def allow_lease_release(self, params):
+        self._maybe_fail("allow_lease_release")
+        return super().allow_lease_release(params)
+
+    def sessions_spawn(self, params):
+        self._maybe_fail("sessions_spawn")
+        return super().sessions_spawn(params)
+
+
 def observation(metadata: dict[str, object], *, external_id: str) -> MetadataObservation:
     return MetadataObservation(
         metadata_contract_version="v1",
@@ -409,6 +433,110 @@ class RuntimeDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeDispatchError, "conflicting reuse"):
             dispatch_with_metadata(self.database, ScriptedAdapter(), conflicting)
 
+    def test_failed_spawn_replay_preserves_review_state_without_adapter_call(self) -> None:
+        for state in ("unknown", "failed", "human_review_required"):
+            with self.subTest(state=state):
+                self.tearDown()
+                self.setUp()
+                self._seed_unknown_spawn()
+                with self._connect() as connection:
+                    connection.execute(
+                        "UPDATE external_rpc_intents SET state=? "
+                        "WHERE rpc_kind='sessions_spawn'",
+                        (state,),
+                    )
+                    connection.execute(
+                        "UPDATE spawn_requests SET state=?,ambiguity_reason='prior failure' "
+                        "WHERE spawn_request_id='spawn'",
+                        (state,),
+                    )
+                adapter = self._accepted_adapter()
+                with self.assertRaisesRegex(RuntimeDispatchError, "will not be retried"):
+                    dispatch_with_metadata(self.database, adapter, self.request)
+                self.assertEqual(adapter.calls, [])
+
+    def test_allow_lease_transport_failure_marks_unknown_before_spawn(self) -> None:
+        adapter = TransportFailingAdapter(
+            {"allow_lease_acquire": OSError("network timeout")}
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone()[0],
+                "unknown",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_sessions_spawn_transport_failure_marks_unknown_without_releasing_lease(
+        self,
+    ) -> None:
+        adapter = TransportFailingAdapter(
+            {"sessions_spawn": TimeoutError("spawn timed out")},
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "reconciliation required"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "unknown",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "unknown",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,release_idempotency_key FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("acquired", None),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_runtime_database_privacy_preflight_runs_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as outside:
+            database = Path(outside) / "control.db"
+            adapter = self._accepted_adapter()
+            with self.assertRaisesRegex(RuntimeDispatchError, "privacy preflight"):
+                dispatch_with_metadata(database, adapter, self.request)
+            self.assertFalse(database.exists())
+            self.assertEqual(adapter.calls, [])
+
     def _seed_unknown_spawn(self) -> None:
         with self._connect() as connection:
             acquire = lease_metadata(self.request, "lease-gateway")
@@ -467,6 +595,30 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE rpc_kind='sessions_spawn'"
                 ).fetchone(),
                 ("reconciled", "session-key"),
+            )
+
+    def test_reconcile_unknown_spawn_requires_full_session_identity(self) -> None:
+        self._seed_unknown_spawn()
+        adapter = ScriptedAdapter(
+            sessions=[
+                MetadataObservation(
+                    metadata_contract_version="v1",
+                    normalized=spawn_metadata(self.request),
+                    raw_json=stable_json(spawn_metadata(self.request)),
+                    external_id="session-key",
+                    spawn_request_session_key=None,
+                    session_key="session-key",
+                )
+            ]
+        )
+        summary = reconcile_unknown_metadata(self.database, adapter)
+        self.assertEqual(summary.human_review_required, 1)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "human_review_required",
             )
 
     def test_reconcile_ambiguous_session_discovery_requires_human_review(self) -> None:

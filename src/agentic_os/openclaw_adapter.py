@@ -74,8 +74,6 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
     normalized = _mapping(normalized, "normalized metadata")
 
     raw_json = container.get("raw_json") or container.get("raw_metadata_json")
-    if raw_json is None:
-        raw_json = _json_object(normalized)
     if not isinstance(raw_json, str) or not raw_json:
         raise AdapterContractError("raw metadata JSON is required")
 
