@@ -47,14 +47,6 @@ CREATE TABLE budget_settlements (
   CHECK (typeof(released_cost_microusd)='integer' AND released_cost_microusd BETWEEN 0 AND 100000000000),
   CHECK (typeof(released_retry_units)='integer' AND released_retry_units BETWEEN 0 AND 1000000),
   CHECK (typeof(released_human_attention_units)='integer' AND released_human_attention_units BETWEEN 0 AND 1000000),
-  CHECK (
-    actual_time_seconds>0 OR actual_input_tokens>0 OR actual_output_tokens>0
-    OR actual_cost_microusd>0 OR actual_retry_units>0
-    OR actual_human_attention_units>0 OR released_time_seconds>0
-    OR released_input_tokens>0 OR released_output_tokens>0
-    OR released_cost_microusd>0 OR released_retry_units>0
-    OR released_human_attention_units>0
-  ),
   UNIQUE(run_id,transition_id,spawn_request_id),
   FOREIGN KEY(transition_id,run_id) REFERENCES transitions(transition_id,run_id)
 ) STRICT;
@@ -116,10 +108,7 @@ WHEN NOT EXISTS (
     AND sr.run_id=NEW.run_id AND sr.transition_id=NEW.transition_id
     AND sr.state='completed' AND s.state='completed'
     AND s.completed_at IS NOT NULL AND s.completed_at<>''
-    AND r.state IN (
-      'child_completed','child_failed','aggregation_completed',
-      'release_pending','finalized'
-    )
+    AND r.state IN ('child_completed','child_failed','aggregation_completed')
     AND rb.selected_reserve_transition_id=NEW.transition_id
     AND rb.selected_provider=NEW.provider AND rb.selected_model=NEW.model
     AND rb.selected_endpoint_binding_id=NEW.endpoint_binding_id
@@ -296,6 +285,34 @@ BEGIN
   SELECT RAISE(ABORT,'final settlement is terminal for this spawn budget ledger');
 END;
 
+CREATE TRIGGER budget_events_reject_after_final_settlement_update
+BEFORE UPDATE ON budget_events
+WHEN (OLD.settlement_id IS NULL OR NEW.settlement_id IS NULL)
+AND (
+  OLD.event_type IN (
+    'reserve','consume','release','retry_decrement','retry_restore','human_attention'
+  )
+  OR NEW.event_type IN (
+    'reserve','consume','release','retry_decrement','retry_restore','human_attention'
+  )
+)
+AND EXISTS (
+  SELECT 1 FROM budget_settlements bs
+  WHERE (
+    bs.run_id=OLD.run_id
+    AND bs.transition_id=OLD.transition_id
+    AND bs.spawn_request_id=OLD.spawn_request_id
+  )
+  OR (
+    bs.run_id=NEW.run_id
+    AND bs.transition_id=NEW.transition_id
+    AND bs.spawn_request_id=NEW.spawn_request_id
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT,'final settlement is terminal for this spawn budget ledger');
+END;
+
 CREATE TRIGGER budget_events_validate_settlement_link_insert
 BEFORE INSERT ON budget_events
 WHEN NEW.settlement_id IS NOT NULL AND NOT EXISTS (
@@ -413,7 +430,9 @@ BEFORE UPDATE OF budget_event_id, event_type, event_sequence, run_id,
   clock_context_id, settlement_id ON budget_events
 WHEN (
   OLD.event_type IN ('consume','retry_decrement','retry_restore','human_attention')
+  OR NEW.event_type IN ('consume','retry_decrement','retry_restore','human_attention')
   OR OLD.settlement_id IS NOT NULL
+  OR NEW.settlement_id IS NOT NULL
 )
 AND EXISTS (
   SELECT 1 FROM external_rpc_intents i
