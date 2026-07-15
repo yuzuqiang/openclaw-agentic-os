@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from agentic_os.migrations import apply_migrations
-from agentic_os.openclaw_adapter import MetadataObservation
+from agentic_os.openclaw_adapter import AdapterContractError, MetadataObservation
 from agentic_os.reconciliation import reconcile_unknown_metadata
 from agentic_os.runtime_dispatch import (
     DispatchRequest,
@@ -60,6 +60,29 @@ class ScriptedAdapter:
     def session_status(self, session_key):
         self.calls.append("session_status")
         return self.sessions[0]
+
+
+class ContractFailingAdapter(ScriptedAdapter):
+    def __init__(self, fail_on: set[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.fail_on = fail_on
+
+    def _maybe_fail(self, call: str) -> None:
+        if call in self.fail_on:
+            self.calls.append(call)
+            raise AdapterContractError(f"{call} response missing metadata")
+
+    def allow_lease_acquire(self, params):
+        self._maybe_fail("allow_lease_acquire")
+        return super().allow_lease_acquire(params)
+
+    def allow_lease_release(self, params):
+        self._maybe_fail("allow_lease_release")
+        return super().allow_lease_release(params)
+
+    def sessions_spawn(self, params):
+        self._maybe_fail("sessions_spawn")
+        return super().sessions_spawn(params)
 
 
 def observation(metadata: dict[str, object], *, external_id: str) -> MetadataObservation:
@@ -243,6 +266,63 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "human_review_required",
             )
 
+    def test_adapter_contract_error_on_acquire_fails_closed_before_spawn(self) -> None:
+        adapter = ContractFailingAdapter(
+            {"allow_lease_acquire"},
+            spawn=[observation(spawn_metadata(self.request), external_id="session-key")],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_adapter_contract_error_on_spawn_releases_owned_lease(self) -> None:
+        adapter = ContractFailingAdapter(
+            {"sessions_spawn"},
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            release=[self._release_observation()],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "owned lease released"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(
+            adapter.calls,
+            ["allow_lease_acquire", "sessions_spawn", "allow_lease_release"],
+        )
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,release_idempotency_key FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("released", "release-idem"),
+            )
+
     def test_spawn_metadata_mismatch_releases_only_owned_lease(self) -> None:
         wrong = dict(spawn_metadata(self.request))
         wrong["task_digest"] = "other-task"
@@ -273,6 +353,47 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE rpc_kind='sessions_spawn'"
                 ).fetchone()[0],
                 "human_review_required",
+            )
+
+    def test_release_contract_error_after_spawn_failure_keeps_human_review_state(
+        self,
+    ) -> None:
+        wrong = dict(spawn_metadata(self.request))
+        wrong["task_digest"] = "other-task"
+        adapter = ContractFailingAdapter(
+            {"allow_lease_release"},
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            spawn=[observation(wrong, external_id="session-key")],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "release requires human review"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(
+            adapter.calls,
+            ["allow_lease_acquire", "sessions_spawn", "allow_lease_release"],
+        )
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,release_idempotency_key,reconciliation_status FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                (
+                    "acquired",
+                    "release-idem",
+                    "allow_lease_release response missing metadata",
+                ),
             )
 
     def test_identical_dispatch_replay_skips_adapter_and_conflicting_reuse_fails(self) -> None:

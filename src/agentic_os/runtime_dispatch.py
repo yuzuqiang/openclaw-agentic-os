@@ -19,6 +19,7 @@ from agentic_os.metadata import (
     validate_session_observation,
 )
 from agentic_os.openclaw_adapter import (
+    AdapterContractError,
     MetadataCapableOpenClawAdapter,
     MetadataObservation,
 )
@@ -26,6 +27,14 @@ from agentic_os.openclaw_adapter import (
 
 class RuntimeDispatchError(RuntimeError):
     """Runtime dispatch failed closed before accepting external authority."""
+
+
+METADATA_RUNTIME_ERRORS = (
+    AdapterContractError,
+    MetadataContractError,
+    RuntimeDispatchError,
+    sqlite3.Error,
+)
 
 
 @dataclass(frozen=True)
@@ -428,6 +437,31 @@ def mark_human_review(
         )
 
 
+def mark_owned_lease_release_review(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    gateway_lease_id: str,
+    *,
+    reason: str,
+) -> None:
+    now, _ = now_utc()
+    connection.execute(
+        "UPDATE leases SET release_idempotency_key=?,release_requested_at=?,"
+        "reconciliation_status=? "
+        "WHERE client_lease_id=? AND run_id=? AND transition_id=? "
+        "AND gateway_lease_id=?",
+        (
+            request.release_idempotency_key,
+            now,
+            reason,
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    )
+
+
 def release_owned_lease(
     connection: sqlite3.Connection,
     adapter: MetadataCapableOpenClawAdapter,
@@ -536,7 +570,7 @@ def dispatch_with_metadata(
                 persist_acquired_lease(
                     connection, request, acquire_observation, gateway_lease_id
                 )
-        except (MetadataContractError, RuntimeDispatchError, sqlite3.Error) as exc:
+        except METADATA_RUNTIME_ERRORS as exc:
             with immediate_transaction(connection):
                 mark_human_review(
                     connection,
@@ -572,7 +606,7 @@ def dispatch_with_metadata(
             )
             with immediate_transaction(connection):
                 persist_spawn_acceptance(connection, request, spawn_observation, session_key)
-        except (MetadataContractError, RuntimeDispatchError, sqlite3.Error) as exc:
+        except METADATA_RUNTIME_ERRORS as exc:
             with immediate_transaction(connection):
                 mark_human_review(
                     connection,
@@ -580,7 +614,21 @@ def dispatch_with_metadata(
                     rpc_kind="sessions_spawn",
                     reason=str(exc),
                 )
-                release_owned_lease(connection, adapter, request, gateway_lease_id)
+            try:
+                with immediate_transaction(connection):
+                    release_owned_lease(connection, adapter, request, gateway_lease_id)
+            except METADATA_RUNTIME_ERRORS as release_exc:
+                with immediate_transaction(connection):
+                    mark_owned_lease_release_review(
+                        connection,
+                        request,
+                        gateway_lease_id,
+                        reason=str(release_exc),
+                    )
+                raise RuntimeDispatchError(
+                    "sessions_spawn metadata validation failed; "
+                    "owned lease release requires human review"
+                ) from exc
             raise RuntimeDispatchError(
                 "sessions_spawn metadata validation failed; owned lease released"
             ) from exc
