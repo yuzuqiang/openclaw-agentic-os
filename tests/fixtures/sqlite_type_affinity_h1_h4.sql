@@ -32,4 +32,14 @@ INSERT INTO model_cost_registry(
   'fixture-integral-real-cost-hash'
 );
 
+INSERT INTO model_cost_registry(
+  cost_registry_id,provider,model,endpoint_binding_id,capability_class,
+  input_cost_microusd_per_million,output_cost_microusd_per_million,
+  confidence,effective_at,registry_row_hash
+) VALUES(
+  'fixture-max-plus-one-cost','fixture-provider','fixture-model',
+  'fixture-endpoint','fixture-capability',100000000001,0,'known',
+  'fixture-effective-max-plus-one','fixture-max-plus-one-cost-hash'
+);
+
 PRAGMA ignore_check_constraints=OFF;

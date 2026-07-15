@@ -4657,12 +4657,27 @@ class MigrationTests(unittest.TestCase):
         expectations = {
             "budgets/ledger_reconciliation.sql": {
                 "Budget ledger reconciles to counters and budgets": {
-                    ("fixture-ledger-drift",)
+                    ("fixture-ledger-drift",),
+                    ("fixture-consume-over-budget",),
+                },
+                "Budget prefix over-release or over-restore": {
+                    ("fixture-consume-over-budget-event",),
+                },
+                "Duplicate or replayed budget events": {
+                    ("fixture-duplicate-replay-dedupe",),
                 },
             },
             "budgets/human_attention_cross_dimension_payload.sql": {
                 "Budget event amount malformed or out of range": {
-                    ("fixture-human-cross-payload",)
+                    ("fixture-human-cross-payload",),
+                    ("fixture-consume-carries-human-attention",),
+                },
+            },
+            "budgets/retry_cross_dimension_payload.sql": {
+                "Budget event amount malformed or out of range": {
+                    ("fixture-consume-carries-retry",),
+                    ("fixture-retry-decrement-cross-payload",),
+                    ("fixture-retry-restore-cross-payload",),
                 },
             },
             "budgets/non_negative_budget_accounting.sql": {
@@ -4678,10 +4693,19 @@ class MigrationTests(unittest.TestCase):
                     ("fixture-invalid-zero-policy",)
                 },
             },
+            "budgets/selected_model_registry_binding.sql": {
+                "Run budget selected cost row mismatch": {
+                    ("fixture-selected-run-budget-mismatch",),
+                },
+                "Endpoint-bound budget event cost row blocks dispatch": {
+                    ("fixture-selected-event-model-mismatch-event",),
+                },
+            },
             "sqlite_type_affinity_h1_h4.sql": {
                 "Model cost registry numeric bounds": {
                     ("fixture-numeric-text-cost",),
                     ("fixture-integral-real-cost",),
+                    ("fixture-max-plus-one-cost",),
                 },
             },
         }
