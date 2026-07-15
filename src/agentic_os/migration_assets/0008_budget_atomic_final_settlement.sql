@@ -273,6 +273,24 @@ BEGIN
   SELECT RAISE(ABORT,'budget event source dedupe key was already used by a final settlement');
 END;
 
+CREATE TRIGGER budget_events_reject_after_final_settlement_insert
+BEFORE INSERT ON budget_events
+WHEN NEW.settlement_id IS NULL
+AND NEW.event_type IN ('consume','retry_decrement','retry_restore','human_attention')
+AND NOT EXISTS (
+  SELECT 1 FROM budget_settlements bs
+  WHERE bs.settlement_dedupe_hash=NEW.event_dedupe_hash
+)
+AND EXISTS (
+  SELECT 1 FROM budget_settlements bs
+  WHERE bs.run_id=NEW.run_id
+    AND bs.transition_id=NEW.transition_id
+    AND bs.spawn_request_id=NEW.spawn_request_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'final settlement is terminal for this spawn budget ledger');
+END;
+
 CREATE TRIGGER budget_events_validate_settlement_link_insert
 BEFORE INSERT ON budget_events
 WHEN NEW.settlement_id IS NOT NULL AND NOT EXISTS (

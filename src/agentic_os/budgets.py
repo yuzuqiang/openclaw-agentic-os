@@ -601,6 +601,24 @@ def _reject_event_dedupe_collision(
         raise BudgetConflict("settlement dedupe key was already used by a budget event")
 
 
+def _reject_event_after_final_settlement(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    transition_id: str,
+    spawn_request_id: str,
+) -> None:
+    row = connection.execute(
+        "SELECT settlement_id FROM budget_settlements "
+        "WHERE run_id=? AND transition_id=? AND spawn_request_id=? LIMIT 1",
+        (run_id, transition_id, spawn_request_id),
+    ).fetchone()
+    if row is not None:
+        raise BudgetConflict(
+            "final settlement is terminal for this spawn budget ledger"
+        )
+
+
 def _update_counters(
     connection: sqlite3.Connection,
     *,
@@ -1156,6 +1174,12 @@ def record_post_dispatch_event(
                 connection.execute("COMMIT")
                 return replay
             _reject_settlement_dedupe_collision(connection, event_dedupe_hash)
+            _reject_event_after_final_settlement(
+                connection,
+                run_id=run_id,
+                transition_id=transition_id,
+                spawn_request_id=spawn_request_id,
+            )
             poisoned_usage = connection.execute(
                 "SELECT 1 FROM run_budgets rb "
                 "WHERE rb.run_id=? AND rb.usage_confidence='unknown' "
