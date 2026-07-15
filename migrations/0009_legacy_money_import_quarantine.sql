@@ -11,7 +11,11 @@ CREATE TABLE legacy_money_import_batches (
   created_at TEXT NOT NULL,
   completed_at TEXT NOT NULL,
   failure_reason TEXT,
-  CHECK (batch_id<>'' AND source_schema_version<>'' AND source_table<>''),
+  CHECK (batch_id<>''),
+  CONSTRAINT legacy_money_import_source_schema_version
+    CHECK (source_schema_version='legacy_budget_terminal_usage_v1'),
+  CONSTRAINT legacy_money_import_source_table
+    CHECK (source_table='legacy_budget_terminal_usage_v1'),
   CHECK (source_unit='usd_decimal'),
   CHECK (length(payload_hash)=64),
   CHECK (typeof(row_count)='integer' AND row_count>=0),
@@ -72,6 +76,32 @@ BEGIN
   SELECT RAISE(ABORT,'legacy money import quarantine evidence is immutable');
 END;
 
+CREATE TRIGGER legacy_money_import_quarantine_insert_matches_batch
+BEFORE INSERT ON legacy_money_import_quarantine
+BEGIN
+  SELECT RAISE(ABORT,'legacy money import batch is missing')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM legacy_money_import_batches
+    WHERE batch_id=NEW.batch_id
+  );
+  SELECT RAISE(ABORT,'legacy money import quarantine evidence exceeds batch counts')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM legacy_money_import_batches
+    WHERE batch_id=NEW.batch_id
+      AND status='quarantined'
+      AND quarantine_count>0
+      AND promoted_count=0
+      AND (
+        SELECT COUNT(*) FROM legacy_money_import_promotions
+        WHERE batch_id=NEW.batch_id
+      )=0
+      AND (
+        SELECT COUNT(*) FROM legacy_money_import_quarantine
+        WHERE batch_id=NEW.batch_id
+      ) < quarantine_count
+  );
+END;
+
 CREATE TRIGGER legacy_money_import_quarantine_preserve_delete
 BEFORE DELETE ON legacy_money_import_quarantine
 BEGIN
@@ -82,6 +112,32 @@ CREATE TRIGGER legacy_money_import_promotions_preserve_update
 BEFORE UPDATE ON legacy_money_import_promotions
 BEGIN
   SELECT RAISE(ABORT,'legacy money import promotion evidence is immutable');
+END;
+
+CREATE TRIGGER legacy_money_import_promotions_insert_matches_batch
+BEFORE INSERT ON legacy_money_import_promotions
+BEGIN
+  SELECT RAISE(ABORT,'legacy money import batch is missing')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM legacy_money_import_batches
+    WHERE batch_id=NEW.batch_id
+  );
+  SELECT RAISE(ABORT,'legacy money import promotion evidence exceeds batch counts')
+  WHERE NOT EXISTS (
+    SELECT 1 FROM legacy_money_import_batches
+    WHERE batch_id=NEW.batch_id
+      AND status='promoted'
+      AND quarantine_count=0
+      AND promoted_count=row_count
+      AND (
+        SELECT COUNT(*) FROM legacy_money_import_quarantine
+        WHERE batch_id=NEW.batch_id
+      )=0
+      AND (
+        SELECT COUNT(*) FROM legacy_money_import_promotions
+        WHERE batch_id=NEW.batch_id
+      ) < promoted_count
+  );
 END;
 
 CREATE TRIGGER legacy_money_import_promotions_preserve_delete

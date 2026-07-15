@@ -2714,6 +2714,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "context-round",
                 actual_cost_usd="0.0000010000000000000000000000000000000000000001",
             ),
+            self._legacy_row("tiny-exponent", actual_cost_usd="1e-1000000000"),
             self._legacy_row("fraction", actual_cost_usd="0.0000001"),
             self._legacy_row("rounding", actual_cost_usd="0.0000015"),
             self._legacy_row("bad-unit", actual_cost_usd="0.01", source_unit="microusd"),
@@ -2793,6 +2794,50 @@ class BudgetRuntimeTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM budget_settlements"
                 ).fetchone(),
                 (0,),
+            )
+
+    def test_legacy_money_import_quarantines_incoming_identity_conflicts(
+        self,
+    ) -> None:
+        source = self._legacy_source(
+            [
+                self._legacy_row(
+                    "incoming-a",
+                    actual_cost_usd="0.001000",
+                    idempotency_key="incoming-conflict-terminal",
+                    dedupe_key="incoming-conflict-source",
+                ),
+                self._legacy_row(
+                    "incoming-b",
+                    actual_cost_usd="0.0010",
+                    idempotency_key="incoming-conflict-terminal",
+                    dedupe_key="incoming-conflict-source",
+                ),
+            ],
+            name="legacy-incoming-conflict.db",
+        )
+
+        result = import_legacy_terminal_usage(
+            self.database, source, batch_id="legacy-incoming-conflict-batch"
+        )
+
+        self.assertEqual(
+            (result.status, result.row_count, result.promoted_count, result.quarantine_count),
+            ("quarantined", 2, 0, 2),
+        )
+        self.assertEqual(self._settlement_count(), 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT legacy_row_id,source_column,reason_code "
+                    "FROM legacy_money_import_quarantine WHERE batch_id=? "
+                    "ORDER BY source_row_ordinal",
+                    ("legacy-incoming-conflict-batch",),
+                ).fetchall(),
+                [
+                    ("incoming-a", "__identity__", "incoming_identity_conflict"),
+                    ("incoming-b", "__identity__", "incoming_identity_conflict"),
+                ],
             )
 
     def test_legacy_money_import_read_failure_hash_is_not_empty_replay(self) -> None:

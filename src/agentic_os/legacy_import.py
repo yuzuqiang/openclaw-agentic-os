@@ -174,7 +174,15 @@ def _decimal_to_integral_microusd(decimal_value: Decimal) -> tuple[int | None, s
     if scale_exponent >= 0:
         microusd = coefficient * (10 ** scale_exponent)
     else:
-        divisor = 10 ** (-scale_exponent)
+        required_trailing_zeros = -scale_exponent
+        trailing_zeros = 0
+        for digit in reversed(digits):
+            if digit != 0:
+                break
+            trailing_zeros += 1
+        if trailing_zeros < required_trailing_zeros:
+            return None, "fractional_microusd"
+        divisor = 10 ** required_trailing_zeros
         if coefficient % divisor:
             return None, "fractional_microusd"
         microusd = coefficient // divisor
@@ -627,6 +635,39 @@ def _reject_changed_legacy_payload_replay(
             )
 
 
+def _incoming_identity_conflict_quarantines(rows: list[_LegacyRow]) -> list[_Quarantine]:
+    identity_rows: dict[tuple[str, str], list[_LegacyRow]] = {}
+    for row in rows:
+        identity_rows.setdefault(("idempotency_key", row.idempotency_key), []).append(row)
+        identity_rows.setdefault(("dedupe_hash", _dedupe_hash(row.dedupe_key)), []).append(row)
+
+    conflicted: dict[int, _LegacyRow] = {}
+    for members in identity_rows.values():
+        if len({member.row_payload_hash for member in members}) > 1:
+            for member in members:
+                conflicted[member.source_row_ordinal] = member
+
+    return [
+        _Quarantine(
+            source_row_ordinal=row.source_row_ordinal,
+            legacy_row_id=row.legacy_row_id,
+            source_column="__identity__",
+            source_type="runtime",
+            source_unit=LEGACY_SOURCE_UNIT,
+            source_value_text=row.idempotency_key,
+            reason_code="incoming_identity_conflict",
+            reason_detail=(
+                "incoming legacy rows reuse an idempotency or dedupe identity "
+                "with different raw payloads"
+            ),
+            row_payload_hash=row.row_payload_hash,
+        )
+        for row in sorted(
+            conflicted.values(), key=lambda item: item.source_row_ordinal
+        )
+    ]
+
+
 def _record_quarantine_batch(
     database: Path,
     *,
@@ -736,6 +777,16 @@ def import_legacy_terminal_usage(
             rows=rows,
             quarantines=quarantines,
             failure_reason="source validation failed",
+        )
+    incoming_identity_conflicts = _incoming_identity_conflict_quarantines(rows)
+    if incoming_identity_conflicts:
+        return _record_quarantine_batch(
+            database,
+            batch_id=batch_id,
+            payload_hash=payload_hash,
+            rows=rows,
+            quarantines=incoming_identity_conflicts,
+            failure_reason="incoming identity conflict",
         )
 
     connection = _connect(Path(database))
