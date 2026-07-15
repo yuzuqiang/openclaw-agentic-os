@@ -194,12 +194,27 @@ def _existing_spawn_replay_result(
             session_key=external_id,
         )
         lease = connection.execute(
-            "SELECT gateway_lease_id FROM leases WHERE client_lease_id=?",
-            (request.client_lease_id,),
+            "SELECT gateway_lease_id FROM leases WHERE run_id=? AND transition_id=? "
+            "AND phase=? AND agent_id=? AND requester_agent_id=? "
+            "AND client_lease_id=? AND acquire_idempotency_key=? "
+            "AND gateway_lease_id IS NOT NULL AND gateway_lease_id<>''",
+            (
+                request.run_id,
+                request.transition_id,
+                request.phase,
+                request.agent_id,
+                request.requester_agent_id,
+                request.client_lease_id,
+                request.acquire_idempotency_key,
+            ),
         ).fetchone()
+        if lease is None:
+            raise RuntimeDispatchError(
+                "conflicting reuse of sessions_spawn allow lease identity"
+            )
         return DispatchResult(
             session_key=session_key,
-            gateway_lease_id=lease[0] if lease else "",
+            gateway_lease_id=lease[0],
             status="replayed",
         )
     if state in ("pending", "unknown", "failed", "human_review_required"):
@@ -288,7 +303,7 @@ def _assert_or_insert_lease(
 ) -> None:
     rows = connection.execute(
         "SELECT lease_id,run_id,phase,transition_id,agent_id,requester_agent_id,"
-        "state,client_lease_id,acquire_idempotency_key,ttl_ms FROM leases "
+        "state,client_lease_id,acquire_idempotency_key,release_idempotency_key,ttl_ms FROM leases "
         "WHERE lease_id=? OR client_lease_id=? OR acquire_idempotency_key=?",
         (lease_id, request.client_lease_id, request.acquire_idempotency_key),
     ).fetchall()
@@ -302,6 +317,7 @@ def _assert_or_insert_lease(
         "acquire_pending",
         request.client_lease_id,
         request.acquire_idempotency_key,
+        request.release_idempotency_key,
         request.ttl_ms,
     )
     if rows:
@@ -311,7 +327,8 @@ def _assert_or_insert_lease(
     connection.execute(
         "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
         "requester_agent_id,state,client_lease_id,acquire_idempotency_key,ttl_ms,"
-        "acquire_requested_at,expires_at,expires_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "release_idempotency_key,acquire_requested_at,expires_at,expires_at_epoch_ms) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             lease_id,
             request.run_id,
@@ -323,6 +340,7 @@ def _assert_or_insert_lease(
             request.client_lease_id,
             request.acquire_idempotency_key,
             request.ttl_ms,
+            request.release_idempotency_key,
             now,
             expires,
             expires_ms,
@@ -784,6 +802,8 @@ def persist_released_lease(
     request: DispatchRequest,
     observation: MetadataObservation,
     gateway_lease_id: str,
+    *,
+    reconciled: bool = False,
 ) -> None:
     observed = validate_allow_lease_release_observation(
         local=release_metadata(request, gateway_lease_id),
@@ -796,14 +816,17 @@ def persist_released_lease(
         rpc_kind="allow_lease_release",
         idempotency_key=request.release_idempotency_key,
     )
+    state = "reconciled" if reconciled else "accepted"
     intent_cursor = connection.execute(
-        "UPDATE external_rpc_intents SET state='accepted',metadata_contract_version=?,"
+        "UPDATE external_rpc_intents SET state=?,metadata_contract_version=?,"
         "external_metadata_json=?,external_run_id=?,external_transition_id=?,"
         "external_client_request_id=?,external_idempotency_key=?,external_phase=?,"
         "external_agent_id=?,external_requester_agent_id=?,external_id=?,"
         "accepted_at=?,accepted_at_epoch_ms=? "
-        "WHERE rpc_kind='allow_lease_release' AND idempotency_key=? AND state='pending'",
+        "WHERE rpc_kind='allow_lease_release' AND idempotency_key=? "
+        "AND state IN ('pending','unknown')",
         (
+            state,
             observation.metadata_contract_version,
             observation.raw_json,
             observed["run_id"],

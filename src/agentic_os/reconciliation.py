@@ -10,17 +10,25 @@ from agentic_os.metadata import (
     MetadataContractError,
     validate_accepted_session_identity,
     validate_allow_lease_observation,
+    validate_allow_lease_release_observation,
     validate_session_observation,
 )
 from agentic_os.openclaw_adapter import MetadataCapableOpenClawAdapter, MetadataObservation
 from agentic_os.runtime_dispatch import (
+    AMBIGUOUS_TRANSPORT_ERRORS,
     DispatchRequest,
+    RELEASE_FAILURE_ERRORS,
     connect_runtime_db,
     immediate_transaction,
     lease_metadata,
     mark_human_review,
+    mark_owned_lease_release_review,
+    mark_owned_lease_release_unknown,
     persist_acquired_lease,
+    persist_released_lease,
     persist_spawn_acceptance,
+    release_metadata,
+    release_owned_lease,
     spawn_metadata,
 )
 
@@ -31,6 +39,12 @@ class ReconciliationSummary:
     human_review_required: int
 
 
+@dataclass(frozen=True)
+class ReleasePendingRequest:
+    request: DispatchRequest
+    gateway_lease_id: str
+
+
 def _unknown_spawn_requests(connection: sqlite3.Connection) -> list[DispatchRequest]:
     rows = connection.execute(
         "SELECT i.run_id,i.transition_id,i.phase,i.agent_id,l.requester_agent_id,"
@@ -38,7 +52,7 @@ def _unknown_spawn_requests(connection: sqlite3.Connection) -> list[DispatchRequ
         "l.acquire_idempotency_key,COALESCE(l.release_idempotency_key,''),l.ttl_ms,"
         "i.client_request_id,i.idempotency_key,l.lease_id FROM external_rpc_intents i "
         "JOIN leases l ON l.run_id=i.run_id AND l.transition_id=i.transition_id "
-        "WHERE i.rpc_kind='sessions_spawn' AND i.state='unknown'"
+        "WHERE i.rpc_kind='sessions_spawn' AND i.state IN ('pending','unknown')"
     ).fetchall()
     return [
         DispatchRequest(
@@ -77,7 +91,7 @@ def _unknown_lease_requests(connection: sqlite3.Connection) -> list[DispatchRequ
         "AND l.acquire_idempotency_key=i.idempotency_key "
         "AND l.ttl_ms=i.ttl_ms "
         "LEFT JOIN spawn_requests sr ON sr.run_id=i.run_id AND sr.transition_id=i.transition_id "
-        "WHERE i.rpc_kind='allow_lease_acquire' AND i.state='unknown'"
+        "WHERE i.rpc_kind='allow_lease_acquire' AND i.state IN ('pending','unknown')"
     ).fetchall()
     return [
         DispatchRequest(
@@ -110,7 +124,7 @@ def _orphan_unknown_lease_requests(connection: sqlite3.Connection) -> list[Dispa
         "COALESCE(sr.spawn_idempotency_key,'unknown-spawn-idem') "
         "FROM external_rpc_intents i "
         "LEFT JOIN spawn_requests sr ON sr.run_id=i.run_id AND sr.transition_id=i.transition_id "
-        "WHERE i.rpc_kind='allow_lease_acquire' AND i.state='unknown' "
+        "WHERE i.rpc_kind='allow_lease_acquire' AND i.state IN ('pending','unknown') "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM leases l "
         "  WHERE l.run_id=i.run_id AND l.transition_id=i.transition_id "
@@ -137,6 +151,99 @@ def _orphan_unknown_lease_requests(connection: sqlite3.Connection) -> list[Dispa
             ttl_ms=row[10],
             spawn_client_request_id=row[11],
             spawn_idempotency_key=row[12],
+        )
+        for row in rows
+    ]
+
+
+def _release_pending_requests(connection: sqlite3.Connection) -> list[ReleasePendingRequest]:
+    rows = connection.execute(
+        "SELECT i.run_id,i.transition_id,i.phase,i.agent_id,i.requester_agent_id,"
+        "COALESCE(sr.task_digest,'unknown-task'),COALESCE(sr.spawn_request_id,'unknown-spawn'),"
+        "'',l.client_lease_id,"
+        "l.acquire_idempotency_key,i.idempotency_key,l.ttl_ms,"
+        "COALESCE(sr.client_request_id,'unknown-client'),"
+        "COALESCE(sr.spawn_idempotency_key,'unknown-spawn-idem'),"
+        "l.lease_id,l.gateway_lease_id "
+        "FROM external_rpc_intents i "
+        "JOIN leases l ON l.run_id=i.run_id AND l.transition_id=i.transition_id "
+        "AND l.release_idempotency_key=i.idempotency_key "
+        "AND l.gateway_lease_id IS NOT NULL AND l.gateway_lease_id<>'' "
+        "AND l.state='release_pending' "
+        "LEFT JOIN spawn_requests sr ON sr.run_id=i.run_id AND sr.transition_id=i.transition_id "
+        "WHERE i.rpc_kind='allow_lease_release' AND i.state IN ('pending','unknown')"
+    ).fetchall()
+    return [
+        ReleasePendingRequest(
+            request=DispatchRequest(
+                run_id=row[0],
+                transition_id=row[1],
+                phase=row[2],
+                agent_id=row[3],
+                requester_agent_id=row[4],
+                task_digest=row[5],
+                spawn_request_id=row[6],
+                reserve_budget_event_id=row[7],
+                client_lease_id=row[8],
+                acquire_idempotency_key=row[9],
+                release_idempotency_key=row[10],
+                ttl_ms=row[11],
+                spawn_client_request_id=row[12],
+                spawn_idempotency_key=row[13],
+                lease_id=row[14],
+            ),
+            gateway_lease_id=row[15],
+        )
+        for row in rows
+    ]
+
+
+def _acquire_only_cleanup_requests(
+    connection: sqlite3.Connection,
+) -> list[ReleasePendingRequest]:
+    rows = connection.execute(
+        "SELECT l.run_id,l.transition_id,l.phase,l.agent_id,l.requester_agent_id,"
+        "sr.task_digest,sr.spawn_request_id,COALESCE(i.reserve_budget_event_id,''),"
+        "l.client_lease_id,l.acquire_idempotency_key,"
+        "COALESCE(l.release_idempotency_key,'reconcile-release:' || l.client_lease_id),"
+        "l.ttl_ms,sr.client_request_id,sr.spawn_idempotency_key,l.lease_id,l.gateway_lease_id "
+        "FROM leases l "
+        "JOIN spawn_requests sr ON sr.run_id=l.run_id AND sr.transition_id=l.transition_id "
+        "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
+        "AND i.run_id=sr.run_id AND i.transition_id=sr.transition_id "
+        "AND i.spawn_request_id=sr.spawn_request_id "
+        "AND i.client_request_id=sr.client_request_id "
+        "AND i.idempotency_key=sr.spawn_idempotency_key "
+        "WHERE l.state='acquired' AND l.gateway_lease_id IS NOT NULL "
+        "AND l.gateway_lease_id<>'' "
+        "AND i.state IN ('failed','human_review_required') "
+        "AND sr.ambiguity_reason LIKE 'spawn blocked by allow lease%' "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM external_rpc_intents release "
+        "  WHERE release.rpc_kind='allow_lease_release' "
+        "  AND release.idempotency_key=COALESCE(l.release_idempotency_key,'reconcile-release:' || l.client_lease_id)"
+        ")"
+    ).fetchall()
+    return [
+        ReleasePendingRequest(
+            request=DispatchRequest(
+                run_id=row[0],
+                transition_id=row[1],
+                phase=row[2],
+                agent_id=row[3],
+                requester_agent_id=row[4],
+                task_digest=row[5],
+                spawn_request_id=row[6],
+                reserve_budget_event_id=row[7],
+                client_lease_id=row[8],
+                acquire_idempotency_key=row[9],
+                release_idempotency_key=row[10],
+                ttl_ms=row[11],
+                spawn_client_request_id=row[12],
+                spawn_idempotency_key=row[13],
+                lease_id=row[14],
+            ),
+            gateway_lease_id=row[15],
         )
         for row in rows
     ]
@@ -185,6 +292,26 @@ def _matching_leases(
     return matches
 
 
+def _matching_releases(
+    request: DispatchRequest,
+    gateway_lease_id: str,
+    observations: list[MetadataObservation],
+) -> list[MetadataObservation]:
+    matches: list[MetadataObservation] = []
+    for observation in observations:
+        try:
+            validate_allow_lease_release_observation(
+                local=release_metadata(request, gateway_lease_id),
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except MetadataContractError:
+            continue
+        matches.append(observation)
+    return matches
+
+
 def reconcile_unknown_metadata(
     database: Path, adapter: MetadataCapableOpenClawAdapter
 ) -> ReconciliationSummary:
@@ -193,8 +320,8 @@ def reconcile_unknown_metadata(
     with connect_runtime_db(database) as connection:
         session_observations = list(adapter.sessions_list())
         lease_observations = list(adapter.allow_lease_list())
-        with immediate_transaction(connection):
-            for request in _orphan_unknown_lease_requests(connection):
+        for request in _orphan_unknown_lease_requests(connection):
+            with immediate_transaction(connection):
                 mark_human_review(
                     connection,
                     request,
@@ -203,8 +330,32 @@ def reconcile_unknown_metadata(
                 )
                 human_review += 1
 
-            for request in _unknown_lease_requests(connection):
-                matches = _matching_leases(request, lease_observations)
+        for item in _release_pending_requests(connection):
+            matches = _matching_releases(
+                item.request, item.gateway_lease_id, lease_observations
+            )
+            with immediate_transaction(connection):
+                if len(matches) != 1:
+                    mark_owned_lease_release_review(
+                        connection,
+                        item.request,
+                        item.gateway_lease_id,
+                        reason="zero-or-ambiguous-release-observation",
+                    )
+                    human_review += 1
+                    continue
+                persist_released_lease(
+                    connection,
+                    item.request,
+                    matches[0],
+                    item.gateway_lease_id,
+                    reconciled=True,
+                )
+                reconciled += 1
+
+        for request in _unknown_lease_requests(connection):
+            matches = _matching_leases(request, lease_observations)
+            with immediate_transaction(connection):
                 if len(matches) != 1:
                     mark_human_review(
                         connection,
@@ -224,8 +375,9 @@ def reconcile_unknown_metadata(
                 )
                 reconciled += 1
 
-            for request in _unknown_spawn_requests(connection):
-                matches = _matching_sessions(request, session_observations)
+        for request in _unknown_spawn_requests(connection):
+            matches = _matching_sessions(request, session_observations)
+            with immediate_transaction(connection):
                 if len(matches) != 1:
                     mark_human_review(
                         connection,
@@ -244,6 +396,31 @@ def reconcile_unknown_metadata(
                     reconciled=True,
                 )
                 reconciled += 1
+
+        for item in _acquire_only_cleanup_requests(connection):
+            try:
+                release_owned_lease(
+                    connection, adapter, item.request, item.gateway_lease_id
+                )
+                reconciled += 1
+            except AMBIGUOUS_TRANSPORT_ERRORS as exc:
+                with immediate_transaction(connection):
+                    mark_owned_lease_release_unknown(
+                        connection,
+                        item.request,
+                        item.gateway_lease_id,
+                        reason=str(exc),
+                    )
+                human_review += 1
+            except RELEASE_FAILURE_ERRORS as exc:
+                with immediate_transaction(connection):
+                    mark_owned_lease_release_review(
+                        connection,
+                        item.request,
+                        item.gateway_lease_id,
+                        reason=str(exc),
+                    )
+                human_review += 1
 
     return ReconciliationSummary(
         reconciled=reconciled, human_review_required=human_review
