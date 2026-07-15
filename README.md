@@ -10,11 +10,11 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `e1fb5b005fc6ba2ab15d0afca550d3d7c4c5f5baab47e4e65533678d81f595b5`
+- Current design artifact SHA-256: `0148d34701e1ce0f7145f8490e978436aa91be0f2534d141212917dc5a6d4e65`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `84b5a34adc999eb65f56c474a64d3c363d029f6409d89dfac750b300bcfde6ea`
-- Current migration manifest SHA-256: `20233457f7f8657b5456f406756cf2c33df5af003e2d0994b5bb21e02c147fa1`
-- Design contract: 27 baseline SQLite tables plus one compatibility archive table, 30 executable SLO queries
+- Current latest migration SHA-256: `9962c31ce164c44f4d73f40fd3e8ef689a8de88c924cbbea18b2df66a07c5243`
+- Current migration manifest SHA-256: `29355572e81a75761002a36edd7e758c0ff2ae7974f7c31423d9b22a15da3f2e`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table and one settlement proof table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
@@ -91,8 +91,18 @@ against update/delete, and versions the current SLO proof so post-dispatch event
 must bind to the selected reserve transition and one-use trusted clock. Accepted
 post-dispatch replay keys and accepted `sessions_spawn` request/accepted epoch
 timing are immutable once they become settlement proof.
-Atomic final settlement of unused reservation, legacy-money import conversion,
-and the remaining adversarial fixture matrix remain open in Issue #4.
+Migration v8 adds immutable, exactly-once `budget_settlements` proof. The
+`settle_budget` API requires an exact completed session and trusted post-accept
+clock, then atomically records remaining terminal usage and releases every
+unused reservation dimension under one `BEGIN IMMEDIATE` transaction. Linked
+ledger events share a settlement identity; incomplete direct imports are
+blocking SLO evidence, selected cost-row outstanding proof is rechecked in the
+database trigger, source dedupe identity is shared with post-dispatch events,
+completed-session proof is frozen in the database and revalidated by the v8 SLO,
+cross-table source dedupe reuse is rejected by the database, conflicting replays fail
+closed, and concurrent final settlements cannot create two terminal proofs.
+Legacy-money import conversion and the remaining adversarial fixture matrix
+remain open in Issue #4.
 
 `verify` accepts only an offline, checkpointed SQLite snapshot. It fails closed
 if a sibling `-wal`, `-shm`, or `-journal` file exists; use SQLite's backup API

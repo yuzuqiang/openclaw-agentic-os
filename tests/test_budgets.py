@@ -22,6 +22,7 @@ from agentic_os.budgets import (
     release_budget,
     reserve_budget,
     restore_retry_budget,
+    settle_budget,
 )
 from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS
@@ -168,6 +169,12 @@ class BudgetRuntimeTests(unittest.TestCase):
     def _event_count(self) -> int:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM budget_events").fetchone()[0]
+
+    def _settlement_count(self) -> int:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM budget_settlements"
+            ).fetchone()[0]
 
     def _accept_spawn(self, reserve_event_id: str, *, completed: bool) -> None:
         external_metadata = (
@@ -1611,6 +1618,747 @@ class BudgetRuntimeTests(unittest.TestCase):
                     "DELETE FROM budget_events WHERE budget_event_id=?",
                     (result.budget_event_id,),
                 )
+
+    def test_final_settlement_atomically_consumes_and_releases_all_dimensions(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-final-settlement",
+                dedupe_key="reserve-for-final-settlement",
+                amounts=BudgetAmounts(
+                    time_seconds=5,
+                    input_tokens=20,
+                    output_tokens=10,
+                    cost_microusd=100,
+                    retry_units=2,
+                    human_attention_units=3,
+                ),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        kwargs = {
+            "run_id": "run",
+            "transition_id": "transition",
+            "selection": self.selection,
+            "actual_usage": BudgetAmounts(
+                time_seconds=3,
+                input_tokens=8,
+                output_tokens=4,
+                cost_microusd=10,
+                retry_units=1,
+                human_attention_units=2,
+            ),
+            "idempotency_key": "final-settlement",
+            "dedupe_key": "final-settlement-source",
+            "source": "terminal-usage-import",
+            "spawn_request_id": "spawn",
+            "clock_context_id": "post-clock",
+        }
+        first = settle_budget(self.database, **kwargs)
+        replay = settle_budget(self.database, **kwargs)
+        self.assertFalse(first.replayed)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(first.settlement_id, replay.settlement_id)
+        self.assertEqual(len(first.events), 4)
+        self.assertTrue(all(event.replayed for event in replay.events))
+        self.assertEqual(
+            first.released,
+            BudgetAmounts(
+                time_seconds=2,
+                input_tokens=12,
+                output_tokens=6,
+                cost_microusd=90,
+                retry_units=1,
+                human_attention_units=1,
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            budget = connection.execute(
+                "SELECT reserved_time_seconds,reserved_input_tokens,"
+                "reserved_output_tokens,reserved_cost_microusd,reserved_retries,"
+                "reserved_human_attention,consumed_time_seconds,"
+                "consumed_input_tokens,consumed_output_tokens,consumed_cost_microusd,"
+                "consumed_retries,consumed_human_attention FROM run_budgets "
+                "WHERE run_id='run'"
+            ).fetchone()
+            self.assertEqual(budget, (0, 0, 0, 0, 0, 0, 3, 8, 4, 10, 1, 2))
+            linked = connection.execute(
+                "SELECT event_type FROM budget_events WHERE settlement_id=? "
+                "ORDER BY event_sequence",
+                (first.settlement_id,),
+            ).fetchall()
+            self.assertEqual(
+                linked,
+                [
+                    ("consume",),
+                    ("retry_decrement",),
+                    ("human_attention",),
+                    ("release",),
+                ],
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE budget_settlements SET source='repair' "
+                    "WHERE settlement_id=?",
+                    (first.settlement_id,),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "DELETE FROM budget_events WHERE settlement_id=? "
+                    "AND event_type='release'",
+                    (first.settlement_id,),
+                )
+
+    def test_final_settlement_blocks_retry_restore_after_terminal_usage(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-terminal-retry",
+                dedupe_key="reserve-for-terminal-retry",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1, retry_units=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(retry_units=1),
+            idempotency_key="final-terminal-retry",
+            dedupe_key="final-terminal-retry",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        self.assertEqual(
+            [event.event_sequence for event in result.events],
+            [2, 3],
+        )
+        with self.assertRaisesRegex(BudgetConflict, "final settlement is terminal"):
+            restore_retry_budget(
+                self.database,
+                **self._post_kwargs(
+                    idempotency_key="restore-after-terminal-final",
+                    amounts=BudgetAmounts(retry_units=1),
+                ),
+            )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT reserved_retries,consumed_retries FROM run_budgets "
+                    "WHERE run_id='run'"
+                ).fetchone(),
+                (0, 1),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "final settlement"):
+                connection.execute(
+                    "INSERT INTO budget_events("
+                    "budget_event_id,event_idempotency_key,event_dedupe_hash,"
+                    "event_sequence,run_id,transition_id,spawn_request_id,"
+                    "provider,model,endpoint_binding_id,capability_class,"
+                    "cost_registry_id,cost_effective_at,cost_registry_hash,"
+                    "cost_confidence,event_type,retry_units,usage_confidence,"
+                    "source,created_at,created_at_epoch_ms,clock_context_id"
+                    ") VALUES('direct-retry-restore-after-final',"
+                    "'direct-retry-restore-after-final-idem',"
+                    "'direct-retry-restore-after-final-dedupe',4,'run',"
+                    "'transition','spawn','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known',"
+                    "'retry_restore',1,'known','usage-import','now',"
+                    "1800000000127,'post-clock')"
+                )
+            connection.execute(
+                "DROP TRIGGER budget_events_reject_after_final_settlement_insert"
+            )
+            connection.execute(
+                "INSERT INTO budget_events("
+                "budget_event_id,event_idempotency_key,event_dedupe_hash,"
+                "event_sequence,run_id,transition_id,spawn_request_id,"
+                "provider,model,endpoint_binding_id,capability_class,"
+                "cost_registry_id,cost_effective_at,cost_registry_hash,"
+                "cost_confidence,event_type,retry_units,usage_confidence,"
+                "source,created_at,created_at_epoch_ms,clock_context_id"
+                ") VALUES('bypassed-retry-restore-after-final',"
+                "'bypassed-retry-restore-after-final-idem',"
+                "'bypassed-retry-restore-after-final-dedupe',4,'run',"
+                "'transition','spawn','provider','model','endpoint',"
+                "'capability','cost-row','effective','cost-hash','known',"
+                "'retry_restore',1,'known','usage-import','now',"
+                "1800000000127,'post-clock')"
+            )
+        rows = self._slo_rows("Budget event amount malformed or out of range")
+        self.assertIn((result.settlement_id,), rows)
+
+    def test_post_dispatch_replay_survives_later_final_settlement(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-pre-final-replay",
+                dedupe_key="reserve-for-pre-final-replay",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1, retry_units=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        decrement = decrement_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="pre-final-retry-decrement",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(),
+            idempotency_key="final-after-pre-replay",
+            dedupe_key="final-after-pre-replay",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        replay = decrement_retry_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="pre-final-retry-decrement",
+                amounts=BudgetAmounts(retry_units=1),
+            ),
+        )
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.budget_event_id, decrement.budget_event_id)
+
+    def test_final_settlement_conflict_and_overage_roll_back_atomically(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-final-conflict",
+                dedupe_key="reserve-for-final-conflict",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=10),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        before = self._budget_row()
+        with self.assertRaisesRegex(BudgetExceeded, "registry price"):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=1),
+                idempotency_key="underpriced-final",
+                dedupe_key="underpriced-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+        with self.assertRaises(BudgetExceeded):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=11, cost_microusd=10),
+                idempotency_key="over-final",
+                dedupe_key="over-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+        self.assertEqual(self._settlement_count(), 0)
+        self.assertEqual(self._event_count(), 1)
+        self.assertEqual(self._budget_row(), before)
+        settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(input_tokens=5, cost_microusd=5),
+            idempotency_key="valid-final",
+            dedupe_key="valid-final",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        with self.assertRaises(BudgetConflict):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=4, cost_microusd=4),
+                idempotency_key="valid-final",
+                dedupe_key="valid-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+        self.assertEqual(self._settlement_count(), 1)
+
+    def test_unknown_usage_blocks_final_settlement(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-unknown-final",
+                dedupe_key="reserve-for-unknown-final",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        consume_budget(
+            self.database,
+            **self._post_kwargs(
+                idempotency_key="unknown-before-final",
+                amounts=BudgetAmounts(),
+            ),
+            usage_confidence="unknown",
+        )
+        with self.assertRaisesRegex(BudgetError, "unknown usage"):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                idempotency_key="blocked-final",
+                dedupe_key="blocked-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+        self.assertEqual(self._settlement_count(), 0)
+
+    def test_final_settlement_requires_completed_session_and_post_accept_clock(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-final-proof",
+                dedupe_key="reserve-for-final-proof",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=False)
+        common = {
+            "run_id": "run",
+            "transition_id": "transition",
+            "selection": self.selection,
+            "actual_usage": BudgetAmounts(input_tokens=1, cost_microusd=1),
+            "idempotency_key": "proof-final",
+            "dedupe_key": "proof-final",
+            "source": "terminal-usage-import",
+            "spawn_request_id": "spawn",
+            "clock_context_id": "post-clock",
+        }
+        with self.assertRaisesRegex(BudgetError, "completed session proof"):
+            settle_budget(self.database, **common)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE runs SET state='child_completed' WHERE run_id='run'")
+            connection.execute(
+                "UPDATE spawn_requests SET state='completed' "
+                "WHERE spawn_request_id='spawn'"
+            )
+            connection.execute(
+                "UPDATE sessions SET state='completed',completed_at='now' "
+                "WHERE session_id='session'"
+            )
+        with self.assertRaisesRegex(BudgetError, "after request acceptance"):
+            settle_budget(self.database, **{**common, "clock_context_id": "clock"})
+        self.assertEqual(self._settlement_count(), 0)
+
+    def test_final_settlement_slo_revalidates_completed_session_after_drift(
+        self,
+    ) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-session-drift-final",
+                dedupe_key="reserve-for-session-drift-final",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(),
+            idempotency_key="release-only-session-drift-final",
+            dedupe_key="release-only-session-drift-final",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        self.assertEqual(len(result.events), 1)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "immutable completed-session proof"
+            ):
+                connection.execute(
+                    "UPDATE sessions SET state='running',completed_at=NULL "
+                    "WHERE session_id='session'"
+                )
+            connection.execute(
+                "DROP TRIGGER sessions_preserve_settlement_completed_proof_update"
+            )
+            connection.execute(
+                "UPDATE sessions SET state='running',completed_at=NULL "
+                "WHERE session_id='session'"
+            )
+        rows = self._slo_rows("Budget event amount malformed or out of range")
+        self.assertIn((result.settlement_id,), rows)
+        with self.assertRaisesRegex(BudgetError, "schema verification failed"):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(),
+                idempotency_key="release-only-session-drift-final",
+                dedupe_key="release-only-session-drift-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+
+    def test_final_settlement_slo_revalidates_linked_event_amounts(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-linked-amount-drift",
+                dedupe_key="reserve-for-linked-amount-drift",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        result = settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            idempotency_key="linked-amount-drift-final",
+            dedupe_key="linked-amount-drift-final",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("DROP TRIGGER budget_events_reject_settlement_link_update")
+            connection.execute(
+                "DROP TRIGGER budget_events_preserve_accepted_post_dispatch_update"
+            )
+            connection.execute(
+                "UPDATE budget_events SET input_tokens=2,cost_microusd=2 "
+                "WHERE settlement_id=? AND event_type='consume'",
+                (result.settlement_id,),
+            )
+            connection.execute(
+                "UPDATE budget_events SET input_tokens=0,cost_microusd=0 "
+                "WHERE settlement_id=? AND event_type='release'",
+                (result.settlement_id,),
+            )
+            connection.execute(
+                "UPDATE run_budgets SET consumed_input_tokens=2,"
+                "consumed_cost_microusd=2 WHERE run_id='run'"
+            )
+        rows = self._slo_rows("Budget event amount malformed or out of range")
+        self.assertIn((result.settlement_id,), rows)
+
+    def test_final_settlement_slo_remains_valid_after_run_finalization(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-finalized-proof",
+                dedupe_key="reserve-for-finalized-proof",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        common = {
+            "run_id": "run",
+            "transition_id": "transition",
+            "selection": self.selection,
+            "actual_usage": BudgetAmounts(),
+            "idempotency_key": "finalized-proof-final",
+            "dedupe_key": "finalized-proof-final",
+            "source": "terminal-usage-import",
+            "spawn_request_id": "spawn",
+            "clock_context_id": "post-clock",
+        }
+        result = settle_budget(self.database, **common)
+        for state in ("release_pending", "finalized"):
+            with closing(sqlite3.connect(self.database)) as connection, connection:
+                connection.execute(
+                    "UPDATE runs SET state=?,updated_at='later' WHERE run_id='run'",
+                    (state,),
+                )
+            self.assertNotIn(
+                (result.settlement_id,),
+                self._slo_rows("Budget event amount malformed or out of range"),
+            )
+            replay = settle_budget(self.database, **common)
+            self.assertTrue(replay.replayed)
+            self.assertEqual(replay.settlement_id, result.settlement_id)
+
+    def test_final_settlement_rejects_outstanding_from_unselected_cost_row(
+        self,
+    ) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-selected-before-final",
+                dedupe_key="reserve-selected-before-final",
+                amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('cost-row-other','other-provider',"
+                "'other-model','endpoint','capability',100,200,'known','effective',"
+                "'cost-hash-other')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,"
+                "spawn_request_id,provider,model,endpoint_binding_id,"
+                "capability_class,cost_registry_id,cost_effective_at,"
+                "cost_registry_hash,cost_confidence,event_type,input_tokens,"
+                "cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('wrong-cost-reserve',"
+                "'wrong-cost-reserve-idem','wrong-cost-reserve-dedupe',2,'run',"
+                "'transition','spawn','other-provider','other-model','endpoint',"
+                "'capability','cost-row-other','effective','cost-hash-other',"
+                "'known','reserve',1,1,'known','test','now',1800000000123)"
+            )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError,
+                "final settlement requires exact completed-session",
+            ):
+                connection.execute(
+                    "INSERT INTO budget_settlements("
+                    "settlement_id,settlement_idempotency_key,"
+                    "settlement_dedupe_hash,run_id,transition_id,"
+                    "spawn_request_id,provider,model,endpoint_binding_id,"
+                    "capability_class,cost_registry_id,cost_effective_at,"
+                    "cost_registry_hash,cost_confidence,actual_time_seconds,"
+                    "actual_input_tokens,actual_output_tokens,actual_cost_microusd,"
+                    "actual_retry_units,actual_human_attention_units,"
+                    "released_time_seconds,released_input_tokens,"
+                    "released_output_tokens,released_cost_microusd,"
+                    "released_retry_units,released_human_attention_units,"
+                    "usage_confidence,source,created_at,created_at_epoch_ms,"
+                    "clock_context_id) VALUES('wrong-cost-settlement',"
+                    "'wrong-cost-settlement-idem','wrong-cost-settlement-dedupe',"
+                    "'run','transition','spawn','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known',"
+                    "0,0,0,0,0,0,0,2,0,2,0,0,'known','imported','now',"
+                    "1800000000126,'post-clock')"
+                )
+        self.assertEqual(self._settlement_count(), 0)
+
+    def test_final_settlement_source_dedupe_is_shared_with_budget_events(
+        self,
+    ) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-settlement-dedupe",
+                dedupe_key="reserve-for-settlement-dedupe",
+                amounts=BudgetAmounts(input_tokens=3, cost_microusd=3),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        consumed = consume_budget(
+            self.database,
+            **{
+                **self._post_kwargs(
+                    idempotency_key="consume-before-final-dedupe",
+                    amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                ),
+                "dedupe_key": "shared-terminal-source",
+            },
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            event_hash = connection.execute(
+                "SELECT event_dedupe_hash FROM budget_events WHERE budget_event_id=?",
+                (consumed.budget_event_id,),
+            ).fetchone()[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "source dedupe"):
+                connection.execute(
+                    "INSERT INTO budget_settlements("
+                    "settlement_id,settlement_idempotency_key,"
+                    "settlement_dedupe_hash,run_id,transition_id,"
+                    "spawn_request_id,provider,model,endpoint_binding_id,"
+                    "capability_class,cost_registry_id,cost_effective_at,"
+                    "cost_registry_hash,cost_confidence,actual_time_seconds,"
+                    "actual_input_tokens,actual_output_tokens,actual_cost_microusd,"
+                    "actual_retry_units,actual_human_attention_units,"
+                    "released_time_seconds,released_input_tokens,"
+                    "released_output_tokens,released_cost_microusd,"
+                    "released_retry_units,released_human_attention_units,"
+                    "usage_confidence,source,created_at,created_at_epoch_ms,"
+                    "clock_context_id) VALUES('direct-reused-dedupe-settlement',"
+                    "'direct-reused-dedupe-idem',?,'run','transition','spawn',"
+                    "'provider','model','endpoint','capability','cost-row',"
+                    "'effective','cost-hash','known',0,0,0,0,0,0,0,2,0,2,0,0,"
+                    "'known','imported','now',1800000000126,'post-clock')",
+                    (event_hash,),
+                )
+        with self.assertRaisesRegex(BudgetConflict, "budget event"):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                idempotency_key="final-reuses-consume-source",
+                dedupe_key="shared-terminal-source",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
+        settle_budget(
+            self.database,
+            run_id="run",
+            transition_id="transition",
+            selection=self.selection,
+            actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+            idempotency_key="final-owns-source",
+            dedupe_key="final-owned-source",
+            source="terminal-usage-import",
+            spawn_request_id="spawn",
+            clock_context_id="post-clock",
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            settlement_hash = connection.execute(
+                "SELECT settlement_dedupe_hash FROM budget_settlements "
+                "WHERE settlement_idempotency_key='final-owns-source'"
+            ).fetchone()[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "source dedupe"):
+                connection.execute(
+                    "INSERT INTO budget_events("
+                    "budget_event_id,event_idempotency_key,event_dedupe_hash,"
+                    "event_sequence,run_id,transition_id,spawn_request_id,"
+                    "provider,model,endpoint_binding_id,capability_class,"
+                    "cost_registry_id,cost_effective_at,cost_registry_hash,"
+                    "cost_confidence,event_type,input_tokens,cost_microusd,"
+                    "usage_confidence,source,created_at,created_at_epoch_ms"
+                    ") VALUES('direct-reused-settlement-dedupe-event',"
+                    "'direct-reused-settlement-dedupe-idem',?,99,'run',"
+                    "'transition','spawn','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known',"
+                    "'consume',1,1,'known','imported','now',1800000000130)",
+                    (settlement_hash,),
+                )
+        with self.assertRaisesRegex(BudgetConflict, "final settlement"):
+            consume_budget(
+                self.database,
+                **{
+                    **self._post_kwargs(
+                        idempotency_key="consume-reuses-final-source",
+                        amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                    ),
+                    "dedupe_key": "final-owned-source",
+                },
+            )
+
+    def test_concurrent_final_settlements_create_exactly_one_terminal_proof(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-concurrent-final",
+                dedupe_key="reserve-for-concurrent-final",
+                amounts=BudgetAmounts(input_tokens=10, cost_microusd=10),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+
+        def settle(index: int) -> str:
+            try:
+                settle_budget(
+                    self.database,
+                    run_id="run",
+                    transition_id="transition",
+                    selection=self.selection,
+                    actual_usage=BudgetAmounts(input_tokens=5, cost_microusd=5),
+                    idempotency_key=f"concurrent-final-{index}",
+                    dedupe_key=f"concurrent-final-{index}",
+                    source="terminal-usage-import",
+                    spawn_request_id="spawn",
+                    clock_context_id="post-clock",
+                )
+                return "settled"
+            except BudgetError:
+                return "blocked"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = sorted(executor.map(settle, range(2)))
+        self.assertEqual(outcomes, ["blocked", "settled"])
+        self.assertEqual(self._settlement_count(), 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM budget_events WHERE settlement_id IS NOT NULL"
+                ).fetchone(),
+                (2,),
+            )
+
+    def test_incomplete_direct_settlement_is_blocking_slo_evidence(self) -> None:
+        reserve = reserve_budget(
+            self.database,
+            **self._kwargs(
+                idempotency_key="reserve-for-imported-final",
+                dedupe_key="reserve-for-imported-final",
+                amounts=BudgetAmounts(input_tokens=2, cost_microusd=2),
+            ),
+        )
+        self._accept_spawn(reserve.budget_event_id, completed=True)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO budget_settlements("
+                "settlement_id,settlement_idempotency_key,settlement_dedupe_hash,"
+                "run_id,transition_id,spawn_request_id,provider,model,"
+                "endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,"
+                "actual_time_seconds,actual_input_tokens,actual_output_tokens,"
+                "actual_cost_microusd,actual_retry_units,"
+                "actual_human_attention_units,released_time_seconds,"
+                "released_input_tokens,released_output_tokens,"
+                "released_cost_microusd,released_retry_units,"
+                "released_human_attention_units,usage_confidence,source,"
+                "created_at,created_at_epoch_ms,clock_context_id) VALUES("
+                "'imported-settlement','imported-idem','imported-dedupe','run',"
+                "'transition','spawn','provider','model','endpoint','capability',"
+                "'cost-row','effective','cost-hash','known',0,1,0,1,0,0,"
+                "0,1,0,1,0,0,'known','imported','now',1800000000126,'post-clock')"
+            )
+        rows = self._slo_rows("Budget event amount malformed or out of range")
+        self.assertIn(("imported-settlement",), rows)
+        with self.assertRaisesRegex(
+            BudgetError, "Budget event amount malformed or out of range"
+        ):
+            settle_budget(
+                self.database,
+                run_id="run",
+                transition_id="transition",
+                selection=self.selection,
+                actual_usage=BudgetAmounts(input_tokens=1, cost_microusd=1),
+                idempotency_key="another-final",
+                dedupe_key="another-final",
+                source="terminal-usage-import",
+                spawn_request_id="spawn",
+                clock_context_id="post-clock",
+            )
 
     def test_missing_database_is_not_created(self) -> None:
         missing = Path(self.temporary.name) / "missing.db"
