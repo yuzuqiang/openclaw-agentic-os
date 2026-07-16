@@ -7,6 +7,7 @@ command evidence, and file adapters are bounded to the repository root.
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import math
 import os
@@ -255,12 +256,38 @@ def _require_git_worktree_top_level(root: Path) -> None:
                 git_dir = (root / git_dir).resolve(strict=False)
             if not git_dir.is_dir():
                 raise PredicateContractError("repo root must contain valid Git metadata")
+            _require_gitdir_worktree_matches_root(git_dir, root)
             common_dir = _git_common_dir(git_dir)
             _validate_git_metadata(git_dir, common_dir)
             return
         raise PredicateContractError("repo root must contain a valid .git entry")
     except OSError as exc:
         raise PredicateContractError("repo root Git metadata cannot be inspected") from exc
+
+
+def _require_gitdir_worktree_matches_root(git_dir: Path, root: Path) -> None:
+    config = git_dir / "config"
+    if not config.is_file() or config.stat().st_size > MAX_FILE_EVIDENCE_BYTES:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        config_text = config.read_text(encoding="utf-8", errors="strict")
+        parser.read_string(config_text)
+    except configparser.Error as exc:
+        raise PredicateContractError("repo root must contain valid Git metadata") from exc
+    worktree_text = parser.get("core", "worktree", fallback=None)
+    if worktree_text is None:
+        raise PredicateContractError("repo root gitdir must bind core.worktree")
+    worktree_text = worktree_text.strip()
+    if not worktree_text or "\x00" in worktree_text or len(worktree_text) > MAX_STRING_LENGTH:
+        raise PredicateContractError("repo root gitdir core.worktree is outside safe bounds")
+    worktree = Path(worktree_text)
+    if not worktree.is_absolute():
+        worktree = (git_dir / worktree).resolve(strict=False)
+    else:
+        worktree = worktree.resolve(strict=False)
+    if worktree != root:
+        raise PredicateContractError("repo root gitdir core.worktree does not match")
 
 
 def _git_common_dir(git_dir: Path) -> Path:

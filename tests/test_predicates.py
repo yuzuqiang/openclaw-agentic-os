@@ -673,6 +673,46 @@ class PredicateTests(unittest.TestCase):
                 )
             )
 
+    def test_gitdir_file_must_bind_core_worktree_to_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            linked_root = base / "linked-root"
+            linked_root.mkdir()
+            borrowed_root = base / "borrowed-root"
+            borrowed_root.mkdir()
+            other_root = base / "other-root"
+            other_root.mkdir()
+            git_dir = base / "gitdir"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "objects").mkdir()
+            (git_dir / "refs").mkdir()
+
+            def write_gitdir_config(worktree: Path) -> None:
+                (git_dir / "config").write_text(
+                    "[core]\n"
+                    "\trepositoryformatversion = 0\n"
+                    f"\tworktree = {worktree}\n",
+                    encoding="utf-8",
+                )
+
+            write_gitdir_config(linked_root)
+            (linked_root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            self.assertTrue(
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=linked_root),
+                )
+            )
+
+            write_gitdir_config(other_root)
+            (borrowed_root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            with self.assertRaisesRegex(PredicateContractError, "core.worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=borrowed_root),
+                )
+
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(

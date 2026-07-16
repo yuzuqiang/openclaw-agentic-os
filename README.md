@@ -84,7 +84,8 @@ equality over caller-supplied evidence. Unsupported backends, dynamic code,
 subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
 non-Git-worktree roots, malformed Git metadata, path traversal, symlink escapes,
 raw database state paths, hard-linked file aliases, common credential stores
-such as `.git`, `.docker`, and `.kube`,
+such as `.git`, `.docker`, and `.kube`, borrowed gitdir metadata whose
+`core.worktree` does not bind the requested root,
 credential/private paths, password/API-key JSON and command evidence names,
 unreadable or unstatable file evidence, symlink evidence before target resolution,
 swapped symlink evidence, opened file identity drift, oversized file-hash evidence,
