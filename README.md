@@ -85,9 +85,10 @@ subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
 non-Git-worktree roots, path traversal, symlink escapes, raw database state paths
 including resolved symlink targets, hard-linked file aliases, common credential
 stores such as `.git`, `.docker`, and `.kube`, credential/private paths,
-unreadable or unstatable file evidence, oversized file-hash evidence, missing or
-non-regular file-hash evidence, JSON path absence, malformed evidence maps, JSON
-scalar type mismatches, writes, missing evidence, and malformed predicate
+password/API-key evidence names, unreadable or unstatable file evidence, swapped
+symlink evidence, opened file identity drift, oversized file-hash evidence,
+missing or non-regular file-hash evidence, JSON path absence, malformed evidence
+maps, JSON scalar type mismatches, writes, missing evidence, and malformed predicate
 documents fail closed with
 `PredicateContractError`. Boolean composition validates every child before
 aggregating results, so unsupported adapters cannot be hidden behind short-circuit

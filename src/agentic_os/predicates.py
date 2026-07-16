@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from stat import S_ISREG
+from stat import S_ISLNK, S_ISREG
 from typing import Any
 
 from .privacy import PrivacyPreflightError, assert_paths_retrievable
@@ -53,6 +54,9 @@ _CREDENTIAL_NAME_TOKENS = frozenset(
     {
         "credential",
         "credentials",
+        "passwd",
+        "password",
+        "passwords",
         "private",
         "secret",
         "secrets",
@@ -230,14 +234,7 @@ def _require_git_worktree_top_level(root: Path) -> None:
         if not git_entry.exists():
             raise PredicateContractError("repo root must be a Git worktree top level")
         if git_entry.is_dir():
-            if not (
-                (git_entry / "HEAD").is_file()
-                and (git_entry / "objects").is_dir()
-                and (git_entry / "refs").is_dir()
-            ):
-                raise PredicateContractError(
-                    "repo root must contain valid Git metadata"
-                )
+            _validate_git_metadata(git_entry, git_entry)
             return
         if git_entry.is_file():
             stat_result = git_entry.stat()
@@ -252,14 +249,55 @@ def _require_git_worktree_top_level(root: Path) -> None:
             git_dir = Path(content[len(prefix) :].strip())
             if not git_dir.is_absolute():
                 git_dir = (root / git_dir).resolve(strict=False)
-            if not git_dir.is_dir() or not (git_dir / "HEAD").is_file():
-                raise PredicateContractError(
-                    "repo root must contain valid Git metadata"
-                )
+            if not git_dir.is_dir():
+                raise PredicateContractError("repo root must contain valid Git metadata")
+            common_dir = _git_common_dir(git_dir)
+            _validate_git_metadata(git_dir, common_dir)
             return
         raise PredicateContractError("repo root must contain a valid .git entry")
     except OSError as exc:
         raise PredicateContractError("repo root Git metadata cannot be inspected") from exc
+
+
+def _git_common_dir(git_dir: Path) -> Path:
+    common_dir_file = git_dir / "commondir"
+    if not common_dir_file.exists():
+        return git_dir
+    if not common_dir_file.is_file() or common_dir_file.stat().st_size > MAX_STRING_LENGTH:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    content = common_dir_file.read_text(encoding="utf-8", errors="strict").strip()
+    common_dir = Path(content)
+    if not common_dir.is_absolute():
+        common_dir = (git_dir / common_dir).resolve(strict=False)
+    if not common_dir.is_dir():
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    return common_dir
+
+
+def _validate_git_metadata(git_dir: Path, common_dir: Path) -> None:
+    head = git_dir / "HEAD"
+    if not head.is_file() or head.stat().st_size > MAX_STRING_LENGTH:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    head_content = head.read_text(encoding="utf-8", errors="strict").strip()
+    if head_content.startswith("ref:"):
+        ref_name = head_content[len("ref:") :].strip()
+        ref_path = PurePosixPath(ref_name)
+        if (
+            not ref_name.startswith("refs/")
+            or ref_path.is_absolute()
+            or ".." in ref_path.parts
+        ):
+            raise PredicateContractError("repo root must contain valid Git metadata")
+    elif not _SHA256_RE.fullmatch(head_content):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    if not (common_dir / "objects").is_dir() or not (common_dir / "refs").is_dir():
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    config = common_dir / "config"
+    if not config.is_file() or config.stat().st_size > MAX_FILE_EVIDENCE_BYTES:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    config_text = config.read_text(encoding="utf-8", errors="strict")
+    if "[core]" not in config_text or "repositoryformatversion" not in config_text:
+        raise PredicateContractError("repo root must contain valid Git metadata")
 
 
 def _repo_path(repo_root: Path, raw_path: Any) -> Path:
@@ -296,11 +334,14 @@ def _is_credential_path_denied(relative: str) -> bool:
     for part in parts:
         stem = part.split(".", 1)[0]
         tokenized = set(re.split(r"[^a-z0-9]+", part))
+        compact = re.sub(r"[^a-z0-9]+", "", part)
         if part in _CREDENTIAL_FILE_NAMES or stem in _CREDENTIAL_FILE_NAMES:
             return True
         if part.startswith(".env."):
             return True
         if tokenized & _CREDENTIAL_NAME_TOKENS:
+            return True
+        if "apikey" in compact or {"api", "key"}.issubset(tokenized):
             return True
         if part.endswith(_CREDENTIAL_FILE_SUFFIXES):
             return True
@@ -309,11 +350,13 @@ def _is_credential_path_denied(relative: str) -> bool:
 
 def _repo_path_stat(path: Path, label: str) -> Any:
     try:
-        path_stat = path.stat()
+        path_stat = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise PredicateContractError(f"{label} cannot be inspected") from exc
+    if S_ISLNK(path_stat.st_mode):
+        raise PredicateContractError(f"{label} cannot use symlink evidence")
     if S_ISREG(path_stat.st_mode):
         _raise_if_multi_link_file(path_stat, label)
     return path_stat
@@ -329,13 +372,49 @@ def _sha256_file(path: Path, path_stat: Any) -> str:
     if size > MAX_FILE_EVIDENCE_BYTES:
         raise PredicateContractError("file_sha256 evidence exceeds safe size limit")
     digest = hashlib.sha256()
+    fd: int | None = None
     try:
-        with path.open("rb") as handle:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        opened_stat = os.fstat(fd)
+        _validate_opened_file_stat(opened_stat, path_stat)
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            total_read = 0
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total_read += len(chunk)
+                if total_read > MAX_FILE_EVIDENCE_BYTES:
+                    raise PredicateContractError(
+                        "file_sha256 evidence exceeds safe size limit"
+                    )
                 digest.update(chunk)
+    except PredicateContractError:
+        raise
     except OSError as exc:
         raise PredicateContractError("file_sha256 evidence cannot be read") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
     return digest.hexdigest()
+
+
+def _validate_opened_file_stat(opened_stat: Any, checked_stat: Any) -> None:
+    if not S_ISREG(opened_stat.st_mode):
+        raise PredicateContractError("file_sha256 evidence must be a regular file")
+    _raise_if_multi_link_file(opened_stat, "file_sha256 evidence")
+    if _stat_identity(opened_stat) != _stat_identity(checked_stat):
+        raise PredicateContractError("file_sha256 evidence changed during read")
+    size = int(getattr(opened_stat, "st_size", 0) or 0)
+    if size > MAX_FILE_EVIDENCE_BYTES:
+        raise PredicateContractError("file_sha256 evidence exceeds safe size limit")
+
+
+def _stat_identity(path_stat: Any) -> tuple[int, int, int]:
+    return (
+        int(getattr(path_stat, "st_dev", -1)),
+        int(getattr(path_stat, "st_ino", -1)),
+        int(getattr(path_stat, "st_mode", -1)),
+    )
 
 
 def _evidence_mapping(value: Any, label: str) -> Mapping[str, Any]:

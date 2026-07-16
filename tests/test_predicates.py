@@ -25,6 +25,10 @@ def make_repo_root(tmp: str) -> Path:
     git_dir = root / ".git"
     git_dir.mkdir()
     (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git_dir / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n",
+        encoding="utf-8",
+    )
     (git_dir / "objects").mkdir()
     (git_dir / "refs").mkdir()
     return root
@@ -324,6 +328,8 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": ".git/config"},
                 {"op": "file_exists", "path": "private/customer.json"},
                 {"op": "file_exists", "path": "artifacts/private-data.json"},
+                {"op": "file_exists", "path": "config/passwords.txt"},
+                {"op": "file_exists", "path": "api-key.json"},
                 {"op": "file_exists", "path": "public-evidence"},
             )
             for predicate in cases:
@@ -370,14 +376,18 @@ class PredicateTests(unittest.TestCase):
             evidence.write_text("predicate evidence\n", encoding="utf-8")
             context = PredicateContext(repo_root=root)
 
-            original_stat = Path.stat
+            original_stat = os.stat
 
-            def stat_side_effect(path: Path, *args: object, **kwargs: object) -> object:
-                if path == evidence:
+            def stat_side_effect(
+                path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                *args: object,
+                **kwargs: object,
+            ) -> object:
+                if Path(path) == evidence:
                     raise PermissionError("permission denied")
                 return original_stat(path, *args, **kwargs)
 
-            with mock.patch.object(Path, "stat", autospec=True) as stat_mock:
+            with mock.patch("os.stat") as stat_mock:
                 stat_mock.side_effect = stat_side_effect
                 with self.assertRaises(PredicateContractError):
                     evaluate_predicate_document(
@@ -393,6 +403,33 @@ class PredicateTests(unittest.TestCase):
                         context,
                     )
 
+    def test_file_exists_rejects_swapped_symlink_after_path_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            target = root / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            symlink = root / "swapped-evidence"
+            symlink.symlink_to(target)
+            context = PredicateContext(repo_root=root)
+            original_stat = os.stat
+
+            def stat_side_effect(
+                path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                *args: object,
+                **kwargs: object,
+            ) -> object:
+                if Path(path) == target and kwargs.get("follow_symlinks") is False:
+                    return original_stat(symlink, *args, **kwargs)
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch("os.stat") as stat_mock:
+                stat_mock.side_effect = stat_side_effect
+                with self.assertRaisesRegex(PredicateContractError, "symlink evidence"):
+                    evaluate_predicate_document(
+                        document({"op": "file_exists", "path": "evidence.txt"}),
+                        context,
+                    )
+
     def test_file_sha256_read_failures_are_contract_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_repo_root(tmp)
@@ -400,16 +437,96 @@ class PredicateTests(unittest.TestCase):
             target.write_text("predicate evidence\n", encoding="utf-8")
             context = PredicateContext(repo_root=root)
 
-            original_open = Path.open
+            original_open = os.open
 
-            def open_side_effect(path: Path, *args: object, **kwargs: object) -> object:
-                if path == target:
+            def open_side_effect(
+                path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                flags: int,
+                *args: object,
+                **kwargs: object,
+            ) -> int:
+                if Path(path) == target:
                     raise PermissionError("permission denied")
-                return original_open(path, *args, **kwargs)
+                return original_open(path, flags, *args, **kwargs)
 
-            with mock.patch.object(Path, "open", autospec=True) as open_mock:
-                open_mock.side_effect = open_side_effect
+            with mock.patch("os.open", side_effect=open_side_effect):
                 with self.assertRaisesRegex(PredicateContractError, "cannot be read"):
+                    evaluate_predicate_document(
+                        document(
+                            {
+                                "op": "file_sha256",
+                                "path": "evidence.txt",
+                                "sha256": "0" * 64,
+                            }
+                        ),
+                        context,
+                    )
+
+    def test_file_sha256_revalidates_opened_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            target = root / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            replacement = root / "replacement.txt"
+            replacement.write_text("different evidence\n", encoding="utf-8")
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            context = PredicateContext(repo_root=root)
+            original_open = os.open
+
+            def open_side_effect(
+                path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                flags: int,
+                *args: object,
+                **kwargs: object,
+            ) -> int:
+                if Path(path) == target:
+                    target.unlink()
+                    replacement.rename(target)
+                return original_open(path, flags, *args, **kwargs)
+
+            with mock.patch("os.open", side_effect=open_side_effect):
+                with self.assertRaisesRegex(PredicateContractError, "changed during read"):
+                    evaluate_predicate_document(
+                        document(
+                            {
+                                "op": "file_sha256",
+                                "path": "evidence.txt",
+                                "sha256": digest,
+                            }
+                        ),
+                        context,
+                    )
+
+    def test_file_sha256_rechecks_size_cap_while_streaming(self) -> None:
+        class GrowingHandle:
+            def __init__(self) -> None:
+                self._chunks = [b"a" * MAX_FILE_EVIDENCE_BYTES, b"b"]
+
+            def read(self, _size: int) -> bytes:
+                if not self._chunks:
+                    return b""
+                return self._chunks.pop(0)
+
+            def __enter__(self) -> "GrowingHandle":
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            target = root / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            checked_stat = os.stat(target, follow_symlinks=False)
+            context = PredicateContext(repo_root=root)
+
+            with (
+                mock.patch("os.open", return_value=99),
+                mock.patch("os.fstat", return_value=checked_stat),
+                mock.patch("os.fdopen", return_value=GrowingHandle()),
+                mock.patch("os.close"),
+            ):
+                with self.assertRaisesRegex(PredicateContractError, "size limit"):
                     evaluate_predicate_document(
                         document(
                             {
@@ -491,6 +608,23 @@ class PredicateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake_root = Path(tmp)
             (fake_root / ".git").mkdir()
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=fake_root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            git_dir = fake_root / ".git"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text("not a valid head\n", encoding="utf-8")
+            (git_dir / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n",
+                encoding="utf-8",
+            )
+            (git_dir / "objects").mkdir()
+            (git_dir / "refs").mkdir()
             with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
                 evaluate_predicate_document(
                     document({"op": "literal", "value": True}),
