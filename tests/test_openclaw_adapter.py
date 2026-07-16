@@ -141,6 +141,99 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
             OpenClawAdapter(MissingRawTransport()).sessions_spawn({})
 
+    def test_conflicting_top_level_and_nested_session_key_fails_contract(self) -> None:
+        class ConflictingSessionTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "session_key": "session-top",
+                    "spawn_request_session_key": "session-top",
+                    "session": {
+                        "session_key": "session-nested",
+                        "spawn_request_session_key": "session-top",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
+            OpenClawAdapter(ConflictingSessionTransport()).sessions_spawn({})
+
+    def test_conflicting_nested_session_aliases_fail_contract(self) -> None:
+        class ConflictingNestedAliasTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "session": {
+                        "session_key": "session-a",
+                        "key": "session-b",
+                        "spawn_request_session_key": "session-a",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
+            OpenClawAdapter(ConflictingNestedAliasTransport()).sessions_spawn({})
+
+    def test_conflicting_spawn_request_session_aliases_fail_contract(self) -> None:
+        class ConflictingSpawnRequestAliasTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "session": {
+                        "session_key": "session-key",
+                        "spawn_request_session_key": "session-a",
+                        "request_session_key": "session-b",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "conflicting spawn request session key"
+        ):
+            OpenClawAdapter(ConflictingSpawnRequestAliasTransport()).sessions_spawn({})
+
 
 if __name__ == "__main__":
     unittest.main()

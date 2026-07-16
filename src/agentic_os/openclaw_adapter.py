@@ -59,6 +59,32 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     return value
 
 
+def _identity_alias(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AdapterContractError(f"{label} must be a string")
+    return value
+
+
+def _consistent_identity(label: str, aliases: Iterable[tuple[str, Any]]) -> str | None:
+    selected: tuple[str, str] | None = None
+    for alias_label, raw_value in aliases:
+        value = _identity_alias(raw_value, alias_label)
+        if value is None:
+            continue
+        if selected is None:
+            selected = (alias_label, value)
+            continue
+        selected_label, selected_value = selected
+        if value != selected_value:
+            raise AdapterContractError(
+                f"conflicting {label} aliases: {selected_label}="
+                f"{selected_value!r}, {alias_label}={value!r}"
+            )
+    return selected[1] if selected is not None else None
+
+
 def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataObservation:
     """Extract normalized/raw metadata from OpenClaw-shaped raw responses."""
 
@@ -83,26 +109,51 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
     if not isinstance(version, str) or not version:
         raise AdapterContractError("metadata contract version is required")
 
-    external_id = response.get("external_id")
-    if external_id is None:
-        external_id = response.get("gateway_lease_id") or response.get("session_key")
-    if external_id is None and isinstance(response.get("lease"), Mapping):
+    lease: Mapping[str, Any] | None = None
+    if isinstance(response.get("lease"), Mapping):
         lease = _mapping(response["lease"], "lease")
-        external_id = lease.get("gateway_lease_id") or lease.get("lease_id")
-    if external_id is None and isinstance(response.get("session"), Mapping):
-        session = _mapping(response["session"], "session")
-        external_id = session.get("session_key") or session.get("key")
-
-    session_key = response.get("session_key")
-    spawn_request_session_key = response.get("spawn_request_session_key")
+    session: Mapping[str, Any] | None = None
     if isinstance(response.get("session"), Mapping):
         session = _mapping(response["session"], "session")
-        session_key = session_key or session.get("session_key") or session.get("key")
-        spawn_request_session_key = (
-            spawn_request_session_key
-            or session.get("spawn_request_session_key")
-            or session.get("request_session_key")
-        )
+
+    session_key = _consistent_identity(
+        "session key",
+        (
+            ("session_key", response.get("session_key")),
+            (
+                "session.session_key",
+                session.get("session_key") if session is not None else None,
+            ),
+            ("session.key", session.get("key") if session is not None else None),
+        ),
+    )
+    spawn_request_session_key = _consistent_identity(
+        "spawn request session key",
+        (
+            ("spawn_request_session_key", response.get("spawn_request_session_key")),
+            (
+                "session.spawn_request_session_key",
+                session.get("spawn_request_session_key") if session is not None else None,
+            ),
+            (
+                "session.request_session_key",
+                session.get("request_session_key") if session is not None else None,
+            ),
+        ),
+    )
+    external_id = _consistent_identity(
+        "external identity",
+        (
+            ("external_id", response.get("external_id")),
+            ("gateway_lease_id", response.get("gateway_lease_id")),
+            ("session_key", session_key),
+            (
+                "lease.gateway_lease_id",
+                lease.get("gateway_lease_id") if lease is not None else None,
+            ),
+            ("lease.lease_id", lease.get("lease_id") if lease is not None else None),
+        ),
+    )
 
     status_metadata_json = response.get("status_metadata_json")
     if status_metadata_json is not None and not isinstance(status_metadata_json, str):
@@ -112,11 +163,9 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
         metadata_contract_version=version,
         normalized=normalized,
         raw_json=raw_json,
-        external_id=external_id if isinstance(external_id, str) else None,
-        spawn_request_session_key=(
-            spawn_request_session_key if isinstance(spawn_request_session_key, str) else None
-        ),
-        session_key=session_key if isinstance(session_key, str) else None,
+        external_id=external_id,
+        spawn_request_session_key=spawn_request_session_key,
+        session_key=session_key,
         status_metadata_json=status_metadata_json,
         raw_response_json=_json_object(response),
     )
