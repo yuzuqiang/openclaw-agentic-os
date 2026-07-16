@@ -377,10 +377,14 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": "config/clientSecret.txt"},
                 {"op": "file_exists", "path": "state/agentic-os/control.db_backup"},
                 {"op": "file_exists", "path": "state/agentic-os/control.dbbackup"},
+                {"op": "file_exists", "path": "state/agentic-os/control.dbbak"},
+                {"op": "file_exists", "path": "state/agentic-os/control.dbbak.gz"},
                 {"op": "file_exists", "path": "state/agentic-os/control.db~"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlitebackup"},
+                {"op": "file_exists", "path": "state/agentic-os/control.sqlitebak"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlite3~"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlite3backup"},
+                {"op": "file_exists", "path": "state/agentic-os/control.sqlite3bak"},
                 {"op": "file_exists", "path": "prod.env.bak.bak.bak.bak.bak"},
                 {"op": "file_exists", "path": "public-evidence"},
             )
@@ -987,6 +991,56 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=root),
                 )
 
+            (root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n"
+                "[Extensions]\n\tobjectFormat = sha256\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+            (root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = +1\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+    def test_detached_head_must_match_configured_object_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            (root / ".git" / "HEAD").write_text("a" * 64 + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+            (root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 1\n"
+                "[extensions]\n\tobjectFormat = sha256\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+            )
+
+            (root / ".git" / "HEAD").write_text("a" * 40 + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
     def test_linked_worktree_rejects_empty_commondir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -1018,6 +1072,84 @@ class PredicateTests(unittest.TestCase):
                 evaluate_predicate_document(
                     document({"op": "literal", "value": True}),
                     PredicateContext(repo_root=linked_root),
+                )
+
+    def test_malformed_git_metadata_paths_fail_before_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            root = base / "core-worktree-root"
+            root.mkdir()
+            git_dir = root / ".git"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 0\n"
+                "\tworktree = missing/../../core-worktree-root\n",
+                encoding="utf-8",
+            )
+            (git_dir / "objects").mkdir()
+            (git_dir / "refs").mkdir()
+            with self.assertRaisesRegex(PredicateContractError, "core.worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+            linked_root = base / "linked-root"
+            linked_root.mkdir()
+            real_git_dir = base / "real-gitdir"
+            real_git_dir.mkdir()
+            (real_git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (real_git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 0\n"
+                f"\tworktree = {linked_root}\n",
+                encoding="utf-8",
+            )
+            (real_git_dir / "objects").mkdir()
+            (real_git_dir / "refs").mkdir()
+            (linked_root / ".git").write_text(
+                "gitdir: missing/../../real-gitdir\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=linked_root),
+                )
+
+            common_dir = base / "main" / ".git"
+            common_dir.mkdir(parents=True)
+            (common_dir / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n",
+                encoding="utf-8",
+            )
+            (common_dir / "objects").mkdir()
+            (common_dir / "refs").mkdir()
+            common_linked_root = base / "common-linked-root"
+            common_linked_root.mkdir()
+            linked_git_dir = common_dir / "worktrees" / "common-linked-root"
+            linked_git_dir.mkdir(parents=True)
+            (linked_git_dir / "HEAD").write_text(
+                "ref: refs/heads/main\n", encoding="utf-8"
+            )
+            (linked_git_dir / "commondir").write_text(
+                "missing/../../..\n", encoding="utf-8"
+            )
+            (linked_git_dir / "gitdir").write_text(
+                str(common_linked_root / ".git") + "\n",
+                encoding="utf-8",
+            )
+            (common_linked_root / ".git").write_text(
+                f"gitdir: {linked_git_dir}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=common_linked_root),
                 )
 
     def test_git_metadata_control_characters_fail_closed(self) -> None:
@@ -1071,6 +1203,24 @@ class PredicateTests(unittest.TestCase):
                     document({"op": "literal", "value": True}),
                     PredicateContext(repo_root=lock_ref_root),
                 )
+
+            bad_ref_path = base / "bad-ref-root"
+            bad_ref_path.mkdir()
+            bad_ref_root = make_repo_root(str(bad_ref_path))
+            for head_content in (
+                "ref: refs//heads/main\n",
+                "ref: refs/heads/foo..bar\n",
+                " ref: refs/heads/main\n",
+            ):
+                with self.subTest(head_content=head_content):
+                    (bad_ref_root / ".git" / "HEAD").write_text(
+                        head_content, encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                        evaluate_predicate_document(
+                            document({"op": "literal", "value": True}),
+                            PredicateContext(repo_root=bad_ref_root),
+                        )
 
             common_dir = base / "main" / ".git"
             common_dir.mkdir(parents=True)

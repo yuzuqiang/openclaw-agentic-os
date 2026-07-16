@@ -29,6 +29,7 @@ MAX_STRING_LENGTH = 4096
 MAX_FILE_EVIDENCE_BYTES = 8 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_HEAD_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_GIT_CONFIG_INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _GIT_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _GIT_CONFIG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CREDENTIAL_FILE_NAMES = frozenset(
@@ -287,14 +288,14 @@ def _require_git_worktree_top_level(root: Path) -> None:
                 git_entry,
                 "repo root must contain valid Git metadata",
             )
-            prefix = "gitdir:"
+            prefix = "gitdir: "
             if not content.startswith(prefix):
                 raise PredicateContractError(
                     "repo root must contain valid Git metadata"
                 )
             git_dir = _resolve_git_metadata_path(
                 root,
-                content[len(prefix) :].strip(),
+                content[len(prefix) :],
                 "repo root must contain valid Git metadata",
             )
             _require_directory_nofollow(
@@ -348,12 +349,12 @@ def _require_gitdir_file_matches_root(git_dir: Path, root: Path) -> None:
     gitdir_text = _read_git_metadata_line(
         gitdir_file, "repo root gitdir file is outside safe bounds"
     )
-    worktree_git_file = Path(gitdir_text)
-    if not worktree_git_file.is_absolute():
-        worktree_git_file = (git_dir / worktree_git_file).resolve(strict=False)
-    else:
-        worktree_git_file = worktree_git_file.resolve(strict=False)
-    expected_git_file = (root / ".git").resolve(strict=False)
+    worktree_git_file = _resolve_git_metadata_path(
+        git_dir,
+        gitdir_text,
+        "repo root gitdir file does not match",
+    )
+    expected_git_file = (root / ".git").resolve(strict=True)
     if worktree_git_file != expected_git_file:
         raise PredicateContractError("repo root gitdir file does not match")
 
@@ -396,11 +397,14 @@ def _validate_git_metadata(
     head_content = _read_git_metadata_line(
         head, "repo root must contain valid Git metadata"
     )
-    if head_content.startswith("ref:"):
-        ref_name = head_content[len("ref:") :].strip()
+    detached_head = None
+    if head_content.startswith("ref: "):
+        ref_name = head_content[len("ref: ") :]
         if not _is_valid_git_ref_name(ref_name):
             raise PredicateContractError("repo root must contain valid Git metadata")
-    elif not _GIT_HEAD_OBJECT_RE.fullmatch(head_content):
+    elif _GIT_HEAD_OBJECT_RE.fullmatch(head_content):
+        detached_head = head_content
+    else:
         raise PredicateContractError("repo root must contain valid Git metadata")
     _require_directory_nofollow(
         common_dir / "objects", "repo root must contain valid Git metadata"
@@ -415,25 +419,27 @@ def _validate_git_metadata(
         max_size=MAX_FILE_EVIDENCE_BYTES,
     )
     parser = _read_git_config(config, "repo root must contain valid Git metadata")
-    if not parser.has_section("core") or not parser.has_option(
-        "core", "repositoryformatversion"
+    core_section = _git_config_section(parser, "core")
+    if core_section is None or not parser.has_option(
+        core_section, "repositoryformatversion"
     ):
         raise PredicateContractError("repo root must contain valid Git metadata")
-    try:
-        _git_config_value(
-            parser,
-            "core",
-            "repositoryformatversion",
-            "repo root must contain valid Git metadata",
-        )
-        repository_format_version = parser.getint("core", "repositoryformatversion")
-    except ValueError as exc:
-        raise PredicateContractError("repo root must contain valid Git metadata") from exc
+    repository_format_text = _git_config_value(
+        parser,
+        "core",
+        "repositoryformatversion",
+        "repo root must contain valid Git metadata",
+    )
+    if not _GIT_CONFIG_INT_RE.fullmatch(repository_format_text):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    repository_format_version = int(repository_format_text, 10)
     if repository_format_version not in (0, 1):
         raise PredicateContractError("repo root must contain valid Git metadata")
-    worktree_config_enabled = _validate_git_config_extensions(
+    worktree_config_enabled, object_format = _validate_git_config_extensions(
         parser, repository_format_version
     )
+    if detached_head is not None:
+        _validate_detached_head_object_format(detached_head, object_format)
     worktree_parser = _read_git_worktree_config(git_dir, worktree_config_enabled)
     effective_parser = worktree_parser or parser
     is_bare = _git_config_bool(
@@ -441,15 +447,19 @@ def _validate_git_metadata(
     )
     if is_bare:
         raise PredicateContractError("repo root must be a Git worktree")
-    if require_worktree_binding:
-        worktree_text = effective_parser.get("core", "worktree", fallback=None)
-        if worktree_text is not None:
-            worktree_base = git_dir if worktree_parser is not None else common_dir
-            worktree = _resolve_git_worktree_path(worktree_text, worktree_base)
-            if worktree != root:
-                raise PredicateContractError(
-                    "repo root gitdir core.worktree does not match"
-                )
+    worktree_text = _git_config_optional(
+        effective_parser,
+        "core",
+        "worktree",
+        "repo root must contain valid Git metadata",
+    )
+    if worktree_text is not None:
+        worktree_base = git_dir if worktree_parser is not None else common_dir
+        worktree = _resolve_git_worktree_path(worktree_text, worktree_base)
+        if worktree != root:
+            raise PredicateContractError(
+                "repo root gitdir core.worktree does not match"
+            )
 
 
 def _read_git_config(path: Path, message: str) -> configparser.ConfigParser:
@@ -469,6 +479,17 @@ def _read_git_config(path: Path, message: str) -> configparser.ConfigParser:
                 raise PredicateContractError(message)
             _git_config_value(parser, section, option, message)
     return parser
+
+
+def _git_config_section(
+    parser: configparser.ConfigParser, section: str
+) -> str | None:
+    matches = [
+        candidate for candidate in parser.sections() if candidate.casefold() == section
+    ]
+    if len(matches) > 1:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    return matches[0] if matches else None
 
 
 def _read_git_worktree_config(
@@ -491,46 +512,63 @@ def _read_git_worktree_config(
 def _git_config_value(
     parser: configparser.ConfigParser, section: str, option: str, message: str
 ) -> str:
-    value = parser.get(section, option, fallback="")
+    actual_section = _git_config_section(parser, section)
+    if actual_section is None:
+        return ""
+    value = parser.get(actual_section, option, fallback="")
     if _GIT_CONTROL_CHAR_RE.search(value) or len(value) > MAX_STRING_LENGTH:
         raise PredicateContractError(message)
     return value.strip()
 
 
+def _git_config_optional(
+    parser: configparser.ConfigParser, section: str, option: str, message: str
+) -> str | None:
+    actual_section = _git_config_section(parser, section)
+    if actual_section is None or not parser.has_option(actual_section, option):
+        return None
+    return _git_config_value(parser, section, option, message)
+
+
 def _git_config_bool(
     parser: configparser.ConfigParser, section: str, option: str, message: str
 ) -> bool:
-    if not parser.has_option(section, option):
+    actual_section = _git_config_section(parser, section)
+    if actual_section is None or not parser.has_option(actual_section, option):
         return False
     _git_config_value(parser, section, option, message)
     try:
-        return parser.getboolean(section, option)
+        return parser.getboolean(actual_section, option)
     except ValueError as exc:
         raise PredicateContractError(message) from exc
 
 
 def _validate_git_config_extensions(
     parser: configparser.ConfigParser, repository_format_version: int
-) -> bool:
-    if not parser.has_section("extensions"):
-        return False
-    if not parser.options("extensions"):
+) -> tuple[bool, str]:
+    extensions_section = _git_config_section(parser, "extensions")
+    if extensions_section is None:
+        return False, "sha1"
+    if not parser.options(extensions_section):
         raise PredicateContractError("repo root must contain valid Git metadata")
     if repository_format_version != 1:
         raise PredicateContractError("repo root must contain valid Git metadata")
     worktree_config_enabled = False
-    for option in parser.options("extensions"):
+    object_format = "sha1"
+    for option in parser.options(extensions_section):
         option_name = option.casefold()
         if option_name not in _SUPPORTED_GIT_EXTENSIONS:
             raise PredicateContractError("repo root must contain valid Git metadata")
         value = _git_config_value(
             parser, "extensions", option, "repo root must contain valid Git metadata"
         ).casefold()
-        if option_name == "objectformat" and value not in {"sha1", "sha256"}:
-            raise PredicateContractError("repo root must contain valid Git metadata")
+        if option_name == "objectformat":
+            if value not in {"sha1", "sha256"}:
+                raise PredicateContractError("repo root must contain valid Git metadata")
+            object_format = value
         if option_name == "worktreeconfig":
             try:
-                if not parser.getboolean("extensions", option):
+                if not parser.getboolean(extensions_section, option):
                     raise PredicateContractError(
                         "repo root must contain valid Git metadata"
                     )
@@ -539,12 +577,20 @@ def _validate_git_config_extensions(
                 raise PredicateContractError(
                     "repo root must contain valid Git metadata"
                 ) from exc
-    return worktree_config_enabled
+    return worktree_config_enabled, object_format
+
+
+def _validate_detached_head_object_format(head_content: str, object_format: str) -> None:
+    expected_length = 64 if object_format == "sha256" else 40
+    if len(head_content) != expected_length:
+        raise PredicateContractError("repo root must contain valid Git metadata")
 
 
 def _is_valid_git_ref_name(ref_name: str) -> bool:
     if (
         not ref_name.startswith("refs/")
+        or "//" in ref_name
+        or ".." in ref_name
         or ref_name.endswith("/")
         or ref_name.endswith(".")
         or ref_name.endswith(".lock")
@@ -589,19 +635,20 @@ def _require_directory_nofollow(path: Path, message: str) -> Any:
 
 
 def _resolve_git_worktree_path(worktree_text: str, base_dir: Path) -> Path:
-    worktree_text = worktree_text.strip()
     if (
         not worktree_text
         or "\x00" in worktree_text
+        or worktree_text != worktree_text.strip()
         or len(worktree_text) > MAX_STRING_LENGTH
     ):
         raise PredicateContractError(
             "repo root gitdir core.worktree is outside safe bounds"
         )
-    worktree = Path(worktree_text)
-    if not worktree.is_absolute():
-        return (base_dir / worktree).resolve(strict=False)
-    return worktree.resolve(strict=False)
+    return _resolve_git_metadata_path(
+        base_dir,
+        worktree_text,
+        "repo root gitdir core.worktree is outside safe bounds",
+    )
 
 
 def _read_git_metadata_line(path: Path, message: str) -> str:
@@ -612,20 +659,28 @@ def _read_git_metadata_line(path: Path, message: str) -> str:
     lines = content.splitlines()
     if len(lines) != 1:
         raise PredicateContractError(message)
-    line = lines[0].strip()
-    if not line or _GIT_CONTROL_CHAR_RE.search(line):
+    line = lines[0]
+    if not line or line != line.strip() or _GIT_CONTROL_CHAR_RE.search(line):
         raise PredicateContractError(message)
     return line
 
 
 def _resolve_git_metadata_path(base_dir: Path, raw_path: str, message: str) -> Path:
-    if not raw_path or "\x00" in raw_path or len(raw_path) > MAX_STRING_LENGTH:
+    if (
+        not raw_path
+        or raw_path != raw_path.strip()
+        or "\x00" in raw_path
+        or len(raw_path) > MAX_STRING_LENGTH
+    ):
         raise PredicateContractError(message)
     path = Path(raw_path)
     _reject_symlink_metadata_path(base_dir, path, message)
     if not path.is_absolute():
-        return (base_dir / path).resolve(strict=False)
-    return path.resolve(strict=False)
+        path = base_dir / path
+    try:
+        return path.resolve(strict=True)
+    except OSError as exc:
+        raise PredicateContractError(message) from exc
 
 
 def _reject_symlink_metadata_path(base_dir: Path, relative_path: Path, message: str) -> None:
@@ -642,7 +697,7 @@ def _reject_symlink_metadata_path(base_dir: Path, relative_path: Path, message: 
         try:
             path_stat = os.stat(current, follow_symlinks=False)
         except FileNotFoundError:
-            return
+            raise PredicateContractError(message)
         except OSError as exc:
             raise PredicateContractError(message) from exc
         if S_ISLNK(path_stat.st_mode):
