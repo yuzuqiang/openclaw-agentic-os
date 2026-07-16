@@ -486,6 +486,7 @@ def _runtime_dispatch_binding_contract() -> SloQueryContract:
         "AND b.run_id=eri.run_id AND b.transition_id=eri.transition_id "
         "AND b.phase=eri.phase AND b.agent_id=eri.agent_id "
         "AND b.task_digest=eri.task_digest "
+        "AND b.reserve_budget_event_id=eri.reserve_budget_event_id "
         "AND b.spawn_client_request_id=eri.client_request_id "
         "AND b.spawn_idempotency_key=eri.idempotency_key "
         "WHERE eri.rpc_kind='sessions_spawn' AND ("

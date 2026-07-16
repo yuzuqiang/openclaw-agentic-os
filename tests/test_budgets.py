@@ -177,7 +177,9 @@ class BudgetRuntimeTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM budget_events").fetchone()[0]
 
-    def _seed_runtime_dispatch_binding(self) -> None:
+    def _seed_runtime_dispatch_binding(
+        self, reserve_budget_event_id: str = "reserve"
+    ) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
@@ -192,9 +194,10 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
                 "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
                 "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
-                "spawn_idempotency_key,created_at) VALUES('spawn','lease','run','transition',"
+                "spawn_idempotency_key,reserve_budget_event_id,created_at) VALUES('spawn','lease','run','transition',"
                 "'phase','agent','requester','task','client-lease','acquire-idem',"
-                "'release-idem','client','spawn-idem','now')"
+                "'release-idem','client','spawn-idem',?,'now')",
+                (reserve_budget_event_id,),
             )
 
     def _settlement_count(self) -> int:
@@ -239,9 +242,10 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
                 "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
                 "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
-                "spawn_idempotency_key,created_at) VALUES('spawn','lease','run','transition',"
+                "spawn_idempotency_key,reserve_budget_event_id,created_at) VALUES('spawn','lease','run','transition',"
                 "'phase','agent','requester','task','client-lease','acquire-idem',"
-                "'release-idem','client','spawn-idem','now')"
+                "'release-idem','client','spawn-idem',?,'now')",
+                (reserve_event_id,),
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -591,7 +595,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
         )
         reserve = reserve_budget(self.database, **kwargs)
-        self._seed_runtime_dispatch_binding()
+        self._seed_runtime_dispatch_binding(reserve.budget_event_id)
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
@@ -623,7 +627,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
         )
         reserve = reserve_budget(self.database, **kwargs)
-        self._seed_runtime_dispatch_binding()
+        self._seed_runtime_dispatch_binding(reserve.budget_event_id)
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
@@ -655,7 +659,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
             ),
         )
-        self._seed_runtime_dispatch_binding()
+        self._seed_runtime_dispatch_binding(reserve.budget_event_id)
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
@@ -1642,10 +1646,10 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
                 "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
                 "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
-                "spawn_idempotency_key,created_at) VALUES('spawn-duplicate',"
+                "spawn_idempotency_key,reserve_budget_event_id,created_at) VALUES('spawn-duplicate',"
                 "'lease-duplicate','run','transition','phase','agent','requester',"
                 "'task-duplicate','client-lease-duplicate','acquire-idem-duplicate',"
-                "'release-idem-duplicate','client-duplicate','spawn-idem-duplicate','now')"
+                "'release-idem-duplicate','client-duplicate','spawn-idem-duplicate','duplicate-reserve','now')"
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"

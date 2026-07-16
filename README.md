@@ -12,8 +12,8 @@ revalidation, and neither artifact proves production runtime behavior.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `b2e3671ea69d0e3f8c7d3d96f65cfc156b0f7305036d9cd72821ac97330006b1`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `5775fcafd9f616da757b7cadfba737adb073a525e9c405c8d2eed20140a680c2`
-- Current migration manifest SHA-256: `97d1a3b174bf63a39ab2ac8755cdaa6c0b1056f6b420a2325288c2a8dea471db`
+- Current latest migration SHA-256: `4654d094b8b3a073ec670ee243974e3718a1d37804a7bf5a73ca133ef026f6ff`
+- Current migration manifest SHA-256: `4e52ee81ca003ab6c0e77e6c5557dc8dc8698cb1cd6f6e32d26fdc97ff180e32`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -202,9 +202,9 @@ not permanently occupy the slot. Migration v10 backfills pre-existing bindings
 only from an exact one-to-one identity and request-timestamp proof and aborts on
 unbound or ambiguous legacy rows rather than silently skipping reconciliation.
 Post-v10 `sessions_spawn` intents are rejected unless the exact runtime dispatch
-binding already exists, and accepted/reconciled replay requires matching local
-`spawn_requests` plus `sessions` proof instead of trusting the external intent
-row alone.
+binding already exists, including the bound reserve budget event, and
+accepted/reconciled replay requires matching local `spawn_requests` plus
+`sessions` proof instead of trusting the external intent row alone.
 Unknown or pending `sessions_spawn` outcomes are never retried; zero, ambiguous,
 mismatched, or incomplete session-identity observations move to human review.
 

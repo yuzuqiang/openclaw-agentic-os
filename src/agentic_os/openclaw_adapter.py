@@ -50,7 +50,10 @@ class OpenClawTransport(Protocol):
 
 
 def _json_object(value: Mapping[str, Any]) -> str:
-    return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
+    try:
+        return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise AdapterContractError("raw OpenClaw response must be JSON serializable") from exc
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -91,10 +94,74 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
     observations: list[MetadataObservation] = []
     for item in items:
         try:
-            observations.append(observation_from_openclaw_response(_mapping(item, label)))
+            mapped = _mapping(item, label)
         except AdapterContractError:
             continue
+        try:
+            observations.append(observation_from_openclaw_response(mapped))
+        except AdapterContractError:
+            partial = partial_observation_from_openclaw_response(mapped)
+            if partial is not None:
+                observations.append(partial)
     return tuple(observations)
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def partial_observation_from_openclaw_response(
+    response: Mapping[str, Any],
+) -> MetadataObservation | None:
+    """Keep malformed matching list observations visible to reconciliation."""
+
+    container: Mapping[str, Any] = response
+    if isinstance(response.get("metadata"), Mapping):
+        container = _mapping(response["metadata"], "metadata")
+    normalized = (
+        container.get("normalized")
+        or container.get("normalized_metadata")
+        or container.get("external_metadata")
+    )
+    if not isinstance(normalized, Mapping):
+        return None
+    version = container.get("metadata_contract_version") or container.get(
+        "contract_version"
+    )
+    raw_json = container.get("raw_json") or container.get("raw_metadata_json")
+    lease = response.get("lease") if isinstance(response.get("lease"), Mapping) else {}
+    session = response.get("session") if isinstance(response.get("session"), Mapping) else {}
+    raw_response_json: str | None
+    try:
+        raw_response_json = _json_object(response)
+    except AdapterContractError:
+        raw_response_json = None
+    session_key = _string_or_none(response.get("session_key")) or _string_or_none(
+        session.get("session_key")
+    )
+    spawn_request_session_key = _string_or_none(
+        response.get("spawn_request_session_key")
+    ) or _string_or_none(session.get("spawn_request_session_key"))
+    external_id = (
+        _string_or_none(response.get("external_id"))
+        or session_key
+        or _string_or_none(response.get("gateway_lease_id"))
+        or _string_or_none(lease.get("gateway_lease_id"))
+        or _string_or_none(lease.get("lease_id"))
+    )
+    status_metadata_json = response.get("status_metadata_json")
+    return MetadataObservation(
+        metadata_contract_version=version if isinstance(version, str) else None,
+        normalized=normalized,
+        raw_json=raw_json if isinstance(raw_json, str) else None,
+        external_id=external_id,
+        spawn_request_session_key=spawn_request_session_key,
+        session_key=session_key,
+        status_metadata_json=status_metadata_json
+        if isinstance(status_metadata_json, str)
+        else None,
+        raw_response_json=raw_response_json,
+    )
 
 
 def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataObservation:

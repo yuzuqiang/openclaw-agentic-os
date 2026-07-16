@@ -374,6 +374,7 @@ class MigrationTests(unittest.TestCase):
         client_lease_id: str = "client-lease",
         acquire_idempotency_key: str = "acquire-idem",
         release_idempotency_key: str = "release-idem",
+        reserve_budget_event_id: str = "reserve",
     ) -> None:
         connection.execute(
             "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
@@ -398,7 +399,8 @@ class MigrationTests(unittest.TestCase):
             "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
             "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
             "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
-            "spawn_idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "spawn_idempotency_key,reserve_budget_event_id,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 spawn_request_id,
                 lease_id,
@@ -413,6 +415,7 @@ class MigrationTests(unittest.TestCase):
                 release_idempotency_key,
                 spawn_client_request_id,
                 spawn_idempotency_key,
+                reserve_budget_event_id,
                 "now",
             ),
         )
@@ -557,7 +560,7 @@ class MigrationTests(unittest.TestCase):
                 connection,
                 "pending",
                 spawn_state="pending",
-                requested_at_epoch_ms=1_800_000_000_200,
+                requested_at_epoch_ms=2,
             )
 
         self.assertEqual(apply_migrations(self.database), (10,))
@@ -2500,6 +2503,7 @@ class MigrationTests(unittest.TestCase):
             spawn_request_id="spawn",
             spawn_client_request_id="client",
             spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="reserve",
         )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
@@ -4517,6 +4521,7 @@ class MigrationTests(unittest.TestCase):
             spawn_request_id="spawn",
             spawn_client_request_id="client",
             spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="clock-reserve",
         )
         external_metadata = (
             '{"run_id":"clock-run","transition_id":"transition-clock",'
@@ -4671,6 +4676,7 @@ class MigrationTests(unittest.TestCase):
             spawn_request_id="spawn",
             spawn_client_request_id="client",
             spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="cost-reserve",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
@@ -4828,6 +4834,7 @@ class MigrationTests(unittest.TestCase):
             spawn_request_id="spawn",
             spawn_client_request_id="client",
             spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="clockless-reserve",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
@@ -4969,6 +4976,7 @@ class MigrationTests(unittest.TestCase):
             spawn_request_id="spawn",
             spawn_client_request_id="client",
             spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="transition-reserve",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"

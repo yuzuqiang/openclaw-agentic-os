@@ -221,7 +221,8 @@ def _existing_spawn_replay_result(
         binding = connection.execute(
             "SELECT spawn_request_id,lease_id,run_id,transition_id,phase,agent_id,"
             "requester_agent_id,task_digest,client_lease_id,acquire_idempotency_key,"
-            "release_idempotency_key,spawn_client_request_id,spawn_idempotency_key "
+            "release_idempotency_key,spawn_client_request_id,spawn_idempotency_key,"
+            "reserve_budget_event_id "
             "FROM runtime_dispatch_bindings WHERE spawn_request_id=?",
             (request.spawn_request_id,),
         ).fetchone()
@@ -239,6 +240,7 @@ def _existing_spawn_replay_result(
             request.release_idempotency_key,
             request.spawn_client_request_id,
             request.spawn_idempotency_key,
+            request.reserve_budget_event_id,
         )
         if binding != expected_binding:
             raise RuntimeDispatchError(
@@ -526,7 +528,8 @@ def _assert_or_insert_dispatch_binding(
     rows = connection.execute(
         "SELECT spawn_request_id,lease_id,run_id,transition_id,phase,agent_id,"
         "requester_agent_id,task_digest,client_lease_id,acquire_idempotency_key,"
-        "release_idempotency_key,spawn_client_request_id,spawn_idempotency_key "
+        "release_idempotency_key,spawn_client_request_id,spawn_idempotency_key,"
+        "reserve_budget_event_id "
         "FROM runtime_dispatch_bindings WHERE spawn_request_id=? OR lease_id=? "
         "OR client_lease_id=? OR acquire_idempotency_key=? "
         "OR release_idempotency_key=? OR spawn_client_request_id=? "
@@ -555,6 +558,7 @@ def _assert_or_insert_dispatch_binding(
         request.release_idempotency_key,
         request.spawn_client_request_id,
         request.spawn_idempotency_key,
+        request.reserve_budget_event_id,
     )
     if rows:
         if len(rows) != 1 or rows[0] != expected:
@@ -564,7 +568,8 @@ def _assert_or_insert_dispatch_binding(
         "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
         "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
         "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
-        "spawn_idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "spawn_idempotency_key,reserve_budget_event_id,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (*expected, now),
     )
 
@@ -644,6 +649,7 @@ def assert_no_potentially_live_dispatch(
         "AND b.run_id=sr.run_id AND b.transition_id=sr.transition_id "
         "AND b.phase=sr.phase AND b.agent_id=sr.agent_id "
         "AND b.task_digest=sr.task_digest "
+        "AND b.reserve_budget_event_id=i.reserve_budget_event_id "
         "AND b.spawn_client_request_id=sr.client_request_id "
         "AND b.spawn_idempotency_key=sr.spawn_idempotency_key "
         "JOIN leases l ON l.lease_id=b.lease_id AND l.run_id=b.run_id "

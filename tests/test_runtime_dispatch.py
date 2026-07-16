@@ -8,8 +8,13 @@ from collections import Counter
 from pathlib import Path
 
 import agentic_os.runtime_dispatch as runtime_dispatch
+import agentic_os.reconciliation as reconciliation_module
 from agentic_os.migrations import apply_migrations
-from agentic_os.openclaw_adapter import AdapterContractError, MetadataObservation
+from agentic_os.openclaw_adapter import (
+    AdapterContractError,
+    MetadataObservation,
+    OpenClawAdapter,
+)
 from agentic_os.reconciliation import reconcile_unknown_metadata
 from agentic_os.runtime_dispatch import (
     DispatchRequest,
@@ -451,6 +456,41 @@ class RuntimeDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
             dispatch_with_metadata(self.database, adapter, self.request)
         self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_adapter_audit_serialization_error_fails_closed_before_spawn(self) -> None:
+        request = self.request
+
+        class NonSerializableTransport:
+            def call(self, method, params):
+                metadata = lease_metadata(request, "lease-gateway")
+                return {
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": stable_json(metadata),
+                    },
+                    "external_id": "lease-gateway",
+                    "diagnostic": object(),
+                }
+
+        adapter = OpenClawAdapter(NonSerializableTransport())
+        with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
+            dispatch_with_metadata(self.database, adapter, self.request)
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
@@ -1000,9 +1040,9 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
                 "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
                 "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
-                "spawn_idempotency_key,created_at) VALUES('spawn','client-lease','run',"
+                "spawn_idempotency_key,reserve_budget_event_id,created_at) VALUES('spawn','client-lease','run',"
                 "'transition','phase','agent','requester','task','client-lease',"
-                "'acquire-idem','release-idem','client','spawn-idem','now')"
+                "'acquire-idem','release-idem','client','spawn-idem','reserve','now')"
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -1036,7 +1076,8 @@ class RuntimeDispatchTests(unittest.TestCase):
         with self._connect() as connection:
             connection.execute(
                 "UPDATE external_rpc_intents SET state='pending',resolved_at=NULL,"
-                "resolved_at_epoch_ms=NULL WHERE rpc_kind='sessions_spawn'"
+                "resolved_at_epoch_ms=NULL,requested_at='old',requested_at_epoch_ms=2 "
+                "WHERE rpc_kind='sessions_spawn'"
             )
             connection.execute(
                 "UPDATE spawn_requests SET state='pending',ambiguity_reason=NULL "
@@ -1057,9 +1098,48 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ("reconciled", "session-key"),
             )
 
+    def test_reconcile_fresh_pending_spawn_does_not_race_in_flight_dispatch(self) -> None:
+        self._seed_unknown_spawn()
+        original_now = reconciliation_module.now_utc
+        reconciliation_module.now_utc = lambda: ("2026-07-16T00:00:00Z", 2_000_000)
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE external_rpc_intents SET state='pending',resolved_at=NULL,"
+                    "resolved_at_epoch_ms=NULL,requested_at='now',requested_at_epoch_ms=? "
+                    "WHERE rpc_kind='sessions_spawn'",
+                    (2_000_000,),
+                )
+                connection.execute(
+                    "UPDATE spawn_requests SET state='pending',ambiguity_reason=NULL "
+                    "WHERE spawn_request_id='spawn'"
+                )
+            adapter = ScriptedAdapter(
+                sessions=[
+                    observation(spawn_metadata(self.request), external_id="session-key")
+                ]
+            )
+            summary = reconcile_unknown_metadata(self.database, adapter)
+        finally:
+            reconciliation_module.now_utc = original_now
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 0)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,external_id FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone(),
+                ("pending", None),
+            )
+
     def test_reconcile_spawn_requires_acquired_allow_lease_proof(self) -> None:
         with self._connect() as connection:
             runtime_dispatch.insert_pending_dispatch(connection, self.request)
+            connection.execute(
+                "UPDATE external_rpc_intents SET requested_at='old',requested_at_epoch_ms=2 "
+                "WHERE rpc_kind IN ('allow_lease_acquire','sessions_spawn')"
+            )
         adapter = ScriptedAdapter(
             sessions=[observation(spawn_metadata(self.request), external_id="session-key")]
         )
@@ -1182,6 +1262,11 @@ class RuntimeDispatchTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(SystemExit, "simulated process crash"):
             dispatch_with_metadata(self.database, crash_adapter, self.request)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE external_rpc_intents SET requested_at='old',requested_at_epoch_ms=2 "
+                "WHERE rpc_kind='sessions_spawn'"
+            )
 
         reconcile_adapter = ScriptedAdapter(release=[self._release_observation()])
         summary = reconcile_unknown_metadata(self.database, reconcile_adapter)
@@ -1357,6 +1442,30 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "DELETE FROM runtime_dispatch_bindings WHERE spawn_request_id='spawn'"
                 )
 
+    def test_post_v10_spawn_intent_requires_exact_reserve_binding(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+                "spawn_request_id,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,input_tokens,"
+                "usage_confidence,source,created_at,created_at_epoch_ms) VALUES("
+                "'other-reserve','other-reserve-idem','other-reserve-dedupe',2,'run',"
+                "'transition','provider','model','spawn','endpoint','capability','cost-row',"
+                "'effective','cost-hash','known','reserve',1,'known','test','old',1)"
+            )
+            runtime_dispatch.insert_pending_dispatch(connection, self.request)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "runtime dispatch binding"):
+                connection.execute(
+                    "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                    "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                    "idempotency_key,phase,agent_id,task_digest,metadata_json,state,"
+                    "requested_at,requested_at_epoch_ms) VALUES("
+                    "'spawn:other-reserve','run','transition','sessions_spawn','spawn',"
+                    "'other-reserve','client-other','spawn-idem-other','phase','agent','task',"
+                    "'{}','pending','now',2)"
+                )
+
     def test_reconcile_unknown_acquire_requires_local_lease_row(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -1438,6 +1547,33 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "SELECT state FROM leases WHERE client_lease_id='client-lease'"
                 ).fetchone()[0],
                 "acquired",
+            )
+
+    def test_reconcile_matching_malformed_session_observation_requires_review(self) -> None:
+        self._seed_unknown_spawn()
+        adapter = ScriptedAdapter(
+            sessions=[
+                observation(spawn_metadata(self.request), external_id="session-key"),
+                MetadataObservation(
+                    metadata_contract_version="v1",
+                    normalized=spawn_metadata(self.request),
+                    raw_json=None,
+                    external_id="session-key-2",
+                    spawn_request_session_key="session-key-2",
+                    session_key="session-key-2",
+                ),
+            ],
+            release=[self._release_observation()],
+        )
+        summary = reconcile_unknown_metadata(self.database, adapter)
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 1)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "human_review_required",
             )
 
 

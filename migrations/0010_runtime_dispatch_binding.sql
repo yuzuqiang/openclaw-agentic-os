@@ -25,6 +25,7 @@ CREATE TABLE runtime_dispatch_bindings (
   release_idempotency_key TEXT NOT NULL UNIQUE,
   spawn_client_request_id TEXT NOT NULL UNIQUE,
   spawn_idempotency_key TEXT NOT NULL UNIQUE,
+  reserve_budget_event_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   CHECK (
     spawn_request_id <> ''
@@ -40,6 +41,7 @@ CREATE TABLE runtime_dispatch_bindings (
     AND release_idempotency_key <> ''
     AND spawn_client_request_id <> ''
     AND spawn_idempotency_key <> ''
+    AND reserve_budget_event_id <> ''
     AND created_at <> ''
   ),
   FOREIGN KEY (
@@ -100,6 +102,7 @@ SELECT
   l.release_idempotency_key,
   i.client_request_id AS spawn_client_request_id,
   i.idempotency_key AS spawn_idempotency_key,
+  i.reserve_budget_event_id,
   i.requested_at AS created_at
 FROM external_rpc_intents i
 JOIN spawn_requests sr
@@ -166,6 +169,7 @@ INSERT INTO runtime_dispatch_bindings(
   release_idempotency_key,
   spawn_client_request_id,
   spawn_idempotency_key,
+  reserve_budget_event_id,
   created_at
 )
 SELECT
@@ -182,6 +186,7 @@ SELECT
   release_idempotency_key,
   spawn_client_request_id,
   spawn_idempotency_key,
+  reserve_budget_event_id,
   created_at
 FROM runtime_dispatch_binding_upgrade_candidates;
 
@@ -198,6 +203,7 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
     AND b.phase=NEW.phase
     AND b.agent_id=NEW.agent_id
     AND b.task_digest=NEW.task_digest
+    AND b.reserve_budget_event_id=NEW.reserve_budget_event_id
     AND b.spawn_client_request_id=NEW.client_request_id
     AND b.spawn_idempotency_key=NEW.idempotency_key
 )
@@ -215,6 +221,7 @@ WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
     AND b.phase=NEW.phase
     AND b.agent_id=NEW.agent_id
     AND b.task_digest=NEW.task_digest
+    AND b.reserve_budget_event_id=NEW.reserve_budget_event_id
     AND b.spawn_client_request_id=NEW.client_request_id
     AND b.spawn_idempotency_key=NEW.idempotency_key
 )
