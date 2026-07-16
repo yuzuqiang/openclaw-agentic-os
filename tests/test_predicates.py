@@ -713,6 +713,75 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=borrowed_root),
                 )
 
+    def test_standard_linked_worktree_gitdir_file_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            common_dir = base / "main" / ".git"
+            common_dir.mkdir(parents=True)
+            (common_dir / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n",
+                encoding="utf-8",
+            )
+            (common_dir / "objects").mkdir()
+            (common_dir / "refs").mkdir()
+
+            linked_root = base / "linked-root"
+            linked_root.mkdir()
+            git_dir = common_dir / "worktrees" / "linked-root"
+            git_dir.mkdir(parents=True)
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(
+                str(linked_root / ".git") + "\n",
+                encoding="utf-8",
+            )
+            (linked_root / ".git").write_text(
+                f"gitdir: {git_dir}\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=linked_root),
+                )
+            )
+
+    def test_linked_worktree_gitdir_file_must_bind_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            common_dir = base / "main" / ".git"
+            common_dir.mkdir(parents=True)
+            (common_dir / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n",
+                encoding="utf-8",
+            )
+            (common_dir / "objects").mkdir()
+            (common_dir / "refs").mkdir()
+
+            linked_root = base / "linked-root"
+            linked_root.mkdir()
+            borrowed_root = base / "borrowed-root"
+            borrowed_root.mkdir()
+            git_dir = common_dir / "worktrees" / "linked-root"
+            git_dir.mkdir(parents=True)
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(
+                str(linked_root / ".git") + "\n",
+                encoding="utf-8",
+            )
+            (borrowed_root / ".git").write_text(
+                f"gitdir: {git_dir}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(PredicateContractError, "gitdir file"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=borrowed_root),
+                )
+
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(

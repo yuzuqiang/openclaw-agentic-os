@@ -267,27 +267,54 @@ def _require_git_worktree_top_level(root: Path) -> None:
 
 def _require_gitdir_worktree_matches_root(git_dir: Path, root: Path) -> None:
     config = git_dir / "config"
-    if not config.is_file() or config.stat().st_size > MAX_FILE_EVIDENCE_BYTES:
-        raise PredicateContractError("repo root must contain valid Git metadata")
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    try:
-        config_text = config.read_text(encoding="utf-8", errors="strict")
-        parser.read_string(config_text)
-    except configparser.Error as exc:
-        raise PredicateContractError("repo root must contain valid Git metadata") from exc
-    worktree_text = parser.get("core", "worktree", fallback=None)
-    if worktree_text is None:
-        raise PredicateContractError("repo root gitdir must bind core.worktree")
-    worktree_text = worktree_text.strip()
-    if not worktree_text or "\x00" in worktree_text or len(worktree_text) > MAX_STRING_LENGTH:
-        raise PredicateContractError("repo root gitdir core.worktree is outside safe bounds")
-    worktree = Path(worktree_text)
-    if not worktree.is_absolute():
-        worktree = (git_dir / worktree).resolve(strict=False)
+    if config.exists():
+        if not config.is_file() or config.stat().st_size > MAX_FILE_EVIDENCE_BYTES:
+            raise PredicateContractError("repo root must contain valid Git metadata")
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            config_text = config.read_text(encoding="utf-8", errors="strict")
+            parser.read_string(config_text)
+        except configparser.Error as exc:
+            raise PredicateContractError("repo root must contain valid Git metadata") from exc
+        worktree_text = parser.get("core", "worktree", fallback=None)
+        if worktree_text is not None:
+            worktree_text = worktree_text.strip()
+            if (
+                not worktree_text
+                or "\x00" in worktree_text
+                or len(worktree_text) > MAX_STRING_LENGTH
+            ):
+                raise PredicateContractError(
+                    "repo root gitdir core.worktree is outside safe bounds"
+                )
+            worktree = Path(worktree_text)
+            if not worktree.is_absolute():
+                worktree = (git_dir / worktree).resolve(strict=False)
+            else:
+                worktree = worktree.resolve(strict=False)
+            if worktree != root:
+                raise PredicateContractError(
+                    "repo root gitdir core.worktree does not match"
+                )
+            return
+    _require_gitdir_file_matches_root(git_dir, root)
+
+
+def _require_gitdir_file_matches_root(git_dir: Path, root: Path) -> None:
+    gitdir_file = git_dir / "gitdir"
+    if not gitdir_file.is_file() or gitdir_file.stat().st_size > MAX_STRING_LENGTH:
+        raise PredicateContractError("repo root gitdir must bind the worktree")
+    gitdir_text = gitdir_file.read_text(encoding="utf-8", errors="strict").strip()
+    if not gitdir_text or "\x00" in gitdir_text:
+        raise PredicateContractError("repo root gitdir file is outside safe bounds")
+    worktree_git_file = Path(gitdir_text)
+    if not worktree_git_file.is_absolute():
+        worktree_git_file = (git_dir / worktree_git_file).resolve(strict=False)
     else:
-        worktree = worktree.resolve(strict=False)
-    if worktree != root:
-        raise PredicateContractError("repo root gitdir core.worktree does not match")
+        worktree_git_file = worktree_git_file.resolve(strict=False)
+    expected_git_file = (root / ".git").resolve(strict=False)
+    if worktree_git_file != expected_git_file:
+        raise PredicateContractError("repo root gitdir file does not match")
 
 
 def _git_common_dir(git_dir: Path) -> Path:
