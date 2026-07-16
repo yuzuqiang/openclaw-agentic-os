@@ -931,6 +931,38 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ("reconciled", "session-key"),
             )
 
+    def test_reconcile_spawn_requires_acquired_allow_lease_proof(self) -> None:
+        with self._connect() as connection:
+            runtime_dispatch.insert_pending_dispatch(connection, self.request)
+        adapter = ScriptedAdapter(
+            sessions=[observation(spawn_metadata(self.request), external_id="session-key")]
+        )
+        summary = reconcile_unknown_metadata(self.database, adapter)
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 2)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,external_id FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone(),
+                ("human_review_required", None),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,session_key FROM spawn_requests "
+                    "WHERE spawn_request_id='spawn'"
+                ).fetchone(),
+                ("human_review_required", None),
+            )
+
     def test_reconcile_release_pending_from_release_metadata(self) -> None:
         wrong = dict(spawn_metadata(self.request))
         wrong["task_digest"] = "other-task"

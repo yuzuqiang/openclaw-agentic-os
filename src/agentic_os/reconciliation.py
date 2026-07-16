@@ -64,7 +64,91 @@ def _unknown_spawn_requests(connection: sqlite3.Connection) -> list[DispatchRequ
         "AND l.client_lease_id=b.client_lease_id "
         "AND l.acquire_idempotency_key=b.acquire_idempotency_key "
         "AND l.release_idempotency_key=b.release_idempotency_key "
-        "WHERE i.rpc_kind='sessions_spawn' AND i.state IN ('pending','unknown')"
+        "JOIN external_rpc_intents acquire ON acquire.rpc_kind='allow_lease_acquire' "
+        "AND acquire.run_id=b.run_id AND acquire.transition_id=b.transition_id "
+        "AND acquire.phase=b.phase AND acquire.agent_id=b.agent_id "
+        "AND acquire.requester_agent_id=b.requester_agent_id "
+        "AND acquire.client_request_id=b.client_lease_id "
+        "AND acquire.idempotency_key=b.acquire_idempotency_key "
+        "AND acquire.ttl_ms=l.ttl_ms AND acquire.state IN ('accepted','reconciled') "
+        "AND acquire.external_id=l.gateway_lease_id "
+        "AND acquire.external_client_request_id=l.client_lease_id "
+        "AND acquire.external_idempotency_key=l.acquire_idempotency_key "
+        "AND acquire.external_run_id=l.run_id "
+        "AND acquire.external_transition_id=l.transition_id "
+        "AND acquire.external_phase=l.phase "
+        "AND acquire.external_agent_id=l.agent_id "
+        "AND acquire.external_requester_agent_id=l.requester_agent_id "
+        "WHERE i.rpc_kind='sessions_spawn' AND i.state IN ('pending','unknown') "
+        "AND l.state='acquired' AND l.gateway_lease_id IS NOT NULL "
+        "AND l.gateway_lease_id<>''"
+    ).fetchall()
+    return [
+        DispatchRequest(
+            run_id=row[0],
+            transition_id=row[1],
+            phase=row[2],
+            agent_id=row[3],
+            requester_agent_id=row[4],
+            task_digest=row[5],
+            spawn_request_id=row[6],
+            reserve_budget_event_id=row[7],
+            client_lease_id=row[8],
+            acquire_idempotency_key=row[9],
+            release_idempotency_key=row[10] or f"reconcile-release:{row[8]}",
+            ttl_ms=row[11],
+            spawn_client_request_id=row[12],
+            spawn_idempotency_key=row[13],
+            lease_id=row[14],
+        )
+        for row in rows
+    ]
+
+
+def _spawn_requests_without_acquired_lease_proof(
+    connection: sqlite3.Connection,
+) -> list[DispatchRequest]:
+    rows = connection.execute(
+        "SELECT i.run_id,i.transition_id,i.phase,i.agent_id,l.requester_agent_id,"
+        "i.task_digest,i.spawn_request_id,i.reserve_budget_event_id,l.client_lease_id,"
+        "l.acquire_idempotency_key,COALESCE(l.release_idempotency_key,''),l.ttl_ms,"
+        "i.client_request_id,i.idempotency_key,l.lease_id FROM external_rpc_intents i "
+        "JOIN runtime_dispatch_bindings b ON b.spawn_request_id=i.spawn_request_id "
+        "AND b.run_id=i.run_id AND b.transition_id=i.transition_id "
+        "AND b.phase=i.phase AND b.agent_id=i.agent_id "
+        "AND b.task_digest=i.task_digest "
+        "AND b.spawn_client_request_id=i.client_request_id "
+        "AND b.spawn_idempotency_key=i.idempotency_key "
+        "JOIN leases l ON l.lease_id=b.lease_id AND l.run_id=b.run_id "
+        "AND l.transition_id=b.transition_id AND l.phase=b.phase "
+        "AND l.agent_id=b.agent_id AND l.requester_agent_id=b.requester_agent_id "
+        "AND l.client_lease_id=b.client_lease_id "
+        "AND l.acquire_idempotency_key=b.acquire_idempotency_key "
+        "AND l.release_idempotency_key=b.release_idempotency_key "
+        "WHERE i.rpc_kind='sessions_spawn' AND i.state IN ('pending','unknown') "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM external_rpc_intents acquire "
+        "  WHERE acquire.rpc_kind='allow_lease_acquire' "
+        "  AND acquire.run_id=b.run_id "
+        "  AND acquire.transition_id=b.transition_id "
+        "  AND acquire.phase=b.phase "
+        "  AND acquire.agent_id=b.agent_id "
+        "  AND acquire.requester_agent_id=b.requester_agent_id "
+        "  AND acquire.client_request_id=b.client_lease_id "
+        "  AND acquire.idempotency_key=b.acquire_idempotency_key "
+        "  AND acquire.ttl_ms=l.ttl_ms "
+        "  AND acquire.state IN ('accepted','reconciled') "
+        "  AND l.state='acquired' "
+        "  AND l.gateway_lease_id IS NOT NULL AND l.gateway_lease_id<>'' "
+        "  AND acquire.external_id=l.gateway_lease_id "
+        "  AND acquire.external_client_request_id=l.client_lease_id "
+        "  AND acquire.external_idempotency_key=l.acquire_idempotency_key "
+        "  AND acquire.external_run_id=l.run_id "
+        "  AND acquire.external_transition_id=l.transition_id "
+        "  AND acquire.external_phase=l.phase "
+        "  AND acquire.external_agent_id=l.agent_id "
+        "  AND acquire.external_requester_agent_id=l.requester_agent_id"
+        ")"
     ).fetchall()
     return [
         DispatchRequest(
@@ -422,6 +506,16 @@ def reconcile_unknown_metadata(
                     reconciled=True,
                 )
                 reconciled += 1
+
+        for request in _spawn_requests_without_acquired_lease_proof(connection):
+            with immediate_transaction(connection):
+                mark_human_review(
+                    connection,
+                    request,
+                    rpc_kind="sessions_spawn",
+                    reason="missing-acquired-allow-lease-proof",
+                )
+                human_review += 1
 
         for request in _unknown_spawn_requests(connection):
             matches = _matching_sessions(request, session_observations)

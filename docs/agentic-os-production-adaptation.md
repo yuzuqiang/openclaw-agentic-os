@@ -184,6 +184,7 @@ Fail-closed rule:
 
 - If allowLease metadata is absent, `lease_acquire_pending` cannot auto-bind a live lease; scanner writes `human_review_required`.
 - If session metadata is absent, `spawn_pending` after a crash becomes `spawn_unknown`/`human_review_required`; the adapter must not retry `sessions_spawn`.
+- If the bound allowLease acquire has not accepted or reconciled into the exact acquired local lease with a non-empty Gateway lease identity, `spawn_pending`/`spawn_unknown` cannot auto-reconcile from session metadata and must move to `human_review_required`.
 - If ownership cannot be proven, ambiguous leases are left to bounded TTL or human review; no other run's lease is released.
 
 ## Minimum Database Contracts
