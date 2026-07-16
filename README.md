@@ -82,8 +82,12 @@ only the read-only `agentic_predicate_inproc_v1` backend: literal booleans,
 JSON scalar equality over caller-supplied documents, and command-result scalar
 equality over caller-supplied evidence. Unsupported backends, dynamic code,
 subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
-path traversal, symlink escapes, writes, missing evidence, and malformed
-predicate documents fail closed with `PredicateContractError`. It does not call
+path traversal, symlink escapes, raw database state paths, unreadable file
+evidence, JSON path absence, JSON scalar type mismatches, writes, missing
+evidence, and malformed predicate documents fail closed with
+`PredicateContractError`. Boolean composition validates every child before
+aggregating results, so unsupported adapters cannot be hidden behind short-circuit
+success. It does not call
 OpenClaw, Gateway, Cron, or a production database, and it does not grant trust or
 approval authority.
 

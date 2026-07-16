@@ -151,6 +151,11 @@ class PredicateTests(unittest.TestCase):
     def test_unsupported_backend_and_extra_keys_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(repo_root=Path(tmp))
+            for malformed_document in (None, ["backend", "predicate"]):
+                with self.subTest(document=malformed_document), self.assertRaisesRegex(
+                    PredicateContractError, "JSON object"
+                ):
+                    evaluate_predicate_document(malformed_document, context)  # type: ignore[arg-type]
             with self.assertRaisesRegex(PredicateContractError, "unsupported"):
                 evaluate_predicate_document(
                     {"backend": "agentic_predicate_external_sandbox_v1", "predicate": {}},
@@ -186,6 +191,31 @@ class PredicateTests(unittest.TestCase):
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
+    def test_boolean_composition_validates_children_before_aggregating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = PredicateContext(repo_root=Path(tmp))
+            cases = (
+                {
+                    "op": "any",
+                    "predicates": [
+                        {"op": "literal", "value": True},
+                        {"op": "shell", "command": "true"},
+                    ],
+                },
+                {
+                    "op": "all",
+                    "predicates": [
+                        {"op": "literal", "value": False},
+                        {"op": "network", "url": "https://example.invalid"},
+                    ],
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "unsupported"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
     def test_path_traversal_absolute_and_symlink_escape_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
             root = Path(tmp)
@@ -202,6 +232,101 @@ class PredicateTests(unittest.TestCase):
                         document({"op": "file_exists", "path": path}),
                         context,
                     )
+
+    def test_raw_state_file_paths_are_rejected_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state" / "agentic-os"
+            state.mkdir(parents=True)
+            raw_state = state / "control.db"
+            raw_state.write_bytes(b"private sqlite bytes")
+            digest = hashlib.sha256(raw_state.read_bytes()).hexdigest()
+            context = PredicateContext(repo_root=root)
+
+            cases = (
+                {"op": "file_exists", "path": "state/agentic-os/control.db"},
+                {
+                    "op": "file_sha256",
+                    "path": "state/agentic-os/control.db",
+                    "sha256": digest,
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "private raw state"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
+    def test_file_sha256_read_failures_are_contract_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            target.chmod(0)
+            context = PredicateContext(repo_root=root)
+            try:
+                with self.assertRaisesRegex(PredicateContractError, "cannot be read"):
+                    evaluate_predicate_document(
+                        document(
+                            {
+                                "op": "file_sha256",
+                                "path": "evidence.txt",
+                                "sha256": "0" * 64,
+                            }
+                        ),
+                        context,
+                    )
+            finally:
+                target.chmod(0o600)
+
+    def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = PredicateContext(
+                repo_root=Path(tmp),
+                json_documents={"manifest": {"gate": {"status": "pass"}}},
+            )
+            with self.assertRaisesRegex(PredicateContractError, "path is missing"):
+                evaluate_predicate_document(
+                    document(
+                        {
+                            "op": "not",
+                            "predicate": {
+                                "op": "json_equals",
+                                "document": "manifest",
+                                "path": ["gate", "missing"],
+                                "value": "pass",
+                            },
+                        }
+                    ),
+                    context,
+                )
+
+    def test_json_and_command_scalar_type_mismatches_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = PredicateContext(
+                repo_root=Path(tmp),
+                json_documents={"manifest": {"exit_code": False}},
+                command_results={"unit": {"exit_code": True}},
+            )
+            cases = (
+                {
+                    "op": "json_equals",
+                    "document": "manifest",
+                    "path": ["exit_code"],
+                    "value": 0,
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "unit",
+                    "field": "exit_code",
+                    "value": 1,
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "type mismatch"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
 
     def test_missing_evidence_and_malformed_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

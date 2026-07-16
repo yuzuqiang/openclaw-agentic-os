@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .privacy import PrivacyPreflightError, assert_paths_retrievable
+
 
 INPROC_PREDICATE_BACKEND = "agentic_predicate_inproc_v1"
 MAX_PREDICATE_DEPTH = 32
@@ -47,6 +49,8 @@ def evaluate_predicate_document(
     :class:`PredicateContractError` so callers can route the run to human review.
     """
 
+    if not isinstance(document, Mapping):
+        raise PredicateContractError("predicate document must be a JSON object")
     _require_keys(document, ("backend", "predicate"), "predicate document")
     backend = document["backend"]
     if backend != INPROC_PREDICATE_BACKEND:
@@ -76,16 +80,18 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         return value
     if op == "all":
         _require_keys(predicate, ("op", "predicates"), "all predicate")
-        return all(
+        results = [
             _evaluate(item, context, depth=depth + 1)
             for item in _predicate_list(predicate["predicates"], "all predicates")
-        )
+        ]
+        return all(results)
     if op == "any":
         _require_keys(predicate, ("op", "predicates"), "any predicate")
-        return any(
+        results = [
             _evaluate(item, context, depth=depth + 1)
             for item in _predicate_list(predicate["predicates"], "any predicates")
-        )
+        ]
+        return any(results)
     if op == "not":
         _require_keys(predicate, ("op", "predicate"), "not predicate")
         return not _evaluate(predicate["predicate"], context, depth=depth + 1)
@@ -100,7 +106,11 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         path = _repo_path(context.repo_root, predicate["path"])
         if not path.is_file():
             return False
-        return hashlib.sha256(path.read_bytes()).hexdigest() == expected
+        try:
+            actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise PredicateContractError("file_sha256 evidence cannot be read") from exc
+        return actual_hash == expected
     if op == "json_equals":
         _require_keys(predicate, ("op", "document", "path", "value"), "json_equals predicate")
         document_name = _bounded_string(predicate["document"], "json document name")
@@ -111,7 +121,7 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
             context.json_documents[document_name],
             predicate["path"],
         )
-        return actual == expected
+        return _json_scalar_equals(actual, expected, "json_equals resolved value")
     if op == "command_result_equals":
         _require_keys(
             predicate,
@@ -131,7 +141,7 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
             )
         expected = _json_scalar(predicate["value"], "command_result_equals value")
         actual = _json_scalar(result[field_name], "command result field value")
-        return actual == expected
+        return _json_scalar_equals(actual, expected, "command result field value")
     raise PredicateContractError(f"unsupported predicate op: {op!r}")
 
 
@@ -180,6 +190,10 @@ def _repo_path(repo_root: Path, raw_path: Any) -> Path:
         candidate.relative_to(repo_root)
     except (OSError, ValueError) as exc:
         raise PredicateContractError("repo-relative path escapes repo root") from exc
+    try:
+        assert_paths_retrievable(relative)
+    except PrivacyPreflightError as exc:
+        raise PredicateContractError("repo-relative path targets private raw state") from exc
     return candidate
 
 
@@ -203,6 +217,28 @@ def _json_scalar(value: Any, label: str) -> Any:
     raise PredicateContractError(f"{label} must be a JSON scalar")
 
 
+def _json_scalar_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    raise PredicateContractError("internal non-scalar comparison")
+
+
+def _json_scalar_equals(actual: Any, expected: Any, label: str) -> bool:
+    actual_kind = _json_scalar_kind(actual)
+    expected_kind = _json_scalar_kind(expected)
+    if actual_kind != expected_kind:
+        raise PredicateContractError(
+            f"{label} type mismatch: expected {expected_kind}, found {actual_kind}"
+        )
+    return actual == expected
+
+
 def _json_path_lookup(document: Any, path: Any) -> Any:
     if not isinstance(path, list):
         raise PredicateContractError("json_equals path must be a JSON array")
@@ -215,21 +251,12 @@ def _json_path_lookup(document: Any, path: Any) -> Any:
         if isinstance(segment, str):
             _bounded_string(segment, "json path segment")
             if not isinstance(current, Mapping) or segment not in current:
-                return _MISSING
+                raise PredicateContractError("json_equals evidence path is missing")
             current = current[segment]
         elif type(segment) is int:
             if not isinstance(current, list) or segment < 0 or segment >= len(current):
-                return _MISSING
+                raise PredicateContractError("json_equals evidence path is missing")
             current = current[segment]
         else:
             raise PredicateContractError("json path segments must be strings or integers")
-    if current is _MISSING:
-        return _MISSING
     return _json_scalar(current, "json_equals resolved value")
-
-
-class _Missing:
-    pass
-
-
-_MISSING = _Missing()
