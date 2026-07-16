@@ -15,7 +15,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from stat import S_ISLNK, S_ISREG
+from stat import S_ISDIR, S_ISLNK, S_ISREG
 from typing import Any
 
 from .privacy import PrivacyPreflightError, assert_paths_retrievable
@@ -140,8 +140,10 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         return not _evaluate(predicate["predicate"], context, depth=depth + 1)
     if op == "file_exists":
         _require_keys(predicate, ("op", "path"), "file_exists predicate")
+        relative_path = _repo_path(context.repo_root, predicate["path"])
         return _repo_path_stat(
-            _repo_path(context.repo_root, predicate["path"]),
+            context.repo_root,
+            relative_path,
             "file_exists evidence",
         ) is not None
     if op == "file_sha256":
@@ -149,12 +151,14 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         expected = predicate["sha256"]
         if not isinstance(expected, str) or not _SHA256_RE.fullmatch(expected):
             raise PredicateContractError("file_sha256 expected hash must be lowercase SHA-256")
-        path = _repo_path(context.repo_root, predicate["path"])
-        path_stat = _repo_path_stat(path, "file_sha256 evidence")
+        relative_path = _repo_path(context.repo_root, predicate["path"])
+        path_stat = _repo_path_stat(
+            context.repo_root, relative_path, "file_sha256 evidence"
+        )
         if path_stat is None or not S_ISREG(path_stat.st_mode):
             raise PredicateContractError("file_sha256 evidence must be a regular file")
         _raise_if_multi_link_file(path_stat, "file_sha256 evidence")
-        actual_hash = _sha256_file(path, path_stat)
+        actual_hash = _sha256_file(context.repo_root, relative_path, path_stat)
         return actual_hash == expected
     if op == "json_equals":
         _require_keys(predicate, ("op", "document", "path", "value"), "json_equals predicate")
@@ -236,14 +240,17 @@ def _normalize_repo_root(repo_root: Path | str) -> Path:
 def _require_git_worktree_top_level(root: Path) -> None:
     try:
         git_entry = root / ".git"
-        if not git_entry.exists():
+        try:
+            git_entry_stat = os.stat(git_entry, follow_symlinks=False)
+        except FileNotFoundError as exc:
             raise PredicateContractError("repo root must be a Git worktree top level")
-        if git_entry.is_dir():
+        if S_ISLNK(git_entry_stat.st_mode):
+            raise PredicateContractError("repo root must contain valid Git metadata")
+        if S_ISDIR(git_entry_stat.st_mode):
             _validate_git_metadata(git_entry, git_entry)
             return
-        if git_entry.is_file():
-            stat_result = git_entry.stat()
-            if stat_result.st_size > MAX_STRING_LENGTH:
+        if S_ISREG(git_entry_stat.st_mode):
+            if git_entry_stat.st_size > MAX_STRING_LENGTH:
                 raise PredicateContractError("repo root .git file is outside safe bounds")
             content = git_entry.read_text(encoding="utf-8", errors="strict").strip()
             prefix = "gitdir:"
@@ -261,7 +268,7 @@ def _require_git_worktree_top_level(root: Path) -> None:
             _validate_git_metadata(git_dir, common_dir)
             return
         raise PredicateContractError("repo root must contain a valid .git entry")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise PredicateContractError("repo root Git metadata cannot be inspected") from exc
 
 
@@ -274,7 +281,7 @@ def _require_gitdir_worktree_matches_root(git_dir: Path, root: Path) -> None:
         try:
             config_text = config.read_text(encoding="utf-8", errors="strict")
             parser.read_string(config_text)
-        except configparser.Error as exc:
+        except (OSError, UnicodeError, configparser.Error) as exc:
             raise PredicateContractError("repo root must contain valid Git metadata") from exc
         worktree_text = parser.get("core", "worktree", fallback=None)
         if worktree_text is not None:
@@ -354,8 +361,21 @@ def _validate_git_metadata(git_dir: Path, common_dir: Path) -> None:
     if not config.is_file() or config.stat().st_size > MAX_FILE_EVIDENCE_BYTES:
         raise PredicateContractError("repo root must contain valid Git metadata")
     config_text = config.read_text(encoding="utf-8", errors="strict")
-    if "[core]" not in config_text or "repositoryformatversion" not in config_text:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        parser.read_string(config_text)
+    except configparser.Error as exc:
+        raise PredicateContractError("repo root must contain valid Git metadata") from exc
+    if not parser.has_section("core") or not parser.has_option(
+        "core", "repositoryformatversion"
+    ):
         raise PredicateContractError("repo root must contain valid Git metadata")
+    try:
+        is_bare = parser.getboolean("core", "bare", fallback=False)
+    except ValueError as exc:
+        raise PredicateContractError("repo root must contain valid Git metadata") from exc
+    if is_bare:
+        raise PredicateContractError("repo root must be a Git worktree")
 
 
 def _repo_path(repo_root: Path, raw_path: Any) -> Path:
@@ -366,17 +386,14 @@ def _repo_path(repo_root: Path, raw_path: Any) -> Path:
     _reject_unsafe_relative_path_parts(candidate_input)
     _assert_predicate_path_allowed(relative)
     _reject_symlink_evidence_path(repo_root, candidate_input)
-    try:
-        candidate = (repo_root / candidate_input).resolve(strict=False)
-        resolved_relative = candidate.relative_to(repo_root).as_posix()
-    except (OSError, ValueError) as exc:
-        raise PredicateContractError("repo-relative path escapes repo root") from exc
-    _assert_predicate_path_allowed(resolved_relative)
-    return candidate
+    return candidate_input
 
 
 def _reject_unsafe_relative_path_parts(relative_path: Path) -> None:
-    if ".." in relative_path.parts:
+    parts = tuple(part for part in relative_path.parts if part not in ("", "."))
+    if not parts:
+        raise PredicateContractError("repo-relative path must name evidence")
+    if ".." in parts:
         raise PredicateContractError("repo-relative path escapes repo root")
 
 
@@ -419,11 +436,29 @@ def _is_credential_path_denied(relative: str) -> bool:
         compact = re.sub(r"[^a-z0-9]+", "", part)
         if part in _CREDENTIAL_FILE_NAMES or stem in _CREDENTIAL_FILE_NAMES:
             return True
+        if any(
+            name.startswith(".") and part.startswith(f"{name}.")
+            for name in _CREDENTIAL_FILE_NAMES
+        ):
+            return True
         if part.startswith(".env."):
             return True
         if tokenized & _CREDENTIAL_NAME_TOKENS:
             return True
-        if "apikey" in compact or {"api", "key"}.issubset(tokenized):
+        if any(
+            token in compact
+            for token in (
+                "apikey",
+                "credential",
+                "passwd",
+                "password",
+                "private",
+                "secret",
+                "token",
+            )
+        ):
+            return True
+        if {"api", "key"}.issubset(tokenized):
             return True
         if part.endswith(_CREDENTIAL_FILE_SUFFIXES):
             return True
@@ -437,11 +472,13 @@ def _reject_sensitive_evidence_name(value: str, label: str) -> None:
         )
 
 
-def _repo_path_stat(path: Path, label: str) -> Any:
+def _repo_path_stat(repo_root: Path, relative_path: Path, label: str) -> Any:
     try:
-        path_stat = os.stat(path, follow_symlinks=False)
+        path_stat = _stat_repo_path_nofollow(repo_root, relative_path, label)
     except FileNotFoundError:
         return None
+    except NotADirectoryError as exc:
+        raise PredicateContractError(f"{label} cannot be inspected") from exc
     except OSError as exc:
         raise PredicateContractError(f"{label} cannot be inspected") from exc
     if S_ISLNK(path_stat.st_mode):
@@ -451,20 +488,96 @@ def _repo_path_stat(path: Path, label: str) -> Any:
     return path_stat
 
 
+def _stat_repo_path_nofollow(repo_root: Path, relative_path: Path, label: str) -> Any:
+    parent_fd: int | None = None
+    try:
+        parent_fd, final_name = _open_parent_directory_nofollow(
+            repo_root, relative_path, label
+        )
+        return os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _open_parent_directory_nofollow(
+    repo_root: Path, relative_path: Path, label: str
+) -> tuple[int, str]:
+    parts = tuple(part for part in relative_path.parts if part not in ("", "."))
+    if not parts:
+        raise PredicateContractError(f"{label} must name evidence")
+    dir_fd: int | None = None
+    try:
+        dir_fd = _open_directory_path_nofollow(repo_root, label)
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=dir_fd,
+            )
+            try:
+                next_stat = os.fstat(next_fd)
+                if S_ISLNK(next_stat.st_mode) or not S_ISDIR(next_stat.st_mode):
+                    raise PredicateContractError(
+                        f"{label} cannot use symlink evidence"
+                    )
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(dir_fd)
+            dir_fd = next_fd
+        opened_fd = dir_fd
+        dir_fd = None
+        return opened_fd, parts[-1]
+    except PredicateContractError:
+        raise
+    except FileNotFoundError:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        raise
+    except NotADirectoryError:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        raise
+    except OSError as exc:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        raise PredicateContractError(f"{label} cannot be inspected") from exc
+
+
+def _open_directory_path_nofollow(path: Path, label: str) -> int:
+    fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        path_stat = os.fstat(fd)
+        if S_ISLNK(path_stat.st_mode) or not S_ISDIR(path_stat.st_mode):
+            raise PredicateContractError(f"{label} cannot be inspected")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _raise_if_multi_link_file(path_stat: Any, label: str) -> None:
     if int(getattr(path_stat, "st_nlink", 1) or 1) > 1:
         raise PredicateContractError(f"{label} cannot use hard-linked file aliases")
 
 
-def _sha256_file(path: Path, path_stat: Any) -> str:
+def _sha256_file(repo_root: Path, relative_path: Path, path_stat: Any) -> str:
     size = int(getattr(path_stat, "st_size", 0) or 0)
     if size > MAX_FILE_EVIDENCE_BYTES:
         raise PredicateContractError("file_sha256 evidence exceeds safe size limit")
     digest = hashlib.sha256()
     fd: int | None = None
+    parent_fd: int | None = None
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        parent_fd, final_name = _open_parent_directory_nofollow(
+            repo_root, relative_path, "file_sha256 evidence"
+        )
+        fd = os.open(final_name, flags, dir_fd=parent_fd)
         opened_stat = os.fstat(fd)
         _validate_opened_file_stat(opened_stat, path_stat)
         with os.fdopen(fd, "rb") as handle:
@@ -482,6 +595,8 @@ def _sha256_file(path: Path, path_stat: Any) -> str:
     except OSError as exc:
         raise PredicateContractError("file_sha256 evidence cannot be read") from exc
     finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
         if fd is not None:
             os.close(fd)
     return digest.hexdigest()

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import agentic_os.predicates as predicates
 from agentic_os.predicates import (
     INPROC_PREDICATE_BACKEND,
     MAX_FILE_EVIDENCE_BYTES,
@@ -360,6 +361,8 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": "artifacts/private-data.json"},
                 {"op": "file_exists", "path": "config/passwords.txt"},
                 {"op": "file_exists", "path": "api-key.json"},
+                {"op": "file_exists", "path": ".npmrc.bak"},
+                {"op": "file_exists", "path": "config/clientSecret.txt"},
                 {"op": "file_exists", "path": "public-evidence"},
             )
             for predicate in cases:
@@ -475,7 +478,7 @@ class PredicateTests(unittest.TestCase):
                 *args: object,
                 **kwargs: object,
             ) -> int:
-                if Path(path) == target:
+                if Path(path) == target or path == "evidence.txt":
                     raise PermissionError("permission denied")
                 return original_open(path, flags, *args, **kwargs)
 
@@ -509,7 +512,7 @@ class PredicateTests(unittest.TestCase):
                 *args: object,
                 **kwargs: object,
             ) -> int:
-                if Path(path) == target:
+                if Path(path) == target or path == "evidence.txt":
                     target.unlink()
                     replacement.rename(target)
                 return original_open(path, flags, *args, **kwargs)
@@ -524,6 +527,81 @@ class PredicateTests(unittest.TestCase):
                                 "sha256": digest,
                             }
                         ),
+                        context,
+                    )
+
+    def test_file_sha256_rejects_swapped_symlink_after_path_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            parent = root / "safe"
+            parent.mkdir()
+            target = parent / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            replacement = parent / "replacement.txt"
+            replacement.write_text("replacement evidence\n", encoding="utf-8")
+            digest = hashlib.sha256(replacement.read_bytes()).hexdigest()
+            context = PredicateContext(repo_root=root)
+
+            original_reject = predicates._reject_symlink_evidence_path
+            swapped = False
+
+            def reject_then_swap(repo_root: Path, relative_path: Path) -> None:
+                nonlocal swapped
+                original_reject(repo_root, relative_path)
+                if not swapped and relative_path == Path("safe/evidence.txt"):
+                    target.unlink()
+                    target.symlink_to(replacement)
+                    swapped = True
+
+            with mock.patch.object(
+                predicates,
+                "_reject_symlink_evidence_path",
+                side_effect=reject_then_swap,
+            ):
+                with self.assertRaises(PredicateContractError):
+                    evaluate_predicate_document(
+                        document(
+                            {
+                                "op": "file_sha256",
+                                "path": "safe/evidence.txt",
+                                "sha256": digest,
+                            }
+                        ),
+                        context,
+                    )
+
+    def test_file_predicates_recheck_parent_components_at_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            parent = root / "safe"
+            parent.mkdir()
+            target = parent / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            outside = root / "other"
+            outside.mkdir()
+            (outside / "evidence.txt").write_text("other evidence\n", encoding="utf-8")
+            context = PredicateContext(repo_root=root)
+
+            original_reject = predicates._reject_symlink_evidence_path
+            swapped = False
+
+            def reject_then_swap(repo_root: Path, relative_path: Path) -> None:
+                nonlocal swapped
+                original_reject(repo_root, relative_path)
+                if not swapped and relative_path == Path("safe/evidence.txt"):
+                    target.unlink()
+                    parent.rmdir()
+                    parent.symlink_to(outside, target_is_directory=True)
+                    swapped = True
+
+            with mock.patch.object(
+                predicates,
+                "_reject_symlink_evidence_path",
+                side_effect=reject_then_swap,
+            ):
+                with self.assertRaises(PredicateContractError):
+                    evaluate_predicate_document(
+                        document({"op": "file_exists", "path": "safe/evidence.txt"}),
                         context,
                     )
 
@@ -551,6 +629,14 @@ class PredicateTests(unittest.TestCase):
             context = PredicateContext(repo_root=root)
 
             with (
+                mock.patch(
+                    "agentic_os.predicates._repo_path_stat",
+                    return_value=checked_stat,
+                ),
+                mock.patch(
+                    "agentic_os.predicates._open_parent_directory_nofollow",
+                    return_value=(98, "evidence.txt"),
+                ),
                 mock.patch("os.open", return_value=99),
                 mock.patch("os.fstat", return_value=checked_stat),
                 mock.patch("os.fdopen", return_value=GrowingHandle()),
@@ -655,6 +741,46 @@ class PredicateTests(unittest.TestCase):
             )
             (git_dir / "objects").mkdir()
             (git_dir / "refs").mkdir()
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=fake_root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            git_dir = fake_root / ".git"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+                encoding="utf-8",
+            )
+            (git_dir / "objects").mkdir()
+            (git_dir / "refs").mkdir()
+            with self.assertRaisesRegex(PredicateContractError, "Git worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=fake_root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            owner_dir = base / "owner"
+            owner_dir.mkdir()
+            owner_root = make_repo_root(str(owner_dir))
+            borrowed_root = base / "borrowed"
+            borrowed_root.mkdir()
+            (borrowed_root / ".git").symlink_to(owner_root / ".git")
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=borrowed_root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = make_repo_root(tmp)
+            (fake_root / ".git" / "HEAD").write_bytes(b"\xff\xfe\x00")
             with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
                 evaluate_predicate_document(
                     document({"op": "literal", "value": True}),
@@ -839,11 +965,16 @@ class PredicateTests(unittest.TestCase):
                     "manifest": {
                         "password": "secret",
                         "nested": {"api_key": "secret"},
+                        "camel": {"clientSecret": "secret"},
                     },
                     "secret-manifest": {"status": "pass"},
                 },
                 command_results={
-                    "unit": {"password": "secret", "api_key": "secret"},
+                    "unit": {
+                        "password": "secret",
+                        "api_key": "secret",
+                        "accessToken": "secret",
+                    },
                     "secret-check": {"exit_code": 0},
                 },
             )
@@ -867,6 +998,12 @@ class PredicateTests(unittest.TestCase):
                     "value": "secret",
                 },
                 {
+                    "op": "json_equals",
+                    "document": "manifest",
+                    "path": ["camel", "clientSecret"],
+                    "value": "secret",
+                },
+                {
                     "op": "command_result_equals",
                     "id": "secret-check",
                     "field": "exit_code",
@@ -882,6 +1019,12 @@ class PredicateTests(unittest.TestCase):
                     "op": "command_result_equals",
                     "id": "unit",
                     "field": "api_key",
+                    "value": "secret",
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "unit",
+                    "field": "accessToken",
                     "value": "secret",
                 },
             )
