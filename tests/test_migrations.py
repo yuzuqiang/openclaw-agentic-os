@@ -581,9 +581,6 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(replay.status, "replayed")
         self.assertEqual(replay.session_key, "session-accepted")
 
-        gateway_id = "gateway-pending"
-        release = release_metadata(pending, gateway_id)
-
         class ReconcileAdapter:
             def sessions_list(self):
                 return []
@@ -592,17 +589,10 @@ class MigrationTests(unittest.TestCase):
                 return []
 
             def allow_lease_release(self, params):
-                if dict(params) != release:
-                    raise AssertionError("release identity did not use backfilled binding")
-                return MetadataObservation(
-                    metadata_contract_version="v1",
-                    normalized=release,
-                    raw_json=stable_json(release),
-                    external_id=gateway_id,
-                )
+                raise AssertionError("zero session observation must retain the lease")
 
         summary = reconcile_unknown_metadata(self.database, ReconcileAdapter())
-        self.assertEqual(summary.reconciled, 1)
+        self.assertEqual(summary.reconciled, 0)
         self.assertEqual(summary.human_review_required, 1)
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -610,7 +600,7 @@ class MigrationTests(unittest.TestCase):
                     "SELECT state FROM leases WHERE client_lease_id=?",
                     (pending.client_lease_id,),
                 ).fetchone(),
-                ("released",),
+                ("acquired",),
             )
 
     def test_v10_rejects_post_migration_spawn_intent_without_binding(self) -> None:

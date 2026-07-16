@@ -3214,8 +3214,11 @@ run/transition/phase/agent identity and equal persisted request text and epoch
 milliseconds. Zero-candidate, multi-candidate, or lease-reuse cases abort the
 whole migration; legacy runtime work is never silently omitted. Reconciliation
 joins only through this relation,
-so a blocked or crash-left spawn can release its proven owned lease without
-pairing another dispatch on the same run/transition. Before inserting a new
+so a spawn proven blocked before the external call can release its owned lease
+without pairing another dispatch on the same run/transition. Crash-left,
+zero-observation, and ambiguous spawn outcomes retain the lease for human
+review because session discovery cannot prove the external spawn did not
+succeed. Before inserting a new
 pending dispatch, the same immediate transaction rejects an older potentially
 live run/phase/agent spawn intent in `pending`, `unknown`, `accepted`, or
 `reconciled` state, plus unresolved human-review outcomes. Only a terminal

@@ -336,6 +336,21 @@ class OpenClawAdapterTests(unittest.TestCase):
             ["session-key"],
         )
 
+    def test_list_responses_reject_malformed_top_level_containers(self) -> None:
+        class MalformedListTransport:
+            def call(self, method, params):
+                if method == "subagents.allowLease.status":
+                    return {"leases": "not-an-array"}
+                if method == "sessions_list":
+                    return {"sessions": {"legacy": True}}
+                raise AssertionError(method)
+
+        adapter = OpenClawAdapter(MalformedListTransport())
+        with self.assertRaisesRegex(AdapterContractError, "lease response"):
+            adapter.allow_lease_list()
+        with self.assertRaisesRegex(AdapterContractError, "session response"):
+            adapter.sessions_list()
+
 
 if __name__ == "__main__":
     unittest.main()

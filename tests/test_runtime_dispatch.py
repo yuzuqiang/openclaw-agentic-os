@@ -1165,7 +1165,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "released",
             )
 
-    def test_reconcile_releases_crash_left_acquired_lease_after_zero_session(self) -> None:
+    def test_reconcile_keeps_crash_left_acquired_lease_after_zero_session(self) -> None:
         class CrashAfterAcquireAdapter(ScriptedAdapter):
             def sessions_spawn(self, params):
                 self.calls.append("sessions_spawn")
@@ -1185,18 +1185,15 @@ class RuntimeDispatchTests(unittest.TestCase):
 
         reconcile_adapter = ScriptedAdapter(release=[self._release_observation()])
         summary = reconcile_unknown_metadata(self.database, reconcile_adapter)
-        self.assertEqual(summary.reconciled, 1)
+        self.assertEqual(summary.reconciled, 0)
         self.assertEqual(summary.human_review_required, 1)
-        self.assertEqual(
-            [params for call, params in reconcile_adapter.params if call == "allow_lease_release"],
-            [release_metadata(self.request, "lease-gateway")],
-        )
+        self.assertNotIn("allow_lease_release", reconcile_adapter.calls)
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM leases WHERE client_lease_id='client-lease'"
                 ).fetchone()[0],
-                "released",
+                "acquired",
             )
 
     def test_cleanup_binding_never_releases_other_same_transition_lease(self) -> None:

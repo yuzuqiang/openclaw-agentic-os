@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `f636c2e326d1baa5c9798373238f7c0cc684476a27480b499dea7f624981250b`
+- Current design artifact SHA-256: `b2e3671ea69d0e3f8c7d3d96f65cfc156b0f7305036d9cd72821ac97330006b1`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `5775fcafd9f616da757b7cadfba737adb073a525e9c405c8d2eed20140a680c2`
 - Current migration manifest SHA-256: `97d1a3b174bf63a39ab2ac8755cdaa6c0b1056f6b420a2325288c2a8dea471db`
@@ -184,9 +184,11 @@ metadata JSON from the external boundary. Ambiguous transport failures become
 recoverable outcomes for reconciliation instead of adapter retries, and prior
 `pending`, `unknown`, `failed`, or `human_review_required` spawn attempts are
 preserved without crossing `sessions_spawn` again. Release-pending leases are
-reconciled from exact release metadata, and acquire-only leases proven after a
-blocked or crash-left spawn are released with the original release idempotency
-key. An immutable schema-backed dispatch relation binds each spawn to its exact
+reconciled from exact release metadata. Acquire-only leases are released with
+the original release idempotency key only when durable state proves the spawn
+was blocked before the external call; crash-left, zero-observation, and
+ambiguous spawn outcomes retain the lease for human review. An immutable
+schema-backed dispatch relation binds each spawn to its exact
 lease/client/acquire/release identity, preventing reconciliation from releasing
 another dispatch's lease on the same run/transition. Unknown or pending spawn
 reconciliation also requires the bound allowLease acquire intent to be accepted

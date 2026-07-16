@@ -86,7 +86,7 @@ def _consistent_identity(label: str, aliases: Iterable[tuple[str, Any]]) -> str 
 
 
 def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservation, ...]:
-    if not isinstance(items, Iterable):
+    if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
         raise AdapterContractError(f"{label} response must include {label}")
     observations: list[MetadataObservation] = []
     for item in items:
