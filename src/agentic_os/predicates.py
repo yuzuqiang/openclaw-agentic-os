@@ -82,6 +82,7 @@ _CREDENTIAL_BACKUP_SUFFIXES = (
     " backup",
     "~",
 )
+_SUPPORTED_GIT_EXTENSIONS = frozenset({"objectformat", "worktreeconfig"})
 
 
 class PredicateContractError(ValueError):
@@ -439,6 +440,7 @@ def _validate_git_metadata(
         raise PredicateContractError("repo root must contain valid Git metadata") from exc
     if repository_format_version not in (0, 1):
         raise PredicateContractError("repo root must contain valid Git metadata")
+    _validate_git_config_extensions(parser)
     try:
         is_bare = parser.getboolean("core", "bare", fallback=False)
     except ValueError as exc:
@@ -453,6 +455,30 @@ def _validate_git_metadata(
                 raise PredicateContractError(
                     "repo root gitdir core.worktree does not match"
                 )
+
+
+def _validate_git_config_extensions(parser: configparser.ConfigParser) -> None:
+    if not parser.has_section("extensions"):
+        return
+    if not parser.options("extensions"):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    for option in parser.options("extensions"):
+        option_name = option.casefold()
+        if option_name not in _SUPPORTED_GIT_EXTENSIONS:
+            raise PredicateContractError("repo root must contain valid Git metadata")
+        value = parser.get("extensions", option, fallback="").strip().casefold()
+        if option_name == "objectformat" and value not in {"sha1", "sha256"}:
+            raise PredicateContractError("repo root must contain valid Git metadata")
+        if option_name == "worktreeconfig":
+            try:
+                if not parser.getboolean("extensions", option):
+                    raise PredicateContractError(
+                        "repo root must contain valid Git metadata"
+                    )
+            except ValueError as exc:
+                raise PredicateContractError(
+                    "repo root must contain valid Git metadata"
+                ) from exc
 
 
 def _require_regular_file_nofollow(
@@ -507,15 +533,20 @@ def _resolve_git_metadata_path(base_dir: Path, raw_path: str, message: str) -> P
     if not raw_path or "\x00" in raw_path or len(raw_path) > MAX_STRING_LENGTH:
         raise PredicateContractError(message)
     path = Path(raw_path)
+    _reject_symlink_metadata_path(base_dir, path, message)
     if not path.is_absolute():
-        _reject_symlink_metadata_path(base_dir, path, message)
         return (base_dir / path).resolve(strict=False)
-    return path
+    return path.resolve(strict=False)
 
 
 def _reject_symlink_metadata_path(base_dir: Path, relative_path: Path, message: str) -> None:
-    current = base_dir
-    for part in relative_path.parts:
+    if relative_path.is_absolute():
+        current = Path(relative_path.anchor)
+        parts = relative_path.parts[1:]
+    else:
+        current = base_dir
+        parts = relative_path.parts
+    for part in parts:
         if part in ("", "."):
             continue
         current = current / part

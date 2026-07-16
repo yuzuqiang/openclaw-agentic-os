@@ -84,13 +84,15 @@ equality over caller-supplied evidence. Unsupported backends, dynamic code,
 subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
 non-Git-worktree roots, bare or symlinked `.git` metadata, malformed or unsupported
 Git metadata, NUL/control-character Git metadata fields, directory `.git` configs whose
-`core.worktree` points away from the requested root, symlinked relative gitdir pointers,
+`core.worktree` points away from the requested root, symlinked relative or absolute
+gitdir pointers, unsupported Git format extensions,
 empty linked-worktree `commondir` files, path traversal, symlink escapes,
 raw database state paths, hard-linked file aliases, common credential stores
 such as `.git`, `.docker`, and `.kube`, borrowed gitdir metadata whose
 `core.worktree` or linked-worktree `gitdir` pointer does not bind the requested root,
 credential/private paths, separator-based `.env` backups, backed-up credential filenames,
 camelCase credential names, underscore- and tilde-suffixed raw database backups,
+raw database backup names without separators,
 password/API-key JSON and command evidence names,
 unreadable or unstatable file evidence, symlink evidence before target resolution,
 swapped symlink evidence, symlink parent components rechecked at file use,
