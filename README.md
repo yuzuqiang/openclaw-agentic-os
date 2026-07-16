@@ -213,8 +213,9 @@ mismatched, or incomplete session-identity observations move to human review.
 - `main` contains reviewed project state.
 - Implementation work should use focused branches and pull requests.
 - Every PR must wait for a completed GitHub Codex review; any P0/P1 finding blocks merge.
-- After Codex is clean for the exact current head, the watcher CAS-checks the
-  head and required checks, then auto-merges into `main`; ambiguity fails closed.
+- After Codex is clean for the exact current head, the watcher records the
+  reviewed SHA and remains fail-closed; merge requires separate explicit
+  authorization and is never implied by a clean automated review.
 - Design changes must preserve executable DDL/SLO validation and adversarial fixtures.
 - Production readiness must be backed by runtime evidence, not document-only acceptance.
 
