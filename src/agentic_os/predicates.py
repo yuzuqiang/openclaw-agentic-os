@@ -66,7 +66,7 @@ _CREDENTIAL_NAME_TOKENS = frozenset(
         "tokens",
     }
 )
-_CREDENTIAL_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+_CREDENTIAL_FILE_SUFFIXES = (".env", ".pem", ".key", ".p12", ".pfx")
 
 
 class PredicateContractError(ValueError):
