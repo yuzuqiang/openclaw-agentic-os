@@ -3,7 +3,41 @@ from __future__ import annotations
 import json
 import unittest
 
-from agentic_os.openclaw_adapter import AdapterContractError, OpenClawAdapter
+from agentic_os.openclaw_adapter import (
+    AdapterContractError,
+    OpenClawAdapter,
+    assert_installed_session_tools,
+)
+
+
+INSTALLED_SESSION_TOOL_CATALOG = {
+    "tools": [
+        {
+            "name": "sessions_spawn",
+            "inputSchema": {
+                "properties": {
+                    "client_request_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                }
+            },
+        },
+        {"name": "sessions_list", "inputSchema": {"properties": {}}},
+        {
+            "name": "sessions_status",
+            "inputSchema": {"properties": {"session_key": {"type": "string"}}},
+        },
+        {
+            "name": "sessions_history",
+            "inputSchema": {
+                "properties": {
+                    "sessionKey": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "includeTools": {"type": "boolean"},
+                }
+            },
+        },
+    ]
+}
 
 
 class CannedTransport:
@@ -88,7 +122,7 @@ class CannedTransport:
                     }
                 ]
             }
-        if method == "session_status":
+        if method == "sessions_status":
             metadata = {
                 "run_id": "run",
                 "transition_id": "transition",
@@ -99,10 +133,10 @@ class CannedTransport:
                 "task_digest": "task",
             }
             return {
-                "sessionKey": params["sessionKey"],
+                "session_key": params["session_key"],
                 "session": {
-                    "sessionKey": params["sessionKey"],
-                    "spawnRequestSessionKey": params["sessionKey"],
+                    "session_key": params["session_key"],
+                    "spawn_request_session_key": params["session_key"],
                 },
                 "metadata": {
                     "metadata_contract_version": "v1",
@@ -158,7 +192,7 @@ class OpenClawAdapterTests(unittest.TestCase):
         self.assertEqual(status.external_id, "session-key")
         self.assertEqual(status.session_key, "session-key")
         self.assertEqual(
-            transport.calls[-1], ("session_status", {"sessionKey": "session-key"})
+            transport.calls[-1], ("sessions_status", {"session_key": "session-key"})
         )
 
         result = adapter.session_result("session-key")
@@ -173,6 +207,31 @@ class OpenClawAdapterTests(unittest.TestCase):
                 {"sessionKey": "session-key", "limit": 1, "includeTools": True},
             ),
         )
+
+    def test_preflighted_adapter_requires_installed_session_tool_catalog(self) -> None:
+        transport = CannedTransport()
+        adapter = OpenClawAdapter.from_preflighted_catalog(
+            transport, INSTALLED_SESSION_TOOL_CATALOG
+        )
+
+        self.assertEqual(adapter.session_status("session-key").session_key, "session-key")
+
+    def test_session_tool_catalog_preflight_rejects_missing_history_parameter(self) -> None:
+        catalog = {
+            "tools": {
+                "sessions_spawn": {
+                    "parameters": {"client_request_id": {}, "idempotency_key": {}}
+                },
+                "sessions_list": {"parameters": {}},
+                "sessions_status": {"parameters": {"session_key": {}}},
+                "sessions_history": {
+                    "parameters": {"sessionKey": {}, "limit": {}}
+                },
+            }
+        }
+
+        with self.assertRaisesRegex(AdapterContractError, "includeTools"):
+            assert_installed_session_tools(catalog)
 
     def test_session_result_missing_raw_json_fails_contract(self) -> None:
         class MissingRawResultTransport:
@@ -224,6 +283,35 @@ class OpenClawAdapterTests(unittest.TestCase):
             AdapterContractError, "accepted session identity"
         ):
             OpenClawAdapter(MissingIdentityResultTransport()).session_result(
+                "session-key"
+            )
+
+    def test_session_result_different_history_session_fails_contract(self) -> None:
+        class DifferentSessionResultTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "sessionKey": "other-session",
+                    "spawnRequestSessionKey": "other-session",
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "requested session"):
+            OpenClawAdapter(DifferentSessionResultTransport()).session_result(
                 "session-key"
             )
 

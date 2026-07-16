@@ -52,6 +52,14 @@ class OpenClawTransport(Protocol):
         ...
 
 
+_REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
+    "sessions_spawn": frozenset(("client_request_id", "idempotency_key")),
+    "sessions_list": frozenset(),
+    "sessions_status": frozenset(("session_key",)),
+    "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
+}
+
+
 def _json_object(value: Mapping[str, Any]) -> str:
     try:
         return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
@@ -67,6 +75,80 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
 
 def _transport_response(value: Any, method: str) -> Mapping[str, Any]:
     return _mapping(value, f"{method} response")
+
+
+def _tool_name(entry: Mapping[str, Any]) -> str | None:
+    for key in ("name", "method", "id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _parameter_names(value: Any) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if isinstance(value, Mapping):
+        properties = value.get("properties")
+        if isinstance(properties, Mapping):
+            return frozenset(str(key) for key in properties)
+        return frozenset(str(key) for key in value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        names: set[str] = set()
+        for item in value:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        return frozenset(names)
+    raise AdapterContractError("runtime tool catalog parameters must be inspectable")
+
+
+def _tool_parameters(entry: Mapping[str, Any]) -> frozenset[str]:
+    if "parameters" in entry:
+        return _parameter_names(entry["parameters"])
+    if "input_schema" in entry:
+        return _parameter_names(entry["input_schema"])
+    if "inputSchema" in entry:
+        return _parameter_names(entry["inputSchema"])
+    return frozenset()
+
+
+def _tool_entries(catalog: Mapping[str, Any]) -> Mapping[str, frozenset[str]]:
+    tools = catalog.get("tools", catalog)
+    entries: dict[str, frozenset[str]] = {}
+    if isinstance(tools, Mapping):
+        for name, value in tools.items():
+            if isinstance(value, Mapping):
+                entries[str(name)] = _tool_parameters(value)
+            else:
+                entries[str(name)] = frozenset()
+        return entries
+    if isinstance(tools, Sequence) and not isinstance(tools, (str, bytes, bytearray)):
+        for item in tools:
+            entry = _mapping(item, "runtime tool catalog entry")
+            name = _tool_name(entry)
+            if name is not None:
+                entries[name] = _tool_parameters(entry)
+        return entries
+    raise AdapterContractError("runtime tool catalog must expose tools")
+
+
+def assert_installed_session_tools(catalog: Mapping[str, Any]) -> None:
+    """Fail closed unless the runtime exposes the session tools this adapter calls."""
+
+    entries = _tool_entries(catalog)
+    for method, required_params in _REQUIRED_SESSION_TOOL_PARAMS.items():
+        if method not in entries:
+            raise AdapterContractError(f"runtime tool catalog is missing {method}")
+        missing_params = sorted(required_params - entries[method])
+        if missing_params:
+            missing = ", ".join(missing_params)
+            raise AdapterContractError(
+                f"runtime tool catalog {method} is missing parameters: {missing}"
+            )
 
 
 def _identity_alias(value: Any, label: str) -> str | None:
@@ -291,6 +373,13 @@ class OpenClawAdapter:
     def __init__(self, transport: OpenClawTransport) -> None:
         self._transport = transport
 
+    @classmethod
+    def from_preflighted_catalog(
+        cls, transport: OpenClawTransport, catalog: Mapping[str, Any]
+    ) -> "OpenClawAdapter":
+        assert_installed_session_tools(catalog)
+        return cls(transport)
+
     def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
             _transport_response(
@@ -330,8 +419,8 @@ class OpenClawAdapter:
     def session_status(self, session_key: str) -> MetadataObservation:
         return observation_from_openclaw_response(
             _transport_response(
-                self._transport.call("session_status", {"sessionKey": session_key}),
-                "session_status",
+                self._transport.call("sessions_status", {"session_key": session_key}),
+                "sessions_status",
             )
         )
 
@@ -351,5 +440,13 @@ class OpenClawAdapter:
         ):
             raise AdapterContractError(
                 "sessions_history response must include accepted session identity"
+            )
+        if (
+            observation.external_id != session_key
+            or observation.session_key != session_key
+            or observation.spawn_request_session_key != session_key
+        ):
+            raise AdapterContractError(
+                "sessions_history response identity must match requested session"
             )
         return observation

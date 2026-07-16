@@ -177,10 +177,13 @@ External runtime metadata contract is a P0 prerequisite:
 - The current implementation includes a pure fake-adapter metadata dispatch
   probe plus an injectable OpenClaw adapter boundary for this contract. These
   validate allowLease acquire/status/release and session spawn/status/list/result
-  observations. The OpenClaw adapter uses only installed session tools proven by
-  runtime catalog preflight, including the history-backed result surface; it does
-  not enable production database authority. Runtime reconciliation remains
-  bounded to the implemented scanner paths.
+  observations. The OpenClaw adapter boundary now includes a runtime catalog
+  preflight helper that fails closed unless the installed transport exposes the
+  exact session tools and parameter names it calls, including the
+  history-backed result surface; production integration must run that preflight
+  before treating the adapter as runtime evidence. It does not enable
+  production database authority. Runtime reconciliation remains bounded to the
+  implemented scanner paths.
 
 Fail-closed rule:
 
