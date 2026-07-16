@@ -12,7 +12,8 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from stat import S_ISREG
 from typing import Any
 
 from .privacy import PrivacyPreflightError, assert_paths_retrievable
@@ -24,6 +25,30 @@ MAX_PREDICATE_LIST_LENGTH = 64
 MAX_JSON_PATH_LENGTH = 32
 MAX_STRING_LENGTH = 4096
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CREDENTIAL_FILE_NAMES = frozenset(
+    {
+        ".aws",
+        ".azure",
+        ".env",
+        ".envrc",
+        ".gcloud",
+        ".gnupg",
+        ".netrc",
+        ".ssh",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
+        "known_hosts",
+    }
+)
+_CREDENTIAL_NAME_TOKENS = frozenset(
+    {"credential", "credentials", "secret", "secrets", "token", "tokens"}
+)
+_CREDENTIAL_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 
 
 class PredicateContractError(ValueError):
@@ -97,14 +122,18 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         return not _evaluate(predicate["predicate"], context, depth=depth + 1)
     if op == "file_exists":
         _require_keys(predicate, ("op", "path"), "file_exists predicate")
-        return _repo_path(context.repo_root, predicate["path"]).exists()
+        return _repo_path_stat(
+            _repo_path(context.repo_root, predicate["path"]),
+            "file_exists evidence",
+        ) is not None
     if op == "file_sha256":
         _require_keys(predicate, ("op", "path", "sha256"), "file_sha256 predicate")
         expected = predicate["sha256"]
         if not isinstance(expected, str) or not _SHA256_RE.fullmatch(expected):
             raise PredicateContractError("file_sha256 expected hash must be lowercase SHA-256")
         path = _repo_path(context.repo_root, predicate["path"])
-        if not path.is_file():
+        path_stat = _repo_path_stat(path, "file_sha256 evidence")
+        if path_stat is None or not S_ISREG(path_stat.st_mode):
             return False
         try:
             actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -187,14 +216,51 @@ def _repo_path(repo_root: Path, raw_path: Any) -> Path:
         raise PredicateContractError("repo-relative path must not be absolute")
     try:
         candidate = (repo_root / candidate_input).resolve(strict=False)
-        candidate.relative_to(repo_root)
+        resolved_relative = candidate.relative_to(repo_root).as_posix()
     except (OSError, ValueError) as exc:
         raise PredicateContractError("repo-relative path escapes repo root") from exc
-    try:
-        assert_paths_retrievable(relative)
-    except PrivacyPreflightError as exc:
-        raise PredicateContractError("repo-relative path targets private raw state") from exc
+    _assert_predicate_path_allowed(relative, resolved_relative)
     return candidate
+
+
+def _assert_predicate_path_allowed(*relative_paths: str) -> None:
+    for relative in relative_paths:
+        try:
+            assert_paths_retrievable(relative)
+        except PrivacyPreflightError as exc:
+            raise PredicateContractError(
+                "repo-relative path targets private raw state"
+            ) from exc
+        if _is_credential_path_denied(relative):
+            raise PredicateContractError(
+                "repo-relative path targets private credentials"
+            )
+
+
+def _is_credential_path_denied(relative: str) -> bool:
+    pure = PurePosixPath(relative.replace("\\", "/"))
+    parts = tuple(part.casefold() for part in pure.parts)
+    for part in parts:
+        stem = part.split(".", 1)[0]
+        tokenized = set(re.split(r"[^a-z0-9]+", part))
+        if part in _CREDENTIAL_FILE_NAMES or stem in _CREDENTIAL_FILE_NAMES:
+            return True
+        if part.startswith(".env."):
+            return True
+        if tokenized & _CREDENTIAL_NAME_TOKENS:
+            return True
+        if part.endswith(_CREDENTIAL_FILE_SUFFIXES):
+            return True
+    return False
+
+
+def _repo_path_stat(path: Path, label: str) -> Any:
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PredicateContractError(f"{label} cannot be inspected") from exc
 
 
 def _bounded_string(value: Any, label: str) -> str:

@@ -257,6 +257,91 @@ class PredicateTests(unittest.TestCase):
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
+    def test_resolved_raw_state_symlink_paths_are_rejected_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state" / "agentic-os"
+            state.mkdir(parents=True)
+            raw_state = state / "control.db"
+            raw_state.write_bytes(b"private sqlite bytes")
+            digest = hashlib.sha256(raw_state.read_bytes()).hexdigest()
+            link = root / "apparently-safe-evidence"
+            link.symlink_to(raw_state)
+            context = PredicateContext(repo_root=root)
+
+            cases = (
+                {"op": "file_exists", "path": "apparently-safe-evidence"},
+                {
+                    "op": "file_sha256",
+                    "path": "apparently-safe-evidence",
+                    "sha256": digest,
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "private raw state"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
+    def test_credential_file_paths_are_rejected_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = root / ".env"
+            env_file.write_text("TOKEN=secret\n", encoding="utf-8")
+            ssh_dir = root / ".ssh"
+            ssh_dir.mkdir()
+            ssh_key = ssh_dir / "id_rsa"
+            ssh_key.write_text("private key\n", encoding="utf-8")
+            env_link = root / "public-evidence"
+            env_link.symlink_to(env_file)
+            digest = hashlib.sha256(env_file.read_bytes()).hexdigest()
+            context = PredicateContext(repo_root=root)
+
+            cases = (
+                {"op": "file_exists", "path": ".env"},
+                {
+                    "op": "file_sha256",
+                    "path": ".env",
+                    "sha256": digest,
+                },
+                {"op": "file_exists", "path": ".ssh/id_rsa"},
+                {"op": "file_exists", "path": "config/credentials.json"},
+                {"op": "file_exists", "path": "public-evidence"},
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "private credentials"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
+    def test_file_exists_stat_failures_are_contract_errors_even_when_negated(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            locked_dir = root / "locked"
+            locked_dir.mkdir()
+            evidence = locked_dir / "evidence.txt"
+            evidence.write_text("predicate evidence\n", encoding="utf-8")
+            locked_dir.chmod(0)
+            context = PredicateContext(repo_root=root)
+            try:
+                with self.assertRaises(PredicateContractError):
+                    evaluate_predicate_document(
+                        document(
+                            {
+                                "op": "not",
+                                "predicate": {
+                                    "op": "file_exists",
+                                    "path": "locked/evidence.txt",
+                                },
+                            }
+                        ),
+                        context,
+                    )
+            finally:
+                locked_dir.chmod(0o700)
+
     def test_file_sha256_read_failures_are_contract_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
