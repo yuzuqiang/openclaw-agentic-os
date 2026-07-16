@@ -82,9 +82,11 @@ only the read-only `agentic_predicate_inproc_v1` backend: literal booleans,
 JSON scalar equality over caller-supplied documents, and command-result scalar
 equality over caller-supplied evidence. Unsupported backends, dynamic code,
 subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
-path traversal, symlink escapes, raw database state paths including resolved
-symlink targets, credential/private paths, unreadable or unstatable file
-evidence, missing or non-regular file-hash evidence, JSON path absence, JSON
+non-Git-worktree roots, path traversal, symlink escapes, raw database state paths
+including resolved symlink targets, hard-linked file aliases, common credential
+stores such as `.git`, `.docker`, and `.kube`, credential/private paths,
+unreadable or unstatable file evidence, oversized file-hash evidence, missing or
+non-regular file-hash evidence, JSON path absence, malformed evidence maps, JSON
 scalar type mismatches, writes, missing evidence, and malformed predicate
 documents fail closed with
 `PredicateContractError`. Boolean composition validates every child before

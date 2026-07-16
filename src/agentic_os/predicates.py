@@ -24,15 +24,19 @@ MAX_PREDICATE_DEPTH = 32
 MAX_PREDICATE_LIST_LENGTH = 64
 MAX_JSON_PATH_LENGTH = 32
 MAX_STRING_LENGTH = 4096
+MAX_FILE_EVIDENCE_BYTES = 8 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CREDENTIAL_FILE_NAMES = frozenset(
     {
         ".aws",
         ".azure",
+        ".docker",
         ".env",
         ".envrc",
+        ".git",
         ".gcloud",
         ".gnupg",
+        ".kube",
         ".netrc",
         ".ssh",
         ".npmrc",
@@ -143,19 +147,18 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         path_stat = _repo_path_stat(path, "file_sha256 evidence")
         if path_stat is None or not S_ISREG(path_stat.st_mode):
             raise PredicateContractError("file_sha256 evidence must be a regular file")
-        try:
-            actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError as exc:
-            raise PredicateContractError("file_sha256 evidence cannot be read") from exc
+        _raise_if_multi_link_file(path_stat, "file_sha256 evidence")
+        actual_hash = _sha256_file(path, path_stat)
         return actual_hash == expected
     if op == "json_equals":
         _require_keys(predicate, ("op", "document", "path", "value"), "json_equals predicate")
         document_name = _bounded_string(predicate["document"], "json document name")
-        if document_name not in context.json_documents:
+        json_documents = _evidence_mapping(context.json_documents, "JSON evidence map")
+        if document_name not in json_documents:
             raise PredicateContractError(f"missing JSON evidence document: {document_name}")
         expected = _json_scalar(predicate["value"], "json_equals value")
         actual = _json_path_lookup(
-            context.json_documents[document_name],
+            json_documents[document_name],
             predicate["path"],
         )
         return _json_scalar_equals(actual, expected, "json_equals resolved value")
@@ -167,9 +170,12 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         )
         result_id = _bounded_string(predicate["id"], "command result id")
         field_name = _bounded_string(predicate["field"], "command result field")
-        if result_id not in context.command_results:
+        command_results = _evidence_mapping(
+            context.command_results, "command result evidence map"
+        )
+        if result_id not in command_results:
             raise PredicateContractError(f"missing command result evidence: {result_id}")
-        result = context.command_results[result_id]
+        result = command_results[result_id]
         if not isinstance(result, Mapping):
             raise PredicateContractError("command result evidence must be an object")
         if field_name not in result:
@@ -214,7 +220,46 @@ def _normalize_repo_root(repo_root: Path | str) -> Path:
         raise PredicateContractError("repo root must exist") from exc
     if not root.is_dir():
         raise PredicateContractError("repo root must be a directory")
+    _require_git_worktree_top_level(root)
     return root
+
+
+def _require_git_worktree_top_level(root: Path) -> None:
+    try:
+        git_entry = root / ".git"
+        if not git_entry.exists():
+            raise PredicateContractError("repo root must be a Git worktree top level")
+        if git_entry.is_dir():
+            if not (
+                (git_entry / "HEAD").is_file()
+                and (git_entry / "objects").is_dir()
+                and (git_entry / "refs").is_dir()
+            ):
+                raise PredicateContractError(
+                    "repo root must contain valid Git metadata"
+                )
+            return
+        if git_entry.is_file():
+            stat_result = git_entry.stat()
+            if stat_result.st_size > MAX_STRING_LENGTH:
+                raise PredicateContractError("repo root .git file is outside safe bounds")
+            content = git_entry.read_text(encoding="utf-8", errors="strict").strip()
+            prefix = "gitdir:"
+            if not content.startswith(prefix):
+                raise PredicateContractError(
+                    "repo root must contain valid Git metadata"
+                )
+            git_dir = Path(content[len(prefix) :].strip())
+            if not git_dir.is_absolute():
+                git_dir = (root / git_dir).resolve(strict=False)
+            if not git_dir.is_dir() or not (git_dir / "HEAD").is_file():
+                raise PredicateContractError(
+                    "repo root must contain valid Git metadata"
+                )
+            return
+        raise PredicateContractError("repo root must contain a valid .git entry")
+    except OSError as exc:
+        raise PredicateContractError("repo root Git metadata cannot be inspected") from exc
 
 
 def _repo_path(repo_root: Path, raw_path: Any) -> Path:
@@ -264,11 +309,39 @@ def _is_credential_path_denied(relative: str) -> bool:
 
 def _repo_path_stat(path: Path, label: str) -> Any:
     try:
-        return path.stat()
+        path_stat = path.stat()
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise PredicateContractError(f"{label} cannot be inspected") from exc
+    if S_ISREG(path_stat.st_mode):
+        _raise_if_multi_link_file(path_stat, label)
+    return path_stat
+
+
+def _raise_if_multi_link_file(path_stat: Any, label: str) -> None:
+    if int(getattr(path_stat, "st_nlink", 1) or 1) > 1:
+        raise PredicateContractError(f"{label} cannot use hard-linked file aliases")
+
+
+def _sha256_file(path: Path, path_stat: Any) -> str:
+    size = int(getattr(path_stat, "st_size", 0) or 0)
+    if size > MAX_FILE_EVIDENCE_BYTES:
+        raise PredicateContractError("file_sha256 evidence exceeds safe size limit")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise PredicateContractError("file_sha256 evidence cannot be read") from exc
+    return digest.hexdigest()
+
+
+def _evidence_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise PredicateContractError(f"{label} must be an object")
+    return value
 
 
 def _bounded_string(value: Any, label: str) -> str:

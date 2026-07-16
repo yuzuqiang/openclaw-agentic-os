@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest import mock
 
 from agentic_os.predicates import (
     INPROC_PREDICATE_BACKEND,
+    MAX_FILE_EVIDENCE_BYTES,
     PredicateContext,
     PredicateContractError,
     evaluate_predicate_document,
@@ -18,10 +20,20 @@ def document(predicate: dict[str, object]) -> dict[str, object]:
     return {"backend": INPROC_PREDICATE_BACKEND, "predicate": predicate}
 
 
+def make_repo_root(tmp: str) -> Path:
+    root = Path(tmp)
+    git_dir = root / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (git_dir / "objects").mkdir()
+    (git_dir / "refs").mkdir()
+    return root
+
+
 class PredicateTests(unittest.TestCase):
     def test_boolean_composition_positive_control(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            context = PredicateContext(repo_root=Path(tmp))
+            context = PredicateContext(repo_root=make_repo_root(tmp))
             self.assertTrue(
                 evaluate_predicate_document(
                     document(
@@ -49,7 +61,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_repo_bounded_file_exists_and_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             target = root / "evidence.txt"
             target.write_text("predicate evidence\n", encoding="utf-8")
             digest = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -89,7 +101,7 @@ class PredicateTests(unittest.TestCase):
     def test_json_and_command_evidence_are_caller_supplied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(
-                repo_root=Path(tmp),
+                repo_root=make_repo_root(tmp),
                 json_documents={"manifest": {"gate": {"status": "pass"}, "items": [7]}},
                 command_results={
                     "unit": {"exit_code": 0, "stdout_sha256": "a" * 64}
@@ -151,7 +163,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_unsupported_backend_and_extra_keys_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            context = PredicateContext(repo_root=Path(tmp))
+            context = PredicateContext(repo_root=make_repo_root(tmp))
             for malformed_document in (None, ["backend", "predicate"]):
                 with self.subTest(document=malformed_document), self.assertRaisesRegex(
                     PredicateContractError, "JSON object"
@@ -185,7 +197,7 @@ class PredicateTests(unittest.TestCase):
             {"op": "time_window", "start": 1, "end": 2},
         )
         with tempfile.TemporaryDirectory() as tmp:
-            context = PredicateContext(repo_root=Path(tmp))
+            context = PredicateContext(repo_root=make_repo_root(tmp))
             for predicate in blocked:
                 with self.subTest(predicate=predicate), self.assertRaisesRegex(
                     PredicateContractError, "unsupported"
@@ -194,7 +206,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_boolean_composition_validates_children_before_aggregating(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            context = PredicateContext(repo_root=Path(tmp))
+            context = PredicateContext(repo_root=make_repo_root(tmp))
             cases = (
                 {
                     "op": "any",
@@ -219,7 +231,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_path_traversal_absolute_and_symlink_escape_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             outside_file = Path(outside) / "secret.txt"
             outside_file.write_text("secret\n", encoding="utf-8")
             (root / "link").symlink_to(outside_file)
@@ -236,7 +248,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_raw_state_file_paths_are_rejected_before_reading(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             state = root / "state" / "agentic-os"
             state.mkdir(parents=True)
             raw_state = state / "control.db"
@@ -260,7 +272,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_resolved_raw_state_symlink_paths_are_rejected_before_reading(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             state = root / "state" / "agentic-os"
             state.mkdir(parents=True)
             raw_state = state / "control.db"
@@ -286,7 +298,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_credential_file_paths_are_rejected_before_reading(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             env_file = root / ".env"
             env_file.write_text("TOKEN=secret\n", encoding="utf-8")
             ssh_dir = root / ".ssh"
@@ -307,6 +319,9 @@ class PredicateTests(unittest.TestCase):
                 },
                 {"op": "file_exists", "path": ".ssh/id_rsa"},
                 {"op": "file_exists", "path": "config/credentials.json"},
+                {"op": "file_exists", "path": ".docker/config.json"},
+                {"op": "file_exists", "path": ".kube/config"},
+                {"op": "file_exists", "path": ".git/config"},
                 {"op": "file_exists", "path": "private/customer.json"},
                 {"op": "file_exists", "path": "artifacts/private-data.json"},
                 {"op": "file_exists", "path": "public-evidence"},
@@ -317,11 +332,38 @@ class PredicateTests(unittest.TestCase):
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
+    def test_hard_linked_private_aliases_are_rejected_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            env_file = root / ".env"
+            env_file.write_text("TOKEN=secret\n", encoding="utf-8")
+            public_alias = root / "public-evidence"
+            try:
+                os.link(env_file, public_alias)
+            except OSError as exc:
+                self.skipTest(f"hard links are unavailable on this filesystem: {exc}")
+            digest = hashlib.sha256(env_file.read_bytes()).hexdigest()
+            context = PredicateContext(repo_root=root)
+
+            cases = (
+                {"op": "file_exists", "path": "public-evidence"},
+                {
+                    "op": "file_sha256",
+                    "path": "public-evidence",
+                    "sha256": digest,
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "hard-linked"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
     def test_file_exists_stat_failures_are_contract_errors_even_when_negated(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             locked_dir = root / "locked"
             locked_dir.mkdir()
             evidence = locked_dir / "evidence.txt"
@@ -353,20 +395,20 @@ class PredicateTests(unittest.TestCase):
 
     def test_file_sha256_read_failures_are_contract_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             target = root / "evidence.txt"
             target.write_text("predicate evidence\n", encoding="utf-8")
             context = PredicateContext(repo_root=root)
 
-            original_read_bytes = Path.read_bytes
+            original_open = Path.open
 
-            def read_bytes_side_effect(path: Path) -> bytes:
+            def open_side_effect(path: Path, *args: object, **kwargs: object) -> object:
                 if path == target:
                     raise PermissionError("permission denied")
-                return original_read_bytes(path)
+                return original_open(path, *args, **kwargs)
 
-            with mock.patch.object(Path, "read_bytes", autospec=True) as read_mock:
-                read_mock.side_effect = read_bytes_side_effect
+            with mock.patch.object(Path, "open", autospec=True) as open_mock:
+                open_mock.side_effect = open_side_effect
                 with self.assertRaisesRegex(PredicateContractError, "cannot be read"):
                     evaluate_predicate_document(
                         document(
@@ -381,7 +423,7 @@ class PredicateTests(unittest.TestCase):
 
     def test_file_sha256_missing_or_non_regular_evidence_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = make_repo_root(tmp)
             directory = root / "directory"
             directory.mkdir()
             context = PredicateContext(repo_root=root)
@@ -406,10 +448,59 @@ class PredicateTests(unittest.TestCase):
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
+    def test_file_sha256_streams_under_size_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            target = root / "large-evidence.bin"
+            with target.open("wb") as handle:
+                handle.seek(MAX_FILE_EVIDENCE_BYTES + 1)
+                handle.write(b"\0")
+            context = PredicateContext(repo_root=root)
+
+            with self.assertRaisesRegex(PredicateContractError, "size limit"):
+                evaluate_predicate_document(
+                    document(
+                        {
+                            "op": "file_sha256",
+                            "path": "large-evidence.bin",
+                            "sha256": "0" * 64,
+                        }
+                    ),
+                    context,
+                )
+
+    def test_repo_root_must_be_git_worktree_top_level(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(PredicateContractError, "Git worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=Path(tmp)),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            subdir = root / "subdir"
+            subdir.mkdir()
+
+            with self.assertRaisesRegex(PredicateContractError, "Git worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=subdir),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            (fake_root / ".git").mkdir()
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=fake_root),
+                )
+
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(
-                repo_root=Path(tmp),
+                repo_root=make_repo_root(tmp),
                 json_documents={"manifest": {"gate": {"status": "pass"}}},
             )
             with self.assertRaisesRegex(PredicateContractError, "path is missing"):
@@ -431,7 +522,7 @@ class PredicateTests(unittest.TestCase):
     def test_json_and_command_scalar_type_mismatches_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(
-                repo_root=Path(tmp),
+                repo_root=make_repo_root(tmp),
                 json_documents={"manifest": {"exit_code": False}},
                 command_results={"unit": {"exit_code": True}},
             )
@@ -455,9 +546,40 @@ class PredicateTests(unittest.TestCase):
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
+    def test_malformed_evidence_maps_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            cases = (
+                (
+                    PredicateContext(repo_root=root, json_documents=None),  # type: ignore[arg-type]
+                    {
+                        "op": "json_equals",
+                        "document": "manifest",
+                        "path": ["status"],
+                        "value": "pass",
+                    },
+                    "JSON evidence map",
+                ),
+                (
+                    PredicateContext(repo_root=root, command_results=None),  # type: ignore[arg-type]
+                    {
+                        "op": "command_result_equals",
+                        "id": "unit",
+                        "field": "exit_code",
+                        "value": 0,
+                    },
+                    "command result evidence map",
+                ),
+            )
+            for context, predicate, message in cases:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    PredicateContractError, message
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
     def test_missing_evidence_and_malformed_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            context = PredicateContext(repo_root=Path(tmp), json_documents={})
+            context = PredicateContext(repo_root=make_repo_root(tmp), json_documents={})
             cases = (
                 {"op": "literal", "value": "true"},
                 {"op": "all", "predicates": []},
