@@ -86,13 +86,14 @@ non-Git-worktree roots, bare or symlinked `.git` metadata, malformed or unsuppor
 Git metadata, NUL/control-character Git metadata fields, directory `.git` configs whose
 `core.worktree` points away from the requested root, symlinked relative or absolute
 gitdir pointers, malformed HEAD refs, v0 repositories declaring v1-only extensions,
-unsupported Git format extensions, per-worktree `config.worktree` bare/worktree drift,
+unsupported Git format extensions, Git config include directives, per-worktree
+`config.worktree` bare/worktree drift overlaid on common config,
 empty linked-worktree `commondir` files, path traversal, symlink escapes,
 raw database state paths, hard-linked file aliases, common credential stores
 such as `.git`, `.docker`, and `.kube`, borrowed gitdir metadata whose
 `core.worktree` or linked-worktree `gitdir` pointer does not bind the requested root,
 credential/private paths, separator-based `.env` backups, backed-up credential filenames,
-camelCase credential names, underscore- and tilde-suffixed raw database backups,
+camelCase credential names, underscore-, tilde-, and copy-suffixed raw database backups,
 raw database backup names without separators,
 password/API-key JSON and command evidence names including split `api/key` components,
 unreadable or unstatable file evidence, symlink evidence before target resolution,

@@ -441,7 +441,11 @@ def _validate_git_metadata(
     if detached_head is not None:
         _validate_detached_head_object_format(detached_head, object_format)
     worktree_parser = _read_git_worktree_config(git_dir, worktree_config_enabled)
-    effective_parser = worktree_parser or parser
+    effective_parser = (
+        _overlay_git_config(parser, worktree_parser)
+        if worktree_parser is not None
+        else parser
+    )
     is_bare = _git_config_bool(
         effective_parser, "core", "bare", "repo root must contain valid Git metadata"
     )
@@ -474,6 +478,9 @@ def _read_git_config(path: Path, message: str) -> configparser.ConfigParser:
     for section in parser.sections():
         if _GIT_CONTROL_CHAR_RE.search(section):
             raise PredicateContractError(message)
+        normalized_section = section.casefold()
+        if normalized_section == "include" or normalized_section.startswith("includeif "):
+            raise PredicateContractError(message)
         for option in parser.options(section):
             if _GIT_CONTROL_CHAR_RE.search(option):
                 raise PredicateContractError(message)
@@ -484,8 +491,11 @@ def _read_git_config(path: Path, message: str) -> configparser.ConfigParser:
 def _git_config_section(
     parser: configparser.ConfigParser, section: str
 ) -> str | None:
+    normalized_section = section.casefold()
     matches = [
-        candidate for candidate in parser.sections() if candidate.casefold() == section
+        candidate
+        for candidate in parser.sections()
+        if candidate.casefold() == normalized_section
     ]
     if len(matches) > 1:
         raise PredicateContractError("repo root must contain valid Git metadata")
@@ -507,6 +517,21 @@ def _read_git_worktree_config(
     except FileNotFoundError:
         return None
     return _read_git_config(config_worktree, "repo root must contain valid Git metadata")
+
+
+def _overlay_git_config(
+    base: configparser.ConfigParser, overlay: configparser.ConfigParser
+) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    for source in (base, overlay):
+        for section in source.sections():
+            target_section = _git_config_section(parser, section)
+            if target_section is None:
+                parser.add_section(section)
+                target_section = section
+            for option in source.options(section):
+                parser.set(target_section, option, source.get(section, option))
+    return parser
 
 
 def _git_config_value(

@@ -379,12 +379,16 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": "state/agentic-os/control.dbbackup"},
                 {"op": "file_exists", "path": "state/agentic-os/control.dbbak"},
                 {"op": "file_exists", "path": "state/agentic-os/control.dbbak.gz"},
+                {"op": "file_exists", "path": "state/agentic-os/control.dbcopy"},
+                {"op": "file_exists", "path": "state/agentic-os/control.dbcopy.gz"},
                 {"op": "file_exists", "path": "state/agentic-os/control.db~"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlitebackup"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlitebak"},
+                {"op": "file_exists", "path": "state/agentic-os/control.sqlitecopy"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlite3~"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlite3backup"},
                 {"op": "file_exists", "path": "state/agentic-os/control.sqlite3bak"},
+                {"op": "file_exists", "path": "state/agentic-os/control.sqlite3copy"},
                 {"op": "file_exists", "path": "prod.env.bak.bak.bak.bak.bak"},
                 {"op": "file_exists", "path": "public-evidence"},
             )
@@ -1180,6 +1184,48 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=config_control_root),
                 )
 
+            mixed_case_control_path = base / "mixed-case-control-root"
+            mixed_case_control_path.mkdir()
+            mixed_case_control_root = make_repo_root(str(mixed_case_control_path))
+            (mixed_case_control_root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n"
+                "[User]\n\tname = bad\tvalue\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=mixed_case_control_root),
+                )
+
+            include_config_path = base / "include-config-root"
+            include_config_path.mkdir()
+            include_config_root = make_repo_root(str(include_config_path))
+            (include_config_root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n"
+                "[include]\n\tpath = ../other-config\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=include_config_root),
+                )
+
+            include_if_config_path = base / "include-if-config-root"
+            include_if_config_path.mkdir()
+            include_if_config_root = make_repo_root(str(include_if_config_path))
+            (include_if_config_root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n"
+                "[includeIf \"gitdir:./\"]\n\tpath = ../other-config\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=include_if_config_root),
+                )
+
             multiline_head_path = base / "multiline-head-root"
             multiline_head_path.mkdir()
             multiline_head_root = make_repo_root(str(multiline_head_path))
@@ -1446,6 +1492,50 @@ class PredicateTests(unittest.TestCase):
             (git_dir / "config.worktree").write_text(
                 "[core]\n"
                 f"\tworktree = {other}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "core.worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            git_dir = root / ".git"
+            (git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 1\n"
+                "\tbare = true\n"
+                "[extensions]\n"
+                "\tworktreeConfig = true\n",
+                encoding="utf-8",
+            )
+            (git_dir / "config.worktree").write_text(
+                "[user]\n\tname = predicate test\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            git_dir = root / ".git"
+            other = root / "other"
+            other.mkdir()
+            (git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 1\n"
+                f"\tworktree = {other}\n"
+                "[extensions]\n"
+                "\tworktreeConfig = true\n",
+                encoding="utf-8",
+            )
+            (git_dir / "config.worktree").write_text(
+                "[user]\n\tname = predicate test\n",
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(PredicateContractError, "core.worktree"):

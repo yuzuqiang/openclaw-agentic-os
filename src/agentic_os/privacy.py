@@ -34,6 +34,7 @@ RAW_STATE_PATTERNS = (
     "*.db.backup*",
     "*.dbbackup*",
     "*.dbbak*",
+    "*.dbcopy*",
     "*.db.bak*",
     "*.sqlite",
     "*.sqlite.*",
@@ -44,6 +45,7 @@ RAW_STATE_PATTERNS = (
     "*.sqlite.backup*",
     "*.sqlitebackup*",
     "*.sqlitebak*",
+    "*.sqlitecopy*",
     "*.sqlite.bak*",
     "*.sqlite3",
     "*.sqlite3.*",
@@ -54,6 +56,7 @@ RAW_STATE_PATTERNS = (
     "*.sqlite3.backup*",
     "*.sqlite3backup*",
     "*.sqlite3bak*",
+    "*.sqlite3copy*",
     "*.sqlite3.bak*",
 )
 
