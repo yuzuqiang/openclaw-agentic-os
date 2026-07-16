@@ -82,11 +82,14 @@ only the read-only `agentic_predicate_inproc_v1` backend: literal booleans,
 JSON scalar equality over caller-supplied documents, and command-result scalar
 equality over caller-supplied evidence. Unsupported backends, dynamic code,
 subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
-non-Git-worktree roots, bare or symlinked `.git` metadata, malformed Git metadata, path traversal, symlink escapes,
+non-Git-worktree roots, bare or symlinked `.git` metadata, malformed or unsupported
+Git metadata, directory `.git` configs whose `core.worktree` points away from the
+requested root, empty linked-worktree `commondir` files, path traversal, symlink escapes,
 raw database state paths, hard-linked file aliases, common credential stores
 such as `.git`, `.docker`, and `.kube`, borrowed gitdir metadata whose
 `core.worktree` or linked-worktree `gitdir` pointer does not bind the requested root,
-credential/private paths, credential backup files, camelCase credential names,
+credential/private paths, separator-based `.env` backups, credential backup files,
+camelCase credential names, underscore-suffixed raw database backups,
 password/API-key JSON and command evidence names,
 unreadable or unstatable file evidence, symlink evidence before target resolution,
 swapped symlink evidence, symlink parent components rechecked at file use,

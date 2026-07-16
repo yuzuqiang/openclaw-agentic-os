@@ -139,6 +139,7 @@ class PrivacyTests(unittest.TestCase):
             "exports/cache.sqlite3.backup/chunk",
             "archives/control.db.tar/member",
             "state/agentic-os/control.db.backup123",
+            "state/agentic-os/control.db_backup",
             "state/agentic-os/control.db.bak1",
             "cache.sqlite",
             "cache.sqlite-backup",
