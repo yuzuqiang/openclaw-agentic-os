@@ -43,10 +43,21 @@ class MetadataCapableOpenClawAdapter(Protocol):
     def session_status(self, session_key: str) -> MetadataObservation:
         ...
 
+    def session_result(self, session_key: str) -> MetadataObservation:
+        ...
+
 
 class OpenClawTransport(Protocol):
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
+
+
+_REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
+    "sessions_spawn": frozenset(("client_request_id", "idempotency_key", "metadata")),
+    "sessions_list": frozenset(),
+    "sessions_status": frozenset(("session_key",)),
+    "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
+}
 
 
 def _json_object(value: Mapping[str, Any]) -> str:
@@ -60,6 +71,88 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise AdapterContractError(f"{label} must be an object")
     return value
+
+
+def _transport_response(value: Any, method: str) -> Mapping[str, Any]:
+    return _mapping(value, f"{method} response")
+
+
+def _tool_name(entry: Mapping[str, Any]) -> str | None:
+    for key in ("name", "method", "id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _parameter_names(value: Any) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if isinstance(value, Mapping):
+        properties = value.get("properties")
+        if isinstance(properties, Mapping):
+            return frozenset(str(key) for key in properties)
+        return frozenset(str(key) for key in value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        names: set[str] = set()
+        for item in value:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        return frozenset(names)
+    raise AdapterContractError("runtime tool catalog parameters must be inspectable")
+
+
+def _tool_parameters(entry: Mapping[str, Any]) -> frozenset[str]:
+    if "parameters" in entry:
+        return _parameter_names(entry["parameters"])
+    if "input_schema" in entry:
+        return _parameter_names(entry["input_schema"])
+    if "inputSchema" in entry:
+        return _parameter_names(entry["inputSchema"])
+    return frozenset()
+
+
+def _tool_entries(catalog: Mapping[str, Any]) -> Mapping[str, frozenset[str]]:
+    tools = catalog.get("tools", catalog)
+    entries: dict[str, frozenset[str]] = {}
+    if isinstance(tools, Mapping):
+        for name, value in tools.items():
+            if isinstance(value, Mapping):
+                entries[str(name)] = _tool_parameters(value)
+            else:
+                entries[str(name)] = frozenset()
+        return entries
+    if isinstance(tools, Sequence) and not isinstance(tools, (str, bytes, bytearray)):
+        for item in tools:
+            entry = _mapping(item, "runtime tool catalog entry")
+            name = _tool_name(entry)
+            if name is not None:
+                if name in entries and name in _REQUIRED_SESSION_TOOL_PARAMS:
+                    raise AdapterContractError(
+                        f"runtime tool catalog has duplicate {name} entries"
+                    )
+                entries[name] = _tool_parameters(entry)
+        return entries
+    raise AdapterContractError("runtime tool catalog must expose tools")
+
+
+def assert_installed_session_tools(catalog: Mapping[str, Any]) -> None:
+    """Fail closed unless the runtime exposes the session tools this adapter calls."""
+
+    entries = _tool_entries(catalog)
+    for method, required_params in _REQUIRED_SESSION_TOOL_PARAMS.items():
+        if method not in entries:
+            raise AdapterContractError(f"runtime tool catalog is missing {method}")
+        missing_params = sorted(required_params - entries[method])
+        if missing_params:
+            missing = ", ".join(missing_params)
+            raise AdapterContractError(
+                f"runtime tool catalog {method} is missing parameters: {missing}"
+            )
 
 
 def _identity_alias(value: Any, label: str) -> str | None:
@@ -108,6 +201,90 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
     return tuple(observations)
 
 
+def _history_item_session_keys(
+    response: Mapping[str, Any],
+) -> tuple[tuple[str, str | None, str | None, str | None], ...]:
+    """Return item-level session identities from a history response."""
+
+    identities: list[tuple[str, str | None, str | None, str | None]] = []
+    for container_name in ("messages", "history", "items", "events"):
+        items = response.get(container_name)
+        if not isinstance(items, Sequence) or isinstance(
+            items, (str, bytes, bytearray)
+        ):
+            continue
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            session = (
+                item.get("session") if isinstance(item.get("session"), Mapping) else {}
+            )
+            label = f"{container_name}[{index}]"
+            session_key = _consistent_identity(
+                f"{label} session key",
+                (
+                    (f"{label}.session_key", item.get("session_key")),
+                    (f"{label}.sessionKey", item.get("sessionKey")),
+                    (f"{label}.session.session_key", session.get("session_key")),
+                    (f"{label}.session.sessionKey", session.get("sessionKey")),
+                    (f"{label}.session.key", session.get("key")),
+                ),
+            )
+            spawn_request_session_key = _consistent_identity(
+                f"{label} spawn request session key",
+                (
+                    (
+                        f"{label}.spawn_request_session_key",
+                        item.get("spawn_request_session_key"),
+                    ),
+                    (
+                        f"{label}.spawnRequestSessionKey",
+                        item.get("spawnRequestSessionKey"),
+                    ),
+                    (
+                        f"{label}.session.spawn_request_session_key",
+                        session.get("spawn_request_session_key"),
+                    ),
+                    (
+                        f"{label}.session.spawnRequestSessionKey",
+                        session.get("spawnRequestSessionKey"),
+                    ),
+                    (
+                        f"{label}.session.request_session_key",
+                        session.get("request_session_key"),
+                    ),
+                    (
+                        f"{label}.session.requestSessionKey",
+                        session.get("requestSessionKey"),
+                    ),
+                ),
+            )
+            external_id = _consistent_identity(
+                f"{label} external identity",
+                (
+                    (f"{label}.external_id", item.get("external_id")),
+                    (f"{label}.externalId", item.get("externalId")),
+                    (
+                        f"{label}.session.external_id",
+                        session.get("external_id"),
+                    ),
+                    (
+                        f"{label}.session.externalId",
+                        session.get("externalId"),
+                    ),
+                ),
+            )
+            if (
+                session_key is not None
+                or spawn_request_session_key is not None
+                or external_id is not None
+            ):
+                identities.append(
+                    (label, session_key, spawn_request_session_key, external_id)
+                )
+    return tuple(identities)
+
+
 def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -139,11 +316,15 @@ def partial_observation_from_openclaw_response(
     except AdapterContractError:
         raw_response_json = None
     session_key = _string_or_none(response.get("session_key")) or _string_or_none(
-        session.get("session_key")
+        response.get("sessionKey")
+    ) or _string_or_none(session.get("session_key")) or _string_or_none(
+        session.get("sessionKey")
     )
     spawn_request_session_key = _string_or_none(
         response.get("spawn_request_session_key")
-    ) or _string_or_none(session.get("spawn_request_session_key"))
+    ) or _string_or_none(response.get("spawnRequestSessionKey")) or _string_or_none(
+        session.get("spawn_request_session_key")
+    ) or _string_or_none(session.get("spawnRequestSessionKey"))
     external_id = (
         _string_or_none(response.get("external_id"))
         or session_key
@@ -201,9 +382,14 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
         "session key",
         (
             ("session_key", response.get("session_key")),
+            ("sessionKey", response.get("sessionKey")),
             (
                 "session.session_key",
                 session.get("session_key") if session is not None else None,
+            ),
+            (
+                "session.sessionKey",
+                session.get("sessionKey") if session is not None else None,
             ),
             ("session.key", session.get("key") if session is not None else None),
         ),
@@ -212,13 +398,22 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
         "spawn request session key",
         (
             ("spawn_request_session_key", response.get("spawn_request_session_key")),
+            ("spawnRequestSessionKey", response.get("spawnRequestSessionKey")),
             (
                 "session.spawn_request_session_key",
                 session.get("spawn_request_session_key") if session is not None else None,
             ),
             (
+                "session.spawnRequestSessionKey",
+                session.get("spawnRequestSessionKey") if session is not None else None,
+            ),
+            (
                 "session.request_session_key",
                 session.get("request_session_key") if session is not None else None,
+            ),
+            (
+                "session.requestSessionKey",
+                session.get("requestSessionKey") if session is not None else None,
             ),
         ),
     )
@@ -266,30 +461,103 @@ class OpenClawAdapter:
     def __init__(self, transport: OpenClawTransport) -> None:
         self._transport = transport
 
+    @classmethod
+    def from_preflighted_catalog(
+        cls, transport: OpenClawTransport, catalog: Mapping[str, Any]
+    ) -> "OpenClawAdapter":
+        assert_installed_session_tools(catalog)
+        return cls(transport)
+
     def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("subagents.allowLease.acquire", params)
+            _transport_response(
+                self._transport.call("subagents.allowLease.acquire", params),
+                "subagents.allowLease.acquire",
+            )
         )
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
-        response = self._transport.call("subagents.allowLease.status", {})
+        response = _transport_response(
+            self._transport.call("subagents.allowLease.status", {}),
+            "subagents.allowLease.status",
+        )
         return _observations_from_items(response.get("leases"), "lease")
 
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("subagents.allowLease.release", params)
+            _transport_response(
+                self._transport.call("subagents.allowLease.release", params),
+                "subagents.allowLease.release",
+            )
         )
 
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("sessions_spawn", params)
+            _transport_response(
+                self._transport.call("sessions_spawn", params), "sessions_spawn"
+            )
         )
 
     def sessions_list(self) -> Sequence[MetadataObservation]:
-        response = self._transport.call("sessions_list", {})
+        response = _transport_response(
+            self._transport.call("sessions_list", {}), "sessions_list"
+        )
         return _observations_from_items(response.get("sessions"), "session")
 
     def session_status(self, session_key: str) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("sessions_status", {"session_key": session_key})
+            _transport_response(
+                self._transport.call("sessions_status", {"session_key": session_key}),
+                "sessions_status",
+            )
         )
+
+    def session_result(self, session_key: str) -> MetadataObservation:
+        response = _transport_response(
+            self._transport.call(
+                "sessions_history",
+                {"sessionKey": session_key, "limit": 1, "includeTools": True},
+            ),
+            "sessions_history",
+        )
+        observation = observation_from_openclaw_response(response)
+        if (
+            not observation.external_id
+            or not observation.session_key
+            or not observation.spawn_request_session_key
+        ):
+            raise AdapterContractError(
+                "sessions_history response must include accepted session identity"
+            )
+        if (
+            observation.external_id != session_key
+            or observation.session_key != session_key
+            or observation.spawn_request_session_key != session_key
+        ):
+            raise AdapterContractError(
+                "sessions_history response identity must match requested session"
+            )
+        for (
+            label,
+            item_session_key,
+            item_spawn_request_session_key,
+            item_external_id,
+        ) in (
+            _history_item_session_keys(response)
+        ):
+            if item_session_key is not None and item_session_key != session_key:
+                raise AdapterContractError(
+                    f"sessions_history {label} identity must match requested session"
+                )
+            if (
+                item_spawn_request_session_key is not None
+                and item_spawn_request_session_key != session_key
+            ):
+                raise AdapterContractError(
+                    f"sessions_history {label} identity must match requested session"
+                )
+            if item_external_id is not None and item_external_id != session_key:
+                raise AdapterContractError(
+                    f"sessions_history {label} identity must match requested session"
+                )
+        return observation
