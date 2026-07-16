@@ -293,8 +293,22 @@ class RuntimeDispatchTests(unittest.TestCase):
         return request
 
     def test_dispatch_persists_exact_lease_spawn_and_session_identity(self) -> None:
-        result = dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        adapter = self._accepted_adapter()
+        result = dispatch_with_metadata(self.database, adapter, self.request)
         self.assertEqual(result.session_key, "session-key")
+        spawn_params = [
+            params for call, params in adapter.params if call == "sessions_spawn"
+        ]
+        self.assertEqual(
+            spawn_params,
+            [
+                {
+                    "metadata": spawn_metadata(self.request),
+                    "gateway_lease_id": "lease-gateway",
+                }
+            ],
+        )
+        self.assertNotIn("gateway_lease_id", spawn_params[0]["metadata"])
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
@@ -354,6 +368,49 @@ class RuntimeDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeDispatchError, "schema verification"):
             dispatch_with_metadata(bad_database, adapter, self.request)
         self.assertEqual(adapter.calls, [])
+
+    def test_invalid_ttl_fails_before_database_or_adapter_call(self) -> None:
+        request = DispatchRequest(**{**self.request.__dict__, "ttl_ms": True})
+        adapter = self._accepted_adapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "ttl_ms"):
+            dispatch_with_metadata(self.database, adapter, request)
+        self.assertEqual(adapter.calls, [])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM external_rpc_intents"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_dispatch_closes_runtime_database_connection(self) -> None:
+        original_connect = runtime_dispatch.connect_runtime_db
+        proxies = []
+
+        class ConnectionProxy:
+            def __init__(self, inner):
+                self.inner = inner
+                self.closed = False
+
+            def execute(self, *args, **kwargs):
+                return self.inner.execute(*args, **kwargs)
+
+            def close(self):
+                self.closed = True
+                self.inner.close()
+
+        def tracking_connect(path):
+            proxy = ConnectionProxy(original_connect(path))
+            proxies.append(proxy)
+            return proxy
+
+        runtime_dispatch.connect_runtime_db = tracking_connect
+        try:
+            dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        finally:
+            runtime_dispatch.connect_runtime_db = original_connect
+        self.assertEqual(len(proxies), 1)
+        self.assertTrue(proxies[0].closed)
 
     def test_missing_lease_metadata_fails_closed_before_spawn(self) -> None:
         adapter = ScriptedAdapter(
@@ -636,6 +693,34 @@ class RuntimeDispatchTests(unittest.TestCase):
             dispatch_with_metadata(self.database, adapter, self.request)
         self.assertEqual(adapter.calls, [])
 
+    def test_release_key_collision_fails_before_acquire(self) -> None:
+        for field in (
+            "client_lease_id",
+            "acquire_idempotency_key",
+            "spawn_client_request_id",
+            "spawn_idempotency_key",
+        ):
+            with self.subTest(field=field):
+                self.tearDown()
+                self.setUp()
+                request = DispatchRequest(
+                    **{
+                        **self.request.__dict__,
+                        "release_idempotency_key": getattr(self.request, field),
+                    }
+                )
+                adapter = self._accepted_adapter()
+                with self.assertRaisesRegex(RuntimeDispatchError, "allow_lease_release"):
+                    dispatch_with_metadata(self.database, adapter, request)
+                self.assertEqual(adapter.calls, [])
+                with self._connect() as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM external_rpc_intents"
+                        ).fetchone()[0],
+                        0,
+                    )
+
     def test_failed_spawn_replay_preserves_review_state_without_adapter_call(self) -> None:
         for state in ("pending", "unknown", "failed", "human_review_required"):
             with self.subTest(state=state):
@@ -799,13 +884,12 @@ class RuntimeDispatchTests(unittest.TestCase):
                 )
             ],
             spawn=[observation(spawn_metadata(self.request), external_id="session-key")],
-            release=[self._release_observation()],
         )
-        with self.assertRaisesRegex(RuntimeDispatchError, "owned lease released"):
+        with self.assertRaisesRegex(RuntimeDispatchError, "local persistence"):
             dispatch_with_metadata(self.database, adapter, self.request)
         self.assertEqual(
             adapter.calls,
-            ["allow_lease_acquire", "sessions_spawn", "allow_lease_release"],
+            ["allow_lease_acquire", "sessions_spawn"],
         )
         with self._connect() as connection:
             self.assertEqual(
@@ -824,6 +908,48 @@ class RuntimeDispatchTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM sessions WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone()[0],
+                "acquired",
+            )
+
+    def test_local_spawn_persistence_error_keeps_owned_lease_for_review(self) -> None:
+        original_persist = runtime_dispatch.persist_spawn_acceptance
+
+        def fail_persistence(*args, **kwargs):
+            raise sqlite3.IntegrityError("local write failed")
+
+        runtime_dispatch.persist_spawn_acceptance = fail_persistence
+        adapter = self._accepted_adapter()
+        try:
+            with self.assertRaisesRegex(RuntimeDispatchError, "local persistence"):
+                dispatch_with_metadata(self.database, adapter, self.request)
+        finally:
+            runtime_dispatch.persist_spawn_acceptance = original_persist
+        self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone()[0],
+                "acquired",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
                 ).fetchone()[0],
                 0,
             )
@@ -1180,13 +1306,23 @@ class RuntimeDispatchTests(unittest.TestCase):
                 [("client-lease", "acquired")],
             )
 
-    def test_terminal_pre_spawn_failure_does_not_block_new_slot_attempt(self) -> None:
+    def test_unverified_acquire_review_state_blocks_new_slot_attempt(self) -> None:
         with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
             dispatch_with_metadata(
                 self.database,
                 ContractFailingAdapter({"allow_lease_acquire"}),
                 self.request,
             )
+        replacement = self._additional_request("replacement", agent_id=self.request.agent_id)
+        adapter = self._accepted_adapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "duplicate live dispatch"):
+            dispatch_with_metadata(self.database, adapter, replacement)
+        self.assertEqual(adapter.calls, [])
+
+    def test_preflight_failure_without_external_intent_does_not_block_new_slot(self) -> None:
+        invalid = DispatchRequest(**{**self.request.__dict__, "ttl_ms": True})
+        with self.assertRaisesRegex(RuntimeDispatchError, "ttl_ms"):
+            dispatch_with_metadata(self.database, ScriptedAdapter(), invalid)
         replacement = self._additional_request("replacement", agent_id=self.request.agent_id)
         gateway_id = "lease-gateway-replacement"
         adapter = ScriptedAdapter(
@@ -1290,13 +1426,21 @@ class RuntimeDispatchTests(unittest.TestCase):
             release=[self._release_observation()],
         )
         summary = reconcile_unknown_metadata(self.database, adapter)
+        self.assertEqual(summary.reconciled, 0)
         self.assertEqual(summary.human_review_required, 1)
+        self.assertNotIn("allow_lease_release", adapter.calls)
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
                 ).fetchone()[0],
                 "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone()[0],
+                "acquired",
             )
 
 

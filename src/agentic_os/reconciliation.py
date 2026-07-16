@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -350,6 +351,8 @@ def _acquire_only_cleanup_requests(
         "WHERE l.state='acquired' AND l.gateway_lease_id IS NOT NULL "
         "AND l.gateway_lease_id<>'' "
         "AND i.state IN ('failed','human_review_required') "
+        "AND (sr.ambiguity_reason LIKE 'spawn blocked by allow lease%' "
+        "OR sr.ambiguity_reason='zero-session-observation') "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM external_rpc_intents release "
         "  WHERE release.rpc_kind='allow_lease_release' "
@@ -449,7 +452,7 @@ def reconcile_unknown_metadata(
 ) -> ReconciliationSummary:
     reconciled = 0
     human_review = 0
-    with connect_runtime_db(database) as connection:
+    with closing(connect_runtime_db(database)) as connection:
         session_observations = list(adapter.sessions_list())
         lease_observations = list(adapter.allow_lease_list())
         for request in _orphan_unknown_lease_requests(connection):
@@ -521,11 +524,16 @@ def reconcile_unknown_metadata(
             matches = _matching_sessions(request, session_observations)
             with immediate_transaction(connection):
                 if len(matches) != 1:
+                    reason = (
+                        "zero-session-observation"
+                        if not matches
+                        else "ambiguous-session-observation"
+                    )
                     mark_human_review(
                         connection,
                         request,
                         rpc_kind="sessions_spawn",
-                        reason="zero-or-ambiguous-session-observation",
+                        reason=reason,
                     )
                     human_review += 1
                     continue

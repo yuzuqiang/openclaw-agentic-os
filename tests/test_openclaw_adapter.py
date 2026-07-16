@@ -234,6 +234,108 @@ class OpenClawAdapterTests(unittest.TestCase):
         ):
             OpenClawAdapter(ConflictingSpawnRequestAliasTransport()).sessions_spawn({})
 
+    def test_gateway_lease_id_is_not_a_session_identity_alias(self) -> None:
+        class GatewayEchoSessionTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "session_key": "session-key",
+                    "spawn_request_session_key": "session-key",
+                    "gateway_lease_id": "lease-gateway",
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        observation = OpenClawAdapter(GatewayEchoSessionTransport()).sessions_spawn({})
+        self.assertEqual(observation.external_id, "session-key")
+        self.assertEqual(observation.session_key, "session-key")
+
+    def test_list_responses_skip_malformed_unrelated_entries(self) -> None:
+        class LegacyListTransport:
+            def call(self, method, params):
+                lease_metadata = {
+                    "client_lease_id": "client-lease",
+                    "idempotency_key": "acquire-idem",
+                    "run_id": "run",
+                    "phase": "phase",
+                    "transition_id": "transition",
+                    "agent_id": "agent",
+                    "requester_agent_id": "requester",
+                    "ttl_ms": 60000,
+                    "gateway_lease_id": "lease-gateway",
+                }
+                session_metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                if method == "subagents.allowLease.status":
+                    return {
+                        "leases": [
+                            {"legacy": True},
+                            {
+                                "gateway_lease_id": "lease-gateway",
+                                "metadata": {
+                                    "metadata_contract_version": "v1",
+                                    "normalized": lease_metadata,
+                                    "raw_json": json.dumps(
+                                        lease_metadata,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                },
+                            },
+                        ]
+                    }
+                if method == "sessions_list":
+                    return {
+                        "sessions": [
+                            {"legacy": True},
+                            {
+                                "session_key": "session-key",
+                                "spawn_request_session_key": "session-key",
+                                "gateway_lease_id": "lease-gateway",
+                                "metadata": {
+                                    "metadata_contract_version": "v1",
+                                    "normalized": session_metadata,
+                                    "raw_json": json.dumps(
+                                        session_metadata,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                },
+                            },
+                        ]
+                    }
+                raise AssertionError(method)
+
+        adapter = OpenClawAdapter(LegacyListTransport())
+        self.assertEqual(
+            [observation.external_id for observation in adapter.allow_lease_list()],
+            ["lease-gateway"],
+        )
+        self.assertEqual(
+            [observation.external_id for observation in adapter.sessions_list()],
+            ["session-key"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -85,6 +85,18 @@ def _consistent_identity(label: str, aliases: Iterable[tuple[str, Any]]) -> str 
     return selected[1] if selected is not None else None
 
 
+def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservation, ...]:
+    if not isinstance(items, Iterable):
+        raise AdapterContractError(f"{label} response must include {label}")
+    observations: list[MetadataObservation] = []
+    for item in items:
+        try:
+            observations.append(observation_from_openclaw_response(_mapping(item, label)))
+        except AdapterContractError:
+            continue
+    return tuple(observations)
+
+
 def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataObservation:
     """Extract normalized/raw metadata from OpenClaw-shaped raw responses."""
 
@@ -141,19 +153,27 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
             ),
         ),
     )
-    external_id = _consistent_identity(
-        "external identity",
-        (
-            ("external_id", response.get("external_id")),
-            ("gateway_lease_id", response.get("gateway_lease_id")),
-            ("session_key", session_key),
+    if session_key is not None or spawn_request_session_key is not None:
+        external_id = _consistent_identity(
+            "session external identity",
             (
-                "lease.gateway_lease_id",
-                lease.get("gateway_lease_id") if lease is not None else None,
+                ("external_id", response.get("external_id")),
+                ("session_key", session_key),
             ),
-            ("lease.lease_id", lease.get("lease_id") if lease is not None else None),
-        ),
-    )
+        )
+    else:
+        external_id = _consistent_identity(
+            "lease external identity",
+            (
+                ("external_id", response.get("external_id")),
+                ("gateway_lease_id", response.get("gateway_lease_id")),
+                (
+                    "lease.gateway_lease_id",
+                    lease.get("gateway_lease_id") if lease is not None else None,
+                ),
+                ("lease.lease_id", lease.get("lease_id") if lease is not None else None),
+            ),
+        )
 
     status_metadata_json = response.get("status_metadata_json")
     if status_metadata_json is not None and not isinstance(status_metadata_json, str):
@@ -184,10 +204,7 @@ class OpenClawAdapter:
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
         response = self._transport.call("subagents.allowLease.status", {})
-        leases = response.get("leases")
-        if not isinstance(leases, Iterable):
-            raise AdapterContractError("allow lease status response must include leases")
-        return tuple(observation_from_openclaw_response(_mapping(item, "lease")) for item in leases)
+        return _observations_from_items(response.get("leases"), "lease")
 
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
@@ -201,13 +218,7 @@ class OpenClawAdapter:
 
     def sessions_list(self) -> Sequence[MetadataObservation]:
         response = self._transport.call("sessions_list", {})
-        sessions = response.get("sessions")
-        if not isinstance(sessions, Iterable):
-            raise AdapterContractError("sessions_list response must include sessions")
-        return tuple(
-            observation_from_openclaw_response(_mapping(item, "session"))
-            for item in sessions
-        )
+        return _observations_from_items(response.get("sessions"), "session")
 
     def session_status(self, session_key: str) -> MetadataObservation:
         return observation_from_openclaw_response(

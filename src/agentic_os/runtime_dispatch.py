@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
 from agentic_os.metadata import (
+    MAX_LEASE_TTL_MS,
     MetadataContractError,
     validate_accepted_lease_identity,
     validate_accepted_session_identity,
@@ -79,6 +80,35 @@ def utc_from_epoch_ms(epoch_ms: int) -> str:
 
 def stable_json(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def validate_dispatch_request(request: DispatchRequest) -> None:
+    for field in (
+        "run_id",
+        "transition_id",
+        "phase",
+        "agent_id",
+        "requester_agent_id",
+        "task_digest",
+        "spawn_request_id",
+        "reserve_budget_event_id",
+        "client_lease_id",
+        "acquire_idempotency_key",
+        "release_idempotency_key",
+        "spawn_client_request_id",
+        "spawn_idempotency_key",
+    ):
+        value = getattr(request, field)
+        if not isinstance(value, str) or not value:
+            raise RuntimeDispatchError(f"{field} must be a non-empty string")
+    if request.lease_id is not None and (
+        not isinstance(request.lease_id, str) or not request.lease_id
+    ):
+        raise RuntimeDispatchError("lease_id must be a non-empty string when provided")
+    if type(request.ttl_ms) is not int or not 1 <= request.ttl_ms <= MAX_LEASE_TTL_MS:
+        raise RuntimeDispatchError(
+            f"ttl_ms must be an integer in [1,{MAX_LEASE_TTL_MS}]"
+        )
 
 
 def connect_runtime_db(path: Path) -> sqlite3.Connection:
@@ -467,6 +497,25 @@ def _assert_or_insert_acquire_intent(
     )
 
 
+def _assert_no_release_key_collision(
+    connection: sqlite3.Connection, request: DispatchRequest
+) -> None:
+    if request.release_idempotency_key in {
+        request.client_lease_id,
+        request.acquire_idempotency_key,
+        request.spawn_client_request_id,
+        request.spawn_idempotency_key,
+    }:
+        raise RuntimeDispatchError("conflicting reuse of allow_lease_release identity")
+    rows = connection.execute(
+        "SELECT 1 FROM external_rpc_intents "
+        "WHERE client_request_id=? OR idempotency_key=? LIMIT 1",
+        (request.release_idempotency_key, request.release_idempotency_key),
+    ).fetchone()
+    if rows is not None:
+        raise RuntimeDispatchError("conflicting reuse of allow_lease_release identity")
+
+
 def _assert_or_insert_dispatch_binding(
     connection: sqlite3.Connection,
     request: DispatchRequest,
@@ -536,7 +585,9 @@ def _strictly_after_requested_time(
 
 
 def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchRequest) -> None:
+    validate_dispatch_request(request)
     _assert_no_conflicting_spawn_replay(connection, request)
+    _assert_no_release_key_collision(connection, request)
     assert_no_potentially_live_dispatch(connection, request)
     now, now_ms = now_utc()
     expires_ms = now_ms + request.ttl_ms
@@ -607,7 +658,7 @@ def assert_no_potentially_live_dispatch(
         "i.state='human_review_required' AND NOT ("
         "sr.state='human_review_required' "
         "AND sr.ambiguity_reason LIKE 'spawn blocked by allow lease%' "
-        "AND l.state IN ('released','release_not_required','expired','human_review_required')"
+        "AND l.state IN ('released','release_not_required','expired')"
         "))) ORDER BY i.requested_at_epoch_ms,i.intent_id LIMIT 1",
         (request.run_id, request.phase, request.agent_id, request.spawn_request_id),
     ).fetchone()
@@ -1053,7 +1104,8 @@ def release_owned_lease(
 def dispatch_with_metadata(
     database: Path, adapter: MetadataCapableOpenClawAdapter, request: DispatchRequest
 ) -> DispatchResult:
-    with connect_runtime_db(database) as connection:
+    validate_dispatch_request(request)
+    with closing(connect_runtime_db(database)) as connection:
         with immediate_transaction(connection):
             existing = _existing_spawn_replay_result(connection, request)
             if existing is not None:
@@ -1112,15 +1164,10 @@ def dispatch_with_metadata(
             raise RuntimeDispatchError("allow lease metadata validation failed") from exc
 
         try:
+            session_metadata = spawn_metadata(request)
             spawn_observation = adapter.sessions_spawn(
                 {
-                    "run_id": request.run_id,
-                    "transition_id": request.transition_id,
-                    "phase": request.phase,
-                    "agent_id": request.agent_id,
-                    "task_digest": request.task_digest,
-                    "client_request_id": request.spawn_client_request_id,
-                    "idempotency_key": request.spawn_idempotency_key,
+                    "metadata": session_metadata,
                     "gateway_lease_id": gateway_lease_id,
                 }
             )
@@ -1142,7 +1189,7 @@ def dispatch_with_metadata(
             raise RuntimeDispatchError(
                 "sessions_spawn transport outcome unknown; reconciliation required"
             ) from exc
-        except METADATA_RUNTIME_ERRORS as exc:
+        except (AdapterContractError, MetadataContractError) as exc:
             with immediate_transaction(connection):
                 mark_human_review(
                     connection,
@@ -1178,6 +1225,18 @@ def dispatch_with_metadata(
                 ) from exc
             raise RuntimeDispatchError(
                 f"sessions_spawn failed closed ({exc}); owned lease released"
+            ) from exc
+        except (RuntimeDispatchError, sqlite3.Error) as exc:
+            with immediate_transaction(connection):
+                mark_human_review(
+                    connection,
+                    request,
+                    rpc_kind="sessions_spawn",
+                    reason=str(exc),
+                )
+            raise RuntimeDispatchError(
+                "sessions_spawn local persistence failed; "
+                "owned lease requires human review"
             ) from exc
 
         return DispatchResult(
