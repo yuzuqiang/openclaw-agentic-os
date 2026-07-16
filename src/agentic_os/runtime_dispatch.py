@@ -214,10 +214,8 @@ def _existing_spawn_replay_result(
             raise RuntimeDispatchError(
                 "conflicting reuse of sessions_spawn allow lease identity binding"
             )
-        session_key = validate_accepted_session_identity(
-            external_id=external_id,
-            spawn_request_session_key=external_id,
-            session_key=external_id,
+        session_key = _accepted_spawn_replay_session_key(
+            connection, request, external_id
         )
         lease = connection.execute(
             "SELECT gateway_lease_id FROM leases WHERE run_id=? AND transition_id=? "
@@ -250,6 +248,46 @@ def _existing_spawn_replay_result(
             f"sessions_spawn replay is already {state}; external RPC will not be retried"
         )
     return None
+
+
+def _accepted_spawn_replay_session_key(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    external_id: str | None,
+) -> str:
+    row = connection.execute(
+        "SELECT sr.session_key,s.session_key FROM spawn_requests sr "
+        "JOIN sessions s ON s.spawn_request_id=sr.spawn_request_id "
+        "AND s.run_id=sr.run_id AND s.transition_id=sr.transition_id "
+        "AND s.client_request_id=sr.client_request_id "
+        "AND s.spawn_idempotency_key=sr.spawn_idempotency_key "
+        "AND s.phase=sr.phase AND s.agent_id=sr.agent_id "
+        "AND s.task_digest=sr.task_digest AND s.session_key=sr.session_key "
+        "WHERE sr.spawn_request_id=? AND sr.run_id=? AND sr.transition_id=? "
+        "AND sr.client_request_id=? AND sr.spawn_idempotency_key=? "
+        "AND sr.phase=? AND sr.agent_id=? AND sr.task_digest=? "
+        "AND sr.state IN ('accepted','completed') AND sr.session_key=?",
+        (
+            request.spawn_request_id,
+            request.run_id,
+            request.transition_id,
+            request.spawn_client_request_id,
+            request.spawn_idempotency_key,
+            request.phase,
+            request.agent_id,
+            request.task_digest,
+            external_id,
+        ),
+    ).fetchone()
+    if row is None:
+        raise RuntimeDispatchError(
+            "accepted sessions_spawn replay lacks local session proof"
+        )
+    return validate_accepted_session_identity(
+        external_id=external_id,
+        spawn_request_session_key=row[0],
+        session_key=row[1],
+    )
 
 
 def _assert_no_conflicting_spawn_replay(
@@ -606,7 +644,7 @@ def persist_acquired_lease(
         "external_agent_id=?,external_requester_agent_id=?,external_ttl_ms=?,"
         "external_id=?,accepted_at=COALESCE(accepted_at,?),accepted_at_epoch_ms="
         "COALESCE(accepted_at_epoch_ms,?) WHERE rpc_kind='allow_lease_acquire' "
-        "AND idempotency_key=?",
+        "AND idempotency_key=? AND state IN ('pending','unknown')",
         (
             state,
             observation.metadata_contract_version,
@@ -632,7 +670,8 @@ def persist_acquired_lease(
         "metadata_observed_at=?,external_metadata_json=?,external_client_lease_id=?,"
         "external_idempotency_key=?,external_run_id=?,external_phase=?,external_transition_id=?,"
         "external_agent_id=?,external_requester_agent_id=?,external_ttl_ms=?,acquired_at=? "
-        "WHERE client_lease_id=?",
+        "WHERE client_lease_id=? AND state='acquire_pending' "
+        "AND gateway_lease_id IS NULL",
         (
             gateway_lease_id,
             observation.metadata_contract_version,
@@ -675,13 +714,14 @@ def persist_spawn_acceptance(
         metadata_contract_version=observation.metadata_contract_version,
     )
     state = "reconciled" if reconciled else "accepted"
-    connection.execute(
+    intent_cursor = connection.execute(
         "UPDATE external_rpc_intents SET state=?,metadata_contract_version=?,"
         "external_metadata_json=?,external_run_id=?,external_transition_id=?,"
         "external_client_request_id=?,external_idempotency_key=?,external_phase=?,"
         "external_agent_id=?,external_task_digest=?,external_id=?,accepted_at="
         "COALESCE(accepted_at,?),accepted_at_epoch_ms=COALESCE(accepted_at_epoch_ms,?) "
-        "WHERE rpc_kind='sessions_spawn' AND idempotency_key=?",
+        "WHERE rpc_kind='sessions_spawn' AND idempotency_key=? "
+        "AND state IN ('pending','unknown')",
         (
             state,
             observation.metadata_contract_version,
@@ -699,9 +739,15 @@ def persist_spawn_acceptance(
             request.spawn_idempotency_key,
         ),
     )
-    connection.execute(
+    if intent_cursor.rowcount != 1:
+        raise RuntimeDispatchError(
+            "sessions_spawn intent update did not match exactly one row"
+        )
+    spawn_cursor = connection.execute(
         "UPDATE spawn_requests SET session_key=?,dispatch_run_id=?,metadata_contract_version=?,"
-        "metadata_observed_at=?,external_metadata_json=?,updated_at=? WHERE spawn_request_id=?",
+        "metadata_observed_at=?,external_metadata_json=?,updated_at=? "
+        "WHERE spawn_request_id=? AND state IN ('pending','unknown') "
+        "AND (session_key IS NULL OR session_key='')",
         (
             session_key,
             session_key,
@@ -712,8 +758,12 @@ def persist_spawn_acceptance(
             request.spawn_request_id,
         ),
     )
+    if spawn_cursor.rowcount != 1:
+        raise RuntimeDispatchError(
+            "sessions_spawn request update did not match exactly one row"
+        )
     connection.execute(
-        "INSERT OR IGNORE INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+        "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
         "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,task_digest,"
         "status_metadata_json,state,spawned_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
@@ -732,10 +782,15 @@ def persist_spawn_acceptance(
             now,
         ),
     )
-    connection.execute(
-        "UPDATE spawn_requests SET state='accepted',updated_at=? WHERE spawn_request_id=?",
-        (now, request.spawn_request_id),
+    accept_cursor = connection.execute(
+        "UPDATE spawn_requests SET state='accepted',updated_at=? "
+        "WHERE spawn_request_id=? AND state IN ('pending','unknown') AND session_key=?",
+        (now, request.spawn_request_id, session_key),
     )
+    if accept_cursor.rowcount != 1:
+        raise RuntimeDispatchError(
+            "sessions_spawn acceptance did not match exactly one row"
+        )
 
 
 def mark_human_review(

@@ -600,6 +600,25 @@ class RuntimeDispatchTests(unittest.TestCase):
                     dispatch_with_metadata(self.database, adapter, changed)
                 self.assertEqual(adapter.calls, [])
 
+    def test_accepted_spawn_replay_requires_local_session_proof(self) -> None:
+        self._seed_unknown_spawn()
+        spawn = spawn_metadata(self.request)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE external_rpc_intents SET state='accepted',"
+                "metadata_contract_version='v1',external_metadata_json=?,"
+                "external_run_id='run',external_transition_id='transition',"
+                "external_client_request_id='client',external_idempotency_key='spawn-idem',"
+                "external_phase='phase',external_agent_id='agent',external_task_digest='task',"
+                "external_id='session-key',accepted_at='now',accepted_at_epoch_ms=1800000000004 "
+                "WHERE rpc_kind='sessions_spawn'",
+                (stable_json(spawn),),
+            )
+        adapter = ScriptedAdapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "local session proof"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, [])
+
     def test_conflicting_acquire_intent_reuse_fails_before_adapter_call(self) -> None:
         with self._connect() as connection:
             conflict = dict(lease_metadata(self.request, "pending"))
@@ -708,6 +727,103 @@ class RuntimeDispatchTests(unittest.TestCase):
                 connection.execute(
                     "SELECT COUNT(*) FROM external_rpc_intents "
                     "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_late_acquire_acceptance_cannot_override_human_review(self) -> None:
+        database = self.database
+
+        class LateAcquireAdapter(ScriptedAdapter):
+            def allow_lease_acquire(inner_self, params):
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        "UPDATE external_rpc_intents SET state='human_review_required' "
+                        "WHERE rpc_kind='allow_lease_acquire'"
+                    )
+                    connection.execute(
+                        "UPDATE leases SET state='human_review_required',"
+                        "reconciliation_status='manual-review' "
+                        "WHERE client_lease_id='client-lease'"
+                    )
+                return super().allow_lease_acquire(params)
+
+        adapter = LateAcquireAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ]
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "allow lease metadata"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_late_spawn_acceptance_cannot_override_human_review(self) -> None:
+        database = self.database
+
+        class LateSpawnAdapter(ScriptedAdapter):
+            def sessions_spawn(inner_self, params):
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        "UPDATE external_rpc_intents SET state='human_review_required' "
+                        "WHERE rpc_kind='sessions_spawn'"
+                    )
+                    connection.execute(
+                        "UPDATE spawn_requests SET state='human_review_required',"
+                        "ambiguity_reason='manual-review' "
+                        "WHERE spawn_request_id='spawn'"
+                    )
+                return super().sessions_spawn(params)
+
+        adapter = LateSpawnAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            spawn=[observation(spawn_metadata(self.request), external_id="session-key")],
+            release=[self._release_observation()],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "owned lease released"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(
+            adapter.calls,
+            ["allow_lease_acquire", "sessions_spawn", "allow_lease_release"],
+        )
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,session_key FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone(),
+                ("human_review_required", None),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE spawn_request_id='spawn'"
                 ).fetchone()[0],
                 0,
             )

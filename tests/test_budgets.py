@@ -177,6 +177,26 @@ class BudgetRuntimeTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute("SELECT COUNT(*) FROM budget_events").fetchone()[0]
 
+    def _seed_runtime_dispatch_binding(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+                "expires_at_epoch_ms) VALUES('lease','run','phase','transition','agent',"
+                "'requester','acquire_pending','client-lease','acquire-idem',"
+                "'release-idem',60000,'now','later',1800000060124)"
+            )
+            connection.execute(
+                "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+                "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+                "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+                "spawn_idempotency_key,created_at) VALUES('spawn','lease','run','transition',"
+                "'phase','agent','requester','task','client-lease','acquire-idem',"
+                "'release-idem','client','spawn-idem','now')"
+            )
+
     def _settlement_count(self) -> int:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             return connection.execute(
@@ -206,6 +226,22 @@ class BudgetRuntimeTests(unittest.TestCase):
                 "'run','transition','phase','agent','client','spawn-idem','session-key',"
                 "'task',?,'now',?)",
                 ("completed" if completed else "running", "now" if completed else None),
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+                "expires_at_epoch_ms) VALUES('lease','run','phase','transition','agent',"
+                "'requester','acquire_pending','client-lease','acquire-idem',"
+                "'release-idem',60000,'now','later',1800000060124)"
+            )
+            connection.execute(
+                "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+                "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+                "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+                "spawn_idempotency_key,created_at) VALUES('spawn','lease','run','transition',"
+                "'phase','agent','requester','task','client-lease','acquire-idem',"
+                "'release-idem','client','spawn-idem','now')"
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -555,6 +591,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
         )
         reserve = reserve_budget(self.database, **kwargs)
+        self._seed_runtime_dispatch_binding()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
@@ -586,6 +623,7 @@ class BudgetRuntimeTests(unittest.TestCase):
             amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
         )
         reserve = reserve_budget(self.database, **kwargs)
+        self._seed_runtime_dispatch_binding()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
@@ -617,6 +655,7 @@ class BudgetRuntimeTests(unittest.TestCase):
                 amounts=BudgetAmounts(input_tokens=1, cost_microusd=1),
             ),
         )
+        self._seed_runtime_dispatch_binding()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
@@ -1589,6 +1628,24 @@ class BudgetRuntimeTests(unittest.TestCase):
             connection.execute(
                 "UPDATE run_budgets SET reserved_input_tokens=11,"
                 "reserved_cost_microusd=2 WHERE run_id='run'"
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+                "expires_at_epoch_ms) VALUES('lease-duplicate','run','phase','transition',"
+                "'agent','requester','acquire_pending','client-lease-duplicate',"
+                "'acquire-idem-duplicate','release-idem-duplicate',60000,'now','later',"
+                "1800000060124)"
+            )
+            connection.execute(
+                "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+                "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+                "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+                "spawn_idempotency_key,created_at) VALUES('spawn-duplicate',"
+                "'lease-duplicate','run','transition','phase','agent','requester',"
+                "'task-duplicate','client-lease-duplicate','acquire-idem-duplicate',"
+                "'release-idem-duplicate','client-duplicate','spawn-idem-duplicate','now')"
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"

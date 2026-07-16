@@ -357,6 +357,66 @@ class MigrationTests(unittest.TestCase):
             )
         return request
 
+    def _seed_runtime_dispatch_binding(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        transition_id: str,
+        phase: str,
+        agent_id: str,
+        task_digest: str,
+        spawn_request_id: str,
+        spawn_client_request_id: str,
+        spawn_idempotency_key: str,
+        requester_agent_id: str = "requester",
+        lease_id: str = "lease",
+        client_lease_id: str = "client-lease",
+        acquire_idempotency_key: str = "acquire-idem",
+        release_idempotency_key: str = "release-idem",
+    ) -> None:
+        connection.execute(
+            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+            "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+            "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+            "expires_at_epoch_ms) VALUES(?,?,?,?,?,?,'acquire_pending',?,?,?,?,"
+            "'now','later',1800000060000)",
+            (
+                lease_id,
+                run_id,
+                phase,
+                transition_id,
+                agent_id,
+                requester_agent_id,
+                client_lease_id,
+                acquire_idempotency_key,
+                release_idempotency_key,
+                60_000,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+            "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+            "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+            "spawn_idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                spawn_request_id,
+                lease_id,
+                run_id,
+                transition_id,
+                phase,
+                agent_id,
+                requester_agent_id,
+                task_digest,
+                client_lease_id,
+                acquire_idempotency_key,
+                release_idempotency_key,
+                spawn_client_request_id,
+                spawn_idempotency_key,
+                "now",
+            ),
+        )
+
     def _insert_gate_bound_evidence(
         self,
         connection: sqlite3.Connection,
@@ -552,6 +612,21 @@ class MigrationTests(unittest.TestCase):
                 ).fetchone(),
                 ("released",),
             )
+
+    def test_v10_rejects_post_migration_spawn_intent_without_binding(self) -> None:
+        self.assertEqual(
+            apply_migrations(self.database),
+            tuple(migration.version for migration in load_migrations()),
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "runtime dispatch binding"):
+                self._seed_v9_dispatch(
+                    connection,
+                    "unbound-post-v10",
+                    spawn_state="pending",
+                    requested_at_epoch_ms=1_800_000_000_250,
+                )
 
     def test_v10_upgrade_refuses_ambiguous_v9_dispatch_binding(self) -> None:
         self._apply_migrations_through(9, "v9-ambiguous")
@@ -2425,6 +2500,17 @@ class MigrationTests(unittest.TestCase):
             "updated_at) VALUES('spawn','r','phase','agent','t','client','spawn-idem','task',"
             "'pending','accepted-session','now','now')"
         )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="r",
+            transition_id="t",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+        )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,phase,"
@@ -2534,16 +2620,16 @@ class MigrationTests(unittest.TestCase):
                         "sessions_spawn",
                         "spawn",
                         reserve_id,
-                        f"client-{identifier}",
-                        f"spawn-idem-{identifier}",
+                        "client",
+                        "spawn-idem",
                         "phase",
                         "agent",
                         "task",
                         "v1",
                         "{}",
                         external_metadata,
-                        f"client-{identifier}",
-                        f"spawn-idem-{identifier}",
+                        "client",
+                        "spawn-idem",
                         "phase",
                         "agent",
                         "task",
@@ -4431,6 +4517,17 @@ class MigrationTests(unittest.TestCase):
             "created_at,updated_at) VALUES('spawn','clock-run','phase','agent',"
             "'transition-clock','client','spawn-idem','task','pending','now','now')"
         )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="clock-run",
+            transition_id="transition-clock",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+        )
         external_metadata = (
             '{"run_id":"clock-run","transition_id":"transition-clock",'
             '"client_request_id":"client","idempotency_key":"spawn-idem",'
@@ -4573,6 +4670,17 @@ class MigrationTests(unittest.TestCase):
             "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
             "created_at,updated_at) VALUES('spawn','cost-run','phase','agent',"
             "'transition-cost','client','spawn-idem','task','pending','now','now')"
+        )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="cost-run",
+            transition_id="transition-cost",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
@@ -4720,6 +4828,17 @@ class MigrationTests(unittest.TestCase):
             "created_at,updated_at) VALUES('spawn','clockless-run','phase','agent',"
             "'transition-clockless','client','spawn-idem','task','pending','now','now')"
         )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="clockless-run",
+            transition_id="transition-clockless",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+        )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
             "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
@@ -4849,6 +4968,17 @@ class MigrationTests(unittest.TestCase):
             "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
             "created_at,updated_at) VALUES('spawn','transition-run','phase','agent',"
             "'transition-event','client','spawn-idem','task','pending','now','now')"
+        )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="transition-run",
+            transition_id="transition-event",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"

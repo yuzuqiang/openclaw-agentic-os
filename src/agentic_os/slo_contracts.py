@@ -469,6 +469,39 @@ def _replace_contract(
     )
 
 
+def _runtime_dispatch_binding_contract() -> SloQueryContract:
+    contract = _contract_by_name(
+        '`sessions_spawn` intent without exact spawn request binding'
+    )
+    sql_text = (
+        "SELECT eri.intent_id FROM external_rpc_intents eri "
+        "LEFT JOIN spawn_requests sr ON sr.spawn_request_id=eri.spawn_request_id "
+        "AND sr.run_id=eri.run_id AND sr.transition_id=eri.transition_id "
+        "AND sr.client_request_id=eri.client_request_id "
+        "AND sr.spawn_idempotency_key=eri.idempotency_key "
+        "AND sr.phase=eri.phase AND sr.agent_id=eri.agent_id "
+        "AND sr.task_digest=eri.task_digest "
+        "LEFT JOIN runtime_dispatch_bindings b "
+        "ON b.spawn_request_id=eri.spawn_request_id "
+        "AND b.run_id=eri.run_id AND b.transition_id=eri.transition_id "
+        "AND b.phase=eri.phase AND b.agent_id=eri.agent_id "
+        "AND b.task_digest=eri.task_digest "
+        "AND b.spawn_client_request_id=eri.client_request_id "
+        "AND b.spawn_idempotency_key=eri.idempotency_key "
+        "WHERE eri.rpc_kind='sessions_spawn' AND ("
+        "eri.spawn_request_id IS NULL OR eri.phase IS NULL OR eri.phase='' "
+        "OR eri.agent_id IS NULL OR eri.agent_id='' "
+        "OR eri.task_digest IS NULL OR eri.task_digest='' "
+        "OR sr.spawn_request_id IS NULL OR b.spawn_request_id IS NULL);"
+    )
+    return SloQueryContract(
+        contract.query_name,
+        sql_text,
+        contract.empty_db_expected_status,
+        contract.fixture_db_expected_status,
+    )
+
+
 _SLO_QUERY_CONTRACTS_V3 = _replace_contract(
     _replace_contract(
         SLO_QUERY_CONTRACTS,
@@ -524,6 +557,11 @@ SLO_QUERY_CONTRACTS = _replace_contract(
         )
     ),
 )
+_SLO_QUERY_CONTRACTS_V8_V9 = SLO_QUERY_CONTRACTS
+SLO_QUERY_CONTRACTS = _replace_contract(
+    SLO_QUERY_CONTRACTS,
+    _runtime_dispatch_binding_contract(),
+)
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
@@ -533,6 +571,8 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     5: _SLO_QUERY_CONTRACTS_V5,
     6: _SLO_QUERY_CONTRACTS_V6,
     7: _SLO_QUERY_CONTRACTS_V7,
+    8: _SLO_QUERY_CONTRACTS_V8_V9,
+    9: _SLO_QUERY_CONTRACTS_V8_V9,
 }
 
 

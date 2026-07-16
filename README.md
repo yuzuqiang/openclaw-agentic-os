@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `ba576cbd979e945c9d2f6eb3287f36c4e85c0fe1dc2e8a42a687d33dacc7fd0b`
+- Current design artifact SHA-256: `6e5f79c9fb8e248e8a08a6d0e7451112597db342baa1692fe8d8a61fd3447cad`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `8ac4f7b7f8767ab89a4e73642dd180f15755fcd2ca95bea939b0870736844aa3`
-- Current migration manifest SHA-256: `7a949159543694126b37d34c4eccee8cf1c8a03d5773138740d2e939a0407d46`
+- Current latest migration SHA-256: `5775fcafd9f616da757b7cadfba737adb073a525e9c405c8d2eed20140a680c2`
+- Current migration manifest SHA-256: `97d1a3b174bf63a39ab2ac8755cdaa6c0b1056f6b420a2325288c2a8dea471db`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
@@ -195,6 +195,10 @@ dispatch before another lease or spawn RPC, while terminal pre-spawn failures do
 not permanently occupy the slot. Migration v10 backfills pre-existing bindings
 only from an exact one-to-one identity and request-timestamp proof and aborts on
 unbound or ambiguous legacy rows rather than silently skipping reconciliation.
+Post-v10 `sessions_spawn` intents are rejected unless the exact runtime dispatch
+binding already exists, and accepted/reconciled replay requires matching local
+`spawn_requests` plus `sessions` proof instead of trusting the external intent
+row alone.
 Unknown or pending `sessions_spawn` outcomes are never retried; zero, ambiguous,
 mismatched, or incomplete session-identity observations move to human review.
 
