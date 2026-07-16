@@ -27,6 +27,7 @@ MAX_JSON_PATH_LENGTH = 32
 MAX_STRING_LENGTH = 4096
 MAX_FILE_EVIDENCE_BYTES = 8 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_HEAD_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _CREDENTIAL_FILE_NAMES = frozenset(
     {
         ".aws",
@@ -157,6 +158,7 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
     if op == "json_equals":
         _require_keys(predicate, ("op", "document", "path", "value"), "json_equals predicate")
         document_name = _bounded_string(predicate["document"], "json document name")
+        _reject_sensitive_evidence_name(document_name, "json document name")
         json_documents = _evidence_mapping(context.json_documents, "JSON evidence map")
         if document_name not in json_documents:
             raise PredicateContractError(f"missing JSON evidence document: {document_name}")
@@ -174,6 +176,8 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         )
         result_id = _bounded_string(predicate["id"], "command result id")
         field_name = _bounded_string(predicate["field"], "command result field")
+        _reject_sensitive_evidence_name(result_id, "command result id")
+        _reject_sensitive_evidence_name(field_name, "command result field")
         command_results = _evidence_mapping(
             context.command_results, "command result evidence map"
         )
@@ -288,7 +292,7 @@ def _validate_git_metadata(git_dir: Path, common_dir: Path) -> None:
             or ".." in ref_path.parts
         ):
             raise PredicateContractError("repo root must contain valid Git metadata")
-    elif not _SHA256_RE.fullmatch(head_content):
+    elif not _GIT_HEAD_OBJECT_RE.fullmatch(head_content):
         raise PredicateContractError("repo root must contain valid Git metadata")
     if not (common_dir / "objects").is_dir() or not (common_dir / "refs").is_dir():
         raise PredicateContractError("repo root must contain valid Git metadata")
@@ -305,13 +309,37 @@ def _repo_path(repo_root: Path, raw_path: Any) -> Path:
     candidate_input = Path(relative)
     if candidate_input.is_absolute():
         raise PredicateContractError("repo-relative path must not be absolute")
+    _reject_unsafe_relative_path_parts(candidate_input)
+    _assert_predicate_path_allowed(relative)
+    _reject_symlink_evidence_path(repo_root, candidate_input)
     try:
         candidate = (repo_root / candidate_input).resolve(strict=False)
         resolved_relative = candidate.relative_to(repo_root).as_posix()
     except (OSError, ValueError) as exc:
         raise PredicateContractError("repo-relative path escapes repo root") from exc
-    _assert_predicate_path_allowed(relative, resolved_relative)
+    _assert_predicate_path_allowed(resolved_relative)
     return candidate
+
+
+def _reject_unsafe_relative_path_parts(relative_path: Path) -> None:
+    if ".." in relative_path.parts:
+        raise PredicateContractError("repo-relative path escapes repo root")
+
+
+def _reject_symlink_evidence_path(repo_root: Path, relative_path: Path) -> None:
+    current = repo_root
+    for part in relative_path.parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        try:
+            path_stat = os.stat(current, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise PredicateContractError("file evidence path cannot be inspected") from exc
+        if S_ISLNK(path_stat.st_mode):
+            raise PredicateContractError("file evidence cannot use symlink evidence")
 
 
 def _assert_predicate_path_allowed(*relative_paths: str) -> None:
@@ -346,6 +374,13 @@ def _is_credential_path_denied(relative: str) -> bool:
         if part.endswith(_CREDENTIAL_FILE_SUFFIXES):
             return True
     return False
+
+
+def _reject_sensitive_evidence_name(value: str, label: str) -> None:
+    if _is_credential_path_denied(value):
+        raise PredicateContractError(
+            f"{label} targets private credentials or artifacts"
+        )
 
 
 def _repo_path_stat(path: Path, label: str) -> Any:
@@ -475,7 +510,8 @@ def _json_path_lookup(document: Any, path: Any) -> Any:
     current = document
     for segment in path:
         if isinstance(segment, str):
-            _bounded_string(segment, "json path segment")
+            segment = _bounded_string(segment, "json path segment")
+            _reject_sensitive_evidence_name(segment, "json path segment")
             if not isinstance(current, Mapping) or segment not in current:
                 raise PredicateContractError("json_equals evidence path is missing")
             current = current[segment]

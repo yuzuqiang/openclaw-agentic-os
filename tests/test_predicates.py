@@ -243,7 +243,7 @@ class PredicateTests(unittest.TestCase):
 
             for path in ("../secret.txt", str(outside_file), "link"):
                 with self.subTest(path=path), self.assertRaisesRegex(
-                    PredicateContractError, "repo"
+                    PredicateContractError, "repo|symlink evidence"
                 ):
                     evaluate_predicate_document(
                         document({"op": "file_exists", "path": path}),
@@ -274,7 +274,7 @@ class PredicateTests(unittest.TestCase):
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
-    def test_resolved_raw_state_symlink_paths_are_rejected_before_reading(self) -> None:
+    def test_raw_state_symlink_paths_are_rejected_before_target_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_repo_root(tmp)
             state = root / "state" / "agentic-os"
@@ -296,7 +296,37 @@ class PredicateTests(unittest.TestCase):
             )
             for predicate in cases:
                 with self.subTest(predicate=predicate), self.assertRaisesRegex(
-                    PredicateContractError, "private raw state"
+                    PredicateContractError, "symlink evidence"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
+    def test_file_predicates_reject_symlink_evidence_before_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            target = root / "evidence.txt"
+            target.write_text("predicate evidence\n", encoding="utf-8")
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            link = root / "evidence-link"
+            link.symlink_to(target)
+            broken = root / "broken-link"
+            broken.symlink_to(root / "missing-target")
+            context = PredicateContext(repo_root=root)
+
+            cases = (
+                {"op": "file_exists", "path": "evidence-link"},
+                {
+                    "op": "file_sha256",
+                    "path": "evidence-link",
+                    "sha256": digest,
+                },
+                {
+                    "op": "not",
+                    "predicate": {"op": "file_exists", "path": "broken-link"},
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "symlink evidence"
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
@@ -334,7 +364,7 @@ class PredicateTests(unittest.TestCase):
             )
             for predicate in cases:
                 with self.subTest(predicate=predicate), self.assertRaisesRegex(
-                    PredicateContractError, "private credentials or artifacts"
+                    PredicateContractError, "private credentials or artifacts|symlink evidence"
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
@@ -631,6 +661,18 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=fake_root),
                 )
 
+    def test_sha1_detached_head_git_worktree_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            (root / ".git" / "HEAD").write_text("a" * 40 + "\n", encoding="utf-8")
+
+            self.assertTrue(
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+            )
+
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(
@@ -677,6 +719,66 @@ class PredicateTests(unittest.TestCase):
             for predicate in cases:
                 with self.subTest(predicate=predicate), self.assertRaisesRegex(
                     PredicateContractError, "type mismatch"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
+
+    def test_sensitive_json_and_command_evidence_names_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = PredicateContext(
+                repo_root=make_repo_root(tmp),
+                json_documents={
+                    "manifest": {
+                        "password": "secret",
+                        "nested": {"api_key": "secret"},
+                    },
+                    "secret-manifest": {"status": "pass"},
+                },
+                command_results={
+                    "unit": {"password": "secret", "api_key": "secret"},
+                    "secret-check": {"exit_code": 0},
+                },
+            )
+            cases = (
+                {
+                    "op": "json_equals",
+                    "document": "secret-manifest",
+                    "path": ["status"],
+                    "value": "pass",
+                },
+                {
+                    "op": "json_equals",
+                    "document": "manifest",
+                    "path": ["password"],
+                    "value": "secret",
+                },
+                {
+                    "op": "json_equals",
+                    "document": "manifest",
+                    "path": ["nested", "api_key"],
+                    "value": "secret",
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "secret-check",
+                    "field": "exit_code",
+                    "value": 0,
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "unit",
+                    "field": "password",
+                    "value": "secret",
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "unit",
+                    "field": "api_key",
+                    "value": "secret",
+                },
+            )
+            for predicate in cases:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "private credentials or artifacts"
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
