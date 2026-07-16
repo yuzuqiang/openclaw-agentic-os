@@ -131,6 +131,21 @@ class PassGateWriterTests(unittest.TestCase):
         kwargs.update(overrides)
         record_approval_pass_gate(self.database, **kwargs)
 
+    def _assert_no_bundle_rows(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            for table in (
+                "approvals",
+                "gate_runs",
+                "gate_clock_context",
+                "judge_verifier_runs",
+                "evidence_hashes",
+            ):
+                self.assertEqual(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                    0,
+                    table,
+                )
+
     def test_records_exact_approval_clock_verifier_pass_gate_bundle(self) -> None:
         self._record()
 
@@ -181,13 +196,42 @@ class PassGateWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(PassGateError, "expire after"):
             self._record(approval=self._approval(expires_at_epoch_ms=1_800_000_000_000))
 
-        with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM gate_runs").fetchone()[0], 0)
-            self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM judge_verifier_runs").fetchone()[0],
-                0,
-            )
+        self._assert_no_bundle_rows()
+
+    def test_malformed_gate_identity_hashes_are_rejected_before_any_bundle_rows(self) -> None:
+        for field_name in (
+            "trusted_clock_source_hash",
+            "gate_query_hash",
+            "migration_sha256",
+        ):
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(PassGateError, field_name):
+                    self._record(**{field_name: "not-a-sha256"})
+                self._assert_no_bundle_rows()
+
+    def test_malformed_verifier_hashes_are_rejected_before_any_bundle_rows(self) -> None:
+        for field_name in ("prompt_hash", "context_hash"):
+            with self.subTest(field_name=field_name):
+                values = {
+                    "prompt_hash": _sha("prompt"),
+                    "context_hash": _sha("context"),
+                }
+                values[field_name] = "ABCDEF"
+                with self.assertRaisesRegex(PassGateError, field_name):
+                    self._record(
+                        verifier=VerifierProof(
+                            verifier_run_id="verifier",
+                            worker_agent_id="writer",
+                            verifier_agent_id="security-reviewer",
+                            provider="openai",
+                            model="gpt-5",
+                            prompt_hash=values["prompt_hash"],
+                            context_hash=values["context_hash"],
+                            independence_proof={"reviewer_session": "phase-c"},
+                            completed_at="verified-now",
+                        )
+                    )
+                self._assert_no_bundle_rows()
 
     def test_same_worker_verifier_is_rejected(self) -> None:
         with self.assertRaisesRegex(PassGateError, "independent"):
@@ -215,9 +259,7 @@ class PassGateWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(PassGateError, "database-authority"):
             self._record()
 
-        with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM gate_runs").fetchone()[0], 0)
+        self._assert_no_bundle_rows()
 
 
 if __name__ == "__main__":

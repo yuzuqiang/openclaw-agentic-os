@@ -122,12 +122,12 @@ def record_approval_pass_gate(
     clock_context_id = _required_text("clock_context_id", clock_context_id)
     gate_nonce = _required_text("gate_nonce", gate_nonce)
     bound_by = _required_text("bound_by", bound_by)
-    trusted_clock_source_hash = _required_text(
+    trusted_clock_source_hash = _sha256_text(
         "trusted_clock_source_hash", trusted_clock_source_hash
     )
     gate_version = _required_text("gate_version", gate_version)
-    gate_query_hash = _required_text("gate_query_hash", gate_query_hash)
-    migration_sha256 = _required_text("migration_sha256", migration_sha256)
+    gate_query_hash = _sha256_text("gate_query_hash", gate_query_hash)
+    migration_sha256 = _sha256_text("migration_sha256", migration_sha256)
     completed_at = _required_text("completed_at", completed_at)
     created_at = _required_text("created_at", created_at)
     now_epoch_ms = _epoch_ms("now_epoch_ms", now_epoch_ms)
@@ -525,8 +525,8 @@ def _validate_verifier(verifier: VerifierProof) -> None:
         raise PassGateError("verifier must be independent from worker")
     _required_text("provider", verifier.provider)
     _required_text("model", verifier.model)
-    _required_text("prompt_hash", verifier.prompt_hash)
-    _required_text("context_hash", verifier.context_hash)
+    _sha256_text("prompt_hash", verifier.prompt_hash)
+    _sha256_text("context_hash", verifier.context_hash)
     if verifier.prompt_hash == verifier.context_hash:
         raise PassGateError("verifier prompt and context hashes must differ")
     if not verifier.independence_proof:
