@@ -334,6 +334,10 @@ def _require_gitdir_worktree_matches_root(git_dir: Path, root: Path) -> None:
                 raise PredicateContractError(
                     "repo root gitdir core.worktree does not match"
                 )
+            try:
+                _require_gitdir_file_matches_root(git_dir, root)
+            except FileNotFoundError:
+                pass
             return
     _require_gitdir_file_matches_root(git_dir, root)
 
@@ -433,7 +437,7 @@ def _validate_git_metadata(
         repository_format_version = parser.getint("core", "repositoryformatversion")
     except ValueError as exc:
         raise PredicateContractError("repo root must contain valid Git metadata") from exc
-    if repository_format_version != 0:
+    if repository_format_version not in (0, 1):
         raise PredicateContractError("repo root must contain valid Git metadata")
     try:
         is_bare = parser.getboolean("core", "bare", fallback=False)
@@ -619,7 +623,7 @@ def _is_credential_path_denied(relative: str) -> bool:
 def _credential_name_variants(part: str) -> tuple[str, ...]:
     variants = [part]
     current = part
-    for _ in range(4):
+    while True:
         stripped = None
         for suffix in _CREDENTIAL_BACKUP_SUFFIXES:
             if current.endswith(suffix) and len(current) > len(suffix):
@@ -807,7 +811,8 @@ def _json_scalar(value: Any, label: str) -> Any:
         return value
     if isinstance(value, (str, int, float)):
         if isinstance(value, str):
-            _bounded_string(value, label)
+            if "\x00" in value or len(value) > MAX_STRING_LENGTH:
+                raise PredicateContractError(f"{label} is outside safe bounds")
         if isinstance(value, float) and not math.isfinite(value):
             raise PredicateContractError(f"{label} must be finite")
         return value

@@ -375,6 +375,9 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": "id_rsa_backup"},
                 {"op": "file_exists", "path": "config/clientSecret.txt"},
                 {"op": "file_exists", "path": "state/agentic-os/control.db_backup"},
+                {"op": "file_exists", "path": "state/agentic-os/control.db~"},
+                {"op": "file_exists", "path": "state/agentic-os/control.sqlite3~"},
+                {"op": "file_exists", "path": "prod.env.bak.bak.bak.bak.bak"},
                 {"op": "file_exists", "path": "public-evidence"},
             )
             for predicate in cases:
@@ -914,17 +917,26 @@ class PredicateTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = make_repo_root(tmp)
-            for value in ("nope", "1"):
-                with self.subTest(value=value):
-                    (root / ".git" / "config").write_text(
-                        f"[core]\n\trepositoryformatversion = {value}\n",
-                        encoding="utf-8",
-                    )
-                    with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
-                        evaluate_predicate_document(
-                            document({"op": "literal", "value": True}),
-                            PredicateContext(repo_root=root),
-                        )
+            (root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = nope\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+            (root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 1\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+            )
 
     def test_linked_worktree_rejects_empty_commondir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1107,6 +1119,41 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=borrowed_root),
                 )
 
+    def test_linked_worktree_gitdir_file_is_checked_with_core_worktree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            linked_root = base / "linked-root"
+            linked_root.mkdir()
+            other_root = base / "other-root"
+            other_root.mkdir()
+            git_dir = base / "gitdir"
+            git_dir.mkdir()
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 0\n"
+                f"\tworktree = {linked_root}\n",
+                encoding="utf-8",
+            )
+            (git_dir / "objects").mkdir()
+            (git_dir / "refs").mkdir()
+            (git_dir / "gitdir").write_text(
+                str(other_root / ".git") + "\n",
+                encoding="utf-8",
+            )
+            (linked_root / ".git").write_text(
+                f"gitdir: {git_dir}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(PredicateContractError, "gitdir file"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=linked_root),
+                )
+
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(
@@ -1155,6 +1202,30 @@ class PredicateTests(unittest.TestCase):
                     PredicateContractError, "type mismatch"
                 ):
                     evaluate_predicate_document(document(predicate), context)
+
+    def test_empty_string_scalar_evidence_is_comparable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = PredicateContext(
+                repo_root=make_repo_root(tmp),
+                json_documents={"manifest": {"stdout": ""}},
+                command_results={"unit": {"stdout": ""}},
+            )
+            for predicate in (
+                {
+                    "op": "json_equals",
+                    "document": "manifest",
+                    "path": ["stdout"],
+                    "value": "",
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "unit",
+                    "field": "stdout",
+                    "value": "",
+                },
+            ):
+                with self.subTest(predicate=predicate):
+                    self.assertTrue(evaluate_predicate_document(document(predicate), context))
 
     def test_sensitive_json_and_command_evidence_names_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

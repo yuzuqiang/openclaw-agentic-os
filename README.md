@@ -90,7 +90,7 @@ raw database state paths, hard-linked file aliases, common credential stores
 such as `.git`, `.docker`, and `.kube`, borrowed gitdir metadata whose
 `core.worktree` or linked-worktree `gitdir` pointer does not bind the requested root,
 credential/private paths, separator-based `.env` backups, backed-up credential filenames,
-camelCase credential names, underscore-suffixed raw database backups,
+camelCase credential names, underscore- and tilde-suffixed raw database backups,
 password/API-key JSON and command evidence names,
 unreadable or unstatable file evidence, symlink evidence before target resolution,
 swapped symlink evidence, symlink parent components rechecked at file use,
@@ -100,7 +100,9 @@ maps, JSON scalar type mismatches, writes, missing evidence, and malformed predi
 documents fail closed with
 `PredicateContractError`. Boolean composition validates every child before
 aggregating results, so unsupported adapters cannot be hidden behind short-circuit
-success. It does not call
+success. Git `core.repositoryformatversion` values `0` and `1` are accepted when
+the remaining metadata is valid, and empty strings are valid JSON/command scalar
+evidence values. It does not call
 OpenClaw, Gateway, Cron, or a production database, and it does not grant trust or
 approval authority.
 
