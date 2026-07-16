@@ -131,6 +131,10 @@ def _tool_entries(catalog: Mapping[str, Any]) -> Mapping[str, frozenset[str]]:
             entry = _mapping(item, "runtime tool catalog entry")
             name = _tool_name(entry)
             if name is not None:
+                if name in entries and name in _REQUIRED_SESSION_TOOL_PARAMS:
+                    raise AdapterContractError(
+                        f"runtime tool catalog has duplicate {name} entries"
+                    )
                 entries[name] = _tool_parameters(entry)
         return entries
     raise AdapterContractError("runtime tool catalog must expose tools")
@@ -199,10 +203,10 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
 
 def _history_item_session_keys(
     response: Mapping[str, Any],
-) -> tuple[tuple[str, str | None, str | None], ...]:
+) -> tuple[tuple[str, str | None, str | None, str | None], ...]:
     """Return item-level session identities from a history response."""
 
-    identities: list[tuple[str, str | None, str | None]] = []
+    identities: list[tuple[str, str | None, str | None, str | None]] = []
     for container_name in ("messages", "history", "items", "events"):
         items = response.get(container_name)
         if not isinstance(items, Sequence) or isinstance(
@@ -255,8 +259,29 @@ def _history_item_session_keys(
                     ),
                 ),
             )
-            if session_key is not None or spawn_request_session_key is not None:
-                identities.append((label, session_key, spawn_request_session_key))
+            external_id = _consistent_identity(
+                f"{label} external identity",
+                (
+                    (f"{label}.external_id", item.get("external_id")),
+                    (f"{label}.externalId", item.get("externalId")),
+                    (
+                        f"{label}.session.external_id",
+                        session.get("external_id"),
+                    ),
+                    (
+                        f"{label}.session.externalId",
+                        session.get("externalId"),
+                    ),
+                ),
+            )
+            if (
+                session_key is not None
+                or spawn_request_session_key is not None
+                or external_id is not None
+            ):
+                identities.append(
+                    (label, session_key, spawn_request_session_key, external_id)
+                )
     return tuple(identities)
 
 
@@ -512,7 +537,12 @@ class OpenClawAdapter:
             raise AdapterContractError(
                 "sessions_history response identity must match requested session"
             )
-        for label, item_session_key, item_spawn_request_session_key in (
+        for (
+            label,
+            item_session_key,
+            item_spawn_request_session_key,
+            item_external_id,
+        ) in (
             _history_item_session_keys(response)
         ):
             if item_session_key is not None and item_session_key != session_key:
@@ -523,6 +553,10 @@ class OpenClawAdapter:
                 item_spawn_request_session_key is not None
                 and item_spawn_request_session_key != session_key
             ):
+                raise AdapterContractError(
+                    f"sessions_history {label} identity must match requested session"
+                )
+            if item_external_id is not None and item_external_id != session_key:
                 raise AdapterContractError(
                     f"sessions_history {label} identity must match requested session"
                 )

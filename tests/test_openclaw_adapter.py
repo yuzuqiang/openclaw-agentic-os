@@ -268,6 +268,53 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "metadata"):
             assert_installed_session_tools(catalog)
 
+    def test_session_tool_catalog_preflight_rejects_duplicate_required_tool_names(
+        self,
+    ) -> None:
+        catalog = {
+            "tools": [
+                {
+                    "name": "sessions_spawn",
+                    "inputSchema": {
+                        "properties": {
+                            "client_request_id": {"type": "string"},
+                            "idempotency_key": {"type": "string"},
+                        }
+                    },
+                },
+                {
+                    "name": "sessions_spawn",
+                    "inputSchema": {
+                        "properties": {
+                            "client_request_id": {"type": "string"},
+                            "idempotency_key": {"type": "string"},
+                            "metadata": {"type": "object"},
+                        }
+                    },
+                },
+                {"name": "sessions_list", "inputSchema": {"properties": {}}},
+                {
+                    "name": "sessions_status",
+                    "inputSchema": {
+                        "properties": {"session_key": {"type": "string"}}
+                    },
+                },
+                {
+                    "name": "sessions_history",
+                    "inputSchema": {
+                        "properties": {
+                            "sessionKey": {"type": "string"},
+                            "limit": {"type": "integer"},
+                            "includeTools": {"type": "boolean"},
+                        }
+                    },
+                },
+            ]
+        }
+
+        with self.assertRaisesRegex(AdapterContractError, "duplicate sessions_spawn"):
+            assert_installed_session_tools(catalog)
+
     def test_session_result_missing_raw_json_fails_contract(self) -> None:
         class MissingRawResultTransport:
             def call(self, method, params):
@@ -386,6 +433,44 @@ class OpenClawAdapterTests(unittest.TestCase):
             OpenClawAdapter(DifferentHistoryItemResultTransport()).session_result(
                 "session-key"
             )
+
+    def test_session_result_different_history_item_external_id_fails_contract(
+        self,
+    ) -> None:
+        class DifferentHistoryItemExternalIdTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "sessionKey": params["sessionKey"],
+                    "spawnRequestSessionKey": params["sessionKey"],
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "done",
+                            "external_id": "other-session",
+                        }
+                    ],
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\]"):
+            OpenClawAdapter(
+                DifferentHistoryItemExternalIdTransport()
+            ).session_result("session-key")
 
     def test_session_result_conflicting_top_level_and_nested_aliases_fail_contract(
         self,
