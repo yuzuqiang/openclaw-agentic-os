@@ -18,6 +18,7 @@ from agentic_os.runtime_dispatch import (
     AMBIGUOUS_TRANSPORT_ERRORS,
     DispatchRequest,
     RELEASE_FAILURE_ERRORS,
+    RuntimeDispatchError,
     connect_runtime_db,
     immediate_transaction,
     lease_metadata,
@@ -51,7 +52,18 @@ def _unknown_spawn_requests(connection: sqlite3.Connection) -> list[DispatchRequ
         "i.task_digest,i.spawn_request_id,i.reserve_budget_event_id,l.client_lease_id,"
         "l.acquire_idempotency_key,COALESCE(l.release_idempotency_key,''),l.ttl_ms,"
         "i.client_request_id,i.idempotency_key,l.lease_id FROM external_rpc_intents i "
-        "JOIN leases l ON l.run_id=i.run_id AND l.transition_id=i.transition_id "
+        "JOIN runtime_dispatch_bindings b ON b.spawn_request_id=i.spawn_request_id "
+        "AND b.run_id=i.run_id AND b.transition_id=i.transition_id "
+        "AND b.phase=i.phase AND b.agent_id=i.agent_id "
+        "AND b.task_digest=i.task_digest "
+        "AND b.spawn_client_request_id=i.client_request_id "
+        "AND b.spawn_idempotency_key=i.idempotency_key "
+        "JOIN leases l ON l.lease_id=b.lease_id AND l.run_id=b.run_id "
+        "AND l.transition_id=b.transition_id AND l.phase=b.phase "
+        "AND l.agent_id=b.agent_id AND l.requester_agent_id=b.requester_agent_id "
+        "AND l.client_lease_id=b.client_lease_id "
+        "AND l.acquire_idempotency_key=b.acquire_idempotency_key "
+        "AND l.release_idempotency_key=b.release_idempotency_key "
         "WHERE i.rpc_kind='sessions_spawn' AND i.state IN ('pending','unknown')"
     ).fetchall()
     return [
@@ -84,13 +96,24 @@ def _unknown_lease_requests(connection: sqlite3.Connection) -> list[DispatchRequ
         "COALESCE(l.release_idempotency_key,''),i.ttl_ms,COALESCE(sr.client_request_id,'unknown-client'),"
         "COALESCE(sr.spawn_idempotency_key,'unknown-spawn-idem'),l.lease_id "
         "FROM external_rpc_intents i "
-        "JOIN leases l ON l.run_id=i.run_id AND l.transition_id=i.transition_id "
-        "AND l.phase=i.phase AND l.agent_id=i.agent_id "
-        "AND l.requester_agent_id=i.requester_agent_id "
-        "AND l.client_lease_id=i.client_request_id "
-        "AND l.acquire_idempotency_key=i.idempotency_key "
+        "JOIN runtime_dispatch_bindings b ON b.run_id=i.run_id "
+        "AND b.transition_id=i.transition_id AND b.phase=i.phase "
+        "AND b.agent_id=i.agent_id AND b.requester_agent_id=i.requester_agent_id "
+        "AND b.client_lease_id=i.client_request_id "
+        "AND b.acquire_idempotency_key=i.idempotency_key "
+        "JOIN leases l ON l.lease_id=b.lease_id AND l.run_id=b.run_id "
+        "AND l.transition_id=b.transition_id AND l.phase=b.phase "
+        "AND l.agent_id=b.agent_id AND l.requester_agent_id=b.requester_agent_id "
+        "AND l.client_lease_id=b.client_lease_id "
+        "AND l.acquire_idempotency_key=b.acquire_idempotency_key "
+        "AND l.release_idempotency_key=b.release_idempotency_key "
         "AND l.ttl_ms=i.ttl_ms "
-        "LEFT JOIN spawn_requests sr ON sr.run_id=i.run_id AND sr.transition_id=i.transition_id "
+        "JOIN spawn_requests sr ON sr.spawn_request_id=b.spawn_request_id "
+        "AND sr.run_id=b.run_id AND sr.transition_id=b.transition_id "
+        "AND sr.phase=b.phase AND sr.agent_id=b.agent_id "
+        "AND sr.task_digest=b.task_digest "
+        "AND sr.client_request_id=b.spawn_client_request_id "
+        "AND sr.spawn_idempotency_key=b.spawn_idempotency_key "
         "WHERE i.rpc_kind='allow_lease_acquire' AND i.state IN ('pending','unknown')"
     ).fetchall()
     return [
@@ -170,7 +193,19 @@ def _release_pending_requests(connection: sqlite3.Connection) -> list[ReleasePen
         "AND l.release_idempotency_key=i.idempotency_key "
         "AND l.gateway_lease_id IS NOT NULL AND l.gateway_lease_id<>'' "
         "AND l.state='release_pending' "
-        "LEFT JOIN spawn_requests sr ON sr.run_id=i.run_id AND sr.transition_id=i.transition_id "
+        "JOIN runtime_dispatch_bindings b ON b.lease_id=l.lease_id "
+        "AND b.run_id=l.run_id AND b.transition_id=l.transition_id "
+        "AND b.phase=l.phase AND b.agent_id=l.agent_id "
+        "AND b.requester_agent_id=l.requester_agent_id "
+        "AND b.client_lease_id=l.client_lease_id "
+        "AND b.acquire_idempotency_key=l.acquire_idempotency_key "
+        "AND b.release_idempotency_key=l.release_idempotency_key "
+        "JOIN spawn_requests sr ON sr.spawn_request_id=b.spawn_request_id "
+        "AND sr.run_id=b.run_id AND sr.transition_id=b.transition_id "
+        "AND sr.phase=b.phase AND sr.agent_id=b.agent_id "
+        "AND sr.task_digest=b.task_digest "
+        "AND sr.client_request_id=b.spawn_client_request_id "
+        "AND sr.spawn_idempotency_key=b.spawn_idempotency_key "
         "WHERE i.rpc_kind='allow_lease_release' AND i.state IN ('pending','unknown')"
     ).fetchall()
     return [
@@ -208,16 +243,29 @@ def _acquire_only_cleanup_requests(
         "COALESCE(l.release_idempotency_key,'reconcile-release:' || l.client_lease_id),"
         "l.ttl_ms,sr.client_request_id,sr.spawn_idempotency_key,l.lease_id,l.gateway_lease_id "
         "FROM leases l "
-        "JOIN spawn_requests sr ON sr.run_id=l.run_id AND sr.transition_id=l.transition_id "
+        "JOIN runtime_dispatch_bindings b ON b.lease_id=l.lease_id "
+        "AND b.run_id=l.run_id AND b.transition_id=l.transition_id "
+        "AND b.phase=l.phase AND b.agent_id=l.agent_id "
+        "AND b.requester_agent_id=l.requester_agent_id "
+        "AND b.client_lease_id=l.client_lease_id "
+        "AND b.acquire_idempotency_key=l.acquire_idempotency_key "
+        "AND b.release_idempotency_key=l.release_idempotency_key "
+        "JOIN spawn_requests sr ON sr.spawn_request_id=b.spawn_request_id "
+        "AND sr.run_id=b.run_id AND sr.transition_id=b.transition_id "
+        "AND sr.phase=b.phase AND sr.agent_id=b.agent_id "
+        "AND sr.task_digest=b.task_digest "
+        "AND sr.client_request_id=b.spawn_client_request_id "
+        "AND sr.spawn_idempotency_key=b.spawn_idempotency_key "
         "JOIN external_rpc_intents i ON i.rpc_kind='sessions_spawn' "
-        "AND i.run_id=sr.run_id AND i.transition_id=sr.transition_id "
-        "AND i.spawn_request_id=sr.spawn_request_id "
-        "AND i.client_request_id=sr.client_request_id "
-        "AND i.idempotency_key=sr.spawn_idempotency_key "
+        "AND i.run_id=b.run_id AND i.transition_id=b.transition_id "
+        "AND i.phase=b.phase AND i.agent_id=b.agent_id "
+        "AND i.task_digest=b.task_digest "
+        "AND i.spawn_request_id=b.spawn_request_id "
+        "AND i.client_request_id=b.spawn_client_request_id "
+        "AND i.idempotency_key=b.spawn_idempotency_key "
         "WHERE l.state='acquired' AND l.gateway_lease_id IS NOT NULL "
         "AND l.gateway_lease_id<>'' "
         "AND i.state IN ('failed','human_review_required') "
-        "AND sr.ambiguity_reason LIKE 'spawn blocked by allow lease%' "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM external_rpc_intents release "
         "  WHERE release.rpc_kind='allow_lease_release' "
@@ -388,14 +436,23 @@ def reconcile_unknown_metadata(
                     human_review += 1
                     continue
                 observation, session_key = matches[0]
-                persist_spawn_acceptance(
-                    connection,
-                    request,
-                    observation,
-                    session_key,
-                    reconciled=True,
-                )
-                reconciled += 1
+                try:
+                    persist_spawn_acceptance(
+                        connection,
+                        request,
+                        observation,
+                        session_key,
+                        reconciled=True,
+                    )
+                    reconciled += 1
+                except RuntimeDispatchError as exc:
+                    mark_human_review(
+                        connection,
+                        request,
+                        rpc_kind="sessions_spawn",
+                        reason=str(exc),
+                    )
+                    human_review += 1
 
         for item in _acquire_only_cleanup_requests(connection):
             try:

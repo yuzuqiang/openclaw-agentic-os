@@ -226,17 +226,71 @@ class RuntimeDispatchTests(unittest.TestCase):
         )
 
     def _release_observation(self) -> MetadataObservation:
+        return self._release_observation_for(self.request, "lease-gateway")
+
+    def _release_observation_for(
+        self, request: DispatchRequest, gateway_lease_id: str
+    ) -> MetadataObservation:
         metadata = {
-            "client_lease_id": self.request.client_lease_id,
-            "idempotency_key": self.request.release_idempotency_key,
-            "run_id": self.request.run_id,
-            "phase": self.request.phase,
-            "transition_id": self.request.transition_id,
-            "agent_id": self.request.agent_id,
-            "requester_agent_id": self.request.requester_agent_id,
-            "gateway_lease_id": "lease-gateway",
+            "client_lease_id": request.client_lease_id,
+            "idempotency_key": request.release_idempotency_key,
+            "run_id": request.run_id,
+            "phase": request.phase,
+            "transition_id": request.transition_id,
+            "agent_id": request.agent_id,
+            "requester_agent_id": request.requester_agent_id,
+            "gateway_lease_id": gateway_lease_id,
         }
-        return observation(metadata, external_id="lease-gateway")
+        return observation(metadata, external_id=gateway_lease_id)
+
+    def _additional_request(self, suffix: str, *, agent_id: str) -> DispatchRequest:
+        request = DispatchRequest(
+            **{
+                **self.request.__dict__,
+                "agent_id": agent_id,
+                "task_digest": f"task-{suffix}",
+                "spawn_request_id": f"spawn-{suffix}",
+                "reserve_budget_event_id": f"reserve-{suffix}",
+                "client_lease_id": f"client-lease-{suffix}",
+                "acquire_idempotency_key": f"acquire-idem-{suffix}",
+                "release_idempotency_key": f"release-idem-{suffix}",
+                "spawn_client_request_id": f"client-{suffix}",
+                "spawn_idempotency_key": f"spawn-idem-{suffix}",
+            }
+        )
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'pending','now','now')",
+                (
+                    request.spawn_request_id,
+                    request.run_id,
+                    request.phase,
+                    request.agent_id,
+                    request.transition_id,
+                    request.spawn_client_request_id,
+                    request.spawn_idempotency_key,
+                    request.task_digest,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,model,"
+                "spawn_request_id,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,input_tokens,"
+                "usage_confidence,source,created_at,created_at_epoch_ms) VALUES(?,?,?,?,"
+                "'run','transition','provider','model',?,'endpoint','capability','cost-row',"
+                "'effective','cost-hash','known','reserve',1,'known','test','now',2)",
+                (
+                    request.reserve_budget_event_id,
+                    f"reserve-idem-{suffix}",
+                    f"reserve-dedupe-{suffix}",
+                    2,
+                    request.spawn_request_id,
+                ),
+            )
+        return request
 
     def test_dispatch_persists_exact_lease_spawn_and_session_identity(self) -> None:
         result = dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
@@ -688,17 +742,25 @@ class RuntimeDispatchTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
                 "requester_agent_id,state,gateway_lease_id,client_lease_id,"
-                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "acquire_idempotency_key,release_idempotency_key,ttl_ms,metadata_contract_version,"
                 "metadata_observed_at,external_metadata_json,external_client_lease_id,"
                 "external_idempotency_key,external_run_id,external_phase,"
                 "external_transition_id,external_agent_id,external_requester_agent_id,"
                 "external_ttl_ms,acquire_requested_at,acquired_at,expires_at,"
                 "expires_at_epoch_ms) VALUES('client-lease','run','phase','transition',"
                 "'agent','requester','acquired','lease-gateway','client-lease',"
-                "'acquire-idem',60000,'v1','now',?,'client-lease','acquire-idem',"
+                "'acquire-idem','release-idem',60000,'v1','now',?,'client-lease','acquire-idem',"
                 "'run','phase','transition','agent','requester',60000,'now','now',"
                 "'later',1800000060000)",
                 (stable_json(acquire),),
+            )
+            connection.execute(
+                "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+                "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+                "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+                "spawn_idempotency_key,created_at) VALUES('spawn','client-lease','run',"
+                "'transition','phase','agent','requester','task','client-lease',"
+                "'acquire-idem','release-idem','client','spawn-idem','now')"
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -829,6 +891,191 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "released",
             )
 
+    def test_reconcile_releases_crash_left_acquired_lease_after_zero_session(self) -> None:
+        class CrashAfterAcquireAdapter(ScriptedAdapter):
+            def sessions_spawn(self, params):
+                self.calls.append("sessions_spawn")
+                self.params.append(("sessions_spawn", dict(params)))
+                raise SystemExit("simulated process crash")
+
+        crash_adapter = CrashAfterAcquireAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ]
+        )
+        with self.assertRaisesRegex(SystemExit, "simulated process crash"):
+            dispatch_with_metadata(self.database, crash_adapter, self.request)
+
+        reconcile_adapter = ScriptedAdapter(release=[self._release_observation()])
+        summary = reconcile_unknown_metadata(self.database, reconcile_adapter)
+        self.assertEqual(summary.reconciled, 1)
+        self.assertEqual(summary.human_review_required, 1)
+        self.assertEqual(
+            [params for call, params in reconcile_adapter.params if call == "allow_lease_release"],
+            [release_metadata(self.request, "lease-gateway")],
+        )
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone()[0],
+                "released",
+            )
+
+    def test_cleanup_binding_never_releases_other_same_transition_lease(self) -> None:
+        dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        blocked = self._additional_request("blocked", agent_id="agent-blocked")
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(
+                self.database,
+                TransportFailingAdapter(
+                    {"allow_lease_acquire": TimeoutError("acquire timed out")}
+                ),
+                blocked,
+            )
+        blocked_gateway_id = "lease-gateway-blocked"
+        reconcile_adapter = ScriptedAdapter(
+            leases=[
+                observation(
+                    lease_metadata(blocked, blocked_gateway_id),
+                    external_id=blocked_gateway_id,
+                )
+            ],
+            sessions=[
+                observation(spawn_metadata(self.request), external_id="session-key")
+            ],
+            release=[self._release_observation_for(blocked, blocked_gateway_id)],
+        )
+        summary = reconcile_unknown_metadata(self.database, reconcile_adapter)
+        self.assertEqual(summary.reconciled, 2)
+        self.assertEqual(
+            [params for call, params in reconcile_adapter.params if call == "allow_lease_release"],
+            [release_metadata(blocked, blocked_gateway_id)],
+        )
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT client_lease_id,state FROM leases ORDER BY client_lease_id"
+                ).fetchall(),
+                [
+                    ("client-lease", "acquired"),
+                    ("client-lease-blocked", "released"),
+                ],
+            )
+
+    def test_duplicate_live_dispatch_is_blocked_before_second_spawn(self) -> None:
+        duplicate = self._additional_request("duplicate", agent_id=self.request.agent_id)
+        dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        duplicate_gateway_id = "lease-gateway-duplicate"
+        adapter = ScriptedAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(duplicate, duplicate_gateway_id),
+                    external_id=duplicate_gateway_id,
+                )
+            ],
+            spawn=[observation(spawn_metadata(duplicate), external_id="session-duplicate")],
+            release=[self._release_observation_for(duplicate, duplicate_gateway_id)],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "duplicate live dispatch"):
+            dispatch_with_metadata(self.database, adapter, duplicate)
+        self.assertEqual(adapter.calls, [])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT spawn_request_id,state FROM spawn_requests ORDER BY spawn_request_id"
+                ).fetchall(),
+                [("spawn", "accepted"), ("spawn-duplicate", "pending")],
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM spawn_requests WHERE run_id='run' AND phase='phase' "
+                    "AND agent_id='agent' AND state IN ('accepted','completed')"
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_ambiguous_first_spawn_blocks_second_before_any_adapter_call(self) -> None:
+        duplicate = self._additional_request("after-unknown", agent_id=self.request.agent_id)
+        first = TransportFailingAdapter(
+            {"sessions_spawn": TimeoutError("spawn outcome unknown")},
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "reconciliation required"):
+            dispatch_with_metadata(self.database, first, self.request)
+        self.assertEqual(first.calls, ["allow_lease_acquire", "sessions_spawn"])
+
+        second = self._accepted_adapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "duplicate live dispatch"):
+            dispatch_with_metadata(self.database, second, duplicate)
+        self.assertEqual(second.calls, [])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn' AND spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "unknown",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT client_lease_id,state FROM leases ORDER BY client_lease_id"
+                ).fetchall(),
+                [("client-lease", "acquired")],
+            )
+
+    def test_terminal_pre_spawn_failure_does_not_block_new_slot_attempt(self) -> None:
+        with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
+            dispatch_with_metadata(
+                self.database,
+                ContractFailingAdapter({"allow_lease_acquire"}),
+                self.request,
+            )
+        replacement = self._additional_request("replacement", agent_id=self.request.agent_id)
+        gateway_id = "lease-gateway-replacement"
+        adapter = ScriptedAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(replacement, gateway_id), external_id=gateway_id
+                )
+            ],
+            spawn=[
+                observation(spawn_metadata(replacement), external_id="session-replacement")
+            ],
+        )
+        result = dispatch_with_metadata(self.database, adapter, replacement)
+        self.assertEqual(result.session_key, "session-replacement")
+        self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
+
+    def test_runtime_dispatch_binding_is_exact_and_immutable(self) -> None:
+        dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT spawn_request_id,lease_id,client_lease_id,"
+                    "acquire_idempotency_key,release_idempotency_key "
+                    "FROM runtime_dispatch_bindings"
+                ).fetchone(),
+                ("spawn", "client-lease", "client-lease", "acquire-idem", "release-idem"),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE runtime_dispatch_bindings SET lease_id='other' "
+                    "WHERE spawn_request_id='spawn'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "DELETE FROM runtime_dispatch_bindings WHERE spawn_request_id='spawn'"
+                )
+
     def test_reconcile_unknown_acquire_requires_local_lease_row(self) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -872,7 +1119,8 @@ class RuntimeDispatchTests(unittest.TestCase):
                     spawn_request_session_key=None,
                     session_key="session-key",
                 )
-            ]
+            ],
+            release=[self._release_observation()],
         )
         summary = reconcile_unknown_metadata(self.database, adapter)
         self.assertEqual(summary.human_review_required, 1)
@@ -890,7 +1138,8 @@ class RuntimeDispatchTests(unittest.TestCase):
             sessions=[
                 observation(spawn_metadata(self.request), external_id="session-a"),
                 observation(spawn_metadata(self.request), external_id="session-b"),
-            ]
+            ],
+            release=[self._release_observation()],
         )
         summary = reconcile_unknown_metadata(self.database, adapter)
         self.assertEqual(summary.human_review_required, 1)

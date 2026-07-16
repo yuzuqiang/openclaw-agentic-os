@@ -3193,6 +3193,34 @@ Exact batch replay is idempotent; reused batch, idempotency, or dedupe identity
 with changed raw legacy payload fails closed.
 This slice does not enable production database authority.
 
+Current migration v10 runtime dispatch binding:
+
+`0010_runtime_dispatch_binding.sql` adds the immutable
+`runtime_dispatch_bindings` relation. Each row binds one spawn request to one
+lease using the complete persisted dispatch identity: run, transition, phase,
+agent, requester, task digest, client lease, acquire key, release key, spawn
+client request, and spawn idempotency key. Composite foreign keys require the
+same row to match both the existing `spawn_requests` identity and the existing
+`leases` identity; unique identity columns reject cross-dispatch reuse, and
+update/delete triggers preserve the binding as reconciliation evidence. The
+runtime writes this relation in the same `BEGIN IMMEDIATE` transaction as both
+pending external RPC intents. During v9-to-v10 upgrade, bindings are backfilled
+only when one spawn intent and one lease/acquire intent have exact durable
+run/transition/phase/agent identity and equal persisted request text and epoch
+milliseconds. Zero-candidate, multi-candidate, or lease-reuse cases abort the
+whole migration; legacy runtime work is never silently omitted. Reconciliation
+joins only through this relation,
+so a blocked or crash-left spawn can release its proven owned lease without
+pairing another dispatch on the same run/transition. Before inserting a new
+pending dispatch, the same immediate transaction rejects an older potentially
+live run/phase/agent spawn intent in `pending`, `unknown`, `accepted`, or
+`reconciled` state, plus unresolved human-review outcomes. Only a terminal
+pre-spawn allow-lease failure is excluded. Exact replay is decided before this
+arbitration. Competing or post-timeout attempts therefore fail before any new
+lease or spawn RPC, while external RPC remains outside the SQLite transaction.
+The acceptance transaction repeats the guard as defense in depth. Runtime
+authority remains disabled.
+
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:
 

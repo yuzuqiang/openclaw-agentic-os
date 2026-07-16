@@ -10,11 +10,11 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `abcb5844b8bb8488b10a673687f45199843d72a62577520b40015872b9d6a928`
+- Current design artifact SHA-256: `ba576cbd979e945c9d2f6eb3287f36c4e85c0fe1dc2e8a42a687d33dacc7fd0b`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
-- Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
-- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, and three legacy import evidence tables, 30 executable SLO queries
+- Current latest migration SHA-256: `8ac4f7b7f8767ab89a4e73642dd180f15755fcd2ca95bea939b0870736844aa3`
+- Current migration manifest SHA-256: `7a949159543694126b37d34c4eccee8cf1c8a03d5773138740d2e939a0407d46`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
@@ -185,8 +185,17 @@ recoverable outcomes for reconciliation instead of adapter retries, and prior
 `pending`, `unknown`, `failed`, or `human_review_required` spawn attempts are
 preserved without crossing `sessions_spawn` again. Release-pending leases are
 reconciled from exact release metadata, and acquire-only leases proven after a
-blocked spawn are released with the original release idempotency key. Unknown or
-pending `sessions_spawn` outcomes are never retried; zero, ambiguous,
+blocked or crash-left spawn are released with the original release idempotency
+key. An immutable schema-backed dispatch relation binds each spawn to its exact
+lease/client/acquire/release identity, preventing reconciliation from releasing
+another dispatch's lease on the same run/transition. Live run/phase/agent
+arbitration occurs in the initial intent transaction: prior pending, unknown,
+accepted, reconciled, or unresolved human-review attempts block a competing
+dispatch before another lease or spawn RPC, while terminal pre-spawn failures do
+not permanently occupy the slot. Migration v10 backfills pre-existing bindings
+only from an exact one-to-one identity and request-timestamp proof and aborts on
+unbound or ambiguous legacy rows rather than silently skipping reconciliation.
+Unknown or pending `sessions_spawn` outcomes are never retried; zero, ambiguous,
 mismatched, or incomplete session-identity observations move to human review.
 
 ## Version-management policy

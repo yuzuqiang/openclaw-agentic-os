@@ -188,6 +188,32 @@ def _existing_spawn_replay_result(
     state = row[8]
     external_id = row[9]
     if state in ("accepted", "reconciled"):
+        binding = connection.execute(
+            "SELECT spawn_request_id,lease_id,run_id,transition_id,phase,agent_id,"
+            "requester_agent_id,task_digest,client_lease_id,acquire_idempotency_key,"
+            "release_idempotency_key,spawn_client_request_id,spawn_idempotency_key "
+            "FROM runtime_dispatch_bindings WHERE spawn_request_id=?",
+            (request.spawn_request_id,),
+        ).fetchone()
+        expected_binding = (
+            request.spawn_request_id,
+            request.lease_id or request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            request.phase,
+            request.agent_id,
+            request.requester_agent_id,
+            request.task_digest,
+            request.client_lease_id,
+            request.acquire_idempotency_key,
+            request.release_idempotency_key,
+            request.spawn_client_request_id,
+            request.spawn_idempotency_key,
+        )
+        if binding != expected_binding:
+            raise RuntimeDispatchError(
+                "conflicting reuse of sessions_spawn allow lease identity binding"
+            )
         session_key = validate_accepted_session_identity(
             external_id=external_id,
             spawn_request_session_key=external_id,
@@ -197,6 +223,7 @@ def _existing_spawn_replay_result(
             "SELECT gateway_lease_id FROM leases WHERE run_id=? AND transition_id=? "
             "AND phase=? AND agent_id=? AND requester_agent_id=? "
             "AND client_lease_id=? AND acquire_idempotency_key=? "
+            "AND release_idempotency_key=? "
             "AND gateway_lease_id IS NOT NULL AND gateway_lease_id<>''",
             (
                 request.run_id,
@@ -206,6 +233,7 @@ def _existing_spawn_replay_result(
                 request.requester_agent_id,
                 request.client_lease_id,
                 request.acquire_idempotency_key,
+                request.release_idempotency_key,
             ),
         ).fetchone()
         if lease is None:
@@ -401,6 +429,59 @@ def _assert_or_insert_acquire_intent(
     )
 
 
+def _assert_or_insert_dispatch_binding(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    *,
+    now: str,
+) -> None:
+    lease_id = request.lease_id or request.client_lease_id
+    rows = connection.execute(
+        "SELECT spawn_request_id,lease_id,run_id,transition_id,phase,agent_id,"
+        "requester_agent_id,task_digest,client_lease_id,acquire_idempotency_key,"
+        "release_idempotency_key,spawn_client_request_id,spawn_idempotency_key "
+        "FROM runtime_dispatch_bindings WHERE spawn_request_id=? OR lease_id=? "
+        "OR client_lease_id=? OR acquire_idempotency_key=? "
+        "OR release_idempotency_key=? OR spawn_client_request_id=? "
+        "OR spawn_idempotency_key=?",
+        (
+            request.spawn_request_id,
+            lease_id,
+            request.client_lease_id,
+            request.acquire_idempotency_key,
+            request.release_idempotency_key,
+            request.spawn_client_request_id,
+            request.spawn_idempotency_key,
+        ),
+    ).fetchall()
+    expected = (
+        request.spawn_request_id,
+        lease_id,
+        request.run_id,
+        request.transition_id,
+        request.phase,
+        request.agent_id,
+        request.requester_agent_id,
+        request.task_digest,
+        request.client_lease_id,
+        request.acquire_idempotency_key,
+        request.release_idempotency_key,
+        request.spawn_client_request_id,
+        request.spawn_idempotency_key,
+    )
+    if rows:
+        if len(rows) != 1 or rows[0] != expected:
+            raise RuntimeDispatchError("conflicting reuse of runtime dispatch binding")
+        return
+    connection.execute(
+        "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+        "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+        "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+        "spawn_idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (*expected, now),
+    )
+
+
 def _strictly_after_requested_time(
     connection: sqlite3.Connection, *, rpc_kind: str, idempotency_key: str
 ) -> tuple[str, int]:
@@ -418,6 +499,7 @@ def _strictly_after_requested_time(
 
 def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchRequest) -> None:
     _assert_no_conflicting_spawn_replay(connection, request)
+    assert_no_potentially_live_dispatch(connection, request)
     now, now_ms = now_utc()
     expires_ms = now_ms + request.ttl_ms
     expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_ms / 1000))
@@ -433,6 +515,7 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
         lease_id=lease_id,
     )
     _assert_or_insert_acquire_intent(connection, request, now=now, now_ms=now_ms)
+    _assert_or_insert_dispatch_binding(connection, request, now=now)
     connection.execute(
         "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
         "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
@@ -456,6 +539,44 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             now_ms,
         ),
     )
+
+
+def assert_no_potentially_live_dispatch(
+    connection: sqlite3.Connection, request: DispatchRequest
+) -> None:
+    duplicate = connection.execute(
+        "SELECT i.spawn_request_id FROM external_rpc_intents i "
+        "JOIN spawn_requests sr ON sr.spawn_request_id=i.spawn_request_id "
+        "AND sr.run_id=i.run_id AND sr.transition_id=i.transition_id "
+        "AND sr.phase=i.phase AND sr.agent_id=i.agent_id "
+        "AND sr.task_digest=i.task_digest AND sr.client_request_id=i.client_request_id "
+        "AND sr.spawn_idempotency_key=i.idempotency_key "
+        "JOIN runtime_dispatch_bindings b ON b.spawn_request_id=sr.spawn_request_id "
+        "AND b.run_id=sr.run_id AND b.transition_id=sr.transition_id "
+        "AND b.phase=sr.phase AND b.agent_id=sr.agent_id "
+        "AND b.task_digest=sr.task_digest "
+        "AND b.spawn_client_request_id=sr.client_request_id "
+        "AND b.spawn_idempotency_key=sr.spawn_idempotency_key "
+        "JOIN leases l ON l.lease_id=b.lease_id AND l.run_id=b.run_id "
+        "AND l.transition_id=b.transition_id AND l.phase=b.phase "
+        "AND l.agent_id=b.agent_id AND l.requester_agent_id=b.requester_agent_id "
+        "AND l.client_lease_id=b.client_lease_id "
+        "AND l.acquire_idempotency_key=b.acquire_idempotency_key "
+        "AND l.release_idempotency_key=b.release_idempotency_key "
+        "WHERE i.rpc_kind='sessions_spawn' AND i.run_id=? AND i.phase=? AND i.agent_id=? "
+        "AND i.spawn_request_id<>? AND ("
+        "i.state IN ('pending','unknown','accepted','reconciled') OR ("
+        "i.state='human_review_required' AND NOT ("
+        "sr.state='human_review_required' "
+        "AND sr.ambiguity_reason LIKE 'spawn blocked by allow lease%' "
+        "AND l.state IN ('released','release_not_required','expired','human_review_required')"
+        "))) ORDER BY i.requested_at_epoch_ms,i.intent_id LIMIT 1",
+        (request.run_id, request.phase, request.agent_id, request.spawn_request_id),
+    ).fetchone()
+    if duplicate is not None:
+        raise RuntimeDispatchError(
+            "duplicate live dispatch for run, phase, and agent is blocked"
+        )
 
 
 def persist_acquired_lease(
@@ -541,6 +662,7 @@ def persist_spawn_acceptance(
     *,
     reconciled: bool = False,
 ) -> None:
+    assert_no_potentially_live_dispatch(connection, request)
     now, now_ms = _strictly_after_requested_time(
         connection,
         rpc_kind="sessions_spawn",
@@ -1000,7 +1122,7 @@ def dispatch_with_metadata(
                     "owned lease release requires human review"
                 ) from exc
             raise RuntimeDispatchError(
-                "sessions_spawn metadata validation failed; owned lease released"
+                f"sessions_spawn failed closed ({exc}); owned lease released"
             ) from exc
 
         return DispatchResult(

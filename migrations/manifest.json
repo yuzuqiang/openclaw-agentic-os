@@ -53,6 +53,12 @@
       "name": "legacy_money_import_quarantine",
       "file": "0009_legacy_money_import_quarantine.sql",
       "sha256": "2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a"
+    },
+    {
+      "version": 10,
+      "name": "runtime_dispatch_binding",
+      "file": "0010_runtime_dispatch_binding.sql",
+      "sha256": "8ac4f7b7f8767ab89a4e73642dd180f15755fcd2ca95bea939b0870736844aa3"
     }
   ]
 }
