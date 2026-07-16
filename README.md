@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `b2e3671ea69d0e3f8c7d3d96f65cfc156b0f7305036d9cd72821ac97330006b1`
+- Current design artifact SHA-256: `8383dfb1b1c7c1f5f092bd0dd595b6867c871b424c3852837b6044c90a7deb12`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `19970e071a05eadc7a682d98b624829b8c3d30782598e27ebeb04edba9f4ba24`
 - Current migration manifest SHA-256: `eff21f04fbe780d29c7c4aba3a1f773cad1b1f283464700cab8d803d8f7486c9`
@@ -176,7 +176,8 @@ scanner, or enabling database authority.
 `agentic_os.openclaw_adapter`, `agentic_os.runtime_dispatch`, and
 `agentic_os.reconciliation` add the next bounded Issue #5 slice: an injectable
 metadata-capable adapter contract, a DB-persisted pending-intent runtime
-dispatcher, exact accepted lease/session persistence, owned-lease cleanup on
+dispatcher, session result metadata parity, exact accepted lease/session
+persistence, owned-lease cleanup on
 spawn metadata failure, and a fail-closed scanner that reconciles unknown
 or crash-left pending outcomes only from list/status metadata. Normalized
 metadata is never promoted to raw evidence; OpenClaw responses must expose raw

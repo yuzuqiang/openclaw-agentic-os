@@ -43,6 +43,9 @@ class MetadataCapableOpenClawAdapter(Protocol):
     def session_status(self, session_key: str) -> MetadataObservation:
         ...
 
+    def session_result(self, session_key: str) -> MetadataObservation:
+        ...
+
 
 class OpenClawTransport(Protocol):
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -60,6 +63,10 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise AdapterContractError(f"{label} must be an object")
     return value
+
+
+def _transport_response(value: Any, method: str) -> Mapping[str, Any]:
+    return _mapping(value, f"{method} response")
 
 
 def _identity_alias(value: Any, label: str) -> str | None:
@@ -268,28 +275,52 @@ class OpenClawAdapter:
 
     def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("subagents.allowLease.acquire", params)
+            _transport_response(
+                self._transport.call("subagents.allowLease.acquire", params),
+                "subagents.allowLease.acquire",
+            )
         )
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
-        response = self._transport.call("subagents.allowLease.status", {})
+        response = _transport_response(
+            self._transport.call("subagents.allowLease.status", {}),
+            "subagents.allowLease.status",
+        )
         return _observations_from_items(response.get("leases"), "lease")
 
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("subagents.allowLease.release", params)
+            _transport_response(
+                self._transport.call("subagents.allowLease.release", params),
+                "subagents.allowLease.release",
+            )
         )
 
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("sessions_spawn", params)
+            _transport_response(
+                self._transport.call("sessions_spawn", params), "sessions_spawn"
+            )
         )
 
     def sessions_list(self) -> Sequence[MetadataObservation]:
-        response = self._transport.call("sessions_list", {})
+        response = _transport_response(
+            self._transport.call("sessions_list", {}), "sessions_list"
+        )
         return _observations_from_items(response.get("sessions"), "session")
 
     def session_status(self, session_key: str) -> MetadataObservation:
         return observation_from_openclaw_response(
-            self._transport.call("sessions_status", {"session_key": session_key})
+            _transport_response(
+                self._transport.call("sessions_status", {"session_key": session_key}),
+                "sessions_status",
+            )
+        )
+
+    def session_result(self, session_key: str) -> MetadataObservation:
+        return observation_from_openclaw_response(
+            _transport_response(
+                self._transport.call("sessions_result", {"session_key": session_key}),
+                "sessions_result",
+            )
         )

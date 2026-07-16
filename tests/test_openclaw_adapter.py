@@ -88,6 +88,31 @@ class CannedTransport:
                     }
                 ]
             }
+        if method == "sessions_result":
+            metadata = {
+                "run_id": "run",
+                "transition_id": "transition",
+                "client_request_id": "client",
+                "idempotency_key": "spawn-idem",
+                "phase": "phase",
+                "agent_id": "agent",
+                "task_digest": "task",
+            }
+            return {
+                "session_key": params["session_key"],
+                "session": {
+                    "session_key": params["session_key"],
+                    "spawn_request_session_key": params["session_key"],
+                },
+                "result": {"state": "completed"},
+                "metadata": {
+                    "metadata_contract_version": "v1",
+                    "normalized": metadata,
+                    "raw_json": json.dumps(
+                        metadata, sort_keys=True, separators=(",", ":")
+                    ),
+                },
+            }
         raise AssertionError(method)
 
 
@@ -107,6 +132,118 @@ class OpenClawAdapterTests(unittest.TestCase):
 
         listed = adapter.sessions_list()
         self.assertEqual(listed[0].external_id, "session-key")
+
+        result = adapter.session_result("session-key")
+        self.assertEqual(result.external_id, "session-key")
+        self.assertEqual(result.session_key, "session-key")
+        self.assertEqual(result.spawn_request_session_key, "session-key")
+        self.assertIn('"result":{"state":"completed"}', result.raw_response_json)
+        self.assertEqual(
+            transport.calls[-1], ("sessions_result", {"session_key": "session-key"})
+        )
+
+    def test_session_result_missing_raw_json_fails_contract(self) -> None:
+        class MissingRawResultTransport:
+            def call(self, method, params):
+                return {
+                    "session_key": params["session_key"],
+                    "session": {
+                        "session_key": params["session_key"],
+                        "spawn_request_session_key": params["session_key"],
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": {
+                            "run_id": "run",
+                            "transition_id": "transition",
+                            "client_request_id": "client",
+                            "idempotency_key": "spawn-idem",
+                            "phase": "phase",
+                            "agent_id": "agent",
+                            "task_digest": "task",
+                        },
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
+            OpenClawAdapter(MissingRawResultTransport()).session_result("session-key")
+
+    def test_session_result_conflicting_top_level_and_nested_aliases_fail_contract(
+        self,
+    ) -> None:
+        class ConflictingResultTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "session_key": "session-top",
+                    "session": {
+                        "session_key": "session-nested",
+                        "spawn_request_session_key": "session-top",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
+            OpenClawAdapter(ConflictingResultTransport()).session_result("session-key")
+
+    def test_session_result_malformed_response_fails_contract(self) -> None:
+        class MalformedResultTransport:
+            def call(self, method, params):
+                return ["not", "an", "object"]
+
+        with self.assertRaisesRegex(AdapterContractError, "sessions_result response"):
+            OpenClawAdapter(MalformedResultTransport()).session_result("session-key")
+
+    def test_session_result_audit_serialization_failure_fails_contract(self) -> None:
+        class NonSerializableResultTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "session_key": params["session_key"],
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                    "diagnostic": object(),
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "JSON serializable"):
+            OpenClawAdapter(NonSerializableResultTransport()).session_result(
+                "session-key"
+            )
+
+    def test_session_result_transport_failure_is_not_swallowed(self) -> None:
+        class FailingResultTransport:
+            def call(self, method, params):
+                raise TimeoutError("result timed out")
+
+        with self.assertRaisesRegex(TimeoutError, "result timed out"):
+            OpenClawAdapter(FailingResultTransport()).session_result("session-key")
 
     def test_missing_metadata_fails_contract(self) -> None:
         class BadTransport:

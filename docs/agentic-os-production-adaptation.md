@@ -174,11 +174,11 @@ External runtime metadata contract is a P0 prerequisite:
 - Post-dispatch budget events must additionally bind to the selected `run_budgets` provider/model/endpoint/capability/cost row and to strict `requested_at_epoch_ms < accepted_at_epoch_ms < budget_events.created_at_epoch_ms` ordering.
 - Duplicate session spawn with the same idempotency key must return the original session identity and must not create another child.
 - Child prompt first line includes `run_id`, `phase`, `agent_id`, and `task_digest`; child echo is a secondary handshake and cannot replace runtime metadata.
-- The current implementation includes only a pure fake-adapter metadata dispatch
-  probe for this contract. That probe validates allowLease acquire/status/release
-  and session spawn/status/list/result observations, but it is not a production
-  OpenClaw adapter, does not call Gateway/session RPCs, does not reconcile
-  unknown external state, and does not enable database authority.
+- The current implementation includes a pure fake-adapter metadata dispatch
+  probe plus an injectable OpenClaw adapter boundary for this contract. These
+  validate allowLease acquire/status/release and session spawn/status/list/result
+  observations, but they do not enable production database authority. Runtime
+  reconciliation remains bounded to the implemented scanner paths.
 
 Fail-closed rule:
 
