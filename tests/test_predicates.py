@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agentic_os.predicates import (
     INPROC_PREDICATE_BACKEND,
@@ -306,11 +307,13 @@ class PredicateTests(unittest.TestCase):
                 },
                 {"op": "file_exists", "path": ".ssh/id_rsa"},
                 {"op": "file_exists", "path": "config/credentials.json"},
+                {"op": "file_exists", "path": "private/customer.json"},
+                {"op": "file_exists", "path": "artifacts/private-data.json"},
                 {"op": "file_exists", "path": "public-evidence"},
             )
             for predicate in cases:
                 with self.subTest(predicate=predicate), self.assertRaisesRegex(
-                    PredicateContractError, "private credentials"
+                    PredicateContractError, "private credentials or artifacts"
                 ):
                     evaluate_predicate_document(document(predicate), context)
 
@@ -323,9 +326,17 @@ class PredicateTests(unittest.TestCase):
             locked_dir.mkdir()
             evidence = locked_dir / "evidence.txt"
             evidence.write_text("predicate evidence\n", encoding="utf-8")
-            locked_dir.chmod(0)
             context = PredicateContext(repo_root=root)
-            try:
+
+            original_stat = Path.stat
+
+            def stat_side_effect(path: Path, *args: object, **kwargs: object) -> object:
+                if path == evidence:
+                    raise PermissionError("permission denied")
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", autospec=True) as stat_mock:
+                stat_mock.side_effect = stat_side_effect
                 with self.assertRaises(PredicateContractError):
                     evaluate_predicate_document(
                         document(
@@ -339,17 +350,23 @@ class PredicateTests(unittest.TestCase):
                         ),
                         context,
                     )
-            finally:
-                locked_dir.chmod(0o700)
 
     def test_file_sha256_read_failures_are_contract_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / "evidence.txt"
             target.write_text("predicate evidence\n", encoding="utf-8")
-            target.chmod(0)
             context = PredicateContext(repo_root=root)
-            try:
+
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes_side_effect(path: Path) -> bytes:
+                if path == target:
+                    raise PermissionError("permission denied")
+                return original_read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", autospec=True) as read_mock:
+                read_mock.side_effect = read_bytes_side_effect
                 with self.assertRaisesRegex(PredicateContractError, "cannot be read"):
                     evaluate_predicate_document(
                         document(
@@ -361,8 +378,33 @@ class PredicateTests(unittest.TestCase):
                         ),
                         context,
                     )
-            finally:
-                target.chmod(0o600)
+
+    def test_file_sha256_missing_or_non_regular_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / "directory"
+            directory.mkdir()
+            context = PredicateContext(repo_root=root)
+            predicates = (
+                {
+                    "op": "not",
+                    "predicate": {
+                        "op": "file_sha256",
+                        "path": "missing.txt",
+                        "sha256": "0" * 64,
+                    },
+                },
+                {
+                    "op": "file_sha256",
+                    "path": "directory",
+                    "sha256": "0" * 64,
+                },
+            )
+            for predicate in predicates:
+                with self.subTest(predicate=predicate), self.assertRaisesRegex(
+                    PredicateContractError, "regular file"
+                ):
+                    evaluate_predicate_document(document(predicate), context)
 
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

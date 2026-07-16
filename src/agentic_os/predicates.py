@@ -46,7 +46,15 @@ _CREDENTIAL_FILE_NAMES = frozenset(
     }
 )
 _CREDENTIAL_NAME_TOKENS = frozenset(
-    {"credential", "credentials", "secret", "secrets", "token", "tokens"}
+    {
+        "credential",
+        "credentials",
+        "private",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+    }
 )
 _CREDENTIAL_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 
@@ -134,7 +142,7 @@ def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
         path = _repo_path(context.repo_root, predicate["path"])
         path_stat = _repo_path_stat(path, "file_sha256 evidence")
         if path_stat is None or not S_ISREG(path_stat.st_mode):
-            return False
+            raise PredicateContractError("file_sha256 evidence must be a regular file")
         try:
             actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:
@@ -233,7 +241,7 @@ def _assert_predicate_path_allowed(*relative_paths: str) -> None:
             ) from exc
         if _is_credential_path_denied(relative):
             raise PredicateContractError(
-                "repo-relative path targets private credentials"
+                "repo-relative path targets private credentials or artifacts"
             )
 
 
