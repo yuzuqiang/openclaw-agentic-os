@@ -33,6 +33,6 @@ current corrected artifact hash.
 Every pull request must receive a completed GitHub Codex review before merge.
 Any Codex P0/P1 finding blocks merge. After fixes, request `@codex review` again
 and wait for a clean review of the exact current head. The review watcher may
-auto-merge only after CAS-checking that reviewed head and required checks; head
-changes, missing checks, or ambiguous review state fail closed. Implementation
-agents must not merge directly.
+auto-merge only after CAS-checking that reviewed head, required checks, and merge
+state; head changes, missing checks, or ambiguous review state fail closed.
+Implementation agents must not merge directly.

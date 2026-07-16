@@ -20,6 +20,16 @@ from agentic_os.migrations import (
     repository_root,
     verify_database,
 )
+from agentic_os.openclaw_adapter import MetadataObservation
+from agentic_os.reconciliation import reconcile_unknown_metadata
+from agentic_os.runtime_dispatch import (
+    DispatchRequest,
+    dispatch_with_metadata,
+    lease_metadata,
+    release_metadata,
+    spawn_metadata,
+    stable_json,
+)
 from agentic_os.slo_contracts import (
     SLO_QUERY_CONTRACTS,
     SLO_QUERY_COUNT,
@@ -95,6 +105,319 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(
             apply_migrations(self.database, migration_dir=migration_dir),
             tuple(migration["version"] for migration in selected),
+        )
+
+    def _seed_v9_dispatch(
+        self,
+        connection: sqlite3.Connection,
+        suffix: str,
+        *,
+        spawn_state: str,
+        requested_at_epoch_ms: int,
+    ) -> DispatchRequest:
+        request = DispatchRequest(
+            run_id=f"run-{suffix}",
+            transition_id=f"transition-{suffix}",
+            phase="phase",
+            agent_id="agent",
+            requester_agent_id="requester",
+            task_digest=f"task-{suffix}",
+            spawn_request_id=f"spawn-{suffix}",
+            reserve_budget_event_id=f"reserve-{suffix}",
+            client_lease_id=f"client-lease-{suffix}",
+            acquire_idempotency_key=f"acquire-idem-{suffix}",
+            release_idempotency_key=f"release-idem-{suffix}",
+            ttl_ms=60_000,
+            spawn_client_request_id=f"client-{suffix}",
+            spawn_idempotency_key=f"spawn-idem-{suffix}",
+        )
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) VALUES(?,"
+            "'file_authority','now')",
+            (f"workflow-{suffix}",),
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES(?,?,?,"
+            "'file_authority','candidate','R1','R1','now','now')",
+            (request.run_id, f"prepare-{suffix}", f"workflow-{suffix}"),
+        )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES(?,?,'before','after','dispatch',"
+            "'spawn','R1',?,0,'now')",
+            (request.transition_id, request.run_id, f"transition-idem-{suffix}"),
+        )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES(?,?,?,'endpoint','capability',100,200,'known','effective',?)",
+            (
+                f"cost-row-{suffix}",
+                "provider",
+                f"model-{suffix}",
+                f"cost-hash-{suffix}",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+            "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?, 'pending','now','now')",
+            (
+                request.spawn_request_id,
+                request.run_id,
+                request.phase,
+                request.agent_id,
+                request.transition_id,
+                request.spawn_client_request_id,
+                request.spawn_idempotency_key,
+                request.task_digest,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,selected_cost_confidence,"
+            "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+            "output_token_budget,cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,usage_confidence,updated_at) VALUES(?,?, 'capability',"
+            "'provider',?,'endpoint',?,'effective',?,'known',?,100,100,100,1000,"
+            "1,1,1,'known','now')",
+            (
+                request.run_id,
+                f"workflow-{suffix}",
+                f"model-{suffix}",
+                f"cost-row-{suffix}",
+                f"cost-hash-{suffix}",
+                request.transition_id,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,event_dedupe_hash,"
+            "event_sequence,run_id,transition_id,provider,model,spawn_request_id,"
+            "endpoint_binding_id,capability_class,cost_registry_id,cost_effective_at,"
+            "cost_registry_hash,cost_confidence,event_type,input_tokens,usage_confidence,"
+            "source,created_at,created_at_epoch_ms) VALUES(?,?,?,1,?,?,'provider',?,"
+            "?,'endpoint','capability',?,'effective',?,'known','reserve',1,'known','test',"
+            "'now',?)",
+            (
+                request.reserve_budget_event_id,
+                f"reserve-idem-{suffix}",
+                f"reserve-dedupe-{suffix}",
+                request.run_id,
+                request.transition_id,
+                f"model-{suffix}",
+                request.spawn_request_id,
+                f"cost-row-{suffix}",
+                f"cost-hash-{suffix}",
+                requested_at_epoch_ms - 1,
+            ),
+        )
+        acquire = lease_metadata(request, f"gateway-{suffix}")
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,phase,agent_id,requester_agent_id,ttl_ms,"
+            "metadata_contract_version,metadata_json,external_metadata_json,external_run_id,"
+            "external_transition_id,external_client_request_id,external_idempotency_key,"
+            "external_phase,external_agent_id,external_requester_agent_id,external_ttl_ms,"
+            "state,external_id,requested_at,requested_at_epoch_ms,accepted_at,"
+            "accepted_at_epoch_ms) VALUES(?,?,?,'allow_lease_acquire',?,?,?,?,?,?, 'v1',"
+            "?,?,?,?,?,?,?,?,?,?, 'accepted',?,'request-time',?,'accept-time',?)",
+            (
+                f"acquire:{request.acquire_idempotency_key}",
+                request.run_id,
+                request.transition_id,
+                request.client_lease_id,
+                request.acquire_idempotency_key,
+                request.phase,
+                request.agent_id,
+                request.requester_agent_id,
+                request.ttl_ms,
+                stable_json(lease_metadata(request, "pending")),
+                stable_json(acquire),
+                request.run_id,
+                request.transition_id,
+                request.client_lease_id,
+                request.acquire_idempotency_key,
+                request.phase,
+                request.agent_id,
+                request.requester_agent_id,
+                request.ttl_ms,
+                f"gateway-{suffix}",
+                requested_at_epoch_ms,
+                requested_at_epoch_ms + 1,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,requester_agent_id,"
+            "state,gateway_lease_id,client_lease_id,acquire_idempotency_key,"
+            "release_idempotency_key,ttl_ms,metadata_contract_version,metadata_observed_at,"
+            "external_metadata_json,external_client_lease_id,external_idempotency_key,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,acquire_requested_at,acquired_at,"
+            "expires_at,expires_at_epoch_ms) VALUES(?,?,?,?,?,?,'acquired',?,?,?,?,?,'v1',"
+            "'observed',?,?,?,?,?,?,?,?,?,'request-time','acquired','later',?)",
+            (
+                request.client_lease_id,
+                request.run_id,
+                request.phase,
+                request.transition_id,
+                request.agent_id,
+                request.requester_agent_id,
+                f"gateway-{suffix}",
+                request.client_lease_id,
+                request.acquire_idempotency_key,
+                request.release_idempotency_key,
+                request.ttl_ms,
+                stable_json(acquire),
+                request.client_lease_id,
+                request.acquire_idempotency_key,
+                request.run_id,
+                request.phase,
+                request.transition_id,
+                request.agent_id,
+                request.requester_agent_id,
+                request.ttl_ms,
+                requested_at_epoch_ms + request.ttl_ms,
+            ),
+        )
+        spawn = spawn_metadata(request)
+        accepted = spawn_state == "accepted"
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+            "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+            "external_metadata_json,external_run_id,external_transition_id,"
+            "external_client_request_id,external_idempotency_key,external_phase,"
+            "external_agent_id,external_task_digest,state,external_id,requested_at,"
+            "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES(?,?,?,"
+            "'sessions_spawn',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'request-time',?,?,?)",
+            (
+                f"spawn:{request.spawn_idempotency_key}",
+                request.run_id,
+                request.transition_id,
+                request.spawn_request_id,
+                request.reserve_budget_event_id,
+                request.spawn_client_request_id,
+                request.spawn_idempotency_key,
+                request.phase,
+                request.agent_id,
+                request.task_digest,
+                "v1" if accepted else None,
+                stable_json(spawn),
+                stable_json(spawn) if accepted else None,
+                request.run_id if accepted else None,
+                request.transition_id if accepted else None,
+                request.spawn_client_request_id if accepted else None,
+                request.spawn_idempotency_key if accepted else None,
+                request.phase if accepted else None,
+                request.agent_id if accepted else None,
+                request.task_digest if accepted else None,
+                spawn_state,
+                f"session-{suffix}" if accepted else None,
+                requested_at_epoch_ms,
+                "accept-time" if accepted else None,
+                requested_at_epoch_ms + 1 if accepted else None,
+            ),
+        )
+        if accepted:
+            connection.execute(
+                "UPDATE spawn_requests SET session_key=?,dispatch_run_id=?,"
+                "metadata_contract_version='v1',metadata_observed_at='observed',"
+                "external_metadata_json=? WHERE spawn_request_id=?",
+                (
+                    f"session-{suffix}",
+                    f"session-{suffix}",
+                    stable_json(spawn),
+                    request.spawn_request_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,phase,"
+                "agent_id,client_request_id,spawn_idempotency_key,session_key,task_digest,"
+                "state,spawned_at) VALUES(?,?,?,?,?,?,?,?,?,?, 'running','now')",
+                (
+                    f"session:{suffix}",
+                    request.spawn_request_id,
+                    request.run_id,
+                    request.transition_id,
+                    request.phase,
+                    request.agent_id,
+                    request.spawn_client_request_id,
+                    request.spawn_idempotency_key,
+                    f"session-{suffix}",
+                    request.task_digest,
+                ),
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET state='accepted' WHERE spawn_request_id=?",
+                (request.spawn_request_id,),
+            )
+        return request
+
+    def _seed_runtime_dispatch_binding(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        run_id: str,
+        transition_id: str,
+        phase: str,
+        agent_id: str,
+        task_digest: str,
+        spawn_request_id: str,
+        spawn_client_request_id: str,
+        spawn_idempotency_key: str,
+        requester_agent_id: str = "requester",
+        lease_id: str = "lease",
+        client_lease_id: str = "client-lease",
+        acquire_idempotency_key: str = "acquire-idem",
+        release_idempotency_key: str = "release-idem",
+        reserve_budget_event_id: str = "reserve",
+    ) -> None:
+        connection.execute(
+            "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+            "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+            "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+            "expires_at_epoch_ms) VALUES(?,?,?,?,?,?,'acquire_pending',?,?,?,?,"
+            "'now','later',1800000060000)",
+            (
+                lease_id,
+                run_id,
+                phase,
+                transition_id,
+                agent_id,
+                requester_agent_id,
+                client_lease_id,
+                acquire_idempotency_key,
+                release_idempotency_key,
+                60_000,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+            "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
+            "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
+            "spawn_idempotency_key,reserve_budget_event_id,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                spawn_request_id,
+                lease_id,
+                run_id,
+                transition_id,
+                phase,
+                agent_id,
+                requester_agent_id,
+                task_digest,
+                client_lease_id,
+                acquire_idempotency_key,
+                release_idempotency_key,
+                spawn_client_request_id,
+                spawn_idempotency_key,
+                reserve_budget_event_id,
+                "now",
+            ),
         )
 
     def _insert_gate_bound_evidence(
@@ -205,7 +528,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 32)
+            self.assertEqual(len(tables), 33)
             rows = connection.execute(
                 "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -221,6 +544,176 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
                 (SLO_QUERY_COUNT * len(migrations),),
+            )
+
+    def test_v10_backfills_exact_v9_dispatches_for_replay_and_reconciliation(self) -> None:
+        self._apply_migrations_through(9, "v9-exact")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            accepted = self._seed_v9_dispatch(
+                connection,
+                "accepted",
+                spawn_state="accepted",
+                requested_at_epoch_ms=1_800_000_000_100,
+            )
+            pending = self._seed_v9_dispatch(
+                connection,
+                "pending",
+                spawn_state="pending",
+                requested_at_epoch_ms=2,
+            )
+
+        self.assertEqual(apply_migrations(self.database), (10,))
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT spawn_request_id,client_lease_id FROM runtime_dispatch_bindings "
+                    "ORDER BY spawn_request_id"
+                ).fetchall(),
+                [
+                    (accepted.spawn_request_id, accepted.client_lease_id),
+                    (pending.spawn_request_id, pending.client_lease_id),
+                ],
+            )
+
+        class NoCallAdapter:
+            def __getattr__(self, name):
+                raise AssertionError(f"accepted replay called adapter method {name}")
+
+        replay = dispatch_with_metadata(self.database, NoCallAdapter(), accepted)
+        self.assertEqual(replay.status, "replayed")
+        self.assertEqual(replay.session_key, "session-accepted")
+
+        class ReconcileAdapter:
+            def sessions_list(self):
+                return []
+
+            def allow_lease_list(self):
+                return []
+
+            def allow_lease_release(self, params):
+                raise AssertionError("zero session observation must retain the lease")
+
+        summary = reconcile_unknown_metadata(self.database, ReconcileAdapter())
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 1)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id=?",
+                    (pending.client_lease_id,),
+                ).fetchone(),
+                ("acquired",),
+            )
+
+    def test_v10_rejects_post_migration_spawn_intent_without_binding(self) -> None:
+        self.assertEqual(
+            apply_migrations(self.database),
+            tuple(migration.version for migration in load_migrations()),
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "runtime dispatch binding"):
+                self._seed_v9_dispatch(
+                    connection,
+                    "unbound-post-v10",
+                    spawn_state="pending",
+                    requested_at_epoch_ms=1_800_000_000_250,
+                )
+
+    def test_v10_upgrade_refuses_ambiguous_v9_dispatch_binding(self) -> None:
+        self._apply_migrations_through(9, "v9-ambiguous")
+        requested_ms = 1_800_000_000_300
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            request = self._seed_v9_dispatch(
+                connection,
+                "ambiguous",
+                spawn_state="pending",
+                requested_at_epoch_ms=requested_ms,
+            )
+            other = DispatchRequest(
+                **{
+                    **request.__dict__,
+                    "client_lease_id": "client-lease-ambiguous-other",
+                    "acquire_idempotency_key": "acquire-idem-ambiguous-other",
+                    "release_idempotency_key": "release-idem-ambiguous-other",
+                    "lease_id": "lease-ambiguous-other",
+                }
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "client_request_id,idempotency_key,phase,agent_id,requester_agent_id,ttl_ms,"
+                "metadata_json,state,requested_at,requested_at_epoch_ms) VALUES(?,?,?,"
+                "'allow_lease_acquire',?,?,?,?,?,?,?,'pending','request-time',?)",
+                (
+                    f"acquire:{other.acquire_idempotency_key}",
+                    other.run_id,
+                    other.transition_id,
+                    other.client_lease_id,
+                    other.acquire_idempotency_key,
+                    other.phase,
+                    other.agent_id,
+                    other.requester_agent_id,
+                    other.ttl_ms,
+                    stable_json(lease_metadata(other, "pending")),
+                    requested_ms,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+                "expires_at_epoch_ms) VALUES(?,?,?,?,?,?,'acquire_pending',?,?,?,?,"
+                "'request-time','later',?)",
+                (
+                    other.lease_id,
+                    other.run_id,
+                    other.phase,
+                    other.transition_id,
+                    other.agent_id,
+                    other.requester_agent_id,
+                    other.client_lease_id,
+                    other.acquire_idempotency_key,
+                    other.release_idempotency_key,
+                    other.ttl_ms,
+                    requested_ms + other.ttl_ms,
+                ),
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "valid=1"):
+            apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone(),
+                (9,),
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='runtime_dispatch_bindings'"
+                ).fetchone()
+            )
+
+    def test_v10_upgrade_refuses_unbound_v9_dispatch(self) -> None:
+        self._apply_migrations_through(9, "v9-unbound")
+        with sqlite3.connect(self.database) as connection:
+            request = self._seed_v9_dispatch(
+                connection,
+                "unbound",
+                spawn_state="pending",
+                requested_at_epoch_ms=1_800_000_000_400,
+            )
+            connection.execute(
+                "UPDATE external_rpc_intents SET requested_at='different-time',"
+                "requested_at_epoch_ms=requested_at_epoch_ms+1 "
+                "WHERE rpc_kind='allow_lease_acquire' AND idempotency_key=?",
+                (request.acquire_idempotency_key,),
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "valid=1"):
+            apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone(),
+                (9,),
             )
 
     def test_legacy_money_import_evidence_children_match_completed_batch_counts(
@@ -437,7 +930,7 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (2, 3, 4, 5, 6, 7, 8, 9))
+        self.assertEqual(apply_migrations(self.database), (2, 3, 4, 5, 6, 7, 8, 9, 10))
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
         )
@@ -533,7 +1026,7 @@ class MigrationTests(unittest.TestCase):
                 [(1, legacy_hash), (2, legacy_hash)],
             )
 
-        self.assertEqual(apply_migrations(self.database), (3, 4, 5, 6, 7, 8, 9))
+        self.assertEqual(apply_migrations(self.database), (3, 4, 5, 6, 7, 8, 9, 10))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -551,6 +1044,7 @@ class MigrationTests(unittest.TestCase):
                     (7, current_hash),
                     (8, current_hash),
                     (9, current_hash),
+                    (10, current_hash),
                 ],
             )
 
@@ -714,6 +1208,7 @@ class MigrationTests(unittest.TestCase):
                 "budget_post_dispatch_clock_identity",
                 "budget_atomic_final_settlement",
                 "legacy_money_import_quarantine",
+                "runtime_dispatch_binding",
             ],
         )
         for migration in migrations:
@@ -736,7 +1231,7 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4, 5, 6, 7, 8, 9))
+        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -1998,6 +2493,18 @@ class MigrationTests(unittest.TestCase):
             "updated_at) VALUES('spawn','r','phase','agent','t','client','spawn-idem','task',"
             "'pending','accepted-session','now','now')"
         )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="r",
+            transition_id="t",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="reserve",
+        )
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,phase,"
@@ -2107,16 +2614,16 @@ class MigrationTests(unittest.TestCase):
                         "sessions_spawn",
                         "spawn",
                         reserve_id,
-                        f"client-{identifier}",
-                        f"spawn-idem-{identifier}",
+                        "client",
+                        "spawn-idem",
                         "phase",
                         "agent",
                         "task",
                         "v1",
                         "{}",
                         external_metadata,
-                        f"client-{identifier}",
-                        f"spawn-idem-{identifier}",
+                        "client",
+                        "spawn-idem",
                         "phase",
                         "agent",
                         "task",
@@ -4004,6 +4511,18 @@ class MigrationTests(unittest.TestCase):
             "created_at,updated_at) VALUES('spawn','clock-run','phase','agent',"
             "'transition-clock','client','spawn-idem','task','pending','now','now')"
         )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="clock-run",
+            transition_id="transition-clock",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="clock-reserve",
+        )
         external_metadata = (
             '{"run_id":"clock-run","transition_id":"transition-clock",'
             '"client_request_id":"client","idempotency_key":"spawn-idem",'
@@ -4146,6 +4665,18 @@ class MigrationTests(unittest.TestCase):
             "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
             "created_at,updated_at) VALUES('spawn','cost-run','phase','agent',"
             "'transition-cost','client','spawn-idem','task','pending','now','now')"
+        )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="cost-run",
+            transition_id="transition-cost",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="cost-reserve",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
@@ -4293,6 +4824,18 @@ class MigrationTests(unittest.TestCase):
             "created_at,updated_at) VALUES('spawn','clockless-run','phase','agent',"
             "'transition-clockless','client','spawn-idem','task','pending','now','now')"
         )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="clockless-run",
+            transition_id="transition-clockless",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="clockless-reserve",
+        )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
             "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
@@ -4422,6 +4965,18 @@ class MigrationTests(unittest.TestCase):
             "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
             "created_at,updated_at) VALUES('spawn','transition-run','phase','agent',"
             "'transition-event','client','spawn-idem','task','pending','now','now')"
+        )
+        self._seed_runtime_dispatch_binding(
+            connection,
+            run_id="transition-run",
+            transition_id="transition-event",
+            phase="phase",
+            agent_id="agent",
+            task_digest="task",
+            spawn_request_id="spawn",
+            spawn_client_request_id="client",
+            spawn_idempotency_key="spawn-idem",
+            reserve_budget_event_id="transition-reserve",
         )
         connection.execute(
             "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
@@ -5296,7 +5851,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(10,'future_contract',?,'now')",
+            "VALUES(11,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -5305,7 +5860,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                10,
+                11,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -5319,7 +5874,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (10,),
+            (11,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -5525,6 +6080,7 @@ class MigrationTests(unittest.TestCase):
                 (7, "budget_post_dispatch_clock_identity"),
                 (8, "budget_atomic_final_settlement"),
                 (9, "legacy_money_import_quarantine"),
+                (10, "runtime_dispatch_binding"),
             ],
         )
 

@@ -11,8 +11,8 @@
 7. Wait for Codex to post its GitHub review. Any P0/P1 issue blocks merge.
 8. Fix every blocking finding, push the changes, and request `@codex review` again.
 9. Repeat until Codex reports no blocking P0/P1 findings.
-10. The review watcher CAS-checks the reviewed head and required checks, then
-    auto-merges into `main`; any ambiguity fails closed.
+10. The review watcher CAS-checks the exact reviewed head, required checks, and
+    merge state, then may auto-merge into `main`; any ambiguity fails closed.
 
 Implementation agents must not merge their own pull requests. A green local
 test suite is necessary but does not replace GitHub Codex review.

@@ -170,7 +170,7 @@ External runtime metadata contract is a P0 prerequisite:
 - `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
 - Session list/status/result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
 - For `sessions_spawn`, SQLite authority is normalized and raw evidence must agree with it: `external_rpc_intents.spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest` must match one concrete `spawn_requests` row through foreign keys. Whenever a `sessions_spawn` row carries `external_metadata_json`, DDL requires `json_valid(...)` and requires `json_extract(...,'$.run_id')`, `$.transition_id`, `$.client_request_id`, `$.idempotency_key`, `$.phase`, `$.agent_id`, and `$.task_digest` to match both the normalized observed fields and the local intent fields exactly. Accepted/reconciled rows additionally require a non-empty accepted external session identity in `external_id`. Pre-RPC `pending` rows may exist without external JSON because the external call has not returned; the blocking SLO rejects pending/unknown/accepted/reconciled rows from auto-repair or gate trust unless the raw JSON, normalized observed fields, and local intent fields are an exact triple match.
-- Accepted session identity has one source of truth tuple: `external_rpc_intents.external_id`, `spawn_requests.session_key`, and `sessions.session_key` must be non-empty and equal for accepted/reconciled or accepted/completed spawn state. The `sessions` row must bind to the same `spawn_requests` row by `spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `spawn_idempotency_key`, `phase`, `agent_id`, and `task_digest`; a session may not point at a real `spawn_request_id` while carrying another run, phase, agent, client, idempotency, or task identity.
+- Accepted session identity has one source of truth tuple: `external_rpc_intents.external_id`, `spawn_requests.session_key`, and `sessions.session_key` must be non-empty and equal for accepted/reconciled or accepted/completed spawn state. The `sessions` row must bind to the same `spawn_requests` row by `spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `spawn_idempotency_key`, `phase`, `agent_id`, and `task_digest`; a session may not point at a real `spawn_request_id` while carrying another run, phase, agent, client, idempotency, or task identity. Accepted/reconciled replay must re-read this local tuple and fail closed if the local spawn/session proof is missing or mismatched.
 - Post-dispatch budget events must additionally bind to the selected `run_budgets` provider/model/endpoint/capability/cost row and to strict `requested_at_epoch_ms < accepted_at_epoch_ms < budget_events.created_at_epoch_ms` ordering.
 - Duplicate session spawn with the same idempotency key must return the original session identity and must not create another child.
 - Child prompt first line includes `run_id`, `phase`, `agent_id`, and `task_digest`; child echo is a secondary handshake and cannot replace runtime metadata.
@@ -184,6 +184,7 @@ Fail-closed rule:
 
 - If allowLease metadata is absent, `lease_acquire_pending` cannot auto-bind a live lease; scanner writes `human_review_required`.
 - If session metadata is absent, `spawn_pending` after a crash becomes `spawn_unknown`/`human_review_required`; the adapter must not retry `sessions_spawn`.
+- If the bound allowLease acquire has not accepted or reconciled into the exact acquired local lease with a non-empty Gateway lease identity, `spawn_pending`/`spawn_unknown` cannot auto-reconcile from session metadata and must move to `human_review_required`.
 - If ownership cannot be proven, ambiguous leases are left to bounded TTL or human review; no other run's lease is released.
 
 ## Minimum Database Contracts
@@ -3192,6 +3193,40 @@ runtime path, so imports cannot create unlinked settlement or budget events.
 Exact batch replay is idempotent; reused batch, idempotency, or dedupe identity
 with changed raw legacy payload fails closed.
 This slice does not enable production database authority.
+
+Current migration v10 runtime dispatch binding:
+
+`0010_runtime_dispatch_binding.sql` adds the immutable
+`runtime_dispatch_bindings` relation. Each row binds one spawn request to one
+lease using the complete persisted dispatch identity: run, transition, phase,
+agent, requester, task digest, client lease, acquire key, release key, spawn
+client request, and spawn idempotency key. Composite foreign keys require the
+same row to match both the existing `spawn_requests` identity and the existing
+`leases` identity; unique identity columns reject cross-dispatch reuse, and
+update/delete triggers preserve the binding as reconciliation evidence. The
+runtime writes this relation in the same `BEGIN IMMEDIATE` transaction as both
+pending external RPC intents. After v10, direct/import writers cannot create or
+reshape a `sessions_spawn` external RPC intent unless the exact binding already
+exists; the trigger and current SLO both treat an unbound spawn intent as
+non-contract state. During v9-to-v10 upgrade, bindings are backfilled
+only when one spawn intent and one lease/acquire intent have exact durable
+run/transition/phase/agent identity and equal persisted request text and epoch
+milliseconds. Zero-candidate, multi-candidate, or lease-reuse cases abort the
+whole migration; legacy runtime work is never silently omitted. Reconciliation
+joins only through this relation,
+so a spawn proven blocked before the external call can release its owned lease
+without pairing another dispatch on the same run/transition. Crash-left,
+zero-observation, and ambiguous spawn outcomes retain the lease for human
+review because session discovery cannot prove the external spawn did not
+succeed. Before inserting a new
+pending dispatch, the same immediate transaction rejects an older potentially
+live run/phase/agent spawn intent in `pending`, `unknown`, `accepted`, or
+`reconciled` state, plus unresolved human-review outcomes. Only a terminal
+pre-spawn allow-lease failure is excluded. Exact replay is decided before this
+arbitration. Competing or post-timeout attempts therefore fail before any new
+lease or spawn RPC, while external RPC remains outside the SQLite transaction.
+The acceptance transaction repeats the guard as defense in depth. Runtime
+authority remains disabled.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:

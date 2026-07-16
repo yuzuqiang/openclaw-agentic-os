@@ -10,17 +10,16 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `abcb5844b8bb8488b10a673687f45199843d72a62577520b40015872b9d6a928`
+- Current design artifact SHA-256: `b2e3671ea69d0e3f8c7d3d96f65cfc156b0f7305036d9cd72821ac97330006b1`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `2c0199135560447e673090b32acafeb9cc16053b0ac258ba7bf8e00faf40c83a`
-- Current migration manifest SHA-256: `739f57fe9e7114cffd73e65a7302dbae1627610d1174e4d4dc16c15930330553`
-- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, and three legacy import evidence tables, 30 executable SLO queries
+- Current latest migration SHA-256: `19970e071a05eadc7a682d98b624829b8c3d30782598e27ebeb04edba9f4ba24`
+- Current migration manifest SHA-256: `eff21f04fbe780d29c7c4aba3a1f773cad1b1f283464700cab8d803d8f7486c9`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
-disabled (`agentic_os.DB_AUTHORITY_ENABLED is False`), and no OpenClaw runtime
-adapter is implemented yet.
+disabled (`agentic_os.DB_AUTHORITY_ENABLED is False`).
 
 ## Foundation commands
 
@@ -174,14 +173,49 @@ same boundary. It covers allowLease acquire/status/release and session
 spawn/status/list/result metadata, including idempotent replay identity, without
 making OpenClaw RPCs, changing Gateway configuration, starting a reconciliation
 scanner, or enabling database authority.
+`agentic_os.openclaw_adapter`, `agentic_os.runtime_dispatch`, and
+`agentic_os.reconciliation` add the next bounded Issue #5 slice: an injectable
+metadata-capable adapter contract, a DB-persisted pending-intent runtime
+dispatcher, exact accepted lease/session persistence, owned-lease cleanup on
+spawn metadata failure, and a fail-closed scanner that reconciles unknown
+or crash-left pending outcomes only from list/status metadata. Normalized
+metadata is never promoted to raw evidence; OpenClaw responses must expose raw
+metadata JSON from the external boundary. Ambiguous transport failures become
+recoverable outcomes for reconciliation instead of adapter retries, and prior
+`pending`, `unknown`, `failed`, or `human_review_required` spawn attempts are
+preserved without crossing `sessions_spawn` again. Release-pending leases are
+reconciled from exact release metadata. Acquire-only leases are released with
+the original release idempotency key only when durable state proves the spawn
+was blocked before the external call; crash-left, zero-observation, and
+ambiguous spawn outcomes retain the lease for human review. An immutable
+schema-backed dispatch relation binds each spawn to its exact
+lease/client/acquire/release identity, preventing reconciliation from releasing
+another dispatch's lease on the same run/transition. Unknown or pending spawn
+reconciliation also requires the bound allowLease acquire intent to be accepted
+or reconciled into the exact acquired local lease with a non-empty Gateway lease
+identity; otherwise the spawn is moved to human review even when `sessions_list`
+contains matching session metadata. Live run/phase/agent
+arbitration occurs in the initial intent transaction: prior pending, unknown,
+accepted, reconciled, or unresolved human-review attempts block a competing
+dispatch before another lease or spawn RPC, while terminal pre-spawn failures do
+not permanently occupy the slot. Migration v10 backfills pre-existing bindings
+only from an exact one-to-one identity and request-timestamp proof and aborts on
+unbound or ambiguous legacy rows rather than silently skipping reconciliation.
+Post-v10 `sessions_spawn` intents are rejected unless the exact runtime dispatch
+binding already exists, including the bound reserve budget event, and
+accepted/reconciled replay requires matching local `spawn_requests` plus
+`sessions` proof instead of trusting the external intent row alone.
+Unknown or pending `sessions_spawn` outcomes are never retried; zero, ambiguous,
+mismatched, or incomplete session-identity observations move to human review.
 
 ## Version-management policy
 
 - `main` contains reviewed project state.
 - Implementation work should use focused branches and pull requests.
 - Every PR must wait for a completed GitHub Codex review; any P0/P1 finding blocks merge.
-- After Codex is clean for the exact current head, the watcher CAS-checks the
-  head and required checks, then auto-merges into `main`; ambiguity fails closed.
+- After Codex is clean for the exact current head, the watcher may auto-merge
+  only after CAS-checking the reviewed SHA, required checks, and merge state;
+  head changes, missing checks, or ambiguous review state fail closed.
 - Design changes must preserve executable DDL/SLO validation and adversarial fixtures.
 - Production readiness must be backed by runtime evidence, not document-only acceptance.
 
