@@ -367,6 +367,7 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": "artifacts/private-data.json"},
                 {"op": "file_exists", "path": "config/passwords.txt"},
                 {"op": "file_exists", "path": "api-key.json"},
+                {"op": "file_exists", "path": "api/key.json"},
                 {"op": "file_exists", "path": ".npmrc.bak"},
                 {"op": "file_exists", "path": ".netrc.old"},
                 {"op": "file_exists", "path": "cert.pem.bak"},
@@ -942,6 +943,17 @@ class PredicateTests(unittest.TestCase):
             )
 
             (root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n"
+                "[extensions]\n\tobjectFormat = sha256\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+            (root / ".git" / "config").write_text(
                 "[core]\n\trepositoryformatversion = 1\n"
                 "[extensions]\n\tobjectFormat = sha256\n\tworktreeConfig = true\n",
                 encoding="utf-8",
@@ -1023,6 +1035,19 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=nul_gitdir_root),
                 )
 
+            config_control_path = base / "config-control-root"
+            config_control_path.mkdir()
+            config_control_root = make_repo_root(str(config_control_path))
+            (config_control_root / ".git" / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\x1f\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=config_control_root),
+                )
+
             multiline_head_path = base / "multiline-head-root"
             multiline_head_path.mkdir()
             multiline_head_root = make_repo_root(str(multiline_head_path))
@@ -1033,6 +1058,18 @@ class PredicateTests(unittest.TestCase):
                 evaluate_predicate_document(
                     document({"op": "literal", "value": True}),
                     PredicateContext(repo_root=multiline_head_root),
+                )
+
+            lock_ref_path = base / "lock-ref-root"
+            lock_ref_path.mkdir()
+            lock_ref_root = make_repo_root(str(lock_ref_path))
+            (lock_ref_root / ".git" / "HEAD").write_text(
+                "ref: refs/heads/main.lock\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=lock_ref_root),
                 )
 
             common_dir = base / "main" / ".git"
@@ -1222,6 +1259,51 @@ class PredicateTests(unittest.TestCase):
                     PredicateContext(repo_root=linked_root),
                 )
 
+    def test_worktree_config_extension_overlays_common_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            git_dir = root / ".git"
+            (git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 1\n"
+                "\tbare = false\n"
+                "[extensions]\n"
+                "\tworktreeConfig = true\n",
+                encoding="utf-8",
+            )
+            (git_dir / "config.worktree").write_text(
+                "[core]\n\tbare = true\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo_root(tmp)
+            git_dir = root / ".git"
+            other = root / "other"
+            other.mkdir()
+            (git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 1\n"
+                "[extensions]\n"
+                "\tworktreeConfig = true\n",
+                encoding="utf-8",
+            )
+            (git_dir / "config.worktree").write_text(
+                "[core]\n"
+                f"\tworktree = {other}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "core.worktree"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
+                )
+
     def test_missing_json_path_fails_closed_even_when_negated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = PredicateContext(
@@ -1303,11 +1385,13 @@ class PredicateTests(unittest.TestCase):
                     "manifest": {
                         "password": "secret",
                         "nested": {"api_key": "secret"},
+                        "api": {"key": "secret"},
                         "camel": {"clientSecret": "secret"},
                     },
                     "secret-manifest": {"status": "pass"},
                 },
                 command_results={
+                    "api": {"key": "secret"},
                     "unit": {
                         "password": "secret",
                         "api_key": "secret",
@@ -1338,6 +1422,12 @@ class PredicateTests(unittest.TestCase):
                 {
                     "op": "json_equals",
                     "document": "manifest",
+                    "path": ["api", "key"],
+                    "value": "secret",
+                },
+                {
+                    "op": "json_equals",
+                    "document": "manifest",
                     "path": ["camel", "clientSecret"],
                     "value": "secret",
                 },
@@ -1357,6 +1447,12 @@ class PredicateTests(unittest.TestCase):
                     "op": "command_result_equals",
                     "id": "unit",
                     "field": "api_key",
+                    "value": "secret",
+                },
+                {
+                    "op": "command_result_equals",
+                    "id": "api",
+                    "field": "key",
                     "value": "secret",
                 },
                 {
