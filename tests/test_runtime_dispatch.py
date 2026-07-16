@@ -310,6 +310,8 @@ class RuntimeDispatchTests(unittest.TestCase):
                 {
                     "metadata": spawn_metadata(self.request),
                     "gateway_lease_id": "lease-gateway",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
                 }
             ],
         )
@@ -361,6 +363,27 @@ class RuntimeDispatchTests(unittest.TestCase):
                     ("allow_lease_acquire", 1000, 1001),
                     ("sessions_spawn", 1000, 1001),
                 ],
+            )
+
+    def test_spawn_intent_time_strictly_follows_same_millisecond_reserve(self) -> None:
+        original_now = runtime_dispatch.now_utc
+        runtime_dispatch.now_utc = lambda: ("1970-01-01T00:00:01Z", 1000)
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "UPDATE budget_events SET created_at_epoch_ms=1000 "
+                    "WHERE budget_event_id='reserve'"
+                )
+            dispatch_with_metadata(self.database, self._accepted_adapter(), self.request)
+        finally:
+            runtime_dispatch.now_utc = original_now
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT requested_at_epoch_ms,accepted_at_epoch_ms "
+                    "FROM external_rpc_intents WHERE rpc_kind='sessions_spawn'"
+                ).fetchone(),
+                (1001, 1002),
             )
 
     def test_runtime_schema_verification_runs_before_adapter_call(self) -> None:
@@ -1465,6 +1488,11 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "'other-reserve','client-other','spawn-idem-other','phase','agent','task',"
                     "'{}','pending','now',2)"
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "runtime dispatch binding"):
+                connection.execute(
+                    "UPDATE external_rpc_intents SET reserve_budget_event_id='other-reserve' "
+                    "WHERE rpc_kind='sessions_spawn' AND idempotency_key='spawn-idem'"
+                )
 
     def test_reconcile_unknown_acquire_requires_local_lease_row(self) -> None:
         with self._connect() as connection:
@@ -1572,6 +1600,96 @@ class RuntimeDispatchTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_reconcile_contract_failed_matching_session_item_requires_review(self) -> None:
+        self._seed_unknown_spawn()
+
+        class ListTransport:
+            def call(self, method, params):
+                if method == "sessions_list":
+                    metadata = spawn_metadata(self_request)
+                    return {
+                        "sessions": [
+                            {
+                                "metadata": {
+                                    "metadata_contract_version": "v1",
+                                    "normalized": metadata,
+                                    "raw_json": stable_json(metadata),
+                                },
+                                "external_id": "session-key",
+                                "session_key": "session-key",
+                                "spawn_request_session_key": "session-key",
+                            },
+                            {
+                                "metadata": {
+                                    "metadata_contract_version": "v1",
+                                    "normalized": metadata,
+                                    "raw_json": stable_json(metadata),
+                                },
+                                "external_id": "session-key-2",
+                                "session_key": "session-key-2",
+                                "spawn_request_session_key": "session-key-2",
+                                "session": {"session_key": "conflicting-session"},
+                            },
+                        ]
+                    }
+                if method == "subagents.allowLease.status":
+                    return {"leases": []}
+                raise AssertionError(method)
+
+        self_request = self.request
+        summary = reconcile_unknown_metadata(self.database, OpenClawAdapter(ListTransport()))
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 1)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
+    def test_reconcile_gatewayless_matching_lease_observation_requires_review(self) -> None:
+        adapter = TransportFailingAdapter(
+            {"allow_lease_acquire": TimeoutError("acquire timed out")}
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE external_rpc_intents SET requested_at='old',requested_at_epoch_ms=2 "
+                "WHERE rpc_kind='allow_lease_acquire'"
+            )
+        valid = observation(
+            lease_metadata(self.request, "lease-gateway"),
+            external_id="lease-gateway",
+        )
+        gatewayless_normalized = dict(lease_metadata(self.request, "lease-gateway"))
+        gatewayless_normalized.pop("gateway_lease_id")
+        summary = reconcile_unknown_metadata(
+            self.database,
+            ScriptedAdapter(
+                leases=[
+                    valid,
+                    MetadataObservation(
+                        metadata_contract_version="v1",
+                        normalized=gatewayless_normalized,
+                        raw_json=stable_json(gatewayless_normalized),
+                        external_id=None,
+                    ),
+                ]
+            ),
+        )
+        self.assertEqual(summary.reconciled, 0)
+        self.assertEqual(summary.human_review_required, 1)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
                 ).fetchone()[0],
                 "human_review_required",
             )

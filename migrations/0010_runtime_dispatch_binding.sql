@@ -212,7 +212,7 @@ BEGIN
 END;
 
 CREATE TRIGGER external_rpc_intents_require_runtime_dispatch_binding_update
-AFTER UPDATE OF rpc_kind, spawn_request_id, run_id, transition_id, phase, agent_id, task_digest, client_request_id, idempotency_key ON external_rpc_intents
+AFTER UPDATE OF rpc_kind, spawn_request_id, reserve_budget_event_id, run_id, transition_id, phase, agent_id, task_digest, client_request_id, idempotency_key ON external_rpc_intents
 WHEN NEW.rpc_kind='sessions_spawn' AND NOT EXISTS (
   SELECT 1 FROM runtime_dispatch_bindings b
   WHERE b.spawn_request_id=NEW.spawn_request_id

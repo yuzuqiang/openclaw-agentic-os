@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 
@@ -102,7 +102,9 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
         except AdapterContractError:
             partial = partial_observation_from_openclaw_response(mapped)
             if partial is not None:
-                observations.append(partial)
+                observations.append(
+                    replace(partial, metadata_contract_version=None, raw_json=None)
+                )
     return tuple(observations)
 
 

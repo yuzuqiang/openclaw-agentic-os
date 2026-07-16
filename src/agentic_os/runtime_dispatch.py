@@ -589,6 +589,19 @@ def _strictly_after_requested_time(
     return utc_from_epoch_ms(accepted_ms), accepted_ms
 
 
+def _spawn_intent_requested_time(
+    connection: sqlite3.Connection, request: DispatchRequest, *, now_ms: int
+) -> tuple[str, int]:
+    reserve = connection.execute(
+        "SELECT created_at_epoch_ms FROM budget_events WHERE budget_event_id=?",
+        (request.reserve_budget_event_id,),
+    ).fetchone()
+    if reserve is None or type(reserve[0]) is not int:
+        raise RuntimeDispatchError("missing reserve budget event timestamp")
+    requested_ms = max(now_ms, reserve[0] + 1)
+    return utc_from_epoch_ms(requested_ms), requested_ms
+
+
 def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchRequest) -> None:
     validate_dispatch_request(request)
     _assert_no_conflicting_spawn_replay(connection, request)
@@ -597,6 +610,9 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
     now, now_ms = now_utc()
     expires_ms = now_ms + request.ttl_ms
     expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(expires_ms / 1000))
+    spawn_requested_at, spawn_requested_at_ms = _spawn_intent_requested_time(
+        connection, request, now_ms=now_ms
+    )
     lease_id = request.lease_id or request.client_lease_id
 
     _assert_or_insert_spawn_request(connection, request, now)
@@ -629,8 +645,8 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             request.task_digest,
             stable_json(spawn_metadata(request)),
             "pending",
-            now,
-            now_ms,
+            spawn_requested_at,
+            spawn_requested_at_ms,
         ),
     )
 
@@ -1175,6 +1191,8 @@ def dispatch_with_metadata(
                 {
                     "metadata": session_metadata,
                     "gateway_lease_id": gateway_lease_id,
+                    "client_request_id": request.spawn_client_request_id,
+                    "idempotency_key": request.spawn_idempotency_key,
                 }
             )
             session_key = validate_accepted_session_identity(

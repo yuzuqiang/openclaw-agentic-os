@@ -473,6 +473,13 @@ def _matching_leases(
     malformed = 0
     for observation in observations:
         if not observation.external_id:
+            local_without_gateway = lease_metadata(request, "")
+            if _normalized_identity_matches(
+                local_without_gateway,
+                observation.normalized,
+                ALLOW_LEASE_IDENTITY_FIELDS,
+            ):
+                malformed += 1
             continue
         local = lease_metadata(request, observation.external_id)
         try:
