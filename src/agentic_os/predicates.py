@@ -29,6 +29,7 @@ MAX_STRING_LENGTH = 4096
 MAX_FILE_EVIDENCE_BYTES = 8 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_HEAD_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_GIT_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 _CREDENTIAL_FILE_NAMES = frozenset(
     {
         ".aws",
@@ -67,6 +68,20 @@ _CREDENTIAL_NAME_TOKENS = frozenset(
     }
 )
 _CREDENTIAL_FILE_SUFFIXES = (".env", ".pem", ".key", ".p12", ".pfx")
+_CREDENTIAL_BACKUP_SUFFIXES = (
+    ".bak",
+    ".backup",
+    ".copy",
+    ".old",
+    ".orig",
+    ".tmp",
+    ".swp",
+    "_bak",
+    "_backup",
+    "-backup",
+    " backup",
+    "~",
+)
 
 
 class PredicateContractError(ValueError):
@@ -254,15 +269,20 @@ def _require_git_worktree_top_level(root: Path) -> None:
         if S_ISREG(git_entry_stat.st_mode):
             if git_entry_stat.st_size > MAX_STRING_LENGTH:
                 raise PredicateContractError("repo root .git file is outside safe bounds")
-            content = git_entry.read_text(encoding="utf-8", errors="strict").strip()
+            content = _read_git_metadata_line(
+                git_entry,
+                "repo root must contain valid Git metadata",
+            )
             prefix = "gitdir:"
             if not content.startswith(prefix):
                 raise PredicateContractError(
                     "repo root must contain valid Git metadata"
                 )
-            git_dir = Path(content[len(prefix) :].strip())
-            if not git_dir.is_absolute():
-                git_dir = (root / git_dir).resolve(strict=False)
+            git_dir = _resolve_git_metadata_path(
+                root,
+                content[len(prefix) :].strip(),
+                "repo root must contain valid Git metadata",
+            )
             _require_directory_nofollow(
                 git_dir, "repo root must contain valid Git metadata"
             )
@@ -325,9 +345,9 @@ def _require_gitdir_file_matches_root(git_dir: Path, root: Path) -> None:
         "repo root gitdir must bind the worktree",
         max_size=MAX_STRING_LENGTH,
     )
-    gitdir_text = gitdir_file.read_text(encoding="utf-8", errors="strict").strip()
-    if not gitdir_text or "\x00" in gitdir_text:
-        raise PredicateContractError("repo root gitdir file is outside safe bounds")
+    gitdir_text = _read_git_metadata_line(
+        gitdir_file, "repo root gitdir file is outside safe bounds"
+    )
     worktree_git_file = Path(gitdir_text)
     if not worktree_git_file.is_absolute():
         worktree_git_file = (git_dir / worktree_git_file).resolve(strict=False)
@@ -348,12 +368,12 @@ def _git_common_dir(git_dir: Path) -> Path:
         )
     except FileNotFoundError:
         return git_dir
-    content = common_dir_file.read_text(encoding="utf-8", errors="strict").strip()
-    if not content:
-        raise PredicateContractError("repo root must contain valid Git metadata")
-    common_dir = Path(content)
-    if not common_dir.is_absolute():
-        common_dir = (git_dir / common_dir).resolve(strict=False)
+    content = _read_git_metadata_line(
+        common_dir_file, "repo root must contain valid Git metadata"
+    )
+    common_dir = _resolve_git_metadata_path(
+        git_dir, content, "repo root must contain valid Git metadata"
+    )
     _require_directory_nofollow(
         common_dir, "repo root must contain valid Git metadata"
     )
@@ -373,7 +393,9 @@ def _validate_git_metadata(
         "repo root must contain valid Git metadata",
         max_size=MAX_STRING_LENGTH,
     )
-    head_content = head.read_text(encoding="utf-8", errors="strict").strip()
+    head_content = _read_git_metadata_line(
+        head, "repo root must contain valid Git metadata"
+    )
     if head_content.startswith("ref:"):
         ref_name = head_content[len("ref:") :].strip()
         ref_path = PurePosixPath(ref_name)
@@ -463,6 +485,46 @@ def _resolve_git_worktree_path(worktree_text: str, base_dir: Path) -> Path:
     return worktree.resolve(strict=False)
 
 
+def _read_git_metadata_line(path: Path, message: str) -> str:
+    try:
+        content = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
+        raise PredicateContractError(message) from exc
+    lines = content.splitlines()
+    if len(lines) != 1:
+        raise PredicateContractError(message)
+    line = lines[0].strip()
+    if not line or _GIT_CONTROL_CHAR_RE.search(line):
+        raise PredicateContractError(message)
+    return line
+
+
+def _resolve_git_metadata_path(base_dir: Path, raw_path: str, message: str) -> Path:
+    if not raw_path or "\x00" in raw_path or len(raw_path) > MAX_STRING_LENGTH:
+        raise PredicateContractError(message)
+    path = Path(raw_path)
+    if not path.is_absolute():
+        _reject_symlink_metadata_path(base_dir, path, message)
+        return (base_dir / path).resolve(strict=False)
+    return path
+
+
+def _reject_symlink_metadata_path(base_dir: Path, relative_path: Path, message: str) -> None:
+    current = base_dir
+    for part in relative_path.parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        try:
+            path_stat = os.stat(current, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise PredicateContractError(message) from exc
+        if S_ISLNK(path_stat.st_mode):
+            raise PredicateContractError(message)
+
+
 def _repo_path(repo_root: Path, raw_path: Any) -> Path:
     relative = _bounded_string(raw_path, "repo-relative path")
     candidate_input = Path(relative)
@@ -516,40 +578,58 @@ def _is_credential_path_denied(relative: str) -> bool:
     pure = PurePosixPath(relative.replace("\\", "/"))
     parts = tuple(part.casefold() for part in pure.parts)
     for part in parts:
-        stem = part.split(".", 1)[0]
-        tokenized = set(re.split(r"[^a-z0-9]+", part))
-        compact = re.sub(r"[^a-z0-9]+", "", part)
-        if part in _CREDENTIAL_FILE_NAMES or stem in _CREDENTIAL_FILE_NAMES:
-            return True
-        if any(
-            name.startswith(".") and part.startswith(f"{name}.")
-            for name in _CREDENTIAL_FILE_NAMES
-        ):
-            return True
-        if part.startswith(".env") and (
-            len(part) == len(".env") or part[len(".env")] in {".", "_", "-", " ", "~"}
-        ):
-            return True
-        if tokenized & _CREDENTIAL_NAME_TOKENS:
-            return True
-        if any(
-            token in compact
-            for token in (
-                "apikey",
-                "credential",
-                "passwd",
-                "password",
-                "private",
-                "secret",
-                "token",
-            )
-        ):
-            return True
-        if {"api", "key"}.issubset(tokenized):
-            return True
-        if part.endswith(_CREDENTIAL_FILE_SUFFIXES):
-            return True
+        for candidate in _credential_name_variants(part):
+            stem = candidate.split(".", 1)[0]
+            tokenized = set(re.split(r"[^a-z0-9]+", candidate))
+            compact = re.sub(r"[^a-z0-9]+", "", candidate)
+            if candidate in _CREDENTIAL_FILE_NAMES or stem in _CREDENTIAL_FILE_NAMES:
+                return True
+            if any(
+                name.startswith(".") and candidate.startswith(f"{name}.")
+                for name in _CREDENTIAL_FILE_NAMES
+            ):
+                return True
+            if candidate.startswith(".env") and (
+                len(candidate) == len(".env")
+                or candidate[len(".env")] in {".", "_", "-", " ", "~"}
+            ):
+                return True
+            if tokenized & _CREDENTIAL_NAME_TOKENS:
+                return True
+            if any(
+                token in compact
+                for token in (
+                    "apikey",
+                    "credential",
+                    "passwd",
+                    "password",
+                    "private",
+                    "secret",
+                    "token",
+                )
+            ):
+                return True
+            if {"api", "key"}.issubset(tokenized):
+                return True
+            if candidate.endswith(_CREDENTIAL_FILE_SUFFIXES):
+                return True
     return False
+
+
+def _credential_name_variants(part: str) -> tuple[str, ...]:
+    variants = [part]
+    current = part
+    for _ in range(4):
+        stripped = None
+        for suffix in _CREDENTIAL_BACKUP_SUFFIXES:
+            if current.endswith(suffix) and len(current) > len(suffix):
+                stripped = current[: -len(suffix)]
+                break
+        if stripped is None or stripped == current:
+            break
+        variants.append(stripped)
+        current = stripped
+    return tuple(variants)
 
 
 def _reject_sensitive_evidence_name(value: str, label: str) -> None:

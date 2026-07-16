@@ -368,6 +368,11 @@ class PredicateTests(unittest.TestCase):
                 {"op": "file_exists", "path": "config/passwords.txt"},
                 {"op": "file_exists", "path": "api-key.json"},
                 {"op": "file_exists", "path": ".npmrc.bak"},
+                {"op": "file_exists", "path": ".netrc.old"},
+                {"op": "file_exists", "path": "cert.pem.bak"},
+                {"op": "file_exists", "path": "tls.key.backup"},
+                {"op": "file_exists", "path": "prod.pfx_backup"},
+                {"op": "file_exists", "path": "id_rsa_backup"},
                 {"op": "file_exists", "path": "config/clientSecret.txt"},
                 {"op": "file_exists", "path": "state/agentic-os/control.db_backup"},
                 {"op": "file_exists", "path": "public-evidence"},
@@ -952,6 +957,85 @@ class PredicateTests(unittest.TestCase):
                 evaluate_predicate_document(
                     document({"op": "literal", "value": True}),
                     PredicateContext(repo_root=linked_root),
+                )
+
+    def test_git_metadata_control_characters_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            nul_gitdir_root = base / "nul-gitdir-root"
+            nul_gitdir_root.mkdir()
+            (nul_gitdir_root / ".git").write_text(
+                "gitdir: bad\x00path\n", encoding="utf-8"
+            )
+            with self.assertRaises(PredicateContractError):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=nul_gitdir_root),
+                )
+
+            multiline_head_path = base / "multiline-head-root"
+            multiline_head_path.mkdir()
+            multiline_head_root = make_repo_root(str(multiline_head_path))
+            (multiline_head_root / ".git" / "HEAD").write_text(
+                "ref: refs/heads/main\njunk\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=multiline_head_root),
+                )
+
+            common_dir = base / "main" / ".git"
+            common_dir.mkdir(parents=True)
+            (common_dir / "config").write_text(
+                "[core]\n\trepositoryformatversion = 0\n",
+                encoding="utf-8",
+            )
+            (common_dir / "objects").mkdir()
+            (common_dir / "refs").mkdir()
+            linked_root = base / "nul-commondir-root"
+            linked_root.mkdir()
+            git_dir = common_dir / "worktrees" / "nul-commondir-root"
+            git_dir.mkdir(parents=True)
+            (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("bad\x00path\n", encoding="utf-8")
+            (git_dir / "gitdir").write_text(
+                str(linked_root / ".git") + "\n",
+                encoding="utf-8",
+            )
+            (linked_root / ".git").write_text(
+                f"gitdir: {git_dir}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=linked_root),
+                )
+
+    def test_relative_gitdir_pointer_rejects_symlink_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "linked-root"
+            root.mkdir()
+            real_git_dir = root / "real-gitdir"
+            real_git_dir.mkdir()
+            (real_git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (real_git_dir / "config").write_text(
+                "[core]\n"
+                "\trepositoryformatversion = 0\n"
+                f"\tworktree = {root}\n",
+                encoding="utf-8",
+            )
+            (real_git_dir / "objects").mkdir()
+            (real_git_dir / "refs").mkdir()
+            (root / "linked-gitdir").symlink_to(real_git_dir, target_is_directory=True)
+            (root / ".git").write_text("gitdir: linked-gitdir\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(PredicateContractError, "Git metadata"):
+                evaluate_predicate_document(
+                    document({"op": "literal", "value": True}),
+                    PredicateContext(repo_root=root),
                 )
 
     def test_standard_linked_worktree_gitdir_file_is_accepted(self) -> None:
