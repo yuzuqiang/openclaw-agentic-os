@@ -146,11 +146,15 @@ def partial_observation_from_openclaw_response(
     except AdapterContractError:
         raw_response_json = None
     session_key = _string_or_none(response.get("session_key")) or _string_or_none(
-        session.get("session_key")
+        response.get("sessionKey")
+    ) or _string_or_none(session.get("session_key")) or _string_or_none(
+        session.get("sessionKey")
     )
     spawn_request_session_key = _string_or_none(
         response.get("spawn_request_session_key")
-    ) or _string_or_none(session.get("spawn_request_session_key"))
+    ) or _string_or_none(response.get("spawnRequestSessionKey")) or _string_or_none(
+        session.get("spawn_request_session_key")
+    ) or _string_or_none(session.get("spawnRequestSessionKey"))
     external_id = (
         _string_or_none(response.get("external_id"))
         or session_key
@@ -208,9 +212,14 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
         "session key",
         (
             ("session_key", response.get("session_key")),
+            ("sessionKey", response.get("sessionKey")),
             (
                 "session.session_key",
                 session.get("session_key") if session is not None else None,
+            ),
+            (
+                "session.sessionKey",
+                session.get("sessionKey") if session is not None else None,
             ),
             ("session.key", session.get("key") if session is not None else None),
         ),
@@ -219,13 +228,22 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
         "spawn request session key",
         (
             ("spawn_request_session_key", response.get("spawn_request_session_key")),
+            ("spawnRequestSessionKey", response.get("spawnRequestSessionKey")),
             (
                 "session.spawn_request_session_key",
                 session.get("spawn_request_session_key") if session is not None else None,
             ),
             (
+                "session.spawnRequestSessionKey",
+                session.get("spawnRequestSessionKey") if session is not None else None,
+            ),
+            (
                 "session.request_session_key",
                 session.get("request_session_key") if session is not None else None,
+            ),
+            (
+                "session.requestSessionKey",
+                session.get("requestSessionKey") if session is not None else None,
             ),
         ),
     )
@@ -312,15 +330,26 @@ class OpenClawAdapter:
     def session_status(self, session_key: str) -> MetadataObservation:
         return observation_from_openclaw_response(
             _transport_response(
-                self._transport.call("sessions_status", {"session_key": session_key}),
-                "sessions_status",
+                self._transport.call("session_status", {"sessionKey": session_key}),
+                "session_status",
             )
         )
 
     def session_result(self, session_key: str) -> MetadataObservation:
-        return observation_from_openclaw_response(
-            _transport_response(
-                self._transport.call("sessions_result", {"session_key": session_key}),
-                "sessions_result",
-            )
+        response = _transport_response(
+            self._transport.call(
+                "sessions_history",
+                {"sessionKey": session_key, "limit": 1, "includeTools": True},
+            ),
+            "sessions_history",
         )
+        observation = observation_from_openclaw_response(response)
+        if (
+            not observation.external_id
+            or not observation.session_key
+            or not observation.spawn_request_session_key
+        ):
+            raise AdapterContractError(
+                "sessions_history response must include accepted session identity"
+            )
+        return observation

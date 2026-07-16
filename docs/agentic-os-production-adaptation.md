@@ -168,7 +168,7 @@ External runtime metadata contract is a P0 prerequisite:
 - Release observations must echo `client_lease_id`, release `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id`; `run_id` plus `transition_id` alone is not owner proof.
 - A local lease row cannot move to `released` or `release_pending` without a non-empty release idempotency key and release request evidence; `release_not_required` is valid only when no external Gateway lease identity exists.
 - `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
-- Session list/status/result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
+- Session list/status/history-backed result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
 - For `sessions_spawn`, SQLite authority is normalized and raw evidence must agree with it: `external_rpc_intents.spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest` must match one concrete `spawn_requests` row through foreign keys. Whenever a `sessions_spawn` row carries `external_metadata_json`, DDL requires `json_valid(...)` and requires `json_extract(...,'$.run_id')`, `$.transition_id`, `$.client_request_id`, `$.idempotency_key`, `$.phase`, `$.agent_id`, and `$.task_digest` to match both the normalized observed fields and the local intent fields exactly. Accepted/reconciled rows additionally require a non-empty accepted external session identity in `external_id`. Pre-RPC `pending` rows may exist without external JSON because the external call has not returned; the blocking SLO rejects pending/unknown/accepted/reconciled rows from auto-repair or gate trust unless the raw JSON, normalized observed fields, and local intent fields are an exact triple match.
 - Accepted session identity has one source of truth tuple: `external_rpc_intents.external_id`, `spawn_requests.session_key`, and `sessions.session_key` must be non-empty and equal for accepted/reconciled or accepted/completed spawn state. The `sessions` row must bind to the same `spawn_requests` row by `spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `spawn_idempotency_key`, `phase`, `agent_id`, and `task_digest`; a session may not point at a real `spawn_request_id` while carrying another run, phase, agent, client, idempotency, or task identity. Accepted/reconciled replay must re-read this local tuple and fail closed if the local spawn/session proof is missing or mismatched.
 - Post-dispatch budget events must additionally bind to the selected `run_budgets` provider/model/endpoint/capability/cost row and to strict `requested_at_epoch_ms < accepted_at_epoch_ms < budget_events.created_at_epoch_ms` ordering.
@@ -177,8 +177,10 @@ External runtime metadata contract is a P0 prerequisite:
 - The current implementation includes a pure fake-adapter metadata dispatch
   probe plus an injectable OpenClaw adapter boundary for this contract. These
   validate allowLease acquire/status/release and session spawn/status/list/result
-  observations, but they do not enable production database authority. Runtime
-  reconciliation remains bounded to the implemented scanner paths.
+  observations. The OpenClaw adapter uses only installed session tools proven by
+  runtime catalog preflight, including the history-backed result surface; it does
+  not enable production database authority. Runtime reconciliation remains
+  bounded to the implemented scanner paths.
 
 Fail-closed rule:
 

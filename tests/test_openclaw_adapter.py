@@ -88,7 +88,7 @@ class CannedTransport:
                     }
                 ]
             }
-        if method == "sessions_result":
+        if method == "session_status":
             metadata = {
                 "run_id": "run",
                 "transition_id": "transition",
@@ -99,12 +99,33 @@ class CannedTransport:
                 "task_digest": "task",
             }
             return {
-                "session_key": params["session_key"],
+                "sessionKey": params["sessionKey"],
                 "session": {
-                    "session_key": params["session_key"],
-                    "spawn_request_session_key": params["session_key"],
+                    "sessionKey": params["sessionKey"],
+                    "spawnRequestSessionKey": params["sessionKey"],
                 },
-                "result": {"state": "completed"},
+                "metadata": {
+                    "metadata_contract_version": "v1",
+                    "normalized": metadata,
+                    "raw_json": json.dumps(
+                        metadata, sort_keys=True, separators=(",", ":")
+                    ),
+                },
+            }
+        if method == "sessions_history":
+            metadata = {
+                "run_id": "run",
+                "transition_id": "transition",
+                "client_request_id": "client",
+                "idempotency_key": "spawn-idem",
+                "phase": "phase",
+                "agent_id": "agent",
+                "task_digest": "task",
+            }
+            return {
+                "sessionKey": params["sessionKey"],
+                "spawnRequestSessionKey": params["sessionKey"],
+                "messages": [{"role": "assistant", "content": "done"}],
                 "metadata": {
                     "metadata_contract_version": "v1",
                     "normalized": metadata,
@@ -133,24 +154,32 @@ class OpenClawAdapterTests(unittest.TestCase):
         listed = adapter.sessions_list()
         self.assertEqual(listed[0].external_id, "session-key")
 
+        status = adapter.session_status("session-key")
+        self.assertEqual(status.external_id, "session-key")
+        self.assertEqual(status.session_key, "session-key")
+        self.assertEqual(
+            transport.calls[-1], ("session_status", {"sessionKey": "session-key"})
+        )
+
         result = adapter.session_result("session-key")
         self.assertEqual(result.external_id, "session-key")
         self.assertEqual(result.session_key, "session-key")
         self.assertEqual(result.spawn_request_session_key, "session-key")
-        self.assertIn('"result":{"state":"completed"}', result.raw_response_json)
+        self.assertIn('"messages":[{"content":"done"', result.raw_response_json)
         self.assertEqual(
-            transport.calls[-1], ("sessions_result", {"session_key": "session-key"})
+            transport.calls[-1],
+            (
+                "sessions_history",
+                {"sessionKey": "session-key", "limit": 1, "includeTools": True},
+            ),
         )
 
     def test_session_result_missing_raw_json_fails_contract(self) -> None:
         class MissingRawResultTransport:
             def call(self, method, params):
                 return {
-                    "session_key": params["session_key"],
-                    "session": {
-                        "session_key": params["session_key"],
-                        "spawn_request_session_key": params["session_key"],
-                    },
+                    "sessionKey": params["sessionKey"],
+                    "spawnRequestSessionKey": params["sessionKey"],
                     "metadata": {
                         "metadata_contract_version": "v1",
                         "normalized": {
@@ -167,6 +196,36 @@ class OpenClawAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
             OpenClawAdapter(MissingRawResultTransport()).session_result("session-key")
+
+    def test_session_result_missing_accepted_identity_fails_contract(self) -> None:
+        class MissingIdentityResultTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "sessionKey": params["sessionKey"],
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "accepted session identity"
+        ):
+            OpenClawAdapter(MissingIdentityResultTransport()).session_result(
+                "session-key"
+            )
 
     def test_session_result_conflicting_top_level_and_nested_aliases_fail_contract(
         self,
@@ -205,7 +264,7 @@ class OpenClawAdapterTests(unittest.TestCase):
             def call(self, method, params):
                 return ["not", "an", "object"]
 
-        with self.assertRaisesRegex(AdapterContractError, "sessions_result response"):
+        with self.assertRaisesRegex(AdapterContractError, "sessions_history response"):
             OpenClawAdapter(MalformedResultTransport()).session_result("session-key")
 
     def test_session_result_audit_serialization_failure_fails_contract(self) -> None:
@@ -221,7 +280,8 @@ class OpenClawAdapterTests(unittest.TestCase):
                     "task_digest": "task",
                 }
                 return {
-                    "session_key": params["session_key"],
+                    "sessionKey": params["sessionKey"],
+                    "spawnRequestSessionKey": params["sessionKey"],
                     "metadata": {
                         "metadata_contract_version": "v1",
                         "normalized": metadata,
