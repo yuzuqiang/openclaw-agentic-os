@@ -110,6 +110,21 @@ evidence values. It does not call
 OpenClaw, Gateway, Cron, or a production database, and it does not grant trust or
 approval authority.
 
+The second P1.2 slice lives in `agentic_os.pass_gates`. It is a local-only
+transactional writer for the approval, one-use gate clock, independent verifier,
+gate evidence, risk assessment, and PASS `gate_runs` rows required before a
+transition can be trusted. `record_approval_pass_gate` updates the existing
+transition with an exact approval binding, creates the single-use
+`gate_clock_context` whose `bound_at_epoch_ms`, `now_epoch_ms`,
+`consumed_at_epoch_ms`, and gate completion epoch are identical, records a
+same-run independent verifier with non-empty independence proof, binds evidence
+to the producer run, and checks the pinned PASS-gate SLO contracts before commit.
+Expired approvals, reused pass-gated transitions, same-worker verifiers, missing
+target fields, lower risk ceilings, malformed SHA-256 authorities, and
+`db_authority_canary` / `db_authority` runs fail closed without granting trust.
+The writer does not call OpenClaw, Gateway, Cron, or any production authority
+surface.
+
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
 `MigrationTests.test_p1_budget_sql_fixture_pack_exercises_blocking_slos`
