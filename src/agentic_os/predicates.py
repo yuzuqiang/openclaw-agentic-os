@@ -1,0 +1,1075 @@
+"""Fail-closed in-process Standing Goal predicate evaluator.
+
+This module implements only the audited ``agentic_predicate_inproc_v1`` subset.
+It is intentionally pure and read-only: callers provide immutable JSON and
+command evidence, and file adapters are bounded to the repository root.
+"""
+
+from __future__ import annotations
+
+import configparser
+import hashlib
+import math
+import os
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from stat import S_ISDIR, S_ISLNK, S_ISREG
+from typing import Any
+
+from .privacy import PrivacyPreflightError, assert_paths_retrievable
+
+
+INPROC_PREDICATE_BACKEND = "agentic_predicate_inproc_v1"
+MAX_PREDICATE_DEPTH = 32
+MAX_PREDICATE_LIST_LENGTH = 64
+MAX_JSON_PATH_LENGTH = 32
+MAX_STRING_LENGTH = 4096
+MAX_FILE_EVIDENCE_BYTES = 8 * 1024 * 1024
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_HEAD_OBJECT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_GIT_CONFIG_INT_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
+_GIT_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+_GIT_CONFIG_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CREDENTIAL_FILE_NAMES = frozenset(
+    {
+        ".aws",
+        ".azure",
+        ".docker",
+        ".env",
+        ".envrc",
+        ".git",
+        ".gcloud",
+        ".gnupg",
+        ".kube",
+        ".netrc",
+        ".ssh",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
+        "known_hosts",
+    }
+)
+_CREDENTIAL_NAME_TOKENS = frozenset(
+    {
+        "credential",
+        "credentials",
+        "passwd",
+        "password",
+        "passwords",
+        "private",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+    }
+)
+_CREDENTIAL_FILE_SUFFIXES = (".env", ".pem", ".key", ".p12", ".pfx")
+_CREDENTIAL_BACKUP_SUFFIXES = (
+    ".bak",
+    ".backup",
+    ".copy",
+    ".old",
+    ".orig",
+    ".tmp",
+    ".swp",
+    "_bak",
+    "_backup",
+    "-backup",
+    " backup",
+    "~",
+)
+_SUPPORTED_GIT_EXTENSIONS = frozenset({"objectformat", "worktreeconfig"})
+
+
+class PredicateContractError(ValueError):
+    """Predicate input is unsupported, ambiguous, or outside the safe subset."""
+
+
+@dataclass(frozen=True)
+class PredicateContext:
+    """Caller-supplied read-only evidence for in-process predicates."""
+
+    repo_root: Path | str
+    json_documents: Mapping[str, Any] = field(default_factory=dict)
+    command_results: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+
+def evaluate_predicate_document(
+    document: Mapping[str, Any], context: PredicateContext
+) -> bool:
+    """Evaluate a backend-tagged predicate document.
+
+    The document must contain exactly ``backend`` and ``predicate``. Unsupported
+    backends, extra keys, malformed adapters, and unsafe paths raise
+    :class:`PredicateContractError` so callers can route the run to human review.
+    """
+
+    if not isinstance(document, Mapping):
+        raise PredicateContractError("predicate document must be a JSON object")
+    _require_keys(document, ("backend", "predicate"), "predicate document")
+    backend = document["backend"]
+    if backend != INPROC_PREDICATE_BACKEND:
+        raise PredicateContractError(f"unsupported predicate backend: {backend!r}")
+    repo_root = _normalize_repo_root(context.repo_root)
+    safe_context = PredicateContext(
+        repo_root=repo_root,
+        json_documents=context.json_documents,
+        command_results=context.command_results,
+    )
+    return _evaluate(document["predicate"], safe_context, depth=0)
+
+
+def _evaluate(predicate: Any, context: PredicateContext, *, depth: int) -> bool:
+    if depth > MAX_PREDICATE_DEPTH:
+        raise PredicateContractError("predicate nesting exceeds safe limit")
+    if not isinstance(predicate, Mapping):
+        raise PredicateContractError("predicate must be a JSON object")
+    op = predicate.get("op")
+    if not isinstance(op, str) or not op:
+        raise PredicateContractError("predicate op must be a non-empty string")
+    if op == "literal":
+        _require_keys(predicate, ("op", "value"), "literal predicate")
+        value = predicate["value"]
+        if type(value) is not bool:
+            raise PredicateContractError("literal predicate value must be boolean")
+        return value
+    if op == "all":
+        _require_keys(predicate, ("op", "predicates"), "all predicate")
+        results = [
+            _evaluate(item, context, depth=depth + 1)
+            for item in _predicate_list(predicate["predicates"], "all predicates")
+        ]
+        return all(results)
+    if op == "any":
+        _require_keys(predicate, ("op", "predicates"), "any predicate")
+        results = [
+            _evaluate(item, context, depth=depth + 1)
+            for item in _predicate_list(predicate["predicates"], "any predicates")
+        ]
+        return any(results)
+    if op == "not":
+        _require_keys(predicate, ("op", "predicate"), "not predicate")
+        return not _evaluate(predicate["predicate"], context, depth=depth + 1)
+    if op == "file_exists":
+        _require_keys(predicate, ("op", "path"), "file_exists predicate")
+        relative_path = _repo_path(context.repo_root, predicate["path"])
+        return _repo_path_stat(
+            context.repo_root,
+            relative_path,
+            "file_exists evidence",
+        ) is not None
+    if op == "file_sha256":
+        _require_keys(predicate, ("op", "path", "sha256"), "file_sha256 predicate")
+        expected = predicate["sha256"]
+        if not isinstance(expected, str) or not _SHA256_RE.fullmatch(expected):
+            raise PredicateContractError("file_sha256 expected hash must be lowercase SHA-256")
+        relative_path = _repo_path(context.repo_root, predicate["path"])
+        path_stat = _repo_path_stat(
+            context.repo_root, relative_path, "file_sha256 evidence"
+        )
+        if path_stat is None or not S_ISREG(path_stat.st_mode):
+            raise PredicateContractError("file_sha256 evidence must be a regular file")
+        _raise_if_multi_link_file(path_stat, "file_sha256 evidence")
+        actual_hash = _sha256_file(context.repo_root, relative_path, path_stat)
+        return actual_hash == expected
+    if op == "json_equals":
+        _require_keys(predicate, ("op", "document", "path", "value"), "json_equals predicate")
+        document_name = _bounded_string(predicate["document"], "json document name")
+        _reject_sensitive_evidence_name(document_name, "json document name")
+        json_documents = _evidence_mapping(context.json_documents, "JSON evidence map")
+        if document_name not in json_documents:
+            raise PredicateContractError(f"missing JSON evidence document: {document_name}")
+        expected = _json_scalar(predicate["value"], "json_equals value")
+        if isinstance(predicate["path"], list):
+            path_names = [
+                segment for segment in predicate["path"] if isinstance(segment, str)
+            ]
+            if path_names:
+                _reject_sensitive_evidence_name(
+                    "/".join((document_name, *path_names)),
+                    "json evidence path",
+                )
+        actual = _json_path_lookup(
+            json_documents[document_name],
+            predicate["path"],
+        )
+        return _json_scalar_equals(actual, expected, "json_equals resolved value")
+    if op == "command_result_equals":
+        _require_keys(
+            predicate,
+            ("op", "id", "field", "value"),
+            "command_result_equals predicate",
+        )
+        result_id = _bounded_string(predicate["id"], "command result id")
+        field_name = _bounded_string(predicate["field"], "command result field")
+        _reject_sensitive_evidence_name(result_id, "command result id")
+        _reject_sensitive_evidence_name(field_name, "command result field")
+        _reject_sensitive_evidence_name(
+            f"{result_id}/{field_name}", "command result evidence path"
+        )
+        command_results = _evidence_mapping(
+            context.command_results, "command result evidence map"
+        )
+        if result_id not in command_results:
+            raise PredicateContractError(f"missing command result evidence: {result_id}")
+        result = command_results[result_id]
+        if not isinstance(result, Mapping):
+            raise PredicateContractError("command result evidence must be an object")
+        if field_name not in result:
+            raise PredicateContractError(
+                f"command result evidence is missing field: {field_name}"
+            )
+        expected = _json_scalar(predicate["value"], "command_result_equals value")
+        actual = _json_scalar(result[field_name], "command result field value")
+        return _json_scalar_equals(actual, expected, "command result field value")
+    raise PredicateContractError(f"unsupported predicate op: {op!r}")
+
+
+def _require_keys(value: Mapping[str, Any], keys: tuple[str, ...], label: str) -> None:
+    if set(value) != set(keys):
+        raise PredicateContractError(
+            f"{label} must contain exactly {list(keys)}, found {_sorted_key_names(value)}"
+        )
+
+
+def _sorted_key_names(value: Mapping[str, Any]) -> list[str]:
+    return sorted(str(key) for key in value)
+
+
+def _predicate_list(value: Any, label: str) -> Sequence[Any]:
+    if not isinstance(value, list):
+        raise PredicateContractError(f"{label} must be a JSON array")
+    if not 1 <= len(value) <= MAX_PREDICATE_LIST_LENGTH:
+        raise PredicateContractError(
+            f"{label} length must be in [1,{MAX_PREDICATE_LIST_LENGTH}]"
+        )
+    return value
+
+
+def _normalize_repo_root(repo_root: Path | str) -> Path:
+    try:
+        root_path = Path(repo_root)
+    except TypeError as exc:
+        raise PredicateContractError("repo root must be a filesystem path") from exc
+    try:
+        root = root_path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise PredicateContractError("repo root must exist") from exc
+    if not root.is_dir():
+        raise PredicateContractError("repo root must be a directory")
+    _require_git_worktree_top_level(root)
+    return root
+
+
+def _require_git_worktree_top_level(root: Path) -> None:
+    try:
+        git_entry = root / ".git"
+        try:
+            git_entry_stat = os.stat(git_entry, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise PredicateContractError("repo root must be a Git worktree top level")
+        if S_ISLNK(git_entry_stat.st_mode):
+            raise PredicateContractError("repo root must contain valid Git metadata")
+        if S_ISDIR(git_entry_stat.st_mode):
+            _validate_git_metadata(
+                git_entry, git_entry, root, require_worktree_binding=True
+            )
+            return
+        if S_ISREG(git_entry_stat.st_mode):
+            if git_entry_stat.st_size > MAX_STRING_LENGTH:
+                raise PredicateContractError("repo root .git file is outside safe bounds")
+            content = _read_git_metadata_line(
+                git_entry,
+                "repo root must contain valid Git metadata",
+            )
+            prefix = "gitdir: "
+            if not content.startswith(prefix):
+                raise PredicateContractError(
+                    "repo root must contain valid Git metadata"
+                )
+            git_dir = _resolve_git_metadata_path(
+                root,
+                content[len(prefix) :],
+                "repo root must contain valid Git metadata",
+            )
+            _require_directory_nofollow(
+                git_dir, "repo root must contain valid Git metadata"
+            )
+            _require_gitdir_worktree_matches_root(git_dir, root)
+            common_dir = _git_common_dir(git_dir)
+            _validate_git_metadata(
+                git_dir, common_dir, root, require_worktree_binding=False
+            )
+            return
+        raise PredicateContractError("repo root must contain a valid .git entry")
+    except (OSError, UnicodeError) as exc:
+        raise PredicateContractError("repo root Git metadata cannot be inspected") from exc
+
+
+def _require_gitdir_worktree_matches_root(git_dir: Path, root: Path) -> None:
+    config = git_dir / "config"
+    try:
+        config_stat = _require_regular_file_nofollow(
+            config,
+            "repo root must contain valid Git metadata",
+            max_size=MAX_FILE_EVIDENCE_BYTES,
+        )
+    except FileNotFoundError:
+        config_stat = None
+    if config_stat is not None:
+        parser = _read_git_config(config, "repo root must contain valid Git metadata")
+        worktree_text = parser.get("core", "worktree", fallback=None)
+        if worktree_text is not None:
+            worktree = _resolve_git_worktree_path(worktree_text, git_dir)
+            if worktree != root:
+                raise PredicateContractError(
+                    "repo root gitdir core.worktree does not match"
+                )
+            try:
+                _require_gitdir_file_matches_root(git_dir, root)
+            except FileNotFoundError:
+                pass
+            return
+    _require_gitdir_file_matches_root(git_dir, root)
+
+
+def _require_gitdir_file_matches_root(git_dir: Path, root: Path) -> None:
+    gitdir_file = git_dir / "gitdir"
+    _require_regular_file_nofollow(
+        gitdir_file,
+        "repo root gitdir must bind the worktree",
+        max_size=MAX_STRING_LENGTH,
+    )
+    gitdir_text = _read_git_metadata_line(
+        gitdir_file, "repo root gitdir file is outside safe bounds"
+    )
+    worktree_git_file = _resolve_git_metadata_path(
+        git_dir,
+        gitdir_text,
+        "repo root gitdir file does not match",
+    )
+    expected_git_file = (root / ".git").resolve(strict=True)
+    if worktree_git_file != expected_git_file:
+        raise PredicateContractError("repo root gitdir file does not match")
+
+
+def _git_common_dir(git_dir: Path) -> Path:
+    common_dir_file = git_dir / "commondir"
+    try:
+        _require_regular_file_nofollow(
+            common_dir_file,
+            "repo root must contain valid Git metadata",
+            max_size=MAX_STRING_LENGTH,
+        )
+    except FileNotFoundError:
+        return git_dir
+    content = _read_git_metadata_line(
+        common_dir_file, "repo root must contain valid Git metadata"
+    )
+    common_dir = _resolve_git_metadata_path(
+        git_dir, content, "repo root must contain valid Git metadata"
+    )
+    _require_directory_nofollow(
+        common_dir, "repo root must contain valid Git metadata"
+    )
+    return common_dir
+
+
+def _validate_git_metadata(
+    git_dir: Path,
+    common_dir: Path,
+    root: Path,
+    *,
+    require_worktree_binding: bool,
+) -> None:
+    head = git_dir / "HEAD"
+    _require_regular_file_nofollow(
+        head,
+        "repo root must contain valid Git metadata",
+        max_size=MAX_STRING_LENGTH,
+    )
+    head_content = _read_git_metadata_line(
+        head, "repo root must contain valid Git metadata"
+    )
+    detached_head = None
+    if head_content.startswith("ref: "):
+        ref_name = head_content[len("ref: ") :]
+        if not _is_valid_git_ref_name(ref_name):
+            raise PredicateContractError("repo root must contain valid Git metadata")
+    elif _GIT_HEAD_OBJECT_RE.fullmatch(head_content):
+        detached_head = head_content
+    else:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    _require_directory_nofollow(
+        common_dir / "objects", "repo root must contain valid Git metadata"
+    )
+    _require_directory_nofollow(
+        common_dir / "refs", "repo root must contain valid Git metadata"
+    )
+    config = common_dir / "config"
+    _require_regular_file_nofollow(
+        config,
+        "repo root must contain valid Git metadata",
+        max_size=MAX_FILE_EVIDENCE_BYTES,
+    )
+    parser = _read_git_config(config, "repo root must contain valid Git metadata")
+    core_section = _git_config_section(parser, "core")
+    if core_section is None or not parser.has_option(
+        core_section, "repositoryformatversion"
+    ):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    repository_format_text = _git_config_value(
+        parser,
+        "core",
+        "repositoryformatversion",
+        "repo root must contain valid Git metadata",
+    )
+    if not _GIT_CONFIG_INT_RE.fullmatch(repository_format_text):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    repository_format_version = int(repository_format_text, 10)
+    if repository_format_version not in (0, 1):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    worktree_config_enabled, object_format = _validate_git_config_extensions(
+        parser, repository_format_version
+    )
+    if detached_head is not None:
+        _validate_detached_head_object_format(detached_head, object_format)
+    worktree_parser = _read_git_worktree_config(git_dir, worktree_config_enabled)
+    effective_parser = (
+        _overlay_git_config(parser, worktree_parser)
+        if worktree_parser is not None
+        else parser
+    )
+    is_bare = _git_config_bool(
+        effective_parser, "core", "bare", "repo root must contain valid Git metadata"
+    )
+    if is_bare:
+        raise PredicateContractError("repo root must be a Git worktree")
+    worktree_text = _git_config_optional(
+        effective_parser,
+        "core",
+        "worktree",
+        "repo root must contain valid Git metadata",
+    )
+    if worktree_text is not None:
+        worktree_base = git_dir if worktree_parser is not None else common_dir
+        worktree = _resolve_git_worktree_path(worktree_text, worktree_base)
+        if worktree != root:
+            raise PredicateContractError(
+                "repo root gitdir core.worktree does not match"
+            )
+
+
+def _read_git_config(path: Path, message: str) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        config_text = path.read_text(encoding="utf-8", errors="strict")
+        if _GIT_CONFIG_CONTROL_CHAR_RE.search(config_text):
+            raise PredicateContractError(message)
+        parser.read_string(config_text)
+    except (OSError, UnicodeError, configparser.Error) as exc:
+        raise PredicateContractError(message) from exc
+    for section in parser.sections():
+        if _GIT_CONTROL_CHAR_RE.search(section):
+            raise PredicateContractError(message)
+        normalized_section = section.casefold()
+        if normalized_section == "include" or normalized_section.startswith("includeif "):
+            raise PredicateContractError(message)
+        for option in parser.options(section):
+            if _GIT_CONTROL_CHAR_RE.search(option):
+                raise PredicateContractError(message)
+            _git_config_value(parser, section, option, message)
+    return parser
+
+
+def _git_config_section(
+    parser: configparser.ConfigParser, section: str
+) -> str | None:
+    normalized_section = section.casefold()
+    matches = [
+        candidate
+        for candidate in parser.sections()
+        if candidate.casefold() == normalized_section
+    ]
+    if len(matches) > 1:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    return matches[0] if matches else None
+
+
+def _read_git_worktree_config(
+    git_dir: Path, worktree_config_enabled: bool
+) -> configparser.ConfigParser | None:
+    if not worktree_config_enabled:
+        return None
+    config_worktree = git_dir / "config.worktree"
+    try:
+        _require_regular_file_nofollow(
+            config_worktree,
+            "repo root must contain valid Git metadata",
+            max_size=MAX_FILE_EVIDENCE_BYTES,
+        )
+    except FileNotFoundError:
+        return None
+    return _read_git_config(config_worktree, "repo root must contain valid Git metadata")
+
+
+def _overlay_git_config(
+    base: configparser.ConfigParser, overlay: configparser.ConfigParser
+) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    for source in (base, overlay):
+        for section in source.sections():
+            target_section = _git_config_section(parser, section)
+            if target_section is None:
+                parser.add_section(section)
+                target_section = section
+            for option in source.options(section):
+                parser.set(target_section, option, source.get(section, option))
+    return parser
+
+
+def _git_config_value(
+    parser: configparser.ConfigParser, section: str, option: str, message: str
+) -> str:
+    actual_section = _git_config_section(parser, section)
+    if actual_section is None:
+        return ""
+    value = parser.get(actual_section, option, fallback="")
+    if _GIT_CONTROL_CHAR_RE.search(value) or len(value) > MAX_STRING_LENGTH:
+        raise PredicateContractError(message)
+    return value.strip()
+
+
+def _git_config_optional(
+    parser: configparser.ConfigParser, section: str, option: str, message: str
+) -> str | None:
+    actual_section = _git_config_section(parser, section)
+    if actual_section is None or not parser.has_option(actual_section, option):
+        return None
+    return _git_config_value(parser, section, option, message)
+
+
+def _git_config_bool(
+    parser: configparser.ConfigParser, section: str, option: str, message: str
+) -> bool:
+    actual_section = _git_config_section(parser, section)
+    if actual_section is None or not parser.has_option(actual_section, option):
+        return False
+    _git_config_value(parser, section, option, message)
+    try:
+        return parser.getboolean(actual_section, option)
+    except ValueError as exc:
+        raise PredicateContractError(message) from exc
+
+
+def _validate_git_config_extensions(
+    parser: configparser.ConfigParser, repository_format_version: int
+) -> tuple[bool, str]:
+    extensions_section = _git_config_section(parser, "extensions")
+    if extensions_section is None:
+        return False, "sha1"
+    if not parser.options(extensions_section):
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    if repository_format_version != 1:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+    worktree_config_enabled = False
+    object_format = "sha1"
+    for option in parser.options(extensions_section):
+        option_name = option.casefold()
+        if option_name not in _SUPPORTED_GIT_EXTENSIONS:
+            raise PredicateContractError("repo root must contain valid Git metadata")
+        value = _git_config_value(
+            parser, "extensions", option, "repo root must contain valid Git metadata"
+        ).casefold()
+        if option_name == "objectformat":
+            if value not in {"sha1", "sha256"}:
+                raise PredicateContractError("repo root must contain valid Git metadata")
+            object_format = value
+        if option_name == "worktreeconfig":
+            try:
+                if not parser.getboolean(extensions_section, option):
+                    raise PredicateContractError(
+                        "repo root must contain valid Git metadata"
+                    )
+                worktree_config_enabled = True
+            except ValueError as exc:
+                raise PredicateContractError(
+                    "repo root must contain valid Git metadata"
+                ) from exc
+    return worktree_config_enabled, object_format
+
+
+def _validate_detached_head_object_format(head_content: str, object_format: str) -> None:
+    expected_length = 64 if object_format == "sha256" else 40
+    if len(head_content) != expected_length:
+        raise PredicateContractError("repo root must contain valid Git metadata")
+
+
+def _is_valid_git_ref_name(ref_name: str) -> bool:
+    if (
+        not ref_name.startswith("refs/")
+        or "//" in ref_name
+        or ".." in ref_name
+        or ref_name.endswith("/")
+        or ref_name.endswith(".")
+        or ref_name.endswith(".lock")
+        or ref_name.startswith("/")
+        or _GIT_CONTROL_CHAR_RE.search(ref_name)
+        or any(char in ref_name for char in ("\\", " ", "~", "^", ":", "?", "*", "["))
+        or "@{" in ref_name
+    ):
+        return False
+    ref_path = PurePosixPath(ref_name)
+    if ref_path.is_absolute() or ".." in ref_path.parts:
+        return False
+    for part in ref_path.parts:
+        if (
+            not part
+            or part == "."
+            or part.endswith(".lock")
+            or part.startswith(".")
+            or part.endswith(".")
+            or "//" in part
+        ):
+            return False
+    return True
+
+
+def _require_regular_file_nofollow(
+    path: Path, message: str, *, max_size: int | None = None
+) -> Any:
+    path_stat = os.stat(path, follow_symlinks=False)
+    if S_ISLNK(path_stat.st_mode) or not S_ISREG(path_stat.st_mode):
+        raise PredicateContractError(message)
+    if max_size is not None and path_stat.st_size > max_size:
+        raise PredicateContractError(message)
+    return path_stat
+
+
+def _require_directory_nofollow(path: Path, message: str) -> Any:
+    path_stat = os.stat(path, follow_symlinks=False)
+    if S_ISLNK(path_stat.st_mode) or not S_ISDIR(path_stat.st_mode):
+        raise PredicateContractError(message)
+    return path_stat
+
+
+def _resolve_git_worktree_path(worktree_text: str, base_dir: Path) -> Path:
+    if (
+        not worktree_text
+        or "\x00" in worktree_text
+        or worktree_text != worktree_text.strip()
+        or len(worktree_text) > MAX_STRING_LENGTH
+    ):
+        raise PredicateContractError(
+            "repo root gitdir core.worktree is outside safe bounds"
+        )
+    return _resolve_git_metadata_path(
+        base_dir,
+        worktree_text,
+        "repo root gitdir core.worktree is outside safe bounds",
+    )
+
+
+def _read_git_metadata_line(path: Path, message: str) -> str:
+    try:
+        content = path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
+        raise PredicateContractError(message) from exc
+    lines = content.splitlines()
+    if len(lines) != 1:
+        raise PredicateContractError(message)
+    line = lines[0]
+    if not line or line != line.strip() or _GIT_CONTROL_CHAR_RE.search(line):
+        raise PredicateContractError(message)
+    return line
+
+
+def _resolve_git_metadata_path(base_dir: Path, raw_path: str, message: str) -> Path:
+    if (
+        not raw_path
+        or raw_path != raw_path.strip()
+        or "\x00" in raw_path
+        or len(raw_path) > MAX_STRING_LENGTH
+    ):
+        raise PredicateContractError(message)
+    path = Path(raw_path)
+    _reject_symlink_metadata_path(base_dir, path, message)
+    if not path.is_absolute():
+        path = base_dir / path
+    try:
+        return path.resolve(strict=True)
+    except OSError as exc:
+        raise PredicateContractError(message) from exc
+
+
+def _reject_symlink_metadata_path(base_dir: Path, relative_path: Path, message: str) -> None:
+    if relative_path.is_absolute():
+        current = Path(relative_path.anchor)
+        parts = relative_path.parts[1:]
+    else:
+        current = base_dir
+        parts = relative_path.parts
+    for part in parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        try:
+            path_stat = os.stat(current, follow_symlinks=False)
+        except FileNotFoundError:
+            raise PredicateContractError(message)
+        except OSError as exc:
+            raise PredicateContractError(message) from exc
+        if S_ISLNK(path_stat.st_mode):
+            raise PredicateContractError(message)
+
+
+def _repo_path(repo_root: Path, raw_path: Any) -> Path:
+    relative = _bounded_string(raw_path, "repo-relative path")
+    candidate_input = Path(relative)
+    if candidate_input.is_absolute():
+        raise PredicateContractError("repo-relative path must not be absolute")
+    _reject_unsafe_relative_path_parts(candidate_input)
+    _assert_predicate_path_allowed(relative)
+    _reject_symlink_evidence_path(repo_root, candidate_input)
+    return candidate_input
+
+
+def _reject_unsafe_relative_path_parts(relative_path: Path) -> None:
+    parts = tuple(part for part in relative_path.parts if part not in ("", "."))
+    if not parts:
+        raise PredicateContractError("repo-relative path must name evidence")
+    if ".." in parts:
+        raise PredicateContractError("repo-relative path escapes repo root")
+
+
+def _reject_symlink_evidence_path(repo_root: Path, relative_path: Path) -> None:
+    current = repo_root
+    for part in relative_path.parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        try:
+            path_stat = os.stat(current, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise PredicateContractError("file evidence path cannot be inspected") from exc
+        if S_ISLNK(path_stat.st_mode):
+            raise PredicateContractError("file evidence cannot use symlink evidence")
+
+
+def _assert_predicate_path_allowed(*relative_paths: str) -> None:
+    for relative in relative_paths:
+        try:
+            assert_paths_retrievable(relative)
+        except PrivacyPreflightError as exc:
+            raise PredicateContractError(
+                "repo-relative path targets private raw state"
+            ) from exc
+        if _is_credential_path_denied(relative):
+            raise PredicateContractError(
+                "repo-relative path targets private credentials or artifacts"
+            )
+
+
+def _is_credential_path_denied(relative: str) -> bool:
+    pure = PurePosixPath(relative.replace("\\", "/"))
+    parts = tuple(part.casefold() for part in pure.parts)
+    path_text = "/".join(parts)
+    path_tokens = set(re.split(r"[^a-z0-9]+", path_text))
+    path_compact = re.sub(r"[^a-z0-9]+", "", path_text)
+    if {"api", "key"}.issubset(path_tokens) or "apikey" in path_compact:
+        return True
+    for part in parts:
+        for candidate in _credential_name_variants(part):
+            stem = candidate.split(".", 1)[0]
+            tokenized = set(re.split(r"[^a-z0-9]+", candidate))
+            compact = re.sub(r"[^a-z0-9]+", "", candidate)
+            if candidate in _CREDENTIAL_FILE_NAMES or stem in _CREDENTIAL_FILE_NAMES:
+                return True
+            if any(
+                name.startswith(".") and candidate.startswith(f"{name}.")
+                for name in _CREDENTIAL_FILE_NAMES
+            ):
+                return True
+            if candidate.startswith(".env") and (
+                len(candidate) == len(".env")
+                or candidate[len(".env")] in {".", "_", "-", " ", "~"}
+            ):
+                return True
+            if tokenized & _CREDENTIAL_NAME_TOKENS:
+                return True
+            if any(
+                token in compact
+                for token in (
+                    "apikey",
+                    "credential",
+                    "passwd",
+                    "password",
+                    "private",
+                    "secret",
+                    "token",
+                )
+            ):
+                return True
+            if {"api", "key"}.issubset(tokenized):
+                return True
+            if candidate.endswith(_CREDENTIAL_FILE_SUFFIXES):
+                return True
+    return False
+
+
+def _credential_name_variants(part: str) -> tuple[str, ...]:
+    variants = [part]
+    current = part
+    while True:
+        stripped = None
+        for suffix in _CREDENTIAL_BACKUP_SUFFIXES:
+            if current.endswith(suffix) and len(current) > len(suffix):
+                stripped = current[: -len(suffix)]
+                break
+        if stripped is None or stripped == current:
+            break
+        variants.append(stripped)
+        current = stripped
+    return tuple(variants)
+
+
+def _reject_sensitive_evidence_name(value: str, label: str) -> None:
+    if _is_credential_path_denied(value):
+        raise PredicateContractError(
+            f"{label} targets private credentials or artifacts"
+        )
+
+
+def _repo_path_stat(repo_root: Path, relative_path: Path, label: str) -> Any:
+    try:
+        path_stat = _stat_repo_path_nofollow(repo_root, relative_path, label)
+    except FileNotFoundError:
+        return None
+    except NotADirectoryError as exc:
+        raise PredicateContractError(f"{label} cannot be inspected") from exc
+    except OSError as exc:
+        raise PredicateContractError(f"{label} cannot be inspected") from exc
+    if S_ISLNK(path_stat.st_mode):
+        raise PredicateContractError(f"{label} cannot use symlink evidence")
+    if S_ISREG(path_stat.st_mode):
+        _raise_if_multi_link_file(path_stat, label)
+    return path_stat
+
+
+def _stat_repo_path_nofollow(repo_root: Path, relative_path: Path, label: str) -> Any:
+    parent_fd: int | None = None
+    try:
+        parent_fd, final_name = _open_parent_directory_nofollow(
+            repo_root, relative_path, label
+        )
+        return os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False)
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _open_parent_directory_nofollow(
+    repo_root: Path, relative_path: Path, label: str
+) -> tuple[int, str]:
+    parts = tuple(part for part in relative_path.parts if part not in ("", "."))
+    if not parts:
+        raise PredicateContractError(f"{label} must name evidence")
+    dir_fd: int | None = None
+    try:
+        dir_fd = _open_directory_path_nofollow(repo_root, label)
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=dir_fd,
+            )
+            try:
+                next_stat = os.fstat(next_fd)
+                if S_ISLNK(next_stat.st_mode) or not S_ISDIR(next_stat.st_mode):
+                    raise PredicateContractError(
+                        f"{label} cannot use symlink evidence"
+                    )
+            except Exception:
+                os.close(next_fd)
+                raise
+            os.close(dir_fd)
+            dir_fd = next_fd
+        opened_fd = dir_fd
+        dir_fd = None
+        return opened_fd, parts[-1]
+    except PredicateContractError:
+        raise
+    except FileNotFoundError:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        raise
+    except NotADirectoryError:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        raise
+    except OSError as exc:
+        if dir_fd is not None:
+            os.close(dir_fd)
+        raise PredicateContractError(f"{label} cannot be inspected") from exc
+
+
+def _open_directory_path_nofollow(path: Path, label: str) -> int:
+    fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        path_stat = os.fstat(fd)
+        if S_ISLNK(path_stat.st_mode) or not S_ISDIR(path_stat.st_mode):
+            raise PredicateContractError(f"{label} cannot be inspected")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _raise_if_multi_link_file(path_stat: Any, label: str) -> None:
+    if int(getattr(path_stat, "st_nlink", 1) or 1) > 1:
+        raise PredicateContractError(f"{label} cannot use hard-linked file aliases")
+
+
+def _sha256_file(repo_root: Path, relative_path: Path, path_stat: Any) -> str:
+    size = int(getattr(path_stat, "st_size", 0) or 0)
+    if size > MAX_FILE_EVIDENCE_BYTES:
+        raise PredicateContractError("file_sha256 evidence exceeds safe size limit")
+    digest = hashlib.sha256()
+    fd: int | None = None
+    parent_fd: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        parent_fd, final_name = _open_parent_directory_nofollow(
+            repo_root, relative_path, "file_sha256 evidence"
+        )
+        fd = os.open(final_name, flags, dir_fd=parent_fd)
+        opened_stat = os.fstat(fd)
+        _validate_opened_file_stat(opened_stat, path_stat)
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            total_read = 0
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total_read += len(chunk)
+                if total_read > MAX_FILE_EVIDENCE_BYTES:
+                    raise PredicateContractError(
+                        "file_sha256 evidence exceeds safe size limit"
+                    )
+                digest.update(chunk)
+    except PredicateContractError:
+        raise
+    except OSError as exc:
+        raise PredicateContractError("file_sha256 evidence cannot be read") from exc
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if fd is not None:
+            os.close(fd)
+    return digest.hexdigest()
+
+
+def _validate_opened_file_stat(opened_stat: Any, checked_stat: Any) -> None:
+    if not S_ISREG(opened_stat.st_mode):
+        raise PredicateContractError("file_sha256 evidence must be a regular file")
+    _raise_if_multi_link_file(opened_stat, "file_sha256 evidence")
+    if _stat_identity(opened_stat) != _stat_identity(checked_stat):
+        raise PredicateContractError("file_sha256 evidence changed during read")
+    size = int(getattr(opened_stat, "st_size", 0) or 0)
+    if size > MAX_FILE_EVIDENCE_BYTES:
+        raise PredicateContractError("file_sha256 evidence exceeds safe size limit")
+
+
+def _stat_identity(path_stat: Any) -> tuple[int, int, int]:
+    return (
+        int(getattr(path_stat, "st_dev", -1)),
+        int(getattr(path_stat, "st_ino", -1)),
+        int(getattr(path_stat, "st_mode", -1)),
+    )
+
+
+def _evidence_mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise PredicateContractError(f"{label} must be an object")
+    return value
+
+
+def _bounded_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise PredicateContractError(f"{label} must be a non-empty string")
+    if "\x00" in value or len(value) > MAX_STRING_LENGTH:
+        raise PredicateContractError(f"{label} is outside safe bounds")
+    return value
+
+
+def _json_scalar(value: Any, label: str) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (str, int, float)):
+        if isinstance(value, str):
+            if "\x00" in value or len(value) > MAX_STRING_LENGTH:
+                raise PredicateContractError(f"{label} is outside safe bounds")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise PredicateContractError(f"{label} must be finite")
+        return value
+    raise PredicateContractError(f"{label} must be a JSON scalar")
+
+
+def _json_scalar_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    raise PredicateContractError("internal non-scalar comparison")
+
+
+def _json_scalar_equals(actual: Any, expected: Any, label: str) -> bool:
+    actual_kind = _json_scalar_kind(actual)
+    expected_kind = _json_scalar_kind(expected)
+    if actual_kind != expected_kind:
+        raise PredicateContractError(
+            f"{label} type mismatch: expected {expected_kind}, found {actual_kind}"
+        )
+    return actual == expected
+
+
+def _json_path_lookup(document: Any, path: Any) -> Any:
+    if not isinstance(path, list):
+        raise PredicateContractError("json_equals path must be a JSON array")
+    if not 1 <= len(path) <= MAX_JSON_PATH_LENGTH:
+        raise PredicateContractError(
+            f"json_equals path length must be in [1,{MAX_JSON_PATH_LENGTH}]"
+        )
+    string_segments = [segment for segment in path if isinstance(segment, str)]
+    if string_segments:
+        _reject_sensitive_evidence_name(
+            "/".join(string_segments), "json path segments"
+        )
+    current = document
+    for segment in path:
+        if isinstance(segment, str):
+            segment = _bounded_string(segment, "json path segment")
+            _reject_sensitive_evidence_name(segment, "json path segment")
+            if not isinstance(current, Mapping) or segment not in current:
+                raise PredicateContractError("json_equals evidence path is missing")
+            current = current[segment]
+        elif type(segment) is int:
+            if not isinstance(current, list) or segment < 0 or segment >= len(current):
+                raise PredicateContractError("json_equals evidence path is missing")
+            current = current[segment]
+        else:
+            raise PredicateContractError("json path segments must be strings or integers")
+    return _json_scalar(current, "json_equals resolved value")

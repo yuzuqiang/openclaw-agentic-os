@@ -15,7 +15,7 @@ revalidation, and neither artifact proves production runtime behavior.
 - Current latest migration SHA-256: `19970e071a05eadc7a682d98b624829b8c3d30782598e27ebeb04edba9f4ba24`
 - Current migration manifest SHA-256: `eff21f04fbe780d29c7c4aba3a1f773cad1b1f283464700cab8d803d8f7486c9`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
-- Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner, crash fixtures, rollback drills, and production smoke tests
+- Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner integrations, approvals/gates/trust promotion, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
@@ -75,6 +75,40 @@ must not delete the committed authority file.
 This is parity evidence only: it does not create `db_authority_canary` or
 `db_authority` runs, does not call OpenClaw or Gateway, and does not claim
 canary readiness.
+
+The first P1.2 predicate slice lives in `agentic_os.predicates`. It implements
+only the read-only `agentic_predicate_inproc_v1` backend: literal booleans,
+`all` / `any` / `not`, repo-root-bounded `file_exists` and `file_sha256`,
+JSON scalar equality over caller-supplied documents, and command-result scalar
+equality over caller-supplied evidence. Unsupported backends, dynamic code,
+subprocess/shell/network/environment adapters, SQL/time/Gateway/config adapters,
+non-Git-worktree roots, bare or symlinked `.git` metadata, malformed or unsupported
+Git metadata, NUL/control-character Git metadata fields, directory `.git` configs whose
+`core.worktree` points away from the requested root, symlinked relative or absolute
+gitdir pointers, malformed HEAD refs, v0 repositories declaring v1-only extensions,
+unsupported Git format extensions, Git config include directives, per-worktree
+`config.worktree` bare/worktree drift overlaid on common config,
+empty linked-worktree `commondir` files, path traversal, symlink escapes,
+raw database state paths, hard-linked file aliases, common credential stores
+such as `.git`, `.docker`, and `.kube`, borrowed gitdir metadata whose
+`core.worktree` or linked-worktree `gitdir` pointer does not bind the requested root,
+credential/private paths, separator-based `.env` backups, backed-up credential filenames,
+camelCase credential names, underscore-, tilde-, and copy-suffixed raw database backups,
+raw database backup names without separators,
+password/API-key JSON and command evidence names including split `api/key` components,
+unreadable or unstatable file evidence, symlink evidence before target resolution,
+swapped symlink evidence, symlink parent components rechecked at file use,
+opened file identity drift, oversized file-hash evidence,
+missing or non-regular file-hash evidence, JSON path absence, malformed evidence
+maps, JSON scalar type mismatches, writes, missing evidence, and malformed predicate
+documents fail closed with
+`PredicateContractError`. Boolean composition validates every child before
+aggregating results, so unsupported adapters cannot be hidden behind short-circuit
+success. Git `core.repositoryformatversion` values `0` and `1` are accepted when
+the remaining metadata is valid, and empty strings are valid JSON/command scalar
+evidence values. It does not call
+OpenClaw, Gateway, Cron, or a production database, and it does not grant trust or
+approval authority.
 
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
