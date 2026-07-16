@@ -53,7 +53,7 @@ class OpenClawTransport(Protocol):
 
 
 _REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
-    "sessions_spawn": frozenset(("client_request_id", "idempotency_key")),
+    "sessions_spawn": frozenset(("client_request_id", "idempotency_key", "metadata")),
     "sessions_list": frozenset(),
     "sessions_status": frozenset(("session_key",)),
     "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
@@ -195,6 +195,69 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
                     replace(partial, metadata_contract_version=None, raw_json=None)
                 )
     return tuple(observations)
+
+
+def _history_item_session_keys(
+    response: Mapping[str, Any],
+) -> tuple[tuple[str, str | None, str | None], ...]:
+    """Return item-level session identities from a history response."""
+
+    identities: list[tuple[str, str | None, str | None]] = []
+    for container_name in ("messages", "history", "items", "events"):
+        items = response.get(container_name)
+        if not isinstance(items, Sequence) or isinstance(
+            items, (str, bytes, bytearray)
+        ):
+            continue
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            session = (
+                item.get("session") if isinstance(item.get("session"), Mapping) else {}
+            )
+            label = f"{container_name}[{index}]"
+            session_key = _consistent_identity(
+                f"{label} session key",
+                (
+                    (f"{label}.session_key", item.get("session_key")),
+                    (f"{label}.sessionKey", item.get("sessionKey")),
+                    (f"{label}.session.session_key", session.get("session_key")),
+                    (f"{label}.session.sessionKey", session.get("sessionKey")),
+                    (f"{label}.session.key", session.get("key")),
+                ),
+            )
+            spawn_request_session_key = _consistent_identity(
+                f"{label} spawn request session key",
+                (
+                    (
+                        f"{label}.spawn_request_session_key",
+                        item.get("spawn_request_session_key"),
+                    ),
+                    (
+                        f"{label}.spawnRequestSessionKey",
+                        item.get("spawnRequestSessionKey"),
+                    ),
+                    (
+                        f"{label}.session.spawn_request_session_key",
+                        session.get("spawn_request_session_key"),
+                    ),
+                    (
+                        f"{label}.session.spawnRequestSessionKey",
+                        session.get("spawnRequestSessionKey"),
+                    ),
+                    (
+                        f"{label}.session.request_session_key",
+                        session.get("request_session_key"),
+                    ),
+                    (
+                        f"{label}.session.requestSessionKey",
+                        session.get("requestSessionKey"),
+                    ),
+                ),
+            )
+            if session_key is not None or spawn_request_session_key is not None:
+                identities.append((label, session_key, spawn_request_session_key))
+    return tuple(identities)
 
 
 def _string_or_none(value: Any) -> str | None:
@@ -449,4 +512,18 @@ class OpenClawAdapter:
             raise AdapterContractError(
                 "sessions_history response identity must match requested session"
             )
+        for label, item_session_key, item_spawn_request_session_key in (
+            _history_item_session_keys(response)
+        ):
+            if item_session_key is not None and item_session_key != session_key:
+                raise AdapterContractError(
+                    f"sessions_history {label} identity must match requested session"
+                )
+            if (
+                item_spawn_request_session_key is not None
+                and item_spawn_request_session_key != session_key
+            ):
+                raise AdapterContractError(
+                    f"sessions_history {label} identity must match requested session"
+                )
         return observation

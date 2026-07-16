@@ -18,6 +18,7 @@ INSTALLED_SESSION_TOOL_CATALOG = {
                 "properties": {
                     "client_request_id": {"type": "string"},
                     "idempotency_key": {"type": "string"},
+                    "metadata": {"type": "object"},
                 }
             },
         },
@@ -159,7 +160,14 @@ class CannedTransport:
             return {
                 "sessionKey": params["sessionKey"],
                 "spawnRequestSessionKey": params["sessionKey"],
-                "messages": [{"role": "assistant", "content": "done"}],
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "done",
+                        "sessionKey": params["sessionKey"],
+                        "spawnRequestSessionKey": params["sessionKey"],
+                    }
+                ],
                 "metadata": {
                     "metadata_contract_version": "v1",
                     "normalized": metadata,
@@ -220,7 +228,11 @@ class OpenClawAdapterTests(unittest.TestCase):
         catalog = {
             "tools": {
                 "sessions_spawn": {
-                    "parameters": {"client_request_id": {}, "idempotency_key": {}}
+                    "parameters": {
+                        "client_request_id": {},
+                        "idempotency_key": {},
+                        "metadata": {},
+                    }
                 },
                 "sessions_list": {"parameters": {}},
                 "sessions_status": {"parameters": {"session_key": {}}},
@@ -231,6 +243,29 @@ class OpenClawAdapterTests(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(AdapterContractError, "includeTools"):
+            assert_installed_session_tools(catalog)
+
+    def test_session_tool_catalog_preflight_rejects_missing_spawn_metadata_parameter(
+        self,
+    ) -> None:
+        catalog = {
+            "tools": {
+                "sessions_spawn": {
+                    "parameters": {"client_request_id": {}, "idempotency_key": {}}
+                },
+                "sessions_list": {"parameters": {}},
+                "sessions_status": {"parameters": {"session_key": {}}},
+                "sessions_history": {
+                    "parameters": {
+                        "sessionKey": {},
+                        "limit": {},
+                        "includeTools": {},
+                    }
+                },
+            }
+        }
+
+        with self.assertRaisesRegex(AdapterContractError, "metadata"):
             assert_installed_session_tools(catalog)
 
     def test_session_result_missing_raw_json_fails_contract(self) -> None:
@@ -312,6 +347,43 @@ class OpenClawAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AdapterContractError, "requested session"):
             OpenClawAdapter(DifferentSessionResultTransport()).session_result(
+                "session-key"
+            )
+
+    def test_session_result_different_history_item_session_fails_contract(self) -> None:
+        class DifferentHistoryItemResultTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "sessionKey": params["sessionKey"],
+                    "spawnRequestSessionKey": params["sessionKey"],
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "done",
+                            "sessionKey": "other-session",
+                            "spawnRequestSessionKey": "other-session",
+                        }
+                    ],
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\]"):
+            OpenClawAdapter(DifferentHistoryItemResultTransport()).session_result(
                 "session-key"
             )
 

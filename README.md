@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `b63e8029aaf0eb22e375c13f98181c65a53141484fb56f1e7238a6787c315891`
+- Current design artifact SHA-256: `1f9bf9ea1ea1fb986164e2c1d20dc824792f1a3d990bcec7fde24e75ee36aa46`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `19970e071a05eadc7a682d98b624829b8c3d30782598e27ebeb04edba9f4ba24`
 - Current migration manifest SHA-256: `eff21f04fbe780d29c7c4aba3a1f773cad1b1f283464700cab8d803d8f7486c9`
@@ -195,8 +195,12 @@ another dispatch's lease on the same run/transition. Unknown or pending spawn
 reconciliation also requires the bound allowLease acquire intent to be accepted
 or reconciled into the exact acquired local lease with a non-empty Gateway lease
 identity; otherwise the spawn is moved to human review even when `sessions_list`
-contains matching session metadata. Live run/phase/agent
-arbitration occurs in the initial intent transaction: prior pending, unknown,
+contains matching session metadata. Session-tool catalog preflight fails closed
+unless `sessions_spawn` declares the caller `metadata` parameter as well as
+`client_request_id` and `idempotency_key`; history-backed result responses must
+match the requested session at the top level and in any history item identity
+they expose. Live run/phase/agent arbitration occurs in the initial intent
+transaction: prior pending, unknown,
 accepted, reconciled, or unresolved human-review attempts block a competing
 dispatch before another lease or spawn RPC, while terminal pre-spawn failures do
 not permanently occupy the slot. Migration v10 backfills pre-existing bindings
