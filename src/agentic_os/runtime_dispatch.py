@@ -32,14 +32,14 @@ class RuntimeDispatchError(RuntimeError):
     """Runtime dispatch failed closed before accepting external authority."""
 
 
-AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError)
-
-METADATA_RUNTIME_ERRORS = AMBIGUOUS_TRANSPORT_ERRORS + (
+METADATA_RUNTIME_ERRORS = (
     AdapterContractError,
     MetadataContractError,
     RuntimeDispatchError,
     sqlite3.Error,
 )
+
+AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError)
 RELEASE_FAILURE_ERRORS = METADATA_RUNTIME_ERRORS + AMBIGUOUS_TRANSPORT_ERRORS
 
 
