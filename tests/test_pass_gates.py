@@ -166,9 +166,19 @@ class PassGateWriterTests(unittest.TestCase):
         return row
 
     def _record(self, **overrides: object) -> None:
-        gate_query_hash, migration_sha256 = self._current_gate_identity()
+        if "gate_query_hash" in overrides and "migration_sha256" in overrides:
+            gate_query_hash = str(overrides["gate_query_hash"])
+            migration_sha256 = str(overrides["migration_sha256"])
+        else:
+            gate_query_hash, migration_sha256 = self._current_gate_identity()
         bound_by = str(overrides.get("bound_by", "pass-gate-writer"))
-        now_epoch_ms = int(overrides.get("now_epoch_ms", int(time.time() * 1000)))
+        if "now_epoch_ms" in overrides:
+            now_epoch_ms = int(overrides["now_epoch_ms"])
+        else:
+            now_epoch_ms = int(time.time() * 1000)
+        approval = overrides["approval"] if "approval" in overrides else self._approval()
+        verifier = overrides["verifier"] if "verifier" in overrides else self._verifier()
+        evidence = overrides["evidence"] if "evidence" in overrides else self._evidence()
         kwargs = {
             "run_id": "run",
             "transition_id": "transition",
@@ -181,9 +191,9 @@ class PassGateWriterTests(unittest.TestCase):
             "gate_version": "pass-gate-v1",
             "gate_query_hash": gate_query_hash,
             "migration_sha256": migration_sha256,
-            "approval": self._approval(),
-            "verifier": self._verifier(),
-            "evidence": self._evidence(),
+            "approval": approval,
+            "verifier": verifier,
+            "evidence": evidence,
             "completed_at": "completed-now",
             "created_at": "created-now",
         }
@@ -244,6 +254,28 @@ class PassGateWriterTests(unittest.TestCase):
                     query_name,
                 )
 
+    def test_absolute_evidence_path_is_stored_as_repo_relative_path(self) -> None:
+        evidence = self._evidence()
+        self._record(
+            evidence=GateEvidence(
+                path=str(repository_root() / evidence.path),
+                sha256=evidence.sha256,
+                size_bytes=evidence.size_bytes,
+                content_type=evidence.content_type,
+                redaction_status=evidence.redaction_status,
+                captured_at=evidence.captured_at,
+            )
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT path FROM evidence_hashes WHERE evidence_hash=?",
+                    (evidence.sha256,),
+                ).fetchone(),
+                (evidence.path,),
+            )
+
     def test_expired_approval_is_rejected_before_any_bundle_rows(self) -> None:
         now_epoch_ms = int(time.time() * 1000)
         with self.assertRaisesRegex(PassGateError, "expire after"):
@@ -279,6 +311,30 @@ class PassGateWriterTests(unittest.TestCase):
         with mock.patch(
             "agentic_os.pass_gates.time.time",
             return_value=local_now_epoch_ms / 1000,
+        ):
+            with self.assertRaisesRegex(PassGateError, "expire after"):
+                self._record(
+                    now_epoch_ms=caller_now_epoch_ms,
+                    trusted_clock_source_hash=_clock_hash(
+                        caller_now_epoch_ms,
+                        "pass-gate-writer",
+                    ),
+                    approval=self._approval(
+                        expires_at_epoch_ms=caller_now_epoch_ms + 1_000
+                    ),
+                )
+
+        self._assert_no_bundle_rows()
+
+    def test_gate_clock_is_resampled_inside_transaction_for_expiry(self) -> None:
+        caller_now_epoch_ms = 10_000_000
+        transaction_now_epoch_ms = caller_now_epoch_ms + 2_000
+        with mock.patch(
+            "agentic_os.pass_gates.time.time",
+            side_effect=[
+                caller_now_epoch_ms / 1000,
+                transaction_now_epoch_ms / 1000,
+            ],
         ):
             with self.assertRaisesRegex(PassGateError, "expire after"):
                 self._record(
@@ -548,6 +604,26 @@ class PassGateWriterTests(unittest.TestCase):
                 )
             )
 
+        self._assert_no_bundle_rows()
+
+    def test_verifier_run_id_cannot_reuse_worker_run_id(self) -> None:
+        with self.assertRaisesRegex(PassGateError, "verifier run id"):
+            self._record(
+                verifier=VerifierProof(
+                    verifier_run_id="run",
+                    worker_agent_id="writer",
+                    verifier_agent_id="security-reviewer",
+                    provider="openai",
+                    model="gpt-5",
+                    prompt_hash=_sha("prompt"),
+                    context_hash=_sha("context"),
+                    independence_proof={"reviewer_session": "phase-c"},
+                    completed_at="verified-now",
+                )
+            )
+
+        self._assert_no_bundle_rows()
+
     def test_database_authority_run_is_rejected_without_writes(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("DELETE FROM transitions")
@@ -561,16 +637,21 @@ class PassGateWriterTests(unittest.TestCase):
         self._assert_no_bundle_rows()
 
     def test_lax_sqlite_sidecar_is_rejected_before_any_bundle_rows(self) -> None:
+        gate_query_hash, migration_sha256 = self._current_gate_identity()
         sidecar = Path(f"{self.database}-wal")
         sidecar.write_bytes(b"wal")
         sidecar.chmod(0o644)
 
         with self.assertRaisesRegex(PassGateError, "sidecar requires 0600"):
-            self._record()
+            self._record(
+                gate_query_hash=gate_query_hash,
+                migration_sha256=migration_sha256,
+            )
 
         self._assert_no_bundle_rows()
 
     def test_symlink_sqlite_sidecar_is_rejected_before_opening_wal(self) -> None:
+        gate_query_hash, migration_sha256 = self._current_gate_identity()
         target = Path(self.temporary.name) / "external-wal-target"
         target.write_bytes(b"wal")
         target.chmod(0o600)
@@ -581,7 +662,29 @@ class PassGateWriterTests(unittest.TestCase):
             self.skipTest(f"symlink creation unavailable: {exc}")
 
         with self.assertRaisesRegex(PassGateError, "sidecar must be a regular"):
-            self._record()
+            self._record(
+                gate_query_hash=gate_query_hash,
+                migration_sha256=migration_sha256,
+            )
+
+        self._assert_no_bundle_rows()
+
+    def test_hard_linked_sqlite_sidecar_is_rejected_before_opening_wal(self) -> None:
+        gate_query_hash, migration_sha256 = self._current_gate_identity()
+        target = Path(self.temporary.name) / "external-wal-target"
+        target.write_bytes(b"wal")
+        target.chmod(0o600)
+        sidecar = Path(f"{self.database}-wal")
+        try:
+            os.link(target, sidecar)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"hard link creation unavailable: {exc}")
+
+        with self.assertRaisesRegex(PassGateError, "sidecar cannot use hard-linked"):
+            self._record(
+                gate_query_hash=gate_query_hash,
+                migration_sha256=migration_sha256,
+            )
 
         self._assert_no_bundle_rows()
 

@@ -116,24 +116,28 @@ gate evidence, risk assessment, and PASS `gate_runs` rows required before a
 transition can be trusted. `record_approval_pass_gate` updates the existing
 transition with an exact approval binding, creates the single-use
 `gate_clock_context` from the local writer wall clock after the caller-supplied
-epoch/hash pair proves it is current, records a same-run independent verifier
-with non-empty independence proof, binds bounded evidence to the producer run only
+epoch/hash pair proves it is current, resamples that trusted clock inside the
+write transaction before approval expiry is evaluated, records a same-run
+independent verifier with non-empty independence proof and a verifier run id
+that cannot reuse the worker run id, binds bounded evidence to the producer run only
 when the evidence path is safe for retrieval, avoids private credential
 artifacts, symlinks, and hard-linked aliases, streams artifact hashing under the
 same evidence size cap as predicates, and rechecks the no-symlink path plus
-identity, SHA-256, and size immediately before commit. The writer also requires
+identity, SHA-256, and size immediately before commit while storing normalized
+repo-relative evidence paths. The writer also requires
 the supplied gate identity to match the current registered
 `Completion gate before done for R2+` SLO and migration hash, rejects terminal
 runs instead of accepting retroactive gates, and checks every blocking runtime
 SLO before commit. SQLite runtime sidecars (`-wal`, `-shm`, and rollback
 journals) must be non-symlink private files before writing and are enforced back
 to `0600` after WAL setup; the control database itself cannot have hard-linked
-aliases.
+aliases, and sidecars cannot have hard-linked aliases.
 Expired approvals, reused pass-gated transitions, same-worker verifiers, missing
 target fields, malformed transition target hashes, stale/fabricated evidence,
 stale/fabricated gate clocks, caller-stale approval-expiry clocks, lower risk
 ceilings, malformed SHA-256 authorities, unsafe evidence aliases, lax SQLite
-sidecars, symlinked sidecars, hard-linked control databases, and
+sidecars, symlinked sidecars, hard-linked SQLite sidecars, hard-linked control
+databases, worker/verifier run id reuse, and
 `db_authority_canary` / `db_authority` runs fail closed without granting trust.
 The writer does not call OpenClaw, Gateway, Cron, or any production authority
 surface.

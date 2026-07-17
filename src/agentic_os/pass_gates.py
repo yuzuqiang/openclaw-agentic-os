@@ -153,15 +153,12 @@ def record_approval_pass_gate(
     completed_at = _required_text("completed_at", completed_at)
     created_at = _required_text("created_at", created_at)
     now_epoch_ms = _epoch_ms("now_epoch_ms", now_epoch_ms)
-    trusted_clock = _assert_trusted_clock(
+    _assert_trusted_clock(
         now_epoch_ms=now_epoch_ms,
         bound_by=bound_by,
         trusted_clock_source_hash=trusted_clock_source_hash,
     )
-    now_epoch_ms = trusted_clock.now_epoch_ms
-    trusted_clock_source_hash = trusted_clock.source_hash
-    _validate_approval(approval, now_epoch_ms=now_epoch_ms)
-    _validate_verifier(verifier)
+    _validate_verifier(verifier, worker_run_id=run_id)
     evidence_snapshot = _validate_evidence(evidence)
     evidence_hash = evidence.sha256
     assessment_id = _required_text(
@@ -193,12 +190,20 @@ def record_approval_pass_gate(
             )
             target_scope = _transition_text(transition, "target_scope")
             risk_dominance = _transition_text(transition, "risk_dominance")
-            if _RISK_ORDER[approval.approved_risk_ceiling] < _RISK_ORDER[risk_dominance]:
-                raise PassGateError("approval risk ceiling is below transition risk")
             if _pass_gate_exists(
                 connection, run_id=run_id, transition_id=transition_id
             ):
                 raise PassGateError("transition already has an immutable PASS gate")
+            trusted_clock = _assert_trusted_clock(
+                now_epoch_ms=now_epoch_ms,
+                bound_by=bound_by,
+                trusted_clock_source_hash=trusted_clock_source_hash,
+            )
+            now_epoch_ms = trusted_clock.now_epoch_ms
+            trusted_clock_source_hash = trusted_clock.source_hash
+            _validate_approval(approval, now_epoch_ms=now_epoch_ms)
+            if _RISK_ORDER[approval.approved_risk_ceiling] < _RISK_ORDER[risk_dominance]:
+                raise PassGateError("approval risk ceiling is below transition risk")
 
             approval_hash = _approval_hash(
                 approval,
@@ -346,7 +351,7 @@ def record_approval_pass_gate(
                 (
                     evidence_hash,
                     run_id,
-                    evidence.path,
+                    evidence_snapshot.relative_path,
                     evidence.sha256,
                     evidence.size_bytes,
                     evidence.content_type,
@@ -632,8 +637,10 @@ def _validate_approval(approval: ApprovalGrant, *, now_epoch_ms: int) -> None:
     _required_text("approved_at", approval.approved_at)
 
 
-def _validate_verifier(verifier: VerifierProof) -> None:
+def _validate_verifier(verifier: VerifierProof, *, worker_run_id: str) -> None:
     _required_text("verifier_run_id", verifier.verifier_run_id)
+    if verifier.verifier_run_id == worker_run_id:
+        raise PassGateError("verifier run id must be independent from worker run")
     _required_text("worker_agent_id", verifier.worker_agent_id)
     _required_text("verifier_agent_id", verifier.verifier_agent_id)
     if verifier.worker_agent_id == verifier.verifier_agent_id:
@@ -786,6 +793,8 @@ def _refuse_lax_sqlite_sidecars(database: Path) -> None:
             continue
         if not stat.S_ISREG(sidecar_stat.st_mode):
             raise PassGateError("SQLite sidecar must be a regular private file")
+        if int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1:
+            raise PassGateError("SQLite sidecar cannot use hard-linked file aliases")
         if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
             raise PassGateError("SQLite sidecar requires 0600 file mode")
 
@@ -797,6 +806,8 @@ def _chmod_private_sqlite_sidecars(database: Path) -> None:
             continue
         if not stat.S_ISREG(sidecar_stat.st_mode):
             raise PassGateError("SQLite sidecar must be a regular private file")
+        if int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1:
+            raise PassGateError("SQLite sidecar cannot use hard-linked file aliases")
         if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
             sidecar.chmod(0o600)
             sidecar_stat = os.stat(sidecar, follow_symlinks=False)
