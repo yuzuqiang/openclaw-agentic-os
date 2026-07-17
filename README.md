@@ -117,7 +117,8 @@ transition can be trusted. `record_approval_pass_gate` updates the existing
 transition with an exact approval binding, creates the single-use
 `gate_clock_context` from the local writer wall clock after the caller-supplied
 epoch/hash pair proves it is current, resamples that trusted clock inside the
-write transaction before approval expiry is evaluated, records a same-run
+write transaction before approval expiry is evaluated, verifies the complete
+migration/schema/SLO registry under the same write lock, records a same-run
 independent verifier with non-empty independence proof and a verifier run id
 that cannot reuse the worker run id, binds bounded evidence to the producer run only
 when the evidence path is safe for retrieval, avoids private credential

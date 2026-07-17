@@ -167,9 +167,9 @@ def record_approval_pass_gate(
 
     connection = _connect(database)
     try:
-        _verify_schema_identity(connection)
         connection.execute("BEGIN IMMEDIATE")
         try:
+            _verify_schema_identity(connection)
             transition = _transition_for_gate(
                 connection, run_id=run_id, transition_id=transition_id
             )

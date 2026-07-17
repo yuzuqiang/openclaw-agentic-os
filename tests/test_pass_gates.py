@@ -350,6 +350,25 @@ class PassGateWriterTests(unittest.TestCase):
 
         self._assert_no_bundle_rows()
 
+    def test_schema_identity_is_verified_under_write_lock(self) -> None:
+        from agentic_os import pass_gates
+
+        original_verify = pass_gates._verify_schema_identity
+        observed_transactions: list[bool] = []
+
+        def assert_write_transaction(connection: sqlite3.Connection) -> None:
+            observed_transactions.append(connection.in_transaction)
+            self.assertTrue(connection.in_transaction)
+            original_verify(connection)
+
+        with mock.patch(
+            "agentic_os.pass_gates._verify_schema_identity",
+            side_effect=assert_write_transaction,
+        ):
+            self._record()
+
+        self.assertEqual(observed_transactions, [True])
+
     def test_malformed_gate_identity_hashes_are_rejected_before_any_bundle_rows(self) -> None:
         for field_name in (
             "trusted_clock_source_hash",
