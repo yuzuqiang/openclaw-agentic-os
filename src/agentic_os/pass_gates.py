@@ -175,6 +175,13 @@ def record_approval_pass_gate(
             )
             if transition["authority_mode"] in {"db_authority_canary", "db_authority"}:
                 raise PassGateError("PASS gate writer refuses database-authority runs")
+            if transition["workflow_authority_mode"] in {
+                "db_authority_canary",
+                "db_authority",
+            }:
+                raise PassGateError(
+                    "PASS gate writer refuses database-authority workflows"
+                )
             _reject_terminal_run(transition)
             _assert_gate_identity(
                 connection,
@@ -308,7 +315,8 @@ def record_approval_pass_gate(
                 "clock_context_id,verifier_run_id,decision,completed_at,"
                 "completed_at_epoch_ms,requires_same_run,gate_version,"
                 "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,"
-                "created_at) VALUES(?,?,?,?,?,'pass',?,?,1,?,?,?,?,?,?)",
+                "created_at,run_authority_mode,workflow_authority_mode) "
+                "VALUES(?,?,?,?,?,'pass',?,?,1,?,?,?,?,?,?,?,?)",
                 (
                     gate_run_id,
                     run_id,
@@ -323,6 +331,8 @@ def record_approval_pass_gate(
                     evidence_hash,
                     risk_dominance,
                     created_at,
+                    transition["authority_mode"],
+                    transition["workflow_authority_mode"],
                 ),
             )
             connection.execute(
@@ -449,8 +459,9 @@ def _transition_for_gate(
     row = connection.execute(
         "SELECT t.action_type,t.target_type,t.target_id,t.target_hash,"
         "t.target_scope,t.risk_dominance,r.authority_mode,r.risk_dominance,"
-        "r.state,r.finalized_at_epoch_ms "
+        "r.state,r.finalized_at_epoch_ms,w.mode "
         "FROM transitions t JOIN runs r ON r.run_id=t.run_id "
+        "JOIN workflow_authority w ON w.workflow=r.workflow "
         "WHERE t.run_id=? AND t.transition_id=?",
         (run_id, transition_id),
     ).fetchone()
@@ -469,6 +480,7 @@ def _transition_for_gate(
         "run_risk_dominance": row[7],
         "run_state": row[8],
         "finalized_at_epoch_ms": row[9],
+        "workflow_authority_mode": row[10],
     }
 
 

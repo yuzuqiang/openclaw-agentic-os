@@ -59,6 +59,12 @@
       "name": "runtime_dispatch_binding",
       "file": "0010_runtime_dispatch_binding.sql",
       "sha256": "19970e071a05eadc7a682d98b624829b8c3d30782598e27ebeb04edba9f4ba24"
+    },
+    {
+      "version": 11,
+      "name": "gate_authority_snapshot",
+      "file": "0011_gate_authority_snapshot.sql",
+      "sha256": "d4143df66b0bcf4d9ffcb1baffa32b3731620d9837e621b011feb6050e7f80b4"
     }
   ]
 }

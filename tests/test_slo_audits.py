@@ -184,12 +184,17 @@ class SloAuditWriterTests(unittest.TestCase):
         gate_query_hash: str | None = None,
         migration_sha256: str | None = None,
         authority_mode: str = "file_authority",
+        stored_evidence_hash: str | None = None,
+        approval_bound: bool = True,
+        restore_current_authority: bool = False,
     ) -> None:
         current_gate_query_hash, current_migration_sha256 = self._current_gate_identity()
         if gate_query_hash is None:
             gate_query_hash = current_gate_query_hash
         if migration_sha256 is None:
             migration_sha256 = current_migration_sha256
+        if stored_evidence_hash is None:
+            stored_evidence_hash = evidence.sha256
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             if authority_mode in {"db_authority_canary", "db_authority"}:
@@ -208,6 +213,36 @@ class SloAuditWriterTests(unittest.TestCase):
                     "UPDATE runs SET authority_mode=? WHERE run_id='run'",
                     (authority_mode,),
                 )
+            if approval_bound:
+                connection.execute(
+                    "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                    "source_message_id,source_message_digest,approval_text_digest,"
+                    "approved_action_type,target_type,target_id,target_hash,target_scope,"
+                    "approved_risk_ceiling,expires_at_epoch_ms,expires_at_display,"
+                    "single_use,approval_hash,consumed_by_transition_id,"
+                    "consumed_by_gate_run_id,approved_at) VALUES('approval','run',"
+                    "'erwin','telegram','message-1',?,?,'mutate','artifact',"
+                    "'artifact-1',?,'repo','R2',?,NULL,1,?,'transition','gate',"
+                    "'approved-now')",
+                    (
+                        _sha("source-message"),
+                        _sha("approval-text"),
+                        _sha("artifact"),
+                        int(time.time() * 1000) + 3_600_000,
+                        _sha("approval:gate"),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE transitions SET approval_required=1,approval_id='approval',"
+                    "approval_channel='telegram',approval_source_digest=?,"
+                    "approval_text_digest=?,gate_run_id='gate',evidence_hash=? "
+                    "WHERE run_id='run' AND transition_id='transition'",
+                    (
+                        _sha("source-message"),
+                        _sha("approval-text"),
+                        stored_evidence_hash,
+                    ),
+                )
             connection.execute(
                 "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
                 "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,"
@@ -216,21 +251,23 @@ class SloAuditWriterTests(unittest.TestCase):
                 "VALUES(?,'run','writer','security-reviewer','openai','gpt-5',"
                 "?,?,?,'independent','{\"reviewer_session\":\"phase-c\"}',0,"
                 "'verified-now')",
-                (verifier_run_id, _sha("prompt"), _sha("context"), evidence.sha256),
+                (verifier_run_id, _sha("prompt"), _sha("context"), stored_evidence_hash),
             )
             connection.execute(
                 "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,"
                 "clock_context_id,verifier_run_id,decision,completed_at,"
                 "completed_at_epoch_ms,requires_same_run,gate_version,"
                 "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,"
-                "created_at) VALUES('gate','run','transition','clock',?,"
-                "'pass','completed-now',1,1,'pass-gate-v1',?,?,?,'R2',"
-                "'created-now')",
+                "created_at,run_authority_mode,workflow_authority_mode) "
+                "VALUES('gate','run','transition','clock',?,'pass','completed-now',"
+                "1,1,'pass-gate-v1',?,?,?,'R2','created-now',?,?)",
                 (
                     verifier_run_id,
                     gate_query_hash,
                     migration_sha256,
-                    evidence.sha256,
+                    stored_evidence_hash,
+                    authority_mode,
+                    authority_mode,
                 ),
             )
             connection.execute(
@@ -247,7 +284,7 @@ class SloAuditWriterTests(unittest.TestCase):
                 "verifier_run_id,gate_run_id,captured_at) VALUES(?,?,?,?,?,"
                 "?,?,?,?,'gate',?)",
                 (
-                    evidence.sha256,
+                    stored_evidence_hash,
                     "run",
                     evidence.path,
                     evidence.sha256,
@@ -259,6 +296,15 @@ class SloAuditWriterTests(unittest.TestCase):
                     evidence.captured_at,
                 ),
             )
+            if restore_current_authority:
+                connection.execute(
+                    "UPDATE workflow_authority SET mode='rollback_to_file_authority',"
+                    "updated_at='rollback' WHERE workflow='workflow'"
+                )
+                connection.execute(
+                    "UPDATE runs SET authority_mode='file_authority',"
+                    "updated_at='restored-file' WHERE run_id='run'"
+                )
 
     def _assert_no_slo_audit_rows(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection:
@@ -272,7 +318,7 @@ class SloAuditWriterTests(unittest.TestCase):
             "slo_audit_id": "slo-audit",
             "query_name": "Duplicate live dispatch blocked",
             "run_at": "audit-now",
-            "run_at_epoch_ms": 1_800_000_000_000,
+            "run_at_epoch_ms": int(time.time() * 1000),
         }
         kwargs.update(overrides)
         return record_slo_audit(self.database, **kwargs)
@@ -333,6 +379,70 @@ class SloAuditWriterTests(unittest.TestCase):
                 evidence_hash=evidence.sha256,
                 evidence_run_id="run",
                 verifier_run_id="run",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_rejects_future_audit_clock_without_write(self) -> None:
+        evidence = self._record_pass_gate()
+
+        with self.assertRaisesRegex(SloAuditError, "clock cannot be in the future"):
+            self._record_slo(
+                run_at_epoch_ms=253_402_300_799_999,
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_evidence_hash_digest_mismatch_without_write(self) -> None:
+        evidence = self._evidence()
+        stored_evidence_hash = _sha("not-the-artifact-digest")
+        self._insert_malformed_pass_gate(
+            evidence=evidence,
+            stored_evidence_hash=stored_evidence_hash,
+        )
+
+        with self.assertRaisesRegex(SloAuditError, "pass-gate evidence"):
+            self._record_slo(
+                evidence_hash=stored_evidence_hash,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_unapproved_pass_gate_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(evidence=evidence, approval_bound=False)
+
+        with self.assertRaisesRegex(SloAuditError, "pass-gate evidence"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_gate_time_db_authority_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(
+            evidence=evidence,
+            authority_mode="db_authority_canary",
+            restore_current_authority=True,
+        )
+
+        with self.assertRaisesRegex(SloAuditError, "database-authority pass gates"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
                 gate_run_id="gate",
             )
 

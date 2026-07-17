@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +61,7 @@ class _PassEvidenceBinding:
 
 
 _MAX_EPOCH_MS = 253_402_300_799_999
+_AUDIT_CLOCK_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 _REFUSED_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
 _PASS_GATE_QUERY_NAME = "Completion gate before done for R2+"
 
@@ -97,6 +99,7 @@ def record_slo_audit(
             query = _current_slo_query(connection, query_name)
             result_count = _execute_pinned_slo(connection, query.sql_text)
             status = "pass" if result_count == 0 else "fail"
+            _assert_audit_clock_not_future(run_at_epoch_ms)
             evidence_fields: tuple[str | None, str | None, str | None, str | None]
             pass_evidence: _PassEvidenceBinding | None = None
             if status == "pass":
@@ -240,18 +243,47 @@ def _require_pass_evidence(
     row = connection.execute(
         "SELECT r.authority_mode,e.path,e.sha256,e.size_bytes,e.content_type,"
         "e.redaction_status,e.captured_at,g.gate_query_hash,g.migration_sha256,"
-        "v.worker_run_id "
+        "v.worker_run_id,g.run_authority_mode,g.workflow_authority_mode,w.mode "
         "FROM evidence_hashes e "
         "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
         "AND g.evidence_hash=e.evidence_hash "
         "AND g.run_id=e.run_id "
         "AND g.verifier_run_id=e.verifier_run_id "
+        "AND g.evidence_hash=e.sha256 "
         "JOIN judge_verifier_runs v ON v.verifier_run_id=e.verifier_run_id "
         "AND v.worker_run_id=e.run_id "
         "AND v.evidence_hash=e.evidence_hash "
         "JOIN runs r ON r.run_id=e.run_id "
+        "JOIN workflow_authority w ON w.workflow=r.workflow "
+        "JOIN transitions t ON t.transition_id=g.transition_id "
+        "AND t.run_id=g.run_id "
+        "AND t.approval_required=1 "
+        "AND t.gate_run_id=g.gate_run_id "
+        "AND t.evidence_hash=e.evidence_hash "
+        "JOIN approvals a ON a.approval_id=t.approval_id "
+        "AND a.run_id=t.run_id "
+        "AND a.approved_action_type=t.action_type "
+        "AND a.target_type=t.target_type "
+        "AND a.target_id=t.target_id "
+        "AND a.target_hash=t.target_hash "
+        "AND a.target_scope=t.target_scope "
+        "AND a.channel=t.approval_channel "
+        "AND a.source_message_digest=t.approval_source_digest "
+        "AND a.approval_text_digest=t.approval_text_digest "
+        "AND a.single_use=1 "
+        "AND a.consumed_by_transition_id=t.transition_id "
+        "AND a.consumed_by_gate_run_id=g.gate_run_id "
+        "JOIN gate_clock_context c ON c.clock_context_id=g.clock_context_id "
+        "AND c.gate_run_id=g.gate_run_id "
+        "AND c.consumed_by_gate_run_id=g.gate_run_id "
+        "AND c.run_id=g.run_id "
+        "AND c.transition_id=g.transition_id "
+        "AND c.now_epoch_ms=g.completed_at_epoch_ms "
+        "AND c.bound_at_epoch_ms=c.now_epoch_ms "
+        "AND c.consumed_at_epoch_ms=c.now_epoch_ms "
         "WHERE e.gate_run_id=? "
         "AND e.evidence_hash=? "
+        "AND e.sha256=? "
         "AND e.run_id=? "
         "AND e.producer_run_id=? "
         "AND e.verifier_run_id=? "
@@ -259,9 +291,11 @@ def _require_pass_evidence(
         "AND g.requires_same_run=1 "
         "AND v.independence_class='independent' "
         "AND v.same_worker_context=0 "
-        "AND v.worker_agent_id<>v.verifier_agent_id",
+        "AND v.worker_agent_id<>v.verifier_agent_id "
+        "AND a.expires_at_epoch_ms > c.now_epoch_ms",
         (
             gate_run_id,
+            evidence_hash,
             evidence_hash,
             evidence_run_id,
             evidence_run_id,
@@ -272,6 +306,10 @@ def _require_pass_evidence(
         raise SloAuditError("passing SLO audit requires pass-gate evidence")
     if row[0] in _REFUSED_AUTHORITY_MODES:
         raise SloAuditError("SLO audit writer refuses database-authority runs")
+    if row[10] in _REFUSED_AUTHORITY_MODES or row[11] in _REFUSED_AUTHORITY_MODES:
+        raise SloAuditError("SLO audit writer refuses database-authority pass gates")
+    if row[12] in _REFUSED_AUTHORITY_MODES:
+        raise SloAuditError("SLO audit writer refuses database-authority workflows")
     if verifier_run_id == row[9]:
         raise SloAuditError("passing SLO audit requires independent verifier run id")
     _assert_current_pass_gate_identity(
@@ -349,6 +387,12 @@ def _assert_safe_pass_evidence_current(binding: _PassEvidenceBinding) -> None:
         _assert_evidence_snapshot_current(binding.evidence_snapshot)
     except PassGateError as exc:
         raise SloAuditError("passing SLO audit pass-gate evidence changed") from exc
+
+
+def _assert_audit_clock_not_future(run_at_epoch_ms: int) -> None:
+    local_epoch_ms = int(time.time() * 1000)
+    if run_at_epoch_ms > local_epoch_ms + _AUDIT_CLOCK_MAX_FUTURE_SKEW_MS:
+        raise SloAuditError("SLO audit clock cannot be in the future")
 
 
 def _required_text(name: str, value: object) -> str:
