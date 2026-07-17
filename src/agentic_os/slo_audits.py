@@ -13,7 +13,14 @@ from .migrations import (
     _verify_slo_queries,
     load_migrations,
 )
-from .pass_gates import _connect
+from .pass_gates import (
+    _EvidenceSnapshot,
+    GateEvidence,
+    PassGateError,
+    _assert_evidence_snapshot_current,
+    _connect,
+    _validate_evidence,
+)
 from .slo_contracts import SLO_QUERY_CONTRACTS, slo_query_hash
 
 
@@ -43,8 +50,18 @@ class _CurrentSloQuery:
     fixture_db_expected_status: str
 
 
+@dataclass(frozen=True)
+class _PassEvidenceBinding:
+    evidence_hash: str
+    evidence_run_id: str
+    verifier_run_id: str
+    gate_run_id: str
+    evidence_snapshot: _EvidenceSnapshot
+
+
 _MAX_EPOCH_MS = 253_402_300_799_999
 _REFUSED_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
+_PASS_GATE_QUERY_NAME = "Completion gate before done for R2+"
 
 
 def record_slo_audit(
@@ -81,13 +98,20 @@ def record_slo_audit(
             result_count = _execute_pinned_slo(connection, query.sql_text)
             status = "pass" if result_count == 0 else "fail"
             evidence_fields: tuple[str | None, str | None, str | None, str | None]
+            pass_evidence: _PassEvidenceBinding | None = None
             if status == "pass":
-                evidence_fields = _require_pass_evidence(
+                pass_evidence = _require_pass_evidence(
                     connection,
                     evidence_hash=evidence_hash,
                     evidence_run_id=evidence_run_id,
                     verifier_run_id=verifier_run_id,
                     gate_run_id=gate_run_id,
+                )
+                evidence_fields = (
+                    pass_evidence.evidence_hash,
+                    pass_evidence.evidence_run_id,
+                    pass_evidence.verifier_run_id,
+                    pass_evidence.gate_run_id,
                 )
                 if (
                     query.empty_db_expected_status != "pass"
@@ -120,6 +144,8 @@ def record_slo_audit(
                     run_at_epoch_ms,
                 ),
             )
+            if pass_evidence is not None:
+                _assert_safe_pass_evidence_current(pass_evidence)
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -204,13 +230,17 @@ def _require_pass_evidence(
     evidence_run_id: str | None,
     verifier_run_id: str | None,
     gate_run_id: str | None,
-) -> tuple[str, str, str, str]:
+) -> _PassEvidenceBinding:
     evidence_hash = _sha256_text("evidence_hash", evidence_hash)
     evidence_run_id = _required_text("evidence_run_id", evidence_run_id)
     verifier_run_id = _required_text("verifier_run_id", verifier_run_id)
     gate_run_id = _required_text("gate_run_id", gate_run_id)
+    if verifier_run_id == evidence_run_id:
+        raise SloAuditError("passing SLO audit requires independent verifier run id")
     row = connection.execute(
-        "SELECT r.authority_mode "
+        "SELECT r.authority_mode,e.path,e.sha256,e.size_bytes,e.content_type,"
+        "e.redaction_status,e.captured_at,g.gate_query_hash,g.migration_sha256,"
+        "v.worker_run_id "
         "FROM evidence_hashes e "
         "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
         "AND g.evidence_hash=e.evidence_hash "
@@ -226,6 +256,7 @@ def _require_pass_evidence(
         "AND e.producer_run_id=? "
         "AND e.verifier_run_id=? "
         "AND g.decision='pass' "
+        "AND g.requires_same_run=1 "
         "AND v.independence_class='independent' "
         "AND v.same_worker_context=0 "
         "AND v.worker_agent_id<>v.verifier_agent_id",
@@ -241,7 +272,83 @@ def _require_pass_evidence(
         raise SloAuditError("passing SLO audit requires pass-gate evidence")
     if row[0] in _REFUSED_AUTHORITY_MODES:
         raise SloAuditError("SLO audit writer refuses database-authority runs")
-    return (evidence_hash, evidence_run_id, verifier_run_id, gate_run_id)
+    if verifier_run_id == row[9]:
+        raise SloAuditError("passing SLO audit requires independent verifier run id")
+    _assert_current_pass_gate_identity(
+        connection,
+        gate_query_hash=row[7],
+        migration_sha256=row[8],
+    )
+    snapshot = _validate_bound_pass_evidence(
+        path=row[1],
+        sha256=row[2],
+        size_bytes=row[3],
+        content_type=row[4],
+        redaction_status=row[5],
+        captured_at=row[6],
+    )
+    return _PassEvidenceBinding(
+        evidence_hash=evidence_hash,
+        evidence_run_id=evidence_run_id,
+        verifier_run_id=verifier_run_id,
+        gate_run_id=gate_run_id,
+        evidence_snapshot=snapshot,
+    )
+
+
+def _assert_current_pass_gate_identity(
+    connection: sqlite3.Connection, *, gate_query_hash: str, migration_sha256: str
+) -> None:
+    row = connection.execute(
+        "SELECT q.query_hash, q.migration_sha256 FROM schema_migrations m "
+        "JOIN slo_queries q ON q.schema_version=m.version "
+        "AND q.migration_sha256=m.sha256 "
+        "WHERE q.query_name=? ORDER BY m.version DESC LIMIT 1",
+        (_PASS_GATE_QUERY_NAME,),
+    ).fetchone()
+    if row is None:
+        raise SloAuditError("current PASS gate SLO identity is missing")
+    if (gate_query_hash, migration_sha256) != (row[0], row[1]):
+        raise SloAuditError("bound PASS gate SLO identity is stale")
+
+
+def _validate_bound_pass_evidence(
+    *,
+    path: object,
+    sha256: object,
+    size_bytes: object,
+    content_type: object,
+    redaction_status: object,
+    captured_at: object,
+) -> _EvidenceSnapshot:
+    if not isinstance(path, str) or not isinstance(sha256, str):
+        raise SloAuditError("passing SLO audit requires pass-gate evidence")
+    if not isinstance(content_type, str) or not isinstance(redaction_status, str):
+        raise SloAuditError("passing SLO audit requires pass-gate evidence")
+    if not isinstance(captured_at, str):
+        raise SloAuditError("passing SLO audit requires pass-gate evidence")
+    try:
+        return _validate_evidence(
+            GateEvidence(
+                path=path,
+                sha256=sha256,
+                size_bytes=size_bytes,
+                content_type=content_type,
+                redaction_status=redaction_status,
+                captured_at=captured_at,
+            )
+        )
+    except PassGateError as exc:
+        raise SloAuditError(
+            "passing SLO audit requires safely retrievable pass-gate evidence"
+        ) from exc
+
+
+def _assert_safe_pass_evidence_current(binding: _PassEvidenceBinding) -> None:
+    try:
+        _assert_evidence_snapshot_current(binding.evidence_snapshot)
+    except PassGateError as exc:
+        raise SloAuditError("passing SLO audit pass-gate evidence changed") from exc
 
 
 def _required_text(name: str, value: object) -> str:

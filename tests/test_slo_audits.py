@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import tempfile
 import time
@@ -9,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
+import agentic_os
 from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.pass_gates import (
     ApprovalGrant,
@@ -130,9 +132,14 @@ class SloAuditWriterTests(unittest.TestCase):
             completed_at="verified-now",
         )
 
-    def _evidence(self) -> GateEvidence:
-        content = b'{"ok":true}\n'
-        path = Path(self.evidence_directory.name) / "evidence.json"
+    def _evidence(
+        self,
+        *,
+        name: str = "evidence.json",
+        content: bytes = b'{"ok":true}\n',
+    ) -> GateEvidence:
+        path = Path(self.evidence_directory.name) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return GateEvidence(
             path=path.relative_to(repository_root()).as_posix(),
@@ -168,6 +175,97 @@ class SloAuditWriterTests(unittest.TestCase):
             created_at="created-now",
         )
         return evidence
+
+    def _insert_malformed_pass_gate(
+        self,
+        *,
+        evidence: GateEvidence,
+        verifier_run_id: str = "verifier",
+        gate_query_hash: str | None = None,
+        migration_sha256: str | None = None,
+        authority_mode: str = "file_authority",
+    ) -> None:
+        current_gate_query_hash, current_migration_sha256 = self._current_gate_identity()
+        if gate_query_hash is None:
+            gate_query_hash = current_gate_query_hash
+        if migration_sha256 is None:
+            migration_sha256 = current_migration_sha256
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            if authority_mode in {"db_authority_canary", "db_authority"}:
+                connection.execute(
+                    "UPDATE runs SET state='finalized',finalized_at='done',"
+                    "finalized_at_epoch_ms=1 WHERE run_id='run'"
+                )
+                connection.execute(
+                    "UPDATE workflow_authority SET mode=?,cutover_approved_by='approver',"
+                    "cutover_evidence_hash=?,rollback_deadline='deadline',"
+                    "last_parity_audit_hash=?,open_file_authority_runs=0 "
+                    "WHERE workflow='workflow'",
+                    (authority_mode, _sha("cutover"), _sha("parity")),
+                )
+                connection.execute(
+                    "UPDATE runs SET authority_mode=? WHERE run_id='run'",
+                    (authority_mode,),
+                )
+            connection.execute(
+                "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"
+                "worker_agent_id,verifier_agent_id,provider,model,prompt_hash,"
+                "context_hash,evidence_hash,independence_class,"
+                "independence_proof_json,same_worker_context,completed_at) "
+                "VALUES(?,'run','writer','security-reviewer','openai','gpt-5',"
+                "?,?,?,'independent','{\"reviewer_session\":\"phase-c\"}',0,"
+                "'verified-now')",
+                (verifier_run_id, _sha("prompt"), _sha("context"), evidence.sha256),
+            )
+            connection.execute(
+                "INSERT INTO gate_runs(gate_run_id,run_id,transition_id,"
+                "clock_context_id,verifier_run_id,decision,completed_at,"
+                "completed_at_epoch_ms,requires_same_run,gate_version,"
+                "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,"
+                "created_at) VALUES('gate','run','transition','clock',?,"
+                "'pass','completed-now',1,1,'pass-gate-v1',?,?,?,'R2',"
+                "'created-now')",
+                (
+                    verifier_run_id,
+                    gate_query_hash,
+                    migration_sha256,
+                    evidence.sha256,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
+                "consumed_by_gate_run_id,run_id,transition_id,gate_nonce,"
+                "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
+                "consumed_at_epoch_ms) VALUES('clock','gate','gate','run',"
+                "'transition','nonce',1,1,'test',?,1)",
+                (_sha("clock"),),
+            )
+            connection.execute(
+                "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
+                "size_bytes,content_type,redaction_status,producer_run_id,"
+                "verifier_run_id,gate_run_id,captured_at) VALUES(?,?,?,?,?,"
+                "?,?,?,?,'gate',?)",
+                (
+                    evidence.sha256,
+                    "run",
+                    evidence.path,
+                    evidence.sha256,
+                    evidence.size_bytes,
+                    evidence.content_type,
+                    evidence.redaction_status,
+                    "run",
+                    verifier_run_id,
+                    evidence.captured_at,
+                ),
+            )
+
+    def _assert_no_slo_audit_rows(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM slo_audits").fetchone()[0],
+                0,
+            )
 
     def _record_slo(self, **overrides: object):
         kwargs = {
@@ -224,11 +322,145 @@ class SloAuditWriterTests(unittest.TestCase):
                 gate_run_id="gate",
             )
 
-        with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM slo_audits").fetchone()[0],
-                0,
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_same_run_verifier_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(evidence=evidence, verifier_run_id="run")
+
+        with self.assertRaisesRegex(SloAuditError, "independent verifier run id"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="run",
+                gate_run_id="gate",
             )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_private_state_evidence_without_write(self) -> None:
+        content = self.database.read_bytes()
+        evidence = GateEvidence(
+            path=self.database.relative_to(repository_root()).as_posix(),
+            sha256=_sha_bytes(content),
+            size_bytes=len(content),
+            content_type="application/octet-stream",
+            redaction_status="none",
+            captured_at="captured-now",
+        )
+        self._insert_malformed_pass_gate(evidence=evidence)
+
+        with self.assertRaisesRegex(SloAuditError, "safely retrievable"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_credential_evidence_without_write(self) -> None:
+        evidence = self._evidence(name="config/credentials.json")
+        self._insert_malformed_pass_gate(evidence=evidence)
+
+        with self.assertRaisesRegex(SloAuditError, "safely retrievable"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_symlink_evidence_without_write(self) -> None:
+        target = Path(self.evidence_directory.name) / "target.json"
+        target.write_bytes(b'{"ok":true}\n')
+        link = Path(self.evidence_directory.name) / "link.json"
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+        evidence = GateEvidence(
+            path=link.relative_to(repository_root()).as_posix(),
+            sha256=_sha_bytes(target.read_bytes()),
+            size_bytes=target.stat().st_size,
+            content_type="application/json",
+            redaction_status="none",
+            captured_at="captured-now",
+        )
+        self._insert_malformed_pass_gate(evidence=evidence)
+
+        with self.assertRaisesRegex(SloAuditError, "safely retrievable"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_hard_linked_evidence_without_write(self) -> None:
+        target = Path(self.evidence_directory.name) / "target.json"
+        target.write_bytes(b'{"ok":true}\n')
+        alias = Path(self.evidence_directory.name) / "alias.json"
+        try:
+            os.link(target, alias)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"hard link creation unavailable: {exc}")
+        evidence = GateEvidence(
+            path=alias.relative_to(repository_root()).as_posix(),
+            sha256=_sha_bytes(alias.read_bytes()),
+            size_bytes=alias.stat().st_size,
+            content_type="application/json",
+            redaction_status="none",
+            captured_at="captured-now",
+        )
+        self._insert_malformed_pass_gate(evidence=evidence)
+
+        with self.assertRaisesRegex(SloAuditError, "safely retrievable"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_stale_gate_identity_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(evidence=evidence, gate_query_hash="a" * 64)
+
+        with self.assertRaisesRegex(SloAuditError, "SLO identity is stale"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_refuses_database_authority_evidence_without_write(self) -> None:
+        self.assertFalse(agentic_os.DB_AUTHORITY_ENABLED)
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(
+            evidence=evidence,
+            authority_mode="db_authority_canary",
+        )
+
+        with self.assertRaisesRegex(SloAuditError, "database-authority"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
 
     def test_failing_named_slo_records_result_count_without_pass_evidence(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
@@ -299,11 +531,7 @@ class SloAuditWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(SloAuditError, "identity is missing"):
             self._record_slo(query_name="not a pinned query")
 
-        with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(
-                connection.execute("SELECT COUNT(*) FROM slo_audits").fetchone()[0],
-                0,
-            )
+        self._assert_no_slo_audit_rows()
 
 
 if __name__ == "__main__":
