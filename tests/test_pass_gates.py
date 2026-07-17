@@ -215,6 +215,16 @@ class PassGateWriterTests(unittest.TestCase):
                     table,
                 )
 
+    def _checkpoint_and_unlink_sqlite_sidecars(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("PRAGMA journal_mode=DELETE")
+        self._unlink_sqlite_sidecars()
+
+    def _unlink_sqlite_sidecars(self) -> None:
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(f"{self.database}{suffix}").unlink(missing_ok=True)
+
     def test_records_exact_approval_clock_verifier_pass_gate_bundle(self) -> None:
         self._record()
 
@@ -671,6 +681,7 @@ class PassGateWriterTests(unittest.TestCase):
 
     def test_symlink_sqlite_sidecar_is_rejected_before_opening_wal(self) -> None:
         gate_query_hash, migration_sha256 = self._current_gate_identity()
+        self._checkpoint_and_unlink_sqlite_sidecars()
         target = Path(self.temporary.name) / "external-wal-target"
         target.write_bytes(b"wal")
         target.chmod(0o600)
@@ -680,16 +691,19 @@ class PassGateWriterTests(unittest.TestCase):
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"symlink creation unavailable: {exc}")
 
-        with self.assertRaisesRegex(PassGateError, "sidecar must be a regular"):
-            self._record(
-                gate_query_hash=gate_query_hash,
-                migration_sha256=migration_sha256,
-            )
-
+        try:
+            with self.assertRaisesRegex(PassGateError, "sidecar must be a regular"):
+                self._record(
+                    gate_query_hash=gate_query_hash,
+                    migration_sha256=migration_sha256,
+                )
+        finally:
+            self._unlink_sqlite_sidecars()
         self._assert_no_bundle_rows()
 
     def test_hard_linked_sqlite_sidecar_is_rejected_before_opening_wal(self) -> None:
         gate_query_hash, migration_sha256 = self._current_gate_identity()
+        self._checkpoint_and_unlink_sqlite_sidecars()
         target = Path(self.temporary.name) / "external-wal-target"
         target.write_bytes(b"wal")
         target.chmod(0o600)
@@ -699,12 +713,14 @@ class PassGateWriterTests(unittest.TestCase):
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"hard link creation unavailable: {exc}")
 
-        with self.assertRaisesRegex(PassGateError, "sidecar cannot use hard-linked"):
-            self._record(
-                gate_query_hash=gate_query_hash,
-                migration_sha256=migration_sha256,
-            )
-
+        try:
+            with self.assertRaisesRegex(PassGateError, "sidecar cannot use hard-linked"):
+                self._record(
+                    gate_query_hash=gate_query_hash,
+                    migration_sha256=migration_sha256,
+                )
+        finally:
+            self._unlink_sqlite_sidecars()
         self._assert_no_bundle_rows()
 
     def test_hard_linked_database_is_rejected_before_opening_wal(self) -> None:
