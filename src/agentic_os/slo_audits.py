@@ -1,0 +1,263 @@
+"""Local-only writer for executable SLO audit rows."""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+from .migrations import (
+    MigrationError,
+    _database_checks,
+    _verify_schema,
+    _verify_slo_queries,
+    load_migrations,
+)
+from .pass_gates import _connect
+from .slo_contracts import SLO_QUERY_CONTRACTS, slo_query_hash
+
+
+class SloAuditError(RuntimeError):
+    """An executable SLO audit row could not be recorded safely."""
+
+
+@dataclass(frozen=True)
+class SloAuditRecord:
+    slo_audit_id: str
+    query_name: str
+    schema_version: int
+    migration_sha256: str
+    query_hash: str
+    result_count: int
+    status: str
+
+
+@dataclass(frozen=True)
+class _CurrentSloQuery:
+    query_name: str
+    schema_version: int
+    migration_sha256: str
+    query_hash: str
+    sql_text: str
+    empty_db_expected_status: str
+    fixture_db_expected_status: str
+
+
+_MAX_EPOCH_MS = 253_402_300_799_999
+_REFUSED_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
+
+
+def record_slo_audit(
+    database: Path,
+    *,
+    slo_audit_id: str,
+    query_name: str,
+    run_at: str,
+    run_at_epoch_ms: int,
+    evidence_hash: str | None = None,
+    evidence_run_id: str | None = None,
+    verifier_run_id: str | None = None,
+    gate_run_id: str | None = None,
+) -> SloAuditRecord:
+    """Execute one pinned SLO query and persist its audit result.
+
+    This writer is intentionally local-only. It requires a pre-existing migrated
+    SQLite database, runs under ``BEGIN IMMEDIATE``, resolves the current
+    ``slo_queries`` identity from the database, and never calls OpenClaw,
+    Gateway, Cron, or production authority surfaces.
+    """
+
+    slo_audit_id = _required_text("slo_audit_id", slo_audit_id)
+    query_name = _required_text("query_name", query_name)
+    run_at = _required_text("run_at", run_at)
+    run_at_epoch_ms = _epoch_ms("run_at_epoch_ms", run_at_epoch_ms)
+
+    connection = _connect(database)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            _verify_schema_identity(connection)
+            query = _current_slo_query(connection, query_name)
+            result_count = _execute_pinned_slo(connection, query.sql_text)
+            status = "pass" if result_count == 0 else "fail"
+            evidence_fields: tuple[str | None, str | None, str | None, str | None]
+            if status == "pass":
+                evidence_fields = _require_pass_evidence(
+                    connection,
+                    evidence_hash=evidence_hash,
+                    evidence_run_id=evidence_run_id,
+                    verifier_run_id=verifier_run_id,
+                    gate_run_id=gate_run_id,
+                )
+                if (
+                    query.empty_db_expected_status != "pass"
+                    or query.fixture_db_expected_status != "pass"
+                ):
+                    raise SloAuditError("passing SLO audit requires pass fixture expectations")
+            else:
+                evidence_fields = (None, None, None, None)
+            connection.execute(
+                "INSERT INTO slo_audits("
+                "slo_audit_id,query_name,schema_version,migration_sha256,"
+                "query_hash,result_count,status,empty_db_status,fixture_db_status,"
+                "evidence_hash,evidence_run_id,verifier_run_id,gate_run_id,"
+                "run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    slo_audit_id,
+                    query.query_name,
+                    query.schema_version,
+                    query.migration_sha256,
+                    query.query_hash,
+                    result_count,
+                    status,
+                    query.empty_db_expected_status,
+                    query.fixture_db_expected_status,
+                    evidence_fields[0],
+                    evidence_fields[1],
+                    evidence_fields[2],
+                    evidence_fields[3],
+                    run_at,
+                    run_at_epoch_ms,
+                ),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+    except sqlite3.Error as exc:
+        raise SloAuditError(f"SLO audit database write failed: {exc}") from exc
+    finally:
+        connection.close()
+    return SloAuditRecord(
+        slo_audit_id=slo_audit_id,
+        query_name=query.query_name,
+        schema_version=query.schema_version,
+        migration_sha256=query.migration_sha256,
+        query_hash=query.query_hash,
+        result_count=result_count,
+        status=status,
+    )
+
+
+def _verify_schema_identity(connection: sqlite3.Connection) -> None:
+    migrations = load_migrations()
+    expected = [(item.version, item.name, item.sha256) for item in migrations]
+    try:
+        actual = connection.execute(
+            "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        if actual != expected:
+            raise SloAuditError("SLO audit database migration identity mismatch")
+        _verify_schema(connection, migrations)
+        _verify_slo_queries(connection, migrations)
+        _database_checks(connection)
+    except (MigrationError, sqlite3.Error) as exc:
+        raise SloAuditError("SLO audit database schema verification failed") from exc
+
+
+def _current_slo_query(
+    connection: sqlite3.Connection, query_name: str
+) -> _CurrentSloQuery:
+    row = connection.execute(
+        "SELECT q.query_name,q.schema_version,q.migration_sha256,q.query_hash,"
+        "q.sql_text,q.empty_db_expected_status,q.fixture_db_expected_status "
+        "FROM schema_migrations m "
+        "JOIN slo_queries q ON q.schema_version=m.version "
+        "AND q.migration_sha256=m.sha256 "
+        "WHERE q.query_name=? "
+        "ORDER BY m.version DESC LIMIT 1",
+        (query_name,),
+    ).fetchone()
+    if row is None:
+        raise SloAuditError("current SLO query identity is missing")
+    contract = next(
+        (item for item in SLO_QUERY_CONTRACTS if item.query_name == query_name),
+        None,
+    )
+    if contract is None:
+        raise SloAuditError("SLO query is not in the pinned local contract")
+    if row[4] != contract.sql_text or row[3] != slo_query_hash(contract.sql_text):
+        raise SloAuditError("current SLO query does not match the pinned SQL contract")
+    return _CurrentSloQuery(
+        query_name=row[0],
+        schema_version=row[1],
+        migration_sha256=row[2],
+        query_hash=row[3],
+        sql_text=row[4],
+        empty_db_expected_status=row[5],
+        fixture_db_expected_status=row[6],
+    )
+
+
+def _execute_pinned_slo(connection: sqlite3.Connection, sql_text: str) -> int:
+    try:
+        cursor = connection.execute(sql_text)
+        return sum(1 for _row in cursor)
+    except sqlite3.Error as exc:
+        raise SloAuditError("pinned SLO SQL failed to execute") from exc
+
+
+def _require_pass_evidence(
+    connection: sqlite3.Connection,
+    *,
+    evidence_hash: str | None,
+    evidence_run_id: str | None,
+    verifier_run_id: str | None,
+    gate_run_id: str | None,
+) -> tuple[str, str, str, str]:
+    evidence_hash = _sha256_text("evidence_hash", evidence_hash)
+    evidence_run_id = _required_text("evidence_run_id", evidence_run_id)
+    verifier_run_id = _required_text("verifier_run_id", verifier_run_id)
+    gate_run_id = _required_text("gate_run_id", gate_run_id)
+    row = connection.execute(
+        "SELECT r.authority_mode "
+        "FROM evidence_hashes e "
+        "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
+        "AND g.evidence_hash=e.evidence_hash "
+        "AND g.run_id=e.run_id "
+        "AND g.verifier_run_id=e.verifier_run_id "
+        "JOIN judge_verifier_runs v ON v.verifier_run_id=e.verifier_run_id "
+        "AND v.worker_run_id=e.run_id "
+        "AND v.evidence_hash=e.evidence_hash "
+        "JOIN runs r ON r.run_id=e.run_id "
+        "WHERE e.gate_run_id=? "
+        "AND e.evidence_hash=? "
+        "AND e.run_id=? "
+        "AND e.producer_run_id=? "
+        "AND e.verifier_run_id=? "
+        "AND g.decision='pass' "
+        "AND v.independence_class='independent' "
+        "AND v.same_worker_context=0 "
+        "AND v.worker_agent_id<>v.verifier_agent_id",
+        (
+            gate_run_id,
+            evidence_hash,
+            evidence_run_id,
+            evidence_run_id,
+            verifier_run_id,
+        ),
+    ).fetchone()
+    if row is None:
+        raise SloAuditError("passing SLO audit requires pass-gate evidence")
+    if row[0] in _REFUSED_AUTHORITY_MODES:
+        raise SloAuditError("SLO audit writer refuses database-authority runs")
+    return (evidence_hash, evidence_run_id, verifier_run_id, gate_run_id)
+
+
+def _required_text(name: str, value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise SloAuditError(f"{name} must be a non-empty string")
+    return value
+
+
+def _epoch_ms(name: str, value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _MAX_EPOCH_MS:
+        raise SloAuditError(f"{name} must be an integer epoch millisecond")
+    return value
+
+
+def _sha256_text(name: str, value: object) -> str:
+    value = _required_text(name, value)
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise SloAuditError(f"{name} must be a lowercase SHA-256 digest")
+    return value

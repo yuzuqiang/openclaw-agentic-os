@@ -143,6 +143,21 @@ databases, worker/verifier run id reuse, and
 The writer does not call OpenClaw, Gateway, Cron, or any production authority
 surface.
 
+The third P1.2 slice lives in `agentic_os.slo_audits`. It is a local-only
+transactional writer for one named executable `slo_audits` row at a time.
+`record_slo_audit` opens an already migrated private SQLite control database,
+enters `BEGIN IMMEDIATE`, verifies the complete migration/schema/SLO registry
+under the write lock, resolves the exact current `slo_queries` identity for the
+requested query name, executes that pinned SQL text, and records `pass` only
+when the result set is empty and the audit is bound to an existing PASS
+`gate_runs` row, matching `evidence_hashes` row, and independent
+`judge_verifier_runs` row. Non-empty pinned-query results are recorded as
+`fail` without granting trust. Unknown query names, registry drift, malformed
+audit clocks, missing PASS evidence, same-worker verifier evidence, and
+`db_authority_canary` / `db_authority` evidence fail closed. This slice does
+not run every SLO, execute fixture packs, bind goal runs, promote trust, call
+OpenClaw/Gateway/Cron, or enable production database authority.
+
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
 `MigrationTests.test_p1_budget_sql_fixture_pack_exercises_blocking_slos`
