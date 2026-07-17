@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `1f9bf9ea1ea1fb986164e2c1d20dc824792f1a3d990bcec7fde24e75ee36aa46`
+- Current design artifact SHA-256: `0a62fb6e030f6454d9c1216b73fe6dedf5b6b752ac523df45e34333a327a5a8e`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `19970e071a05eadc7a682d98b624829b8c3d30782598e27ebeb04edba9f4ba24`
-- Current migration manifest SHA-256: `eff21f04fbe780d29c7c4aba3a1f773cad1b1f283464700cab8d803d8f7486c9`
+- Current latest migration SHA-256: `d4143df66b0bcf4d9ffcb1baffa32b3731620d9837e621b011feb6050e7f80b4`
+- Current migration manifest SHA-256: `b28040fb59f7070477fb1116a243fce0ebf66c92d18b5ae26b3e01160b6db717`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner integrations, approvals/gates/trust promotion, crash fixtures, rollback drills, and production smoke tests
 
@@ -142,6 +142,24 @@ databases, worker/verifier run id reuse, and
 `db_authority_canary` / `db_authority` runs fail closed without granting trust.
 The writer does not call OpenClaw, Gateway, Cron, or any production authority
 surface.
+
+The third P1.2 slice lives in `agentic_os.slo_audits`. It is a local-only
+transactional writer for one named executable `slo_audits` row at a time.
+`record_slo_audit` opens an already migrated private SQLite control database,
+enters `BEGIN IMMEDIATE`, verifies the complete migration/schema/SLO registry
+under the write lock, resolves the exact current `slo_queries` identity for the
+requested query name, executes that pinned SQL text, and records `pass` only
+when the result set is empty and the audit is bound to an existing approval-bound
+PASS `gate_runs` row, matching `evidence_hashes` artifact digest, exact gate
+clock context, gate-time file-authority snapshot, and independent
+`judge_verifier_runs` row. Non-empty pinned-query results are recorded as
+`fail` without granting trust. Unknown query names, registry drift, malformed or
+far-future audit clocks, missing approval-bound PASS evidence, evidence hash /
+artifact digest mismatches, same-worker verifier evidence, and
+`db_authority_canary` / `db_authority` evidence or gate-time snapshots fail
+closed. This slice does not run every SLO, execute fixture packs, bind goal runs,
+promote trust, call OpenClaw/Gateway/Cron, or enable production database
+authority.
 
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.

@@ -563,7 +563,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10,))
+        self.assertEqual(apply_migrations(self.database), (10, 11))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -930,7 +930,10 @@ class MigrationTests(unittest.TestCase):
                     ("a" * 64,),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (2, 3, 4, 5, 6, 7, 8, 9, 10))
+        self.assertEqual(
+            apply_migrations(self.database),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
         )
@@ -1026,7 +1029,10 @@ class MigrationTests(unittest.TestCase):
                 [(1, legacy_hash), (2, legacy_hash)],
             )
 
-        self.assertEqual(apply_migrations(self.database), (3, 4, 5, 6, 7, 8, 9, 10))
+        self.assertEqual(
+            apply_migrations(self.database),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11),
+        )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -1045,6 +1051,7 @@ class MigrationTests(unittest.TestCase):
                     (8, current_hash),
                     (9, current_hash),
                     (10, current_hash),
+                    (11, current_hash),
                 ],
             )
 
@@ -1209,6 +1216,7 @@ class MigrationTests(unittest.TestCase):
                 "budget_atomic_final_settlement",
                 "legacy_money_import_quarantine",
                 "runtime_dispatch_binding",
+                "gate_authority_snapshot",
             ],
         )
         for migration in migrations:
@@ -1231,7 +1239,10 @@ class MigrationTests(unittest.TestCase):
         self.assertFalse(shm.exists())
         before = hashlib.sha256(verify_target.read_bytes()).hexdigest()
         before_mtime = verify_target.stat().st_mtime_ns
-        self.assertEqual(verify_database(verify_target), (1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+        self.assertEqual(
+            verify_database(verify_target),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+        )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
         self.assertFalse(wal.exists())
@@ -5851,7 +5862,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(11,'future_contract',?,'now')",
+            "VALUES(12,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -5860,7 +5871,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                11,
+                12,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -5874,7 +5885,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (11,),
+            (12,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -6081,6 +6092,7 @@ class MigrationTests(unittest.TestCase):
                 (8, "budget_atomic_final_settlement"),
                 (9, "legacy_money_import_quarantine"),
                 (10, "runtime_dispatch_binding"),
+                (11, "gate_authority_snapshot"),
             ],
         )
 
