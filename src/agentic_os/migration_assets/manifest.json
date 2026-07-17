@@ -65,6 +65,12 @@
       "name": "gate_authority_snapshot",
       "file": "0011_gate_authority_snapshot.sql",
       "sha256": "d4143df66b0bcf4d9ffcb1baffa32b3731620d9837e621b011feb6050e7f80b4"
+    },
+    {
+      "version": 12,
+      "name": "goal_run_evidence_binding",
+      "file": "0012_goal_run_evidence_binding.sql",
+      "sha256": "39568555fb3bcc7c97b04b049718900f5735c92f713e2c39ef7f82495cb62618"
     }
   ]
 }
