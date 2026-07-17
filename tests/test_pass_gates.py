@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -22,6 +23,22 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _sha_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _clock_hash(now_epoch_ms: int, bound_by: str) -> str:
+    return hashlib.sha256(
+        (
+            '{"bound_by":"'
+            + bound_by
+            + '","now_epoch_ms":'
+            + str(now_epoch_ms)
+            + ',"source":"pass-gate-writer-local-wall-clock-v1"}'
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 class PassGateWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state_root = repository_root() / "state/agentic-os"
@@ -29,6 +46,11 @@ class PassGateWriterTests(unittest.TestCase):
         self.addCleanup(self._cleanup_state_root)
         self.temporary = tempfile.TemporaryDirectory(dir=self.state_root)
         self.addCleanup(self.temporary.cleanup)
+        self.artifact_root = repository_root() / "artifacts/pass-gate-test"
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        self.evidence_directory = tempfile.TemporaryDirectory(dir=self.artifact_root)
+        self.addCleanup(self.evidence_directory.cleanup)
+        self.addCleanup(self._cleanup_artifact_root)
         self.database = Path(self.temporary.name) / "control.db"
         apply_migrations(self.database)
         self._seed_transition()
@@ -37,6 +59,13 @@ class PassGateWriterTests(unittest.TestCase):
         try:
             self.state_root.rmdir()
             self.state_root.parent.rmdir()
+        except OSError:
+            pass
+
+    def _cleanup_artifact_root(self) -> None:
+        try:
+            self.artifact_root.rmdir()
+            self.artifact_root.parent.rmdir()
         except OSError:
             pass
 
@@ -73,7 +102,8 @@ class PassGateWriterTests(unittest.TestCase):
                 (_sha("artifact"),),
             )
 
-    def _approval(self, *, expires_at_epoch_ms: int = 1_800_000_100_000) -> ApprovalGrant:
+    def _approval(self, *, expires_at_epoch_ms: int | None = None) -> ApprovalGrant:
+        expires_at_epoch_ms = expires_at_epoch_ms or int(time.time() * 1000) + 3_600_000
         return ApprovalGrant(
             approval_id="approval",
             approver="erwin",
@@ -99,11 +129,22 @@ class PassGateWriterTests(unittest.TestCase):
             completed_at="verified-now",
         )
 
-    def _evidence(self) -> GateEvidence:
+    def _evidence(
+        self,
+        *,
+        name: str = "evidence.json",
+        content: bytes = b'{"ok":true}\n',
+        sha256: str | None = None,
+        size_bytes: int | None = None,
+    ) -> GateEvidence:
+        path = Path(self.evidence_directory.name) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        relative = path.relative_to(repository_root()).as_posix()
         return GateEvidence(
-            path="artifacts/pass-gate/evidence.json",
-            sha256=_sha("evidence"),
-            size_bytes=17,
+            path=relative,
+            sha256=sha256 or _sha_bytes(content),
+            size_bytes=len(content) if size_bytes is None else size_bytes,
             content_type="application/json",
             redaction_status="none",
             captured_at="captured-now",
@@ -123,15 +164,17 @@ class PassGateWriterTests(unittest.TestCase):
 
     def _record(self, **overrides: object) -> None:
         gate_query_hash, migration_sha256 = self._current_gate_identity()
+        bound_by = str(overrides.get("bound_by", "pass-gate-writer"))
+        now_epoch_ms = int(overrides.get("now_epoch_ms", int(time.time() * 1000)))
         kwargs = {
             "run_id": "run",
             "transition_id": "transition",
             "gate_run_id": "gate",
             "clock_context_id": "clock",
             "gate_nonce": "nonce",
-            "now_epoch_ms": 1_800_000_000_000,
-            "bound_by": "pass-gate-writer",
-            "trusted_clock_source_hash": _sha("trusted-clock"),
+            "now_epoch_ms": now_epoch_ms,
+            "bound_by": bound_by,
+            "trusted_clock_source_hash": _clock_hash(now_epoch_ms, bound_by),
             "gate_version": "pass-gate-v1",
             "gate_query_hash": gate_query_hash,
             "migration_sha256": migration_sha256,
@@ -169,22 +212,20 @@ class PassGateWriterTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(
                 transition,
-                (1, "approval", "gate", _sha("evidence")),
+                (1, "approval", "gate", self._evidence().sha256),
             )
             gate = connection.execute(
                 "SELECT decision,clock_context_id,verifier_run_id,completed_at_epoch_ms "
                 "FROM gate_runs WHERE gate_run_id='gate'"
             ).fetchone()
-            self.assertEqual(gate, ("pass", "clock", "verifier", 1_800_000_000_000))
+            self.assertEqual(gate[:3], ("pass", "clock", "verifier"))
             clock = connection.execute(
                 "SELECT gate_run_id,consumed_by_gate_run_id,now_epoch_ms,"
                 "bound_at_epoch_ms,consumed_at_epoch_ms FROM gate_clock_context "
                 "WHERE clock_context_id='clock'"
             ).fetchone()
-            self.assertEqual(
-                clock,
-                ("gate", "gate", 1_800_000_000_000, 1_800_000_000_000, 1_800_000_000_000),
-            )
+            self.assertEqual(clock[0:2], ("gate", "gate"))
+            self.assertEqual((clock[2], clock[3], clock[4]), (gate[3], gate[3], gate[3]))
             for query_name in (
                 item.query_name
                 for item in SLO_QUERY_CONTRACTS
@@ -201,8 +242,31 @@ class PassGateWriterTests(unittest.TestCase):
                 )
 
     def test_expired_approval_is_rejected_before_any_bundle_rows(self) -> None:
+        now_epoch_ms = int(time.time() * 1000)
         with self.assertRaisesRegex(PassGateError, "expire after"):
-            self._record(approval=self._approval(expires_at_epoch_ms=1_800_000_000_000))
+            self._record(
+                now_epoch_ms=now_epoch_ms,
+                approval=self._approval(expires_at_epoch_ms=now_epoch_ms),
+            )
+
+        self._assert_no_bundle_rows()
+
+    def test_trusted_clock_source_hash_must_be_derived_before_any_bundle_rows(self) -> None:
+        with self.assertRaisesRegex(PassGateError, "derived gate clock"):
+            self._record(trusted_clock_source_hash="a" * 64)
+
+        self._assert_no_bundle_rows()
+
+    def test_stale_trusted_clock_is_rejected_before_any_bundle_rows(self) -> None:
+        stale_now_epoch_ms = 1000
+        with self.assertRaisesRegex(PassGateError, "outside local wall-clock skew"):
+            self._record(
+                now_epoch_ms=stale_now_epoch_ms,
+                trusted_clock_source_hash=_clock_hash(
+                    stale_now_epoch_ms,
+                    "pass-gate-writer",
+                ),
+            )
 
         self._assert_no_bundle_rows()
 
@@ -236,7 +300,19 @@ class PassGateWriterTests(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(PassGateError, "retroactive"):
-            self._record(now_epoch_ms=1000)
+            self._record()
+
+        self._assert_no_bundle_rows()
+
+    def test_malformed_transition_target_hash_is_rejected_before_any_bundle_rows(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE transitions SET target_hash='not-a-digest' "
+                "WHERE transition_id='transition'"
+            )
+
+        with self.assertRaisesRegex(PassGateError, "transition target_hash"):
+            self._record()
 
         self._assert_no_bundle_rows()
 
@@ -278,6 +354,34 @@ class PassGateWriterTests(unittest.TestCase):
                     captured_at="captured-now",
                 )
             )
+
+        self._assert_no_bundle_rows()
+
+    def test_missing_evidence_artifact_is_rejected_before_any_bundle_rows(self) -> None:
+        missing = Path(self.evidence_directory.name) / "missing.json"
+        with self.assertRaisesRegex(PassGateError, "artifact is not readable"):
+            self._record(
+                evidence=GateEvidence(
+                    path=missing.relative_to(repository_root()).as_posix(),
+                    sha256=_sha_bytes(b"missing"),
+                    size_bytes=len(b"missing"),
+                    content_type="application/json",
+                    redaction_status="none",
+                    captured_at="captured-now",
+                )
+            )
+
+        self._assert_no_bundle_rows()
+
+    def test_stale_evidence_hash_is_rejected_before_any_bundle_rows(self) -> None:
+        with self.assertRaisesRegex(PassGateError, "sha256 does not match"):
+            self._record(evidence=self._evidence(sha256=_sha("stale")))
+
+        self._assert_no_bundle_rows()
+
+    def test_stale_evidence_size_is_rejected_before_any_bundle_rows(self) -> None:
+        with self.assertRaisesRegex(PassGateError, "size does not match"):
+            self._record(evidence=self._evidence(size_bytes=999))
 
         self._assert_no_bundle_rows()
 

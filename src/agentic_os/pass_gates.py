@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -35,6 +36,8 @@ _RISK_ORDER = {"R0": 0, "R1": 1, "R2": 2, "R3": 3, "R4": 4}
 _COMPLETION_GATE_QUERY_NAME = "Completion gate before done for R2+"
 _SLO_FIXTURE_STATUS_QUERY_NAME = "SLO query fixture status"
 _TERMINAL_RUN_STATES = {"finalized", "rolled_back", "rejected"}
+_TRUSTED_CLOCK_SOURCE = "pass-gate-writer-local-wall-clock-v1"
+_TRUSTED_CLOCK_MAX_SKEW_MS = 5 * 60 * 1000
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,11 @@ def record_approval_pass_gate(
     completed_at = _required_text("completed_at", completed_at)
     created_at = _required_text("created_at", created_at)
     now_epoch_ms = _epoch_ms("now_epoch_ms", now_epoch_ms)
+    _assert_trusted_clock(
+        now_epoch_ms=now_epoch_ms,
+        bound_by=bound_by,
+        trusted_clock_source_hash=trusted_clock_source_hash,
+    )
     _validate_approval(approval, now_epoch_ms=now_epoch_ms)
     _validate_verifier(verifier)
     _validate_evidence(evidence)
@@ -155,7 +163,10 @@ def record_approval_pass_gate(
             action_type = _transition_text(transition, "action_type")
             target_type = _transition_text(transition, "target_type")
             target_id = _transition_text(transition, "target_id")
-            target_hash = _transition_text(transition, "target_hash")
+            target_hash = _sha256_text(
+                "transition target_hash",
+                _transition_text(transition, "target_hash"),
+            )
             target_scope = _transition_text(transition, "target_scope")
             risk_dominance = _transition_text(transition, "risk_dominance")
             if _RISK_ORDER[approval.approved_risk_ceiling] < _RISK_ORDER[risk_dominance]:
@@ -530,6 +541,35 @@ def _sha256_text(name: str, value: str) -> str:
     return value
 
 
+def _derived_trusted_clock_source_hash(*, now_epoch_ms: int, bound_by: str) -> str:
+    return hashlib.sha256(
+        _canonical_json(
+            {
+                "bound_by": bound_by,
+                "now_epoch_ms": now_epoch_ms,
+                "source": _TRUSTED_CLOCK_SOURCE,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _assert_trusted_clock(
+    *,
+    now_epoch_ms: int,
+    bound_by: str,
+    trusted_clock_source_hash: str,
+) -> None:
+    local_now_epoch_ms = int(time.time() * 1000)
+    if abs(local_now_epoch_ms - now_epoch_ms) > _TRUSTED_CLOCK_MAX_SKEW_MS:
+        raise PassGateError("trusted gate clock is outside local wall-clock skew")
+    expected = _derived_trusted_clock_source_hash(
+        now_epoch_ms=now_epoch_ms,
+        bound_by=bound_by,
+    )
+    if trusted_clock_source_hash != expected:
+        raise PassGateError("trusted_clock_source_hash does not match derived gate clock")
+
+
 def _validate_approval(approval: ApprovalGrant, *, now_epoch_ms: int) -> None:
     _required_text("approval_id", approval.approval_id)
     _required_text("approver", approval.approver)
@@ -563,14 +603,38 @@ def _validate_verifier(verifier: VerifierProof) -> None:
 
 
 def _validate_evidence(evidence: GateEvidence) -> None:
-    path = _required_text("evidence path", evidence.path)
+    path_text = _required_text("evidence path", evidence.path)
     try:
-        assert_paths_retrievable(path)
+        assert_paths_retrievable(path_text)
     except PrivacyPreflightError as exc:
         raise PassGateError("gate evidence path is not safely retrievable") from exc
-    _sha256_text("evidence sha256", evidence.sha256)
+    expected_sha256 = _sha256_text("evidence sha256", evidence.sha256)
     if type(evidence.size_bytes) is not int or evidence.size_bytes < 0:
         raise PassGateError("evidence size must be a non-negative integer")
+    repo_root = repository_root()
+    candidate = Path(path_text).expanduser()
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise PassGateError("gate evidence artifact is not readable") from exc
+    try:
+        relative = resolved.relative_to(repo_root).as_posix()
+    except ValueError:
+        raise PassGateError("gate evidence artifact must stay inside the worktree") from None
+    try:
+        assert_paths_retrievable((path_text, relative))
+    except PrivacyPreflightError as exc:
+        raise PassGateError("gate evidence path is not safely retrievable") from exc
+    file_stat = resolved.stat()
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise PassGateError("gate evidence artifact must be a regular file")
+    if file_stat.st_size != evidence.size_bytes:
+        raise PassGateError("gate evidence size does not match artifact")
+    actual_sha256 = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise PassGateError("gate evidence sha256 does not match artifact")
     _required_text("evidence content_type", evidence.content_type)
     _required_text("evidence redaction_status", evidence.redaction_status)
     _required_text("evidence captured_at", evidence.captured_at)

@@ -115,17 +115,20 @@ transactional writer for the approval, one-use gate clock, independent verifier,
 gate evidence, risk assessment, and PASS `gate_runs` rows required before a
 transition can be trusted. `record_approval_pass_gate` updates the existing
 transition with an exact approval binding, creates the single-use
-`gate_clock_context` whose `bound_at_epoch_ms`, `now_epoch_ms`,
-`consumed_at_epoch_ms`, and gate completion epoch are identical, records a
-same-run independent verifier with non-empty independence proof, binds evidence
-to the producer run only when the evidence path is safe for retrieval, requires
-the supplied gate identity to match the current registered
+`gate_clock_context` only when the supplied epoch is current against the local
+writer wall clock and its source hash can be re-derived, records a same-run
+independent verifier with non-empty independence proof, binds evidence to the
+producer run only when the evidence path is safe for retrieval and the artifact
+exists with matching SHA-256 and size, requires the supplied gate identity to
+match the current registered
 `Completion gate before done for R2+` SLO and migration hash, rejects terminal
 runs instead of accepting retroactive gates, and checks every blocking runtime
 SLO before commit.
 Expired approvals, reused pass-gated transitions, same-worker verifiers, missing
-target fields, lower risk ceilings, malformed SHA-256 authorities, and
-`db_authority_canary` / `db_authority` runs fail closed without granting trust.
+target fields, malformed transition target hashes, stale/fabricated evidence,
+stale/fabricated gate clocks, lower risk ceilings, malformed SHA-256
+authorities, and `db_authority_canary` / `db_authority` runs fail closed without
+granting trust.
 The writer does not call OpenClaw, Gateway, Cron, or any production authority
 surface.
 
