@@ -18,6 +18,7 @@ from agentic_os.pass_gates import (
     VerifierProof,
     record_approval_pass_gate,
 )
+from agentic_os.predicates import MAX_FILE_EVIDENCE_BYTES
 from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS
 
 
@@ -469,6 +470,32 @@ class PassGateWriterTests(unittest.TestCase):
 
         self._assert_no_bundle_rows()
 
+    def test_evidence_swapped_to_symlink_before_commit_is_rejected(self) -> None:
+        evidence = self._evidence()
+        path = repository_root() / evidence.path
+        moved = path.with_name("moved-evidence.json")
+
+        from agentic_os import pass_gates
+
+        original = pass_gates._assert_blocking_slos_clear
+
+        def swap_to_symlink_after_slos(connection: sqlite3.Connection) -> None:
+            original(connection)
+            path.rename(moved)
+            try:
+                os.symlink(moved, path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+
+        with mock.patch(
+            "agentic_os.pass_gates._assert_blocking_slos_clear",
+            side_effect=swap_to_symlink_after_slos,
+        ):
+            with self.assertRaisesRegex(PassGateError, "changed before commit"):
+                self._record(evidence=evidence)
+
+        self._assert_no_bundle_rows()
+
     def test_stale_evidence_hash_is_rejected_before_any_bundle_rows(self) -> None:
         with self.assertRaisesRegex(PassGateError, "sha256 does not match"):
             self._record(evidence=self._evidence(sha256=_sha("stale")))
@@ -540,6 +567,53 @@ class PassGateWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(PassGateError, "sidecar requires 0600"):
             self._record()
+
+        self._assert_no_bundle_rows()
+
+    def test_symlink_sqlite_sidecar_is_rejected_before_opening_wal(self) -> None:
+        target = Path(self.temporary.name) / "external-wal-target"
+        target.write_bytes(b"wal")
+        target.chmod(0o600)
+        sidecar = Path(f"{self.database}-wal")
+        try:
+            os.symlink(target, sidecar)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+
+        with self.assertRaisesRegex(PassGateError, "sidecar must be a regular"):
+            self._record()
+
+        self._assert_no_bundle_rows()
+
+    def test_hard_linked_database_is_rejected_before_opening_wal(self) -> None:
+        alias = Path(self.temporary.name) / "control-alias.db"
+        try:
+            os.link(self.database, alias)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"hard link creation unavailable: {exc}")
+
+        with self.assertRaisesRegex(PassGateError, "database cannot use hard-linked"):
+            self._record()
+
+        self._assert_no_bundle_rows()
+
+    def test_oversized_evidence_is_rejected_before_any_bundle_rows(self) -> None:
+        path = Path(self.evidence_directory.name) / "large-evidence.bin"
+        with path.open("wb") as handle:
+            handle.seek(MAX_FILE_EVIDENCE_BYTES)
+            handle.write(b"x")
+
+        with self.assertRaisesRegex(PassGateError, "exceeds safe size"):
+            self._record(
+                evidence=GateEvidence(
+                    path=path.relative_to(repository_root()).as_posix(),
+                    sha256=_sha_bytes(b"x"),
+                    size_bytes=MAX_FILE_EVIDENCE_BYTES + 1,
+                    content_type="application/octet-stream",
+                    redaction_status="none",
+                    captured_at="captured-now",
+                )
+            )
 
         self._assert_no_bundle_rows()
 

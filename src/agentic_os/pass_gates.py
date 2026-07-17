@@ -26,6 +26,7 @@ from .privacy import (
     assert_privacy_preflight,
 )
 from .predicates import (
+    MAX_FILE_EVIDENCE_BYTES,
     PredicateContractError,
     _is_credential_path_denied,
     _reject_symlink_evidence_path,
@@ -385,9 +386,14 @@ def _connect(database: Path) -> sqlite3.Connection:
     if not path.is_file():
         raise PassGateError("PASS gate database must already exist")
     parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
-    file_mode = stat.S_IMODE(path.stat().st_mode)
+    database_stat = os.stat(path, follow_symlinks=False)
+    file_mode = stat.S_IMODE(database_stat.st_mode)
+    if not stat.S_ISREG(database_stat.st_mode):
+        raise PassGateError("PASS gate database must be a regular private file")
     if parent_mode != 0o700 or file_mode != 0o600:
         raise PassGateError("PASS gate database requires 0700 directory and 0600 file")
+    if int(getattr(database_stat, "st_nlink", 1) or 1) > 1:
+        raise PassGateError("PASS gate database cannot use hard-linked file aliases")
     _refuse_lax_sqlite_sidecars(path)
     database_uri = path.as_uri() + "?mode=rw"
     old_umask = os.umask(0o177)
@@ -653,6 +659,8 @@ def _validate_evidence(evidence: GateEvidence) -> _EvidenceSnapshot:
     expected_sha256 = _sha256_text("evidence sha256", evidence.sha256)
     if type(evidence.size_bytes) is not int or evidence.size_bytes < 0:
         raise PassGateError("evidence size must be a non-negative integer")
+    if evidence.size_bytes > MAX_FILE_EVIDENCE_BYTES:
+        raise PassGateError("gate evidence exceeds safe size limit")
     repo_root = repository_root().resolve()
     candidate = Path(path_text).expanduser()
     if candidate.is_absolute():
@@ -688,14 +696,9 @@ def _validate_evidence(evidence: GateEvidence) -> _EvidenceSnapshot:
         assert_paths_retrievable((path_text, relative))
     except PrivacyPreflightError as exc:
         raise PassGateError("gate evidence path is not safely retrievable") from exc
-    file_stat = resolved.stat()
-    if not stat.S_ISREG(file_stat.st_mode):
-        raise PassGateError("gate evidence artifact must be a regular file")
-    if int(getattr(file_stat, "st_nlink", 1) or 1) > 1:
-        raise PassGateError("gate evidence cannot use hard-linked file aliases")
+    actual_sha256, file_stat = _hash_evidence_file(resolved)
     if file_stat.st_size != evidence.size_bytes:
         raise PassGateError("gate evidence size does not match artifact")
-    actual_sha256 = hashlib.sha256(resolved.read_bytes()).hexdigest()
     if actual_sha256 != expected_sha256:
         raise PassGateError("gate evidence sha256 does not match artifact")
     _required_text("evidence content_type", evidence.content_type)
@@ -710,18 +713,58 @@ def _validate_evidence(evidence: GateEvidence) -> _EvidenceSnapshot:
 
 
 def _assert_evidence_snapshot_current(snapshot: _EvidenceSnapshot) -> None:
+    repo_root = repository_root().resolve()
+    relative_path = Path(snapshot.relative_path)
     path = repository_root().resolve() / snapshot.relative_path
     try:
-        file_stat = path.stat()
+        _reject_symlink_evidence_path(repo_root, relative_path)
+        actual_sha256, file_stat = _hash_evidence_file(path, checked_stat=None)
         if _stat_identity(file_stat) != snapshot.identity:
             raise PassGateError("gate evidence artifact changed before commit")
         if file_stat.st_size != snapshot.size_bytes:
             raise PassGateError("gate evidence artifact changed before commit")
-        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as exc:
+    except (OSError, PredicateContractError) as exc:
         raise PassGateError("gate evidence artifact changed before commit") from exc
     if actual_sha256 != snapshot.sha256:
         raise PassGateError("gate evidence artifact changed before commit")
+
+
+def _hash_evidence_file(
+    path: Path, *, checked_stat: os.stat_result | None = None
+) -> tuple[str, os.stat_result]:
+    digest = hashlib.sha256()
+    fd: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        opened_stat = os.fstat(fd)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise PassGateError("gate evidence artifact must be a regular file")
+        if int(getattr(opened_stat, "st_nlink", 1) or 1) > 1:
+            raise PassGateError("gate evidence cannot use hard-linked file aliases")
+        if checked_stat is not None and _stat_identity(opened_stat) != _stat_identity(
+            checked_stat
+        ):
+            raise PassGateError("gate evidence artifact changed during read")
+        size = int(getattr(opened_stat, "st_size", 0) or 0)
+        if size > MAX_FILE_EVIDENCE_BYTES:
+            raise PassGateError("gate evidence exceeds safe size limit")
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            total_read = 0
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total_read += len(chunk)
+                if total_read > MAX_FILE_EVIDENCE_BYTES:
+                    raise PassGateError("gate evidence exceeds safe size limit")
+                digest.update(chunk)
+        return digest.hexdigest(), opened_stat
+    except PassGateError:
+        raise
+    except OSError as exc:
+        raise PassGateError("gate evidence artifact is not readable") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _stat_identity(path_stat: os.stat_result) -> tuple[int, int, int]:
@@ -738,9 +781,9 @@ def _sqlite_sidecar_paths(database: Path) -> tuple[Path, ...]:
 
 def _refuse_lax_sqlite_sidecars(database: Path) -> None:
     for sidecar in _sqlite_sidecar_paths(database):
-        if not sidecar.exists():
+        sidecar_stat = _stat_existing_path_nofollow(sidecar)
+        if sidecar_stat is None:
             continue
-        sidecar_stat = sidecar.stat()
         if not stat.S_ISREG(sidecar_stat.st_mode):
             raise PassGateError("SQLite sidecar must be a regular private file")
         if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
@@ -749,13 +792,20 @@ def _refuse_lax_sqlite_sidecars(database: Path) -> None:
 
 def _chmod_private_sqlite_sidecars(database: Path) -> None:
     for sidecar in _sqlite_sidecar_paths(database):
-        if not sidecar.exists():
+        sidecar_stat = _stat_existing_path_nofollow(sidecar)
+        if sidecar_stat is None:
             continue
-        sidecar_stat = sidecar.stat()
         if not stat.S_ISREG(sidecar_stat.st_mode):
             raise PassGateError("SQLite sidecar must be a regular private file")
         if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
             sidecar.chmod(0o600)
-            sidecar_stat = sidecar.stat()
+            sidecar_stat = os.stat(sidecar, follow_symlinks=False)
             if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
                 raise PassGateError("SQLite sidecar requires 0600 file mode")
+
+
+def _stat_existing_path_nofollow(path: Path) -> os.stat_result | None:
+    try:
+        return os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
