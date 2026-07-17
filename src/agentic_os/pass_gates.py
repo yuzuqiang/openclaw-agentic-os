@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 import time
@@ -24,6 +25,11 @@ from .privacy import (
     assert_paths_retrievable,
     assert_privacy_preflight,
 )
+from .predicates import (
+    PredicateContractError,
+    _is_credential_path_denied,
+    _reject_symlink_evidence_path,
+)
 from .slo_contracts import SLO_QUERY_CONTRACTS
 
 
@@ -38,6 +44,7 @@ _SLO_FIXTURE_STATUS_QUERY_NAME = "SLO query fixture status"
 _TERMINAL_RUN_STATES = {"finalized", "rolled_back", "rejected"}
 _TRUSTED_CLOCK_SOURCE = "pass-gate-writer-local-wall-clock-v1"
 _TRUSTED_CLOCK_MAX_SKEW_MS = 5 * 60 * 1000
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,20 @@ class PassGateBundle:
     status: str
 
 
+@dataclass(frozen=True)
+class _TrustedClock:
+    now_epoch_ms: int
+    source_hash: str
+
+
+@dataclass(frozen=True)
+class _EvidenceSnapshot:
+    relative_path: str
+    sha256: str
+    size_bytes: int
+    identity: tuple[int, int, int]
+
+
 def record_approval_pass_gate(
     database: Path,
     *,
@@ -131,14 +152,16 @@ def record_approval_pass_gate(
     completed_at = _required_text("completed_at", completed_at)
     created_at = _required_text("created_at", created_at)
     now_epoch_ms = _epoch_ms("now_epoch_ms", now_epoch_ms)
-    _assert_trusted_clock(
+    trusted_clock = _assert_trusted_clock(
         now_epoch_ms=now_epoch_ms,
         bound_by=bound_by,
         trusted_clock_source_hash=trusted_clock_source_hash,
     )
+    now_epoch_ms = trusted_clock.now_epoch_ms
+    trusted_clock_source_hash = trusted_clock.source_hash
     _validate_approval(approval, now_epoch_ms=now_epoch_ms)
     _validate_verifier(verifier)
-    _validate_evidence(evidence)
+    evidence_snapshot = _validate_evidence(evidence)
     evidence_hash = evidence.sha256
     assessment_id = _required_text(
         "assessment_id", assessment_id or f"{transition_id}:{gate_run_id}:risk"
@@ -334,6 +357,7 @@ def record_approval_pass_gate(
                 ),
             )
             _assert_blocking_slos_clear(connection)
+            _assert_evidence_snapshot_current(evidence_snapshot)
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -364,10 +388,15 @@ def _connect(database: Path) -> sqlite3.Connection:
     file_mode = stat.S_IMODE(path.stat().st_mode)
     if parent_mode != 0o700 or file_mode != 0o600:
         raise PassGateError("PASS gate database requires 0700 directory and 0600 file")
+    _refuse_lax_sqlite_sidecars(path)
     database_uri = path.as_uri() + "?mode=rw"
-    connection = sqlite3.connect(database_uri, uri=True, isolation_level=None)
-    connection.execute("PRAGMA busy_timeout=10000")
-    journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    old_umask = os.umask(0o177)
+    try:
+        connection = sqlite3.connect(database_uri, uri=True, isolation_level=None)
+        connection.execute("PRAGMA busy_timeout=10000")
+        journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    finally:
+        os.umask(old_umask)
     actual_journal_mode = journal_mode[0] if journal_mode else None
     if str(actual_journal_mode).casefold() != "wal":
         connection.close()
@@ -379,6 +408,11 @@ def _connect(database: Path) -> sqlite3.Connection:
     if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
         connection.close()
         raise PassGateError("SQLite foreign key enforcement is unavailable")
+    try:
+        _chmod_private_sqlite_sidecars(path)
+    except PassGateError:
+        connection.close()
+        raise
     return connection
 
 
@@ -558,16 +592,24 @@ def _assert_trusted_clock(
     now_epoch_ms: int,
     bound_by: str,
     trusted_clock_source_hash: str,
-) -> None:
+) -> _TrustedClock:
     local_now_epoch_ms = int(time.time() * 1000)
     if abs(local_now_epoch_ms - now_epoch_ms) > _TRUSTED_CLOCK_MAX_SKEW_MS:
         raise PassGateError("trusted gate clock is outside local wall-clock skew")
-    expected = _derived_trusted_clock_source_hash(
+    caller_expected = _derived_trusted_clock_source_hash(
         now_epoch_ms=now_epoch_ms,
         bound_by=bound_by,
     )
-    if trusted_clock_source_hash != expected:
+    if trusted_clock_source_hash != caller_expected:
         raise PassGateError("trusted_clock_source_hash does not match derived gate clock")
+    local_source_hash = _derived_trusted_clock_source_hash(
+        now_epoch_ms=local_now_epoch_ms,
+        bound_by=bound_by,
+    )
+    return _TrustedClock(
+        now_epoch_ms=local_now_epoch_ms,
+        source_hash=local_source_hash,
+    )
 
 
 def _validate_approval(approval: ApprovalGrant, *, now_epoch_ms: int) -> None:
@@ -602,7 +644,7 @@ def _validate_verifier(verifier: VerifierProof) -> None:
     _required_text("completed_at", verifier.completed_at)
 
 
-def _validate_evidence(evidence: GateEvidence) -> None:
+def _validate_evidence(evidence: GateEvidence) -> _EvidenceSnapshot:
     path_text = _required_text("evidence path", evidence.path)
     try:
         assert_paths_retrievable(path_text)
@@ -611,8 +653,25 @@ def _validate_evidence(evidence: GateEvidence) -> None:
     expected_sha256 = _sha256_text("evidence sha256", evidence.sha256)
     if type(evidence.size_bytes) is not int or evidence.size_bytes < 0:
         raise PassGateError("evidence size must be a non-negative integer")
-    repo_root = repository_root()
+    repo_root = repository_root().resolve()
     candidate = Path(path_text).expanduser()
+    if candidate.is_absolute():
+        try:
+            input_relative = candidate.relative_to(repo_root)
+        except ValueError:
+            raise PassGateError("gate evidence artifact must stay inside the worktree") from None
+    else:
+        input_relative = candidate
+    if ".." in input_relative.parts or not input_relative.parts:
+        raise PassGateError("gate evidence path must name repo evidence")
+    try:
+        _reject_symlink_evidence_path(repo_root, input_relative)
+    except PredicateContractError as exc:
+        raise PassGateError("gate evidence cannot use symlink evidence") from exc
+    if _is_credential_path_denied(path_text) or _is_credential_path_denied(
+        input_relative.as_posix()
+    ):
+        raise PassGateError("gate evidence targets private credentials or artifacts")
     if not candidate.is_absolute():
         candidate = repo_root / candidate
     try:
@@ -623,6 +682,8 @@ def _validate_evidence(evidence: GateEvidence) -> None:
         relative = resolved.relative_to(repo_root).as_posix()
     except ValueError:
         raise PassGateError("gate evidence artifact must stay inside the worktree") from None
+    if _is_credential_path_denied(relative):
+        raise PassGateError("gate evidence targets private credentials or artifacts")
     try:
         assert_paths_retrievable((path_text, relative))
     except PrivacyPreflightError as exc:
@@ -630,6 +691,8 @@ def _validate_evidence(evidence: GateEvidence) -> None:
     file_stat = resolved.stat()
     if not stat.S_ISREG(file_stat.st_mode):
         raise PassGateError("gate evidence artifact must be a regular file")
+    if int(getattr(file_stat, "st_nlink", 1) or 1) > 1:
+        raise PassGateError("gate evidence cannot use hard-linked file aliases")
     if file_stat.st_size != evidence.size_bytes:
         raise PassGateError("gate evidence size does not match artifact")
     actual_sha256 = hashlib.sha256(resolved.read_bytes()).hexdigest()
@@ -638,3 +701,61 @@ def _validate_evidence(evidence: GateEvidence) -> None:
     _required_text("evidence content_type", evidence.content_type)
     _required_text("evidence redaction_status", evidence.redaction_status)
     _required_text("evidence captured_at", evidence.captured_at)
+    return _EvidenceSnapshot(
+        relative_path=relative,
+        sha256=expected_sha256,
+        size_bytes=evidence.size_bytes,
+        identity=_stat_identity(file_stat),
+    )
+
+
+def _assert_evidence_snapshot_current(snapshot: _EvidenceSnapshot) -> None:
+    path = repository_root().resolve() / snapshot.relative_path
+    try:
+        file_stat = path.stat()
+        if _stat_identity(file_stat) != snapshot.identity:
+            raise PassGateError("gate evidence artifact changed before commit")
+        if file_stat.st_size != snapshot.size_bytes:
+            raise PassGateError("gate evidence artifact changed before commit")
+        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise PassGateError("gate evidence artifact changed before commit") from exc
+    if actual_sha256 != snapshot.sha256:
+        raise PassGateError("gate evidence artifact changed before commit")
+
+
+def _stat_identity(path_stat: os.stat_result) -> tuple[int, int, int]:
+    return (
+        int(getattr(path_stat, "st_dev", -1)),
+        int(getattr(path_stat, "st_ino", -1)),
+        int(getattr(path_stat, "st_mode", -1)),
+    )
+
+
+def _sqlite_sidecar_paths(database: Path) -> tuple[Path, ...]:
+    return tuple(Path(f"{database}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
+
+
+def _refuse_lax_sqlite_sidecars(database: Path) -> None:
+    for sidecar in _sqlite_sidecar_paths(database):
+        if not sidecar.exists():
+            continue
+        sidecar_stat = sidecar.stat()
+        if not stat.S_ISREG(sidecar_stat.st_mode):
+            raise PassGateError("SQLite sidecar must be a regular private file")
+        if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+            raise PassGateError("SQLite sidecar requires 0600 file mode")
+
+
+def _chmod_private_sqlite_sidecars(database: Path) -> None:
+    for sidecar in _sqlite_sidecar_paths(database):
+        if not sidecar.exists():
+            continue
+        sidecar_stat = sidecar.stat()
+        if not stat.S_ISREG(sidecar_stat.st_mode):
+            raise PassGateError("SQLite sidecar must be a regular private file")
+        if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+            sidecar.chmod(0o600)
+            sidecar_stat = sidecar.stat()
+            if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+                raise PassGateError("SQLite sidecar requires 0600 file mode")

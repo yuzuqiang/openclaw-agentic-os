@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import tempfile
 import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 from agentic_os.migrations import apply_migrations, repository_root
 from agentic_os.pass_gates import (
@@ -270,6 +272,27 @@ class PassGateWriterTests(unittest.TestCase):
 
         self._assert_no_bundle_rows()
 
+    def test_caller_stale_clock_cannot_keep_recently_expired_approval_alive(self) -> None:
+        caller_now_epoch_ms = 10_000_000
+        local_now_epoch_ms = caller_now_epoch_ms + 90_000
+        with mock.patch(
+            "agentic_os.pass_gates.time.time",
+            return_value=local_now_epoch_ms / 1000,
+        ):
+            with self.assertRaisesRegex(PassGateError, "expire after"):
+                self._record(
+                    now_epoch_ms=caller_now_epoch_ms,
+                    trusted_clock_source_hash=_clock_hash(
+                        caller_now_epoch_ms,
+                        "pass-gate-writer",
+                    ),
+                    approval=self._approval(
+                        expires_at_epoch_ms=caller_now_epoch_ms + 1_000
+                    ),
+                )
+
+        self._assert_no_bundle_rows()
+
     def test_malformed_gate_identity_hashes_are_rejected_before_any_bundle_rows(self) -> None:
         for field_name in (
             "trusted_clock_source_hash",
@@ -357,6 +380,58 @@ class PassGateWriterTests(unittest.TestCase):
 
         self._assert_no_bundle_rows()
 
+    def test_private_credential_evidence_path_is_rejected_before_any_bundle_rows(self) -> None:
+        with self.assertRaisesRegex(PassGateError, "private credentials"):
+            self._record(evidence=self._evidence(name="config/credentials.json"))
+
+        self._assert_no_bundle_rows()
+
+    def test_symlink_evidence_path_is_rejected_before_any_bundle_rows(self) -> None:
+        target = Path(self.evidence_directory.name) / "target.json"
+        target.write_bytes(b'{"ok":true}\n')
+        link = Path(self.evidence_directory.name) / "link.json"
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+
+        with self.assertRaisesRegex(PassGateError, "symlink evidence"):
+            self._record(
+                evidence=GateEvidence(
+                    path=link.relative_to(repository_root()).as_posix(),
+                    sha256=_sha_bytes(target.read_bytes()),
+                    size_bytes=target.stat().st_size,
+                    content_type="application/json",
+                    redaction_status="none",
+                    captured_at="captured-now",
+                )
+            )
+
+        self._assert_no_bundle_rows()
+
+    def test_hard_linked_evidence_path_is_rejected_before_any_bundle_rows(self) -> None:
+        target = Path(self.evidence_directory.name) / "target.json"
+        target.write_bytes(b'{"ok":true}\n')
+        alias = Path(self.evidence_directory.name) / "alias.json"
+        try:
+            os.link(target, alias)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"hard link creation unavailable: {exc}")
+
+        with self.assertRaisesRegex(PassGateError, "hard-linked"):
+            self._record(
+                evidence=GateEvidence(
+                    path=alias.relative_to(repository_root()).as_posix(),
+                    sha256=_sha_bytes(alias.read_bytes()),
+                    size_bytes=alias.stat().st_size,
+                    content_type="application/json",
+                    redaction_status="none",
+                    captured_at="captured-now",
+                )
+            )
+
+        self._assert_no_bundle_rows()
+
     def test_missing_evidence_artifact_is_rejected_before_any_bundle_rows(self) -> None:
         missing = Path(self.evidence_directory.name) / "missing.json"
         with self.assertRaisesRegex(PassGateError, "artifact is not readable"):
@@ -370,6 +445,27 @@ class PassGateWriterTests(unittest.TestCase):
                     captured_at="captured-now",
                 )
             )
+
+        self._assert_no_bundle_rows()
+
+    def test_evidence_changed_before_commit_is_rejected_and_rolled_back(self) -> None:
+        evidence = self._evidence()
+        path = repository_root() / evidence.path
+
+        from agentic_os import pass_gates
+
+        original = pass_gates._assert_blocking_slos_clear
+
+        def mutate_after_slos(connection: sqlite3.Connection) -> None:
+            original(connection)
+            path.write_bytes(b'{"ok":false}\n')
+
+        with mock.patch(
+            "agentic_os.pass_gates._assert_blocking_slos_clear",
+            side_effect=mutate_after_slos,
+        ):
+            with self.assertRaisesRegex(PassGateError, "changed before commit"):
+                self._record(evidence=evidence)
 
         self._assert_no_bundle_rows()
 
@@ -436,6 +532,24 @@ class PassGateWriterTests(unittest.TestCase):
             self._record()
 
         self._assert_no_bundle_rows()
+
+    def test_lax_sqlite_sidecar_is_rejected_before_any_bundle_rows(self) -> None:
+        sidecar = Path(f"{self.database}-wal")
+        sidecar.write_bytes(b"wal")
+        sidecar.chmod(0o644)
+
+        with self.assertRaisesRegex(PassGateError, "sidecar requires 0600"):
+            self._record()
+
+        self._assert_no_bundle_rows()
+
+    def test_sqlite_sidecars_are_private_after_successful_write(self) -> None:
+        self._record()
+
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{self.database}{suffix}")
+            if sidecar.exists():
+                self.assertEqual(sidecar.stat().st_mode & 0o777, 0o600, sidecar)
 
 
 if __name__ == "__main__":
