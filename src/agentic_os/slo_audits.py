@@ -20,6 +20,7 @@ from .pass_gates import (
     PassGateError,
     _assert_evidence_snapshot_current,
     _connect,
+    _derived_trusted_clock_source_hash,
     _validate_evidence,
 )
 from .slo_contracts import SLO_QUERY_CONTRACTS, slo_query_hash
@@ -61,9 +62,9 @@ class _PassEvidenceBinding:
 
 
 _MAX_EPOCH_MS = 253_402_300_799_999
-_AUDIT_CLOCK_MAX_FUTURE_SKEW_MS = 5 * 60 * 1000
 _REFUSED_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
 _PASS_GATE_QUERY_NAME = "Completion gate before done for R2+"
+_FILE_AUTHORITY_MODE = "file_authority"
 
 
 def record_slo_audit(
@@ -89,7 +90,7 @@ def record_slo_audit(
     slo_audit_id = _required_text("slo_audit_id", slo_audit_id)
     query_name = _required_text("query_name", query_name)
     run_at = _required_text("run_at", run_at)
-    run_at_epoch_ms = _epoch_ms("run_at_epoch_ms", run_at_epoch_ms)
+    _epoch_ms("run_at_epoch_ms", run_at_epoch_ms)
 
     connection = _connect(database)
     try:
@@ -99,7 +100,6 @@ def record_slo_audit(
             query = _current_slo_query(connection, query_name)
             result_count = _execute_pinned_slo(connection, query.sql_text)
             status = "pass" if result_count == 0 else "fail"
-            _assert_audit_clock_not_future(run_at_epoch_ms)
             evidence_fields: tuple[str | None, str | None, str | None, str | None]
             pass_evidence: _PassEvidenceBinding | None = None
             if status == "pass":
@@ -116,13 +116,12 @@ def record_slo_audit(
                     pass_evidence.verifier_run_id,
                     pass_evidence.gate_run_id,
                 )
-                if (
-                    query.empty_db_expected_status != "pass"
-                    or query.fixture_db_expected_status != "pass"
-                ):
-                    raise SloAuditError("passing SLO audit requires pass fixture expectations")
+                raise SloAuditError(
+                    "passing SLO audit requires fixture execution evidence"
+                )
             else:
                 evidence_fields = (None, None, None, None)
+            writer_run_at_epoch_ms = _writer_audit_epoch_ms()
             connection.execute(
                 "INSERT INTO slo_audits("
                 "slo_audit_id,query_name,schema_version,migration_sha256,"
@@ -137,14 +136,14 @@ def record_slo_audit(
                     query.query_hash,
                     result_count,
                     status,
-                    query.empty_db_expected_status,
-                    query.fixture_db_expected_status,
+                    "not_run",
+                    "not_run",
                     evidence_fields[0],
                     evidence_fields[1],
                     evidence_fields[2],
                     evidence_fields[3],
                     run_at,
-                    run_at_epoch_ms,
+                    writer_run_at_epoch_ms,
                 ),
             )
             if pass_evidence is not None:
@@ -243,7 +242,8 @@ def _require_pass_evidence(
     row = connection.execute(
         "SELECT r.authority_mode,e.path,e.sha256,e.size_bytes,e.content_type,"
         "e.redaction_status,e.captured_at,g.gate_query_hash,g.migration_sha256,"
-        "v.worker_run_id,g.run_authority_mode,g.workflow_authority_mode,w.mode "
+        "v.worker_run_id,g.run_authority_mode,g.workflow_authority_mode,w.mode,"
+        "c.now_epoch_ms,c.bound_by,c.trusted_clock_source_hash "
         "FROM evidence_hashes e "
         "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
         "AND g.evidence_hash=e.evidence_hash "
@@ -306,10 +306,17 @@ def _require_pass_evidence(
         raise SloAuditError("passing SLO audit requires pass-gate evidence")
     if row[0] in _REFUSED_AUTHORITY_MODES:
         raise SloAuditError("SLO audit writer refuses database-authority runs")
-    if row[10] in _REFUSED_AUTHORITY_MODES or row[11] in _REFUSED_AUTHORITY_MODES:
-        raise SloAuditError("SLO audit writer refuses database-authority pass gates")
+    _assert_file_authority_gate_snapshot(
+        run_authority_mode=row[10],
+        workflow_authority_mode=row[11],
+    )
     if row[12] in _REFUSED_AUTHORITY_MODES:
         raise SloAuditError("SLO audit writer refuses database-authority workflows")
+    _assert_bound_gate_clock(
+        now_epoch_ms=row[13],
+        bound_by=row[14],
+        trusted_clock_source_hash=row[15],
+    )
     if verifier_run_id == row[9]:
         raise SloAuditError("passing SLO audit requires independent verifier run id")
     _assert_current_pass_gate_identity(
@@ -389,10 +396,33 @@ def _assert_safe_pass_evidence_current(binding: _PassEvidenceBinding) -> None:
         raise SloAuditError("passing SLO audit pass-gate evidence changed") from exc
 
 
-def _assert_audit_clock_not_future(run_at_epoch_ms: int) -> None:
-    local_epoch_ms = int(time.time() * 1000)
-    if run_at_epoch_ms > local_epoch_ms + _AUDIT_CLOCK_MAX_FUTURE_SKEW_MS:
-        raise SloAuditError("SLO audit clock cannot be in the future")
+def _writer_audit_epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _assert_file_authority_gate_snapshot(
+    *, run_authority_mode: object, workflow_authority_mode: object
+) -> None:
+    if (
+        run_authority_mode != _FILE_AUTHORITY_MODE
+        or workflow_authority_mode != _FILE_AUTHORITY_MODE
+    ):
+        raise SloAuditError("SLO audit writer requires file-authority pass gates")
+
+
+def _assert_bound_gate_clock(
+    *, now_epoch_ms: object, bound_by: object, trusted_clock_source_hash: object
+) -> None:
+    if type(now_epoch_ms) is not int or not isinstance(bound_by, str):
+        raise SloAuditError("passing SLO audit requires trusted gate clock evidence")
+    if not isinstance(trusted_clock_source_hash, str):
+        raise SloAuditError("passing SLO audit requires trusted gate clock evidence")
+    expected = _derived_trusted_clock_source_hash(
+        now_epoch_ms=now_epoch_ms,
+        bound_by=bound_by,
+    )
+    if trusted_clock_source_hash != expected:
+        raise SloAuditError("passing SLO audit requires trusted gate clock evidence")
 
 
 def _required_text(name: str, value: object) -> str:

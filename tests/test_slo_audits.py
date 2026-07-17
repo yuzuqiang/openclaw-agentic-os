@@ -184,9 +184,12 @@ class SloAuditWriterTests(unittest.TestCase):
         gate_query_hash: str | None = None,
         migration_sha256: str | None = None,
         authority_mode: str = "file_authority",
+        gate_run_authority_mode: str | None = "file_authority",
+        gate_workflow_authority_mode: str | None = "file_authority",
         stored_evidence_hash: str | None = None,
         approval_bound: bool = True,
         restore_current_authority: bool = False,
+        trusted_clock_source_hash: str | None = None,
     ) -> None:
         current_gate_query_hash, current_migration_sha256 = self._current_gate_identity()
         if gate_query_hash is None:
@@ -195,6 +198,8 @@ class SloAuditWriterTests(unittest.TestCase):
             migration_sha256 = current_migration_sha256
         if stored_evidence_hash is None:
             stored_evidence_hash = evidence.sha256
+        if trusted_clock_source_hash is None:
+            trusted_clock_source_hash = _clock_hash(1, "test")
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             if authority_mode in {"db_authority_canary", "db_authority"}:
@@ -266,8 +271,8 @@ class SloAuditWriterTests(unittest.TestCase):
                     gate_query_hash,
                     migration_sha256,
                     stored_evidence_hash,
-                    authority_mode,
-                    authority_mode,
+                    gate_run_authority_mode,
+                    gate_workflow_authority_mode,
                 ),
             )
             connection.execute(
@@ -276,7 +281,7 @@ class SloAuditWriterTests(unittest.TestCase):
                 "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
                 "consumed_at_epoch_ms) VALUES('clock','gate','gate','run',"
                 "'transition','nonce',1,1,'test',?,1)",
-                (_sha("clock"),),
+                (trusted_clock_source_hash,),
             )
             connection.execute(
                 "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
@@ -323,41 +328,18 @@ class SloAuditWriterTests(unittest.TestCase):
         kwargs.update(overrides)
         return record_slo_audit(self.database, **kwargs)
 
-    def test_records_passing_named_slo_with_existing_pass_gate_evidence(self) -> None:
+    def test_refuses_to_stamp_fixture_passes_without_fixture_evidence(self) -> None:
         evidence = self._record_pass_gate()
-        record = self._record_slo(
-            evidence_hash=evidence.sha256,
-            evidence_run_id="run",
-            verifier_run_id="verifier",
-            gate_run_id="gate",
-        )
 
-        self.assertEqual(record.status, "pass")
-        self.assertEqual(record.result_count, 0)
-        with closing(sqlite3.connect(self.database)) as connection:
-            row = connection.execute(
-                "SELECT a.status,a.result_count,a.query_hash,q.query_hash,"
-                "a.evidence_hash,a.evidence_run_id,a.verifier_run_id,a.gate_run_id "
-                "FROM slo_audits a JOIN slo_queries q "
-                "ON q.query_name=a.query_name "
-                "AND q.schema_version=a.schema_version "
-                "AND q.migration_sha256=a.migration_sha256 "
-                "AND q.query_hash=a.query_hash "
-                "WHERE a.slo_audit_id='slo-audit'"
-            ).fetchone()
-        self.assertEqual(
-            row,
-            (
-                "pass",
-                0,
-                record.query_hash,
-                record.query_hash,
-                evidence.sha256,
-                "run",
-                "verifier",
-                "gate",
-            ),
-        )
+        with self.assertRaisesRegex(SloAuditError, "fixture execution evidence"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
 
     def test_pass_status_requires_existing_pass_gate_evidence(self) -> None:
         with self.assertRaisesRegex(SloAuditError, "pass-gate evidence"):
@@ -384,19 +366,22 @@ class SloAuditWriterTests(unittest.TestCase):
 
         self._assert_no_slo_audit_rows()
 
-    def test_rejects_future_audit_clock_without_write(self) -> None:
-        evidence = self._record_pass_gate()
+    def test_failing_audit_binds_timestamp_to_writer_clock(self) -> None:
+        before = int(time.time() * 1000)
+        self._make_unknown_usage_violation()
 
-        with self.assertRaisesRegex(SloAuditError, "clock cannot be in the future"):
-            self._record_slo(
-                run_at_epoch_ms=253_402_300_799_999,
-                evidence_hash=evidence.sha256,
-                evidence_run_id="run",
-                verifier_run_id="verifier",
-                gate_run_id="gate",
-            )
+        self._record_slo(
+            query_name="Unknown usage blocks auto-local",
+            run_at_epoch_ms=253_402_300_799_999,
+        )
 
-        self._assert_no_slo_audit_rows()
+        after = int(time.time() * 1000)
+        with closing(sqlite3.connect(self.database)) as connection:
+            stored_epoch_ms = connection.execute(
+                "SELECT run_at_epoch_ms FROM slo_audits WHERE slo_audit_id='slo-audit'"
+            ).fetchone()[0]
+        self.assertGreaterEqual(stored_epoch_ms, before)
+        self.assertLessEqual(stored_epoch_ms, after)
 
     def test_pass_audit_rejects_evidence_hash_digest_mismatch_without_write(self) -> None:
         evidence = self._evidence()
@@ -435,10 +420,65 @@ class SloAuditWriterTests(unittest.TestCase):
         self._insert_malformed_pass_gate(
             evidence=evidence,
             authority_mode="db_authority_canary",
+            gate_run_authority_mode="db_authority_canary",
+            gate_workflow_authority_mode="db_authority_canary",
             restore_current_authority=True,
         )
 
-        with self.assertRaisesRegex(SloAuditError, "database-authority pass gates"):
+        with self.assertRaisesRegex(SloAuditError, "file-authority pass gates"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_missing_gate_authority_snapshot_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(
+            evidence=evidence,
+            gate_run_authority_mode=None,
+            gate_workflow_authority_mode=None,
+        )
+
+        with self.assertRaisesRegex(SloAuditError, "file-authority pass gates"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_garbage_gate_authority_snapshot_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(
+            evidence=evidence,
+            gate_run_authority_mode="restored-file-later",
+            gate_workflow_authority_mode="file_authority",
+        )
+
+        with self.assertRaisesRegex(SloAuditError, "file-authority pass gates"):
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
+
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_untrusted_gate_clock_without_write(self) -> None:
+        evidence = self._evidence()
+        self._insert_malformed_pass_gate(
+            evidence=evidence,
+            trusted_clock_source_hash="a" * 64,
+        )
+
+        with self.assertRaisesRegex(SloAuditError, "trusted gate clock evidence"):
             self._record_slo(
                 evidence_hash=evidence.sha256,
                 evidence_run_id="run",
@@ -573,6 +613,22 @@ class SloAuditWriterTests(unittest.TestCase):
         self._assert_no_slo_audit_rows()
 
     def test_failing_named_slo_records_result_count_without_pass_evidence(self) -> None:
+        self._make_unknown_usage_violation()
+
+        record = self._record_slo(query_name="Unknown usage blocks auto-local")
+
+        self.assertEqual(record.status, "fail")
+        self.assertEqual(record.result_count, 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status,result_count,empty_db_status,fixture_db_status,"
+                    "evidence_hash FROM slo_audits WHERE slo_audit_id='slo-audit'"
+                ).fetchone(),
+                ("fail", 1, "not_run", "not_run", None),
+            )
+
+    def _make_unknown_usage_violation(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute(
                 "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
@@ -599,19 +655,6 @@ class SloAuditWriterTests(unittest.TestCase):
                 "UPDATE runs SET state='gate_passed' WHERE run_id='run'"
             )
 
-        record = self._record_slo(query_name="Unknown usage blocks auto-local")
-
-        self.assertEqual(record.status, "fail")
-        self.assertEqual(record.result_count, 1)
-        with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(
-                connection.execute(
-                    "SELECT status,result_count,evidence_hash FROM slo_audits "
-                    "WHERE slo_audit_id='slo-audit'"
-                ).fetchone(),
-                ("fail", 1, None),
-            )
-
     def test_schema_identity_is_verified_under_write_lock(self) -> None:
         evidence = self._record_pass_gate()
         from agentic_os import slo_audits
@@ -628,14 +671,16 @@ class SloAuditWriterTests(unittest.TestCase):
             "agentic_os.slo_audits._verify_schema_identity",
             side_effect=assert_write_transaction,
         ):
-            self._record_slo(
-                evidence_hash=evidence.sha256,
-                evidence_run_id="run",
-                verifier_run_id="verifier",
-                gate_run_id="gate",
-            )
+            with self.assertRaisesRegex(SloAuditError, "fixture execution evidence"):
+                self._record_slo(
+                    evidence_hash=evidence.sha256,
+                    evidence_run_id="run",
+                    verifier_run_id="verifier",
+                    gate_run_id="gate",
+                )
 
         self.assertEqual(observed_transactions, [True])
+        self._assert_no_slo_audit_rows()
 
     def test_unknown_query_name_is_rejected_without_audit_row(self) -> None:
         with self.assertRaisesRegex(SloAuditError, "identity is missing"):

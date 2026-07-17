@@ -2570,6 +2570,8 @@ CREATE TABLE gate_runs (
   evidence_hash TEXT,
   risk_dominance TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  run_authority_mode TEXT,
+  workflow_authority_mode TEXT,
   CHECK (typeof(completed_at_epoch_ms)='integer' AND completed_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (typeof(requires_same_run)='integer' AND requires_same_run IN (0,1)),
   CHECK (risk_dominance IN ('R0','R1','R2','R3','R4')),
@@ -2582,6 +2584,13 @@ CREATE TABLE gate_runs (
     REFERENCES evidence_hashes(gate_run_id,evidence_hash,run_id,verifier_run_id)
     DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
+
+-- Migration v11 adds gate_runs.run_authority_mode and
+-- gate_runs.workflow_authority_mode as immutable gate-time authority snapshots.
+-- Executable SLO audit PASS evidence must require both snapshot values to be
+-- the exact non-NULL value file_authority; upgraded rows with NULL snapshots
+-- and rows containing restored/current authority state but missing gate-time
+-- snapshots fail closed.
 
 CREATE TRIGGER gate_runs_validate_clock_context_insert
 AFTER INSERT ON gate_runs
