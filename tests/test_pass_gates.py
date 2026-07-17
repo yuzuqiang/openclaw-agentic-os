@@ -109,7 +109,20 @@ class PassGateWriterTests(unittest.TestCase):
             captured_at="captured-now",
         )
 
+    def _current_gate_identity(self) -> tuple[str, str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT q.query_hash, q.migration_sha256 FROM schema_migrations m "
+                "JOIN slo_queries q ON q.schema_version=m.version "
+                "AND q.migration_sha256=m.sha256 "
+                "WHERE q.query_name='Completion gate before done for R2+' "
+                "ORDER BY m.version DESC LIMIT 1"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return row
+
     def _record(self, **overrides: object) -> None:
+        gate_query_hash, migration_sha256 = self._current_gate_identity()
         kwargs = {
             "run_id": "run",
             "transition_id": "transition",
@@ -120,8 +133,8 @@ class PassGateWriterTests(unittest.TestCase):
             "bound_by": "pass-gate-writer",
             "trusted_clock_source_hash": _sha("trusted-clock"),
             "gate_version": "pass-gate-v1",
-            "gate_query_hash": _sha("gate-query"),
-            "migration_sha256": _sha("migration"),
+            "gate_query_hash": gate_query_hash,
+            "migration_sha256": migration_sha256,
             "approval": self._approval(),
             "verifier": self._verifier(),
             "evidence": self._evidence(),
@@ -173,14 +186,9 @@ class PassGateWriterTests(unittest.TestCase):
                 ("gate", "gate", 1_800_000_000_000, 1_800_000_000_000, 1_800_000_000_000),
             )
             for query_name in (
-                "Passing gate without verifier row",
-                "Passing gate wrong-run or non-independent verifier",
-                "Gate evidence bound to same run",
-                "Gate clock context exact one-use binding",
-                "Broad or expired approvals",
-                "Exact mutating approval binding",
-                "Reused approval id",
-                "Non-independent verifier row",
+                item.query_name
+                for item in SLO_QUERY_CONTRACTS
+                if item.query_name != "SLO query fixture status"
             ):
                 sql = next(
                     item.sql_text
@@ -208,6 +216,70 @@ class PassGateWriterTests(unittest.TestCase):
                 with self.assertRaisesRegex(PassGateError, field_name):
                     self._record(**{field_name: "not-a-sha256"})
                 self._assert_no_bundle_rows()
+
+    def test_fictional_gate_identity_hashes_are_rejected_before_any_bundle_rows(self) -> None:
+        for field_name in ("gate_query_hash", "migration_sha256"):
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(PassGateError, "SLO identity"):
+                    self._record(**{field_name: "a" * 64})
+                self._assert_no_bundle_rows()
+
+    def test_finalized_run_cannot_receive_backdated_pass_gate(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE runs SET state='finalized',finalized_at='done',"
+                "finalized_at_epoch_ms=2000 WHERE run_id='run'"
+            )
+            connection.execute(
+                "UPDATE transitions SET state_after='finalized' "
+                "WHERE transition_id='transition'"
+            )
+
+        with self.assertRaisesRegex(PassGateError, "retroactive"):
+            self._record(now_epoch_ms=1000)
+
+        self._assert_no_bundle_rows()
+
+    def test_pending_external_rpc_blocks_pass_gate_before_commit(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO external_rpc_intents("
+                "intent_id,run_id,transition_id,rpc_kind,client_request_id,"
+                "idempotency_key,metadata_json,state,requested_at,"
+                "requested_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "intent",
+                    "run",
+                    "transition",
+                    "allow_lease_acquire",
+                    "client-request",
+                    "lease-idempotency",
+                    "{}",
+                    "pending",
+                    "requested-now",
+                    1,
+                ),
+            )
+
+        with self.assertRaisesRegex(PassGateError, "Metadata-missing external RPC"):
+            self._record()
+
+        self._assert_no_bundle_rows()
+
+    def test_raw_state_evidence_path_is_rejected_before_any_bundle_rows(self) -> None:
+        with self.assertRaisesRegex(PassGateError, "evidence path"):
+            self._record(
+                evidence=GateEvidence(
+                    path="state/agentic-os/control.db",
+                    sha256=_sha("evidence"),
+                    size_bytes=17,
+                    content_type="application/json",
+                    redaction_status="none",
+                    captured_at="captured-now",
+                )
+            )
+
+        self._assert_no_bundle_rows()
 
     def test_malformed_verifier_hashes_are_rejected_before_any_bundle_rows(self) -> None:
         for field_name in ("prompt_hash", "context_hash"):

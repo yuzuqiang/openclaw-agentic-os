@@ -118,7 +118,11 @@ transition with an exact approval binding, creates the single-use
 `gate_clock_context` whose `bound_at_epoch_ms`, `now_epoch_ms`,
 `consumed_at_epoch_ms`, and gate completion epoch are identical, records a
 same-run independent verifier with non-empty independence proof, binds evidence
-to the producer run, and checks the pinned PASS-gate SLO contracts before commit.
+to the producer run only when the evidence path is safe for retrieval, requires
+the supplied gate identity to match the current registered
+`Completion gate before done for R2+` SLO and migration hash, rejects terminal
+runs instead of accepting retroactive gates, and checks every blocking runtime
+SLO before commit.
 Expired approvals, reused pass-gated transitions, same-worker verifiers, missing
 target fields, lower risk ceilings, malformed SHA-256 authorities, and
 `db_authority_canary` / `db_authority` runs fail closed without granting trust.

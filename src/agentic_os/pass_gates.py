@@ -18,7 +18,11 @@ from .migrations import (
     load_migrations,
     repository_root,
 )
-from .privacy import PrivacyPreflightError, assert_privacy_preflight
+from .privacy import (
+    PrivacyPreflightError,
+    assert_paths_retrievable,
+    assert_privacy_preflight,
+)
 from .slo_contracts import SLO_QUERY_CONTRACTS
 
 
@@ -28,16 +32,9 @@ class PassGateError(RuntimeError):
 
 _MAX_EPOCH_MS = 253_402_300_799_999
 _RISK_ORDER = {"R0": 0, "R1": 1, "R2": 2, "R3": 3, "R4": 4}
-_PASS_GATE_INVARIANT_QUERIES = {
-    "Passing gate without verifier row",
-    "Passing gate wrong-run or non-independent verifier",
-    "Gate evidence bound to same run",
-    "Gate clock context exact one-use binding",
-    "Broad or expired approvals",
-    "Exact mutating approval binding",
-    "Reused approval id",
-    "Non-independent verifier row",
-}
+_COMPLETION_GATE_QUERY_NAME = "Completion gate before done for R2+"
+_SLO_FIXTURE_STATUS_QUERY_NAME = "SLO query fixture status"
+_TERMINAL_RUN_STATES = {"finalized", "rolled_back", "rejected"}
 
 
 @dataclass(frozen=True)
@@ -149,6 +146,12 @@ def record_approval_pass_gate(
             )
             if transition["authority_mode"] in {"db_authority_canary", "db_authority"}:
                 raise PassGateError("PASS gate writer refuses database-authority runs")
+            _reject_terminal_run(transition)
+            _assert_gate_identity(
+                connection,
+                gate_query_hash=gate_query_hash,
+                migration_sha256=migration_sha256,
+            )
             action_type = _transition_text(transition, "action_type")
             target_type = _transition_text(transition, "target_type")
             target_id = _transition_text(transition, "target_id")
@@ -319,7 +322,7 @@ def record_approval_pass_gate(
                     evidence.captured_at,
                 ),
             )
-            _assert_pass_gate_invariants(connection)
+            _assert_blocking_slos_clear(connection)
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -389,7 +392,8 @@ def _transition_for_gate(
 ) -> dict[str, str | None]:
     row = connection.execute(
         "SELECT t.action_type,t.target_type,t.target_id,t.target_hash,"
-        "t.target_scope,t.risk_dominance,r.authority_mode,r.risk_dominance "
+        "t.target_scope,t.risk_dominance,r.authority_mode,r.risk_dominance,"
+        "r.state,r.finalized_at_epoch_ms "
         "FROM transitions t JOIN runs r ON r.run_id=t.run_id "
         "WHERE t.run_id=? AND t.transition_id=?",
         (run_id, transition_id),
@@ -406,6 +410,9 @@ def _transition_for_gate(
         "target_scope": row[4],
         "risk_dominance": row[5],
         "authority_mode": row[6],
+        "run_risk_dominance": row[7],
+        "run_state": row[8],
+        "finalized_at_epoch_ms": row[9],
     }
 
 
@@ -422,18 +429,38 @@ def _pass_gate_exists(
     )
 
 
-def _assert_pass_gate_invariants(connection: sqlite3.Connection) -> None:
+def _reject_terminal_run(transition: Mapping[str, object]) -> None:
+    run_state = transition.get("run_state")
+    finalized_at_epoch_ms = transition.get("finalized_at_epoch_ms")
+    if run_state in _TERMINAL_RUN_STATES or finalized_at_epoch_ms is not None:
+        raise PassGateError("terminal run cannot receive a retroactive PASS gate")
+
+
+def _assert_gate_identity(
+    connection: sqlite3.Connection, *, gate_query_hash: str, migration_sha256: str
+) -> None:
+    row = connection.execute(
+        "SELECT q.query_hash, q.migration_sha256 FROM schema_migrations m "
+        "JOIN slo_queries q ON q.schema_version=m.version "
+        "AND q.migration_sha256=m.sha256 "
+        "WHERE q.query_name=? ORDER BY m.version DESC LIMIT 1",
+        (_COMPLETION_GATE_QUERY_NAME,),
+    ).fetchone()
+    if row is None:
+        raise PassGateError("current PASS gate SLO identity is missing")
+    if (gate_query_hash, migration_sha256) != (row[0], row[1]):
+        raise PassGateError("PASS gate SLO identity does not match current database")
+
+
+def _assert_blocking_slos_clear(connection: sqlite3.Connection) -> None:
     contracts = {
         item.query_name: item.sql_text
         for item in SLO_QUERY_CONTRACTS
-        if item.query_name in _PASS_GATE_INVARIANT_QUERIES
+        if item.query_name != _SLO_FIXTURE_STATUS_QUERY_NAME
     }
-    missing = _PASS_GATE_INVARIANT_QUERIES - set(contracts)
-    if missing:
-        raise PassGateError(f"required PASS gate SLO contracts missing: {sorted(missing)}")
     for query_name in sorted(contracts):
         if connection.execute(contracts[query_name]).fetchone() is not None:
-            raise PassGateError(f"PASS gate invariant failed: {query_name}")
+            raise PassGateError(f"blocking SLO failed before PASS gate commit: {query_name}")
 
 
 def _approval_hash(
@@ -536,7 +563,11 @@ def _validate_verifier(verifier: VerifierProof) -> None:
 
 
 def _validate_evidence(evidence: GateEvidence) -> None:
-    _required_text("evidence path", evidence.path)
+    path = _required_text("evidence path", evidence.path)
+    try:
+        assert_paths_retrievable(path)
+    except PrivacyPreflightError as exc:
+        raise PassGateError("gate evidence path is not safely retrievable") from exc
     _sha256_text("evidence sha256", evidence.sha256)
     if type(evidence.size_bytes) is not int or evidence.size_bytes < 0:
         raise PassGateError("evidence size must be a non-negative integer")
