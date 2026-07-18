@@ -88,6 +88,11 @@ def record_goal_run(
                     connection,
                     approval_id=approval_id,
                     goal_run_id=goal_run_id,
+                    goal_id=goal_id,
+                    run_id=run_id,
+                    predicate_plugin_hash=predicate_plugin_hash,
+                    backend=backend,
+                    created_at_epoch_ms=created_at_epoch_ms,
                 )
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
@@ -292,15 +297,57 @@ def _assert_evidence_binding(
 
 
 def _consume_goal_approval(
-    connection: sqlite3.Connection, *, approval_id: str, goal_run_id: str
+    connection: sqlite3.Connection,
+    *,
+    approval_id: str,
+    goal_run_id: str,
+    goal_id: str,
+    run_id: str | None,
+    predicate_plugin_hash: str,
+    backend: str,
+    created_at_epoch_ms: int,
 ) -> None:
+    if run_id is None:
+        raise GoalRunError("goal run approval requires a bound run_id")
     cursor = connection.execute(
         "UPDATE approvals SET consumed_by_goal_run_id=? "
         "WHERE approval_id=? "
         "AND consumed_by_transition_id IS NULL "
         "AND consumed_by_gate_run_id IS NULL "
-        "AND (consumed_by_goal_run_id IS NULL OR consumed_by_goal_run_id=?)",
-        (goal_run_id, approval_id, goal_run_id),
+        "AND (consumed_by_goal_run_id IS NULL OR consumed_by_goal_run_id=?) "
+        "AND run_id=? "
+        "AND approved_action_type='goal_run' "
+        "AND target_type='goal' "
+        "AND target_id=? "
+        "AND single_use=1 "
+        "AND expires_at_epoch_ms > ? "
+        "AND EXISTS ("
+        "SELECT 1 FROM goal_manifests gm "
+        "WHERE gm.goal_id=? "
+        "AND gm.predicate_plugin_hash=? "
+        "AND gm.backend=? "
+        "AND gm.approval_required=1 "
+        "AND gm.enabled=1 "
+        "AND approvals.target_hash=gm.manifest_hash "
+        "AND approvals.target_scope=gm.owner "
+        "AND CASE approvals.approved_risk_ceiling "
+        "WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 "
+        "WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1 END >= "
+        "CASE gm.severity "
+        "WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 "
+        "WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99 END"
+        ")",
+        (
+            goal_run_id,
+            approval_id,
+            goal_run_id,
+            run_id,
+            goal_id,
+            created_at_epoch_ms,
+            goal_id,
+            predicate_plugin_hash,
+            backend,
+        ),
     )
     if cursor.rowcount != 1:
         raise GoalRunError("goal run approval could not be consumed")

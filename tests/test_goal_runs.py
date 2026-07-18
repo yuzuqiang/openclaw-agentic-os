@@ -99,6 +99,43 @@ class GoalRunWriterTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("approval-bound",))
 
+    def test_record_goal_run_rejects_approval_for_non_required_manifest(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,approved_at) VALUES("
+                "'unneeded-approval','run','river','telegram','goal-source',"
+                "'goal-text','goal_run','goal','goal','manifest','owner','R1',"
+                "2000,'unneeded-approval-hash','now')"
+            )
+        with self.assertRaisesRegex(GoalRunError, "approval could not be consumed"):
+            record_goal_run(
+                self.database,
+                goal_run_id="approval-not-required",
+                goal_id="goal",
+                run_id="run",
+                severity="R1",
+                state="open",
+                predicate_plugin_hash="plugin",
+                approval_id="unneeded-approval",
+                created_at="now",
+                created_at_epoch_ms=1000,
+            )
+        with closing(sqlite3.connect(self.database)) as connection:
+            approval_row = connection.execute(
+                "SELECT consumed_by_goal_run_id FROM approvals "
+                "WHERE approval_id='unneeded-approval'"
+            ).fetchone()
+            goal_run_count = connection.execute(
+                "SELECT COUNT(*) FROM goal_runs "
+                "WHERE goal_run_id='approval-not-required'"
+            ).fetchone()[0]
+        self.assertEqual(approval_row, (None,))
+        self.assertEqual(goal_run_count, 0)
+
     def test_forged_goal_run_evidence_fails_without_partial_write(self) -> None:
         with self.assertRaisesRegex(
             GoalRunError, "same-run independent pass-gate evidence"
