@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `a908265397fdcc2cde4b1d4cf1fe08144a194591b2647eddc3b11f99f0fafcac`
+- Current design artifact SHA-256: `e62a8de581aef178fd0c25f7519c07da3d5d825225645bdba09ec3af6cd465c8`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `5bf14f296de4eb07fa34910d232b653d0192e4557e17523348337ac5aebc7158`
-- Current migration manifest SHA-256: `36602237117cbed094c82f2c1dbb248b384192619f30b26289781eb993a09190`
+- Current latest migration SHA-256: `dcd48d74bc11b3b2608a817a360636a4b31d91a4e90dceb3e3db0f4f9f872426`
+- Current migration manifest SHA-256: `0fce8507c9e83c82e5d914294d42c83dbe09e99d550366a6dd1a44bff4d9c983`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner integrations, trust promotion, crash fixtures, rollback drills, and production smoke tests
 
@@ -164,11 +164,16 @@ authority.
 The fourth P1.2 slice lives in `agentic_os.goal_runs` plus migration v12. It
 records Standing Goal runs through a local-only SQLite writer and binds
 `goal_runs.evidence_hash` to existing same-run, approval-bound PASS-gate
-evidence with an independent verifier. Forged evidence hashes, wrong-run
-evidence, non-PASS or non-independent evidence, missing `run_id` bindings,
-database-authority runs, and attempts to rewrite an established goal-run
-evidence binding fail closed. This slice does not promote trust, call
-OpenClaw/Gateway/Cron, or enable production database authority.
+evidence with an independent verifier whose verifier run id cannot reuse the
+worker run id. Gate-time authority snapshots are validated when recorded and
+frozen before goal-run binding, and required goal-run approvals must carry
+SHA-256-shaped approval evidence and still be unexpired against the local writer
+or SQLite current clock. Forged evidence hashes, wrong-run evidence, artifact
+digest mismatches, non-PASS or non-independent evidence, missing `run_id`
+bindings, database-authority runs, spoofed authority snapshots, expired or
+malformed approvals, deletes of evidenced goal runs, and attempts to rewrite an
+established goal-run evidence binding fail closed. This slice does not promote
+trust, call OpenClaw/Gateway/Cron, or enable production database authority.
 
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.

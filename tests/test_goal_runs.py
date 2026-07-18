@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -65,6 +66,10 @@ class GoalRunWriterTests(unittest.TestCase):
         self.assertEqual(row, ("run", self.evidence_hash))
 
     def test_record_goal_run_consumes_required_approval_in_transaction(self) -> None:
+        source_digest = _sha(b"goal-source")
+        text_digest = _sha(b"goal-text")
+        approval_hash = _sha(b"goal-approval")
+        expires_at = int(time.time() * 1000) + 60_000
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
@@ -75,9 +80,9 @@ class GoalRunWriterTests(unittest.TestCase):
                 "source_message_digest,approval_text_digest,approved_action_type,"
                 "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
                 "expires_at_epoch_ms,approval_hash,approved_at) VALUES("
-                "'goal-approval','run','river','telegram','goal-source','goal-text',"
-                "'goal_run','goal','goal','manifest','owner','R1',2000,"
-                "'goal-approval-hash','now')"
+                "'goal-approval','run','river','telegram',?,?,'goal_run','goal',"
+                "'goal','manifest','owner','R1',?,?,'now')",
+                (source_digest, text_digest, expires_at, approval_hash),
             )
         result = record_goal_run(
             self.database,
@@ -98,6 +103,72 @@ class GoalRunWriterTests(unittest.TestCase):
                 "WHERE approval_id='goal-approval'"
             ).fetchone()
         self.assertEqual(row, ("approval-bound",))
+
+    def test_record_goal_run_rejects_expired_approval_despite_backdated_created_at(
+        self,
+    ) -> None:
+        source_digest = _sha(b"expired-source")
+        text_digest = _sha(b"expired-text")
+        approval_hash = _sha(b"expired-approval")
+        expires_at = int(time.time() * 1000) - 1_000
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "UPDATE goal_manifests SET approval_required=1 WHERE goal_id='goal'"
+            )
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,approved_at) VALUES("
+                "'expired-goal-approval','run','river','telegram',?,?,'goal_run',"
+                "'goal','goal','manifest','owner','R1',?,?,'now')",
+                (source_digest, text_digest, expires_at, approval_hash),
+            )
+        with self.assertRaisesRegex(GoalRunError, "approval could not be consumed"):
+            record_goal_run(
+                self.database,
+                goal_run_id="expired-approval-bound",
+                goal_id="goal",
+                run_id="run",
+                severity="R1",
+                state="open",
+                predicate_plugin_hash="plugin",
+                approval_id="expired-goal-approval",
+                created_at="backdated",
+                created_at_epoch_ms=1000,
+            )
+
+    def test_record_goal_run_rejects_malformed_approval_digests(self) -> None:
+        expires_at = int(time.time() * 1000) + 60_000
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "UPDATE goal_manifests SET approval_required=1 WHERE goal_id='goal'"
+            )
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,approved_at) VALUES("
+                "'malformed-goal-approval','run','river','telegram','x','y',"
+                "'goal_run','goal','goal','manifest','owner','R1',?,"
+                "'not-a-hash','now')",
+                (expires_at,),
+            )
+        with self.assertRaisesRegex(GoalRunError, "approval could not be consumed"):
+            record_goal_run(
+                self.database,
+                goal_run_id="malformed-approval-bound",
+                goal_id="goal",
+                run_id="run",
+                severity="R1",
+                state="open",
+                predicate_plugin_hash="plugin",
+                approval_id="malformed-goal-approval",
+                created_at="now",
+                created_at_epoch_ms=int(time.time() * 1000),
+            )
 
     def test_record_goal_run_rejects_approval_for_non_required_manifest(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
@@ -242,6 +313,9 @@ class GoalRunWriterTests(unittest.TestCase):
 
     def _seed_valid_goal_run_fixture(self, connection: sqlite3.Connection) -> None:
         target_hash = _sha(b"target")
+        source_digest = _sha(b"source")
+        text_digest = _sha(b"text")
+        approval_hash = _sha(b"approval")
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
             "VALUES('w','file_authority','now')"
@@ -265,16 +339,16 @@ class GoalRunWriterTests(unittest.TestCase):
             "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
             "expires_at_epoch_ms,approval_hash,consumed_by_transition_id,"
             "consumed_by_gate_run_id,approved_at) VALUES('approval','run','river',"
-            "'telegram','source','text','mutate','artifact','artifact-1',?,"
-            "'repo','R1',2000,'approval-hash','transition','gate','now')",
-            (target_hash,),
+            "'telegram',?,?,'mutate','artifact','artifact-1',?,'repo','R1',"
+            "2000,?,'transition','gate','now')",
+            (source_digest, text_digest, target_hash, approval_hash),
         )
         connection.execute(
             "UPDATE transitions SET approval_required=1,approval_id='approval',"
-            "approval_channel='telegram',approval_source_digest='source',"
-            "approval_text_digest='text',gate_run_id='gate',evidence_hash=? "
+            "approval_channel='telegram',approval_source_digest=?,"
+            "approval_text_digest=?,gate_run_id='gate',evidence_hash=? "
             "WHERE transition_id='transition'",
-            (self.evidence_hash,),
+            (source_digest, text_digest, self.evidence_hash),
         )
         connection.execute(
             "INSERT INTO judge_verifier_runs(verifier_run_id,worker_run_id,"

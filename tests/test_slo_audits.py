@@ -455,18 +455,25 @@ class SloAuditWriterTests(unittest.TestCase):
 
     def test_pass_audit_rejects_garbage_gate_authority_snapshot_without_write(self) -> None:
         evidence = self._evidence()
-        self._insert_malformed_pass_gate(
-            evidence=evidence,
-            gate_run_authority_mode="restored-file-later",
-            gate_workflow_authority_mode="file_authority",
-        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "authority snapshot"):
+            self._insert_malformed_pass_gate(
+                evidence=evidence,
+                gate_run_authority_mode="restored-file-later",
+                gate_workflow_authority_mode="file_authority",
+            )
 
-        with self.assertRaisesRegex(SloAuditError, "file-authority pass gates"):
-            self._record_slo(
-                evidence_hash=evidence.sha256,
-                evidence_run_id="run",
-                verifier_run_id="verifier",
-                gate_run_id="gate",
+        self._assert_no_slo_audit_rows()
+
+    def test_pass_audit_rejects_spoofed_file_authority_snapshot_without_write(
+        self,
+    ) -> None:
+        evidence = self._evidence()
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "authority snapshot"):
+            self._insert_malformed_pass_gate(
+                evidence=evidence,
+                authority_mode="db_authority_canary",
+                gate_run_authority_mode="file_authority",
+                gate_workflow_authority_mode="file_authority",
             )
 
         self._assert_no_slo_audit_rows()
@@ -600,6 +607,8 @@ class SloAuditWriterTests(unittest.TestCase):
         self._insert_malformed_pass_gate(
             evidence=evidence,
             authority_mode="db_authority_canary",
+            gate_run_authority_mode="db_authority_canary",
+            gate_workflow_authority_mode="db_authority_canary",
         )
 
         with self.assertRaisesRegex(SloAuditError, "database-authority"):

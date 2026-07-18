@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,7 +93,6 @@ def record_goal_run(
                     run_id=run_id,
                     predicate_plugin_hash=predicate_plugin_hash,
                     backend=backend,
-                    created_at_epoch_ms=created_at_epoch_ms,
                 )
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
@@ -279,6 +279,8 @@ def _assert_evidence_binding(
         "AND g.decision='pass' AND g.requires_same_run=1 "
         "AND t.approval_required=1 "
         "AND j.independence_class='independent' "
+        "AND j.verifier_run_id<>j.worker_run_id "
+        "AND j.verifier_run_id<>e.run_id "
         "AND j.worker_agent_id<>j.verifier_agent_id AND j.same_worker_context=0 "
         "AND a.single_use=1 "
         "AND CASE a.approved_risk_ceiling "
@@ -305,10 +307,10 @@ def _consume_goal_approval(
     run_id: str | None,
     predicate_plugin_hash: str,
     backend: str,
-    created_at_epoch_ms: int,
 ) -> None:
     if run_id is None:
         raise GoalRunError("goal run approval requires a bound run_id")
+    trusted_now_epoch_ms = int(time.time() * 1000)
     cursor = connection.execute(
         "UPDATE approvals SET consumed_by_goal_run_id=? "
         "WHERE approval_id=? "
@@ -320,6 +322,12 @@ def _consume_goal_approval(
         "AND target_type='goal' "
         "AND target_id=? "
         "AND single_use=1 "
+        "AND length(source_message_digest)=64 "
+        "AND source_message_digest NOT GLOB '*[^0-9a-f]*' "
+        "AND length(approval_text_digest)=64 "
+        "AND approval_text_digest NOT GLOB '*[^0-9a-f]*' "
+        "AND length(approval_hash)=64 "
+        "AND approval_hash NOT GLOB '*[^0-9a-f]*' "
         "AND expires_at_epoch_ms > ? "
         "AND EXISTS ("
         "SELECT 1 FROM goal_manifests gm "
@@ -343,7 +351,7 @@ def _consume_goal_approval(
             goal_run_id,
             run_id,
             goal_id,
-            created_at_epoch_ms,
+            trusted_now_epoch_ms,
             goal_id,
             predicate_plugin_hash,
             backend,
