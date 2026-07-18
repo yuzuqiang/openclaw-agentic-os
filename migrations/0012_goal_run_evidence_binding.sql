@@ -158,6 +158,53 @@ WHERE gr.evidence_hash IS NOT NULL
 
 DROP TABLE goal_run_evidence_binding_migration_guard;
 
+CREATE TEMP TABLE goal_run_required_approval_migration_guard (
+  violation INTEGER NOT NULL
+    CONSTRAINT goal_run_required_approval_legacy_invalid CHECK (violation=0)
+);
+
+INSERT INTO goal_run_required_approval_migration_guard(violation)
+SELECT 1
+FROM goal_runs gr
+JOIN goal_manifests gm
+  ON gm.goal_id=gr.goal_id
+ AND gm.predicate_plugin_hash=gr.predicate_plugin_hash
+ AND gm.backend=gr.backend
+LEFT JOIN approvals a
+  ON a.approval_id=gr.approval_id
+WHERE gm.approval_required=1
+  AND (
+    gr.run_id IS NULL
+    OR a.approval_id IS NULL
+    OR a.run_id<>gr.run_id
+    OR a.approved_action_type<>'goal_run'
+    OR a.target_type<>'goal'
+    OR a.target_id<>gr.goal_id
+    OR a.target_hash<>gm.manifest_hash
+    OR a.target_scope<>gm.owner
+    OR a.single_use<>1
+    OR a.consumed_by_goal_run_id<>gr.goal_run_id
+    OR a.approver=''
+    OR a.channel=''
+    OR a.approved_at=''
+    OR length(a.source_message_digest)<>64
+    OR a.source_message_digest GLOB '*[^0-9a-f]*'
+    OR length(a.approval_text_digest)<>64
+    OR a.approval_text_digest GLOB '*[^0-9a-f]*'
+    OR length(a.approval_hash)<>64
+    OR a.approval_hash GLOB '*[^0-9a-f]*'
+    OR a.expires_at_epoch_ms<=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+    OR CASE a.approved_risk_ceiling
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+    END < CASE gr.severity
+      WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+      WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+    END
+  );
+
+DROP TABLE goal_run_required_approval_migration_guard;
+
 CREATE TRIGGER goal_runs_validate_evidence_binding_insert
 AFTER INSERT ON goal_runs
 WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (

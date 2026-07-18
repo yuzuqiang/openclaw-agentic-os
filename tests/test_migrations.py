@@ -3977,6 +3977,55 @@ class MigrationTests(unittest.TestCase):
         ):
             apply_migrations(self.database)
 
+    def test_goal_run_required_approval_migration_rejects_invalid_legacy_rows(
+        self,
+    ) -> None:
+        self._apply_migrations_through(11, "through-11")
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES('run',"
+            "'prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+            "schema_hash,sandbox_required,sandbox_enforced,created_at) VALUES("
+            "'plugin','safe','1','agentic_predicate_inproc_v1','schema',0,1,'now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,"
+            "updated_at) VALUES('goal','owner','R1','manifest','plugin',"
+            "'agentic_predicate_inproc_v1',1,1,'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,approval_hash,consumed_by_goal_run_id,approved_at) "
+            "VALUES('legacy-approval','run','river','telegram','x','y','goal_run',"
+            "'goal','goal','manifest','owner','R1',1000,'not-a-sha',"
+            "'legacy-required','now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at,"
+            "created_at_epoch_ms) VALUES('legacy-required','goal','run','R1','open',"
+            "'plugin','agentic_predicate_inproc_v1',1,'legacy-approval','backdated',1)"
+        )
+        connection.commit()
+        connection.close()
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "goal_run_required_approval_legacy_invalid"
+        ):
+            apply_migrations(self.database)
+
     def test_goal_run_evidence_requires_artifact_digest_match(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
