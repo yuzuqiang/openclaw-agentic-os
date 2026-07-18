@@ -64,6 +64,41 @@ class GoalRunWriterTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row, ("run", self.evidence_hash))
 
+    def test_record_goal_run_consumes_required_approval_in_transaction(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "UPDATE goal_manifests SET approval_required=1 WHERE goal_id='goal'"
+            )
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,approved_at) VALUES("
+                "'goal-approval','run','river','telegram','goal-source','goal-text',"
+                "'goal_run','goal','goal','manifest','owner','R1',2000,"
+                "'goal-approval-hash','now')"
+            )
+        result = record_goal_run(
+            self.database,
+            goal_run_id="approval-bound",
+            goal_id="goal",
+            run_id="run",
+            severity="R1",
+            state="open",
+            predicate_plugin_hash="plugin",
+            approval_id="goal-approval",
+            created_at="now",
+            created_at_epoch_ms=1000,
+        )
+        self.assertEqual(result.goal_run_id, "approval-bound")
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT consumed_by_goal_run_id FROM approvals "
+                "WHERE approval_id='goal-approval'"
+            ).fetchone()
+        self.assertEqual(row, ("approval-bound",))
+
     def test_forged_goal_run_evidence_fails_without_partial_write(self) -> None:
         with self.assertRaisesRegex(
             GoalRunError, "same-run independent pass-gate evidence"

@@ -12,8 +12,8 @@ revalidation, and neither artifact proves production runtime behavior.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `0a62fb6e030f6454d9c1216b73fe6dedf5b6b752ac523df45e34333a327a5a8e`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `9ff1d56c27db698049c40ba737ae1cc08447b5d3f0ca6e83222f4dc597946d29`
-- Current migration manifest SHA-256: `79e9520b5199e66fc22a98b73e28f1905df0f6fe28707632809a3f51d429afd4`
+- Current latest migration SHA-256: `5bf14f296de4eb07fa34910d232b653d0192e4557e17523348337ac5aebc7158`
+- Current migration manifest SHA-256: `36602237117cbed094c82f2c1dbb248b384192619f30b26289781eb993a09190`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner integrations, trust promotion, crash fixtures, rollback drills, and production smoke tests
 

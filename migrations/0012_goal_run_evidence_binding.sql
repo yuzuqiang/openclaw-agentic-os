@@ -10,10 +10,6 @@ WHERE gr.evidence_hash IS NOT NULL
   AND NOT EXISTS (
     SELECT 1
     FROM evidence_hashes e
-    JOIN runs r
-      ON r.run_id=e.run_id
-    JOIN workflow_authority w
-      ON w.workflow=r.workflow
     JOIN judge_verifier_runs j
       ON j.verifier_run_id=e.verifier_run_id
      AND j.worker_run_id=e.run_id
@@ -49,14 +45,14 @@ WHERE gr.evidence_hash IS NOT NULL
     WHERE gr.run_id IS NOT NULL
       AND e.evidence_hash=gr.evidence_hash
       AND e.sha256=e.evidence_hash
+      AND length(e.evidence_hash)=64
+      AND e.evidence_hash NOT GLOB '*[^0-9a-f]*'
       AND e.run_id=gr.run_id
       AND e.producer_run_id=gr.run_id
       AND e.verifier_run_id IS NOT NULL
       AND e.gate_run_id IS NOT NULL
-      AND r.authority_mode NOT IN ('db_authority_canary','db_authority')
-      AND w.mode NOT IN ('db_authority_canary','db_authority')
-      AND g.run_authority_mode NOT IN ('db_authority_canary','db_authority')
-      AND g.workflow_authority_mode NOT IN ('db_authority_canary','db_authority')
+      AND g.run_authority_mode='file_authority'
+      AND g.workflow_authority_mode='file_authority'
       AND g.decision='pass'
       AND g.requires_same_run=1
       AND t.approval_required=1
@@ -81,10 +77,6 @@ AFTER INSERT ON goal_runs
 WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
   SELECT 1
   FROM evidence_hashes e
-  JOIN runs r
-    ON r.run_id=e.run_id
-  JOIN workflow_authority w
-    ON w.workflow=r.workflow
   JOIN judge_verifier_runs j
     ON j.verifier_run_id=e.verifier_run_id
    AND j.worker_run_id=e.run_id
@@ -120,14 +112,14 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
   WHERE NEW.run_id IS NOT NULL
     AND e.evidence_hash=NEW.evidence_hash
     AND e.sha256=e.evidence_hash
+    AND length(e.evidence_hash)=64
+    AND e.evidence_hash NOT GLOB '*[^0-9a-f]*'
     AND e.run_id=NEW.run_id
     AND e.producer_run_id=NEW.run_id
     AND e.verifier_run_id IS NOT NULL
     AND e.gate_run_id IS NOT NULL
-    AND r.authority_mode NOT IN ('db_authority_canary','db_authority')
-    AND w.mode NOT IN ('db_authority_canary','db_authority')
-    AND g.run_authority_mode NOT IN ('db_authority_canary','db_authority')
-    AND g.workflow_authority_mode NOT IN ('db_authority_canary','db_authority')
+    AND g.run_authority_mode='file_authority'
+    AND g.workflow_authority_mode='file_authority'
     AND g.decision='pass'
     AND g.requires_same_run=1
     AND t.approval_required=1
@@ -153,10 +145,6 @@ AFTER UPDATE OF run_id, evidence_hash ON goal_runs
 WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
   SELECT 1
   FROM evidence_hashes e
-  JOIN runs r
-    ON r.run_id=e.run_id
-  JOIN workflow_authority w
-    ON w.workflow=r.workflow
   JOIN judge_verifier_runs j
     ON j.verifier_run_id=e.verifier_run_id
    AND j.worker_run_id=e.run_id
@@ -192,14 +180,14 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
   WHERE NEW.run_id IS NOT NULL
     AND e.evidence_hash=NEW.evidence_hash
     AND e.sha256=e.evidence_hash
+    AND length(e.evidence_hash)=64
+    AND e.evidence_hash NOT GLOB '*[^0-9a-f]*'
     AND e.run_id=NEW.run_id
     AND e.producer_run_id=NEW.run_id
     AND e.verifier_run_id IS NOT NULL
     AND e.gate_run_id IS NOT NULL
-    AND r.authority_mode NOT IN ('db_authority_canary','db_authority')
-    AND w.mode NOT IN ('db_authority_canary','db_authority')
-    AND g.run_authority_mode NOT IN ('db_authority_canary','db_authority')
-    AND g.workflow_authority_mode NOT IN ('db_authority_canary','db_authority')
+    AND g.run_authority_mode='file_authority'
+    AND g.workflow_authority_mode='file_authority'
     AND g.decision='pass'
     AND g.requires_same_run=1
     AND t.approval_required=1
@@ -233,4 +221,11 @@ WHEN OLD.evidence_hash IS NOT NULL
   )
 BEGIN
   SELECT RAISE(ABORT,'goal run evidence binding is immutable');
+END;
+
+CREATE TRIGGER goal_runs_freeze_evidence_binding_delete
+BEFORE DELETE ON goal_runs
+WHEN OLD.evidence_hash IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT,'bound goal run evidence cannot be deleted');
 END;

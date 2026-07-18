@@ -3895,6 +3895,8 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE goal_runs SET goal_id='other-goal' WHERE goal_run_id='bound'"
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "cannot be deleted"):
+            connection.execute("DELETE FROM goal_runs WHERE goal_run_id='bound'")
 
     def test_goal_run_evidence_migration_rejects_invalid_legacy_rows(self) -> None:
         self._apply_migrations_through(11, "through-11")
@@ -3946,6 +3948,27 @@ class MigrationTests(unittest.TestCase):
                 (hashlib.sha256(b"pass-evidence").hexdigest(),),
             )
 
+    def test_goal_run_evidence_requires_sha256_shape(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(
+            connection,
+            evidence_hash="not-a-sha",
+            evidence_sha256="not-a-sha",
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "same-run independent pass-gate evidence"
+        ):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+                "created_at,created_at_epoch_ms) VALUES('malformed-sha','goal','run',"
+                "'R1','open','plugin','agentic_predicate_inproc_v1',1,"
+                "'not-a-sha','now',1000)"
+            )
+
     def test_goal_run_evidence_rejects_database_authority_gate_snapshot(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -3965,6 +3988,68 @@ class MigrationTests(unittest.TestCase):
                 "'R1','open','plugin','agentic_predicate_inproc_v1',1,?,'now',1000)",
                 (hashlib.sha256(b"pass-evidence").hexdigest(),),
             )
+
+    def test_goal_run_evidence_rejects_malformed_gate_authority_snapshot(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(
+            connection,
+            gate_run_authority_mode="restored-file-later",
+            gate_workflow_authority_mode="file_authority",
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "same-run independent pass-gate evidence"
+        ):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+                "created_at,created_at_epoch_ms) VALUES('malformed-authority','goal',"
+                "'run','R1','open','plugin','agentic_predicate_inproc_v1',1,?,"
+                "'now',1000)",
+                (hashlib.sha256(b"pass-evidence").hexdigest(),),
+            )
+
+    def test_goal_run_evidence_uses_gate_time_authority_snapshot_after_cutover(
+        self,
+    ) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(connection)
+        connection.execute(
+            "UPDATE runs SET state='finalized',finalized_at='now',"
+            "finalized_at_epoch_ms=1001 WHERE run_id IN ('run','other-run')"
+        )
+        connection.execute(
+            "UPDATE workflow_authority SET mode='db_authority_canary',"
+            "cutover_approved_by='river',cutover_evidence_hash=?,"
+            "rollback_deadline='deadline',last_parity_audit_hash=?,"
+            "open_file_authority_runs=0 WHERE workflow='w'",
+            (
+                hashlib.sha256(b"cutover").hexdigest(),
+                hashlib.sha256(b"parity").hexdigest(),
+            ),
+        )
+        connection.execute(
+            "UPDATE runs SET authority_mode='db_authority_canary' "
+            "WHERE run_id='run'"
+        )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+            "created_at,created_at_epoch_ms) VALUES('after-cutover','goal','run',"
+            "'R1','open','plugin','agentic_predicate_inproc_v1',1,?,'now',1000)",
+            (hashlib.sha256(b"pass-evidence").hexdigest(),),
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT evidence_hash FROM goal_runs WHERE goal_run_id='after-cutover'"
+            ).fetchone(),
+            (hashlib.sha256(b"pass-evidence").hexdigest(),),
+        )
 
     def test_goal_run_evidence_requires_exact_unexpired_transition_approval(self) -> None:
         apply_migrations(self.database)
@@ -3995,11 +4080,16 @@ class MigrationTests(unittest.TestCase):
         connection: sqlite3.Connection,
         *,
         authority_mode: str = "file_authority",
+        gate_run_authority_mode: str | None = None,
+        gate_workflow_authority_mode: str | None = None,
+        evidence_hash: str | None = None,
         evidence_sha256: str | None = None,
         transition_approval_required: bool = True,
         approval_expires_at_epoch_ms: int = 2000,
     ) -> None:
-        evidence_hash = hashlib.sha256(b"pass-evidence").hexdigest()
+        evidence_hash = evidence_hash or hashlib.sha256(b"pass-evidence").hexdigest()
+        gate_run_authority_mode = gate_run_authority_mode or authority_mode
+        gate_workflow_authority_mode = gate_workflow_authority_mode or authority_mode
         evidence_sha256 = evidence_sha256 or evidence_hash
         target_hash = hashlib.sha256(b"target").hexdigest()
         if authority_mode in ("db_authority_canary", "db_authority"):
@@ -4080,8 +4170,8 @@ class MigrationTests(unittest.TestCase):
                     hashlib.sha256(b"gate-query").hexdigest(),
                     hashlib.sha256(b"migration").hexdigest(),
                     evidence_hash,
-                    authority_mode,
-                    authority_mode,
+                    gate_run_authority_mode,
+                    gate_workflow_authority_mode,
                 ),
             )
             connection.execute(

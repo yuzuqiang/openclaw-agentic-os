@@ -83,6 +83,12 @@ def record_goal_run(
                 if run_id is None:
                     raise GoalRunError("goal run evidence requires a bound run_id")
                 _assert_evidence_binding(connection, run_id=run_id, evidence_hash=evidence_hash)
+            if approval_id is not None:
+                _consume_goal_approval(
+                    connection,
+                    approval_id=approval_id,
+                    goal_run_id=goal_run_id,
+                )
             connection.execute(
                 "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
                 "triaged_at,predicate_plugin_hash,backend,sandbox_enforced,"
@@ -238,8 +244,6 @@ def _assert_evidence_binding(
 ) -> None:
     row = connection.execute(
         "SELECT e.evidence_hash FROM evidence_hashes e "
-        "JOIN runs r ON r.run_id=e.run_id "
-        "JOIN workflow_authority w ON w.workflow=r.workflow "
         "JOIN judge_verifier_runs j ON j.verifier_run_id=e.verifier_run_id "
         " AND j.worker_run_id=e.run_id AND j.evidence_hash=e.evidence_hash "
         "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
@@ -261,12 +265,12 @@ def _assert_evidence_binding(
         " AND a.consumed_by_transition_id=t.transition_id "
         " AND a.consumed_by_gate_run_id=g.gate_run_id "
         "WHERE e.evidence_hash=? AND e.sha256=e.evidence_hash "
+        "AND length(e.evidence_hash)=64 "
+        "AND e.evidence_hash NOT GLOB '*[^0-9a-f]*' "
         "AND e.run_id=? AND e.producer_run_id=? "
         "AND e.verifier_run_id IS NOT NULL AND e.gate_run_id IS NOT NULL "
-        "AND r.authority_mode NOT IN ('db_authority_canary','db_authority') "
-        "AND w.mode NOT IN ('db_authority_canary','db_authority') "
-        "AND g.run_authority_mode NOT IN ('db_authority_canary','db_authority') "
-        "AND g.workflow_authority_mode NOT IN ('db_authority_canary','db_authority') "
+        "AND g.run_authority_mode='file_authority' "
+        "AND g.workflow_authority_mode='file_authority' "
         "AND g.decision='pass' AND g.requires_same_run=1 "
         "AND t.approval_required=1 "
         "AND j.independence_class='independent' "
@@ -285,6 +289,21 @@ def _assert_evidence_binding(
         raise GoalRunError(
             "goal run evidence requires same-run independent pass-gate evidence"
         )
+
+
+def _consume_goal_approval(
+    connection: sqlite3.Connection, *, approval_id: str, goal_run_id: str
+) -> None:
+    cursor = connection.execute(
+        "UPDATE approvals SET consumed_by_goal_run_id=? "
+        "WHERE approval_id=? "
+        "AND consumed_by_transition_id IS NULL "
+        "AND consumed_by_gate_run_id IS NULL "
+        "AND (consumed_by_goal_run_id IS NULL OR consumed_by_goal_run_id=?)",
+        (goal_run_id, approval_id, goal_run_id),
+    )
+    if cursor.rowcount != 1:
+        raise GoalRunError("goal run approval could not be consumed")
 
 
 def _required_text(name: str, value: object) -> str:
