@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .privacy import assert_privacy_preflight
+from .predicates import (
+    MAX_FILE_EVIDENCE_BYTES,
+    PredicateContractError,
+    _is_credential_path_denied,
+    _reject_symlink_evidence_path,
+)
 from .slo_contracts import (
     SLO_QUERY_COUNT,
     slo_query_contracts_for_schema_version,
@@ -122,6 +128,79 @@ def _trust_binding_hash(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _evidence_snapshot_current(
+    path: object,
+    sha256: object,
+    size_bytes: object,
+    content_type: object,
+    redaction_status: object,
+    captured_at: object,
+) -> int:
+    if not all(
+        isinstance(item, str) and item
+        for item in (path, sha256, content_type, redaction_status, captured_at)
+    ):
+        return 0
+    if len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+        return 0
+    if type(size_bytes) is not int or size_bytes < 0:
+        return 0
+    repo_root = repository_root().resolve()
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        try:
+            relative = candidate.relative_to(repo_root)
+        except ValueError:
+            return 0
+    else:
+        relative = candidate
+        candidate = repo_root / relative
+    if ".." in relative.parts or not relative.parts:
+        return 0
+    if _is_credential_path_denied(path) or _is_credential_path_denied(
+        relative.as_posix()
+    ):
+        return 0
+    try:
+        _reject_symlink_evidence_path(repo_root, relative)
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(repo_root)
+    except (OSError, PredicateContractError):
+        return 0
+    except ValueError:
+        return 0
+    if _is_credential_path_denied(resolved.relative_to(repo_root).as_posix()):
+        return 0
+    digest = hashlib.sha256()
+    fd: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(resolved, flags)
+        stat_result = os.fstat(fd)
+        if stat_result.st_size > MAX_FILE_EVIDENCE_BYTES:
+            return 0
+        if stat_result.st_size != size_bytes:
+            return 0
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            total_read = 0
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total_read += len(chunk)
+                if total_read > MAX_FILE_EVIDENCE_BYTES:
+                    return 0
+                digest.update(chunk)
+    except OSError:
+        return 0
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if not stat.S_ISREG(stat_result.st_mode):
+        return 0
+    if int(getattr(stat_result, "st_nlink", 1) or 1) > 1:
+        return 0
+    return 1 if digest.hexdigest() == sha256 else 0
+
+
 def _register_migration_functions(connection: sqlite3.Connection) -> None:
     connection.create_function(
         "agentic_shadow_projection_id",
@@ -140,6 +219,11 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         8,
         _trust_binding_hash,
         deterministic=True,
+    )
+    connection.create_function(
+        "agentic_evidence_snapshot_current",
+        6,
+        _evidence_snapshot_current,
     )
 
 

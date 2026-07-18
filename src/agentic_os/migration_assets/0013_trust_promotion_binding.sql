@@ -31,7 +31,7 @@ ALTER TABLE trust_observations ADD COLUMN selected_cost_registry_id TEXT REFEREN
 ALTER TABLE trust_observations ADD COLUMN selected_cost_registry_hash TEXT;
 ALTER TABLE trust_observations ADD COLUMN cost_confidence TEXT;
 
-CREATE INDEX trust_observations_run_goal_idx
+CREATE UNIQUE INDEX trust_observations_run_goal_idx
 ON trust_observations(run_id,goal_run_id,evidence_hash)
 WHERE invalidated_at IS NULL;
 
@@ -41,6 +41,12 @@ SELECT
   gr.goal_run_id,
   e.evidence_hash,
   e.run_id AS evidence_run_id,
+  e.path AS evidence_path,
+  e.sha256 AS evidence_sha256,
+  e.size_bytes AS evidence_size_bytes,
+  e.content_type AS evidence_content_type,
+  e.redaction_status AS evidence_redaction_status,
+  e.captured_at AS evidence_captured_at,
   e.verifier_run_id,
   e.gate_run_id,
   g.transition_id,
@@ -208,6 +214,16 @@ WHERE gr.run_id IS NOT NULL
           AND sa.evidence_run_id=e.run_id
           AND sa.verifier_run_id=e.verifier_run_id
           AND sa.gate_run_id=e.gate_run_id
+          AND sa.run_at_epoch_ms >= COALESCE((
+            SELECT MAX(be.created_at_epoch_ms)
+            FROM budget_events be
+            WHERE be.run_id=r.run_id
+          ),0)
+          AND sa.run_at_epoch_ms >= COALESCE((
+            SELECT MAX(bs.created_at_epoch_ms)
+            FROM budget_settlements bs
+            WHERE bs.run_id=r.run_id
+          ),0)
           AND sa.slo_audit_id=(
             SELECT latest.slo_audit_id
             FROM slo_audits latest
@@ -251,6 +267,14 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
     AND b.usage_confidence=NEW.usage_confidence
     AND b.current_slo_query_count=NEW.blocking_slo_query_count
     AND b.current_slo_query_count=NEW.blocking_slo_pass_audit_count
+    AND agentic_evidence_snapshot_current(
+      b.evidence_path,
+      b.evidence_sha256,
+      b.evidence_size_bytes,
+      b.evidence_content_type,
+      b.evidence_redaction_status,
+      b.evidence_captured_at
+    )=1
     AND NEW.scope<>''
     AND NEW.severity<>''
     AND NEW.status='promoted'
@@ -287,6 +311,7 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
       NEW.migration_sha256,
       NEW.blocking_slo_query_count
     )
+    AND NEW.effective_group_id=NEW.blocking_slo_bundle_hash
 )
 BEGIN
   SELECT RAISE(ABORT,'trust promotion requires complete bound evidence');
@@ -419,6 +444,107 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
+END;
+
+CREATE TRIGGER slo_audits_preserve_active_trust_insert
+BEFORE INSERT ON slo_audits
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND trust.schema_version=NEW.schema_version
+    AND trust.migration_sha256=NEW.migration_sha256
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before SLO audit changes');
+END;
+
+CREATE TRIGGER slo_audits_preserve_active_trust_update
+BEFORE UPDATE ON slo_audits
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      (trust.schema_version=OLD.schema_version
+       AND trust.migration_sha256=OLD.migration_sha256)
+      OR
+      (trust.schema_version=NEW.schema_version
+       AND trust.migration_sha256=NEW.migration_sha256)
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before SLO audit changes');
+END;
+
+CREATE TRIGGER slo_audits_preserve_active_trust_delete
+BEFORE DELETE ON slo_audits
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND trust.schema_version=OLD.schema_version
+    AND trust.migration_sha256=OLD.migration_sha256
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before SLO audit changes');
+END;
+
+CREATE TRIGGER schema_migrations_preserve_active_trust_insert
+BEFORE INSERT ON schema_migrations
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before schema changes');
+END;
+
+CREATE TRIGGER schema_migrations_preserve_active_trust_update
+BEFORE UPDATE ON schema_migrations
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before schema changes');
+END;
+
+CREATE TRIGGER schema_migrations_preserve_active_trust_delete
+BEFORE DELETE ON schema_migrations
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before schema changes');
+END;
+
+CREATE TRIGGER slo_queries_preserve_active_trust_insert
+BEFORE INSERT ON slo_queries
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before SLO registry changes');
+END;
+
+CREATE TRIGGER slo_queries_preserve_active_trust_update
+BEFORE UPDATE ON slo_queries
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before SLO registry changes');
+END;
+
+CREATE TRIGGER slo_queries_preserve_active_trust_delete
+BEFORE DELETE ON slo_queries
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before SLO registry changes');
 END;
 
 CREATE TRIGGER trust_observations_validate_bound_reactivate_update

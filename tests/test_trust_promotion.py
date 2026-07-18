@@ -113,7 +113,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
                             f"UPDATE run_budgets SET {column}=? WHERE run_id='run'",
                             (value,),
                         )
-                self._assert_promotion_fails_without_write("complete bound evidence")
+                self._assert_promotion_fails_without_write(
+                    "current blocking SLO pass|complete bound evidence"
+                )
 
     def test_unknown_or_estimated_budget_event_confidence_fails_without_write(self) -> None:
         for usage_confidence, cost_confidence in (
@@ -156,7 +158,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 if cost_confidence == "unknown":
                     self._promote(observation_id="schema-blocked-unknown-cost")
                 else:
-                    self._assert_promotion_fails_without_write("complete bound evidence")
+                    self._assert_promotion_fails_without_write(
+                        "current blocking SLO pass|complete bound evidence"
+                    )
 
     def test_unknown_or_estimated_final_settlement_confidence_fails_without_write(self) -> None:
         for usage_confidence, cost_confidence in (
@@ -179,11 +183,15 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         usage_confidence=usage_confidence,
                         cost_confidence=cost_confidence,
                     )
-                    self._assert_promotion_fails_without_write("complete bound evidence")
+                    self._assert_promotion_fails_without_write(
+                        "current blocking SLO pass|complete bound evidence"
+                    )
 
     def test_estimated_model_cost_registry_confidence_fails_without_write(self) -> None:
         self._seed_valid_fixture(cost_confidence="estimated")
-        self._assert_promotion_fails_without_write("complete bound evidence")
+        self._assert_promotion_fails_without_write(
+            "current blocking SLO pass|complete bound evidence"
+        )
 
     def test_missing_or_stale_slo_audit_fails_without_write(self) -> None:
         for statement in (
@@ -204,7 +212,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
 
         self._reset_database()
         self._seed_valid_fixture(seed_slo_audits=False)
-        self._assert_promotion_fails_without_write("complete bound evidence")
+        self._assert_promotion_fails_without_write(
+            "current blocking SLO pass|complete bound evidence"
+        )
 
     def test_later_failing_slo_audit_blocks_stale_pass_promotion(self) -> None:
         self._seed_valid_fixture()
@@ -229,7 +239,31 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 ),
             )
 
-        self._assert_promotion_fails_without_write("complete bound evidence")
+        self._assert_promotion_fails_without_write(
+            "current blocking SLO pass|complete bound evidence"
+        )
+
+    def test_current_slo_failure_after_cached_audits_blocks_promotion(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            latest_epoch = connection.execute(
+                "SELECT MAX(run_at_epoch_ms) FROM slo_audits"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('post-audit-consume',"
+                "'post-audit-consume-idem','post-audit-consume-dedupe',1,'run',"
+                "'transition','provider','model','endpoint','capability','cost-row',"
+                "'effective','cost-hash','known','consume',999,999,'known','test',"
+                "'now',?)",
+                (int(latest_epoch) + 1000,),
+            )
+
+        self._assert_promotion_fails_without_write("current blocking SLO pass")
 
     def test_trust_scope_and_severity_must_match_bound_evidence(self) -> None:
         for field, value in (("scope", "global"), ("severity", "R2")):
@@ -239,6 +273,24 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 self._assert_promotion_fails_without_write(
                     "complete bound evidence", **{field: value}
                 )
+
+    def test_effective_group_must_match_bound_evidence(self) -> None:
+        self._seed_valid_fixture()
+        with self.assertRaisesRegex(TrustPromotionError, "effective_group_id"):
+            promote_trust(
+                self.database,
+                observation_id="wrong-group",
+                scope="workflow",
+                severity="R1",
+                effective_group_id="workflow:group",
+                run_id="run",
+                goal_run_id="goal-run",
+                evidence_hash=self.evidence_hash,
+                bounded_at="bounded-now",
+                created_at="created-now",
+            )
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(self._trust_count(connection), 0)
 
     def test_active_trust_can_only_be_invalidated_fail_closed(self) -> None:
         self._seed_valid_fixture()
@@ -264,7 +316,70 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 connection.execute(
                     "UPDATE trust_observations SET invalidated_at=NULL "
                     "WHERE observation_id='trust'"
+            )
+
+    def test_post_promotion_slo_schema_and_registry_changes_require_invalidation(self) -> None:
+        self._seed_valid_fixture()
+        self._promote()
+        schema_version, migration_sha256 = self._current_schema_identity()
+        contract = SLO_QUERY_CONTRACTS[0]
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            latest_epoch = connection.execute(
+                "SELECT MAX(run_at_epoch_ms) FROM slo_audits"
+            ).fetchone()[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "SLO audit changes"):
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,run_at,run_at_epoch_ms) VALUES("
+                    "'post-trust-slo-fail',?,?,?,?,1,'fail','fail','fail','later',?)",
+                    (
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        int(latest_epoch) + 1000,
+                    ),
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "schema changes"):
+                connection.execute(
+                    "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
+                    "VALUES(99,'future',?,'now')",
+                    (_sha("future-migration"),),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "SLO registry changes"):
+                connection.execute(
+                    "INSERT INTO slo_queries(query_name,schema_version,migration_sha256,"
+                    "query_hash,sql_text,empty_db_expected_status,"
+                    "fixture_db_expected_status,created_at) VALUES("
+                    "'future-slo',?,?,?,?,?,?,?)",
+                    (
+                        schema_version,
+                        migration_sha256,
+                        _sha("future-slo"),
+                        "SELECT 1 WHERE 0",
+                        "pass",
+                        "pass",
+                        "now",
+                    ),
+                )
+            connection.execute(
+                "UPDATE trust_observations SET invalidated_at='invalid-now' "
+                "WHERE observation_id='trust'"
+            )
+            connection.execute(
+                "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                "fixture_db_status,run_at,run_at_epoch_ms) VALUES("
+                "'post-invalidated-slo-fail',?,?,?,?,1,'fail','fail','fail','later',?)",
+                (
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    int(latest_epoch) + 1000,
+                ),
+            )
 
     def test_post_promotion_budget_evidence_changes_require_invalidation(self) -> None:
         self._seed_valid_fixture()
@@ -407,6 +522,105 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         binding["current_slo_query_count"],
                         binding["current_slo_query_count"],
                         "f" * 64,
+                        binding["clock_context_id"],
+                        binding["gate_clock_epoch_ms"],
+                        binding["trusted_clock_source_hash"],
+                        binding["run_authority_mode"],
+                        binding["workflow_authority_mode"],
+                        binding["selected_cost_registry_id"],
+                        binding["selected_cost_registry_hash"],
+                        "known",
+                    ),
+                )
+            bundle_hash = _trust_binding_hash(
+                "run",
+                "goal-run",
+                self.evidence_hash,
+                binding["verifier_run_id"],
+                binding["gate_run_id"],
+                binding["schema_version"],
+                binding["migration_sha256"],
+                binding["current_slo_query_count"],
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                connection.execute(
+                    "INSERT INTO trust_observations(observation_id,scope,severity,status,"
+                    "effective_group_id,verifier_run_id,gate_run_id,usage_confidence,"
+                    "bounded_at,created_at,run_id,goal_run_id,evidence_hash,evidence_run_id,"
+                    "transition_id,approval_id,approval_hash,schema_version,migration_sha256,"
+                    "blocking_slo_query_count,blocking_slo_pass_audit_count,"
+                    "blocking_slo_bundle_hash,clock_context_id,gate_clock_epoch_ms,"
+                    "trusted_clock_source_hash,run_authority_mode,workflow_authority_mode,"
+                    "selected_cost_registry_id,selected_cost_registry_hash,cost_confidence) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "direct-wrong-group",
+                        "workflow",
+                        "R1",
+                        "promoted",
+                        "other-group",
+                        binding["verifier_run_id"],
+                        binding["gate_run_id"],
+                        "known",
+                        "now",
+                        "now",
+                        "run",
+                        "goal-run",
+                        self.evidence_hash,
+                        "run",
+                        binding["transition_id"],
+                        binding["approval_id"],
+                        binding["approval_hash"],
+                        binding["schema_version"],
+                        binding["migration_sha256"],
+                        binding["current_slo_query_count"],
+                        binding["current_slo_query_count"],
+                        bundle_hash,
+                        binding["clock_context_id"],
+                        binding["gate_clock_epoch_ms"],
+                        binding["trusted_clock_source_hash"],
+                        binding["run_authority_mode"],
+                        binding["workflow_authority_mode"],
+                        binding["selected_cost_registry_id"],
+                        binding["selected_cost_registry_hash"],
+                        "known",
+                    ),
+                )
+            self.evidence_path.write_bytes(b'{"trust":"tampered"}\n')
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                connection.execute(
+                    "INSERT INTO trust_observations(observation_id,scope,severity,status,"
+                    "effective_group_id,verifier_run_id,gate_run_id,usage_confidence,"
+                    "bounded_at,created_at,run_id,goal_run_id,evidence_hash,evidence_run_id,"
+                    "transition_id,approval_id,approval_hash,schema_version,migration_sha256,"
+                    "blocking_slo_query_count,blocking_slo_pass_audit_count,"
+                    "blocking_slo_bundle_hash,clock_context_id,gate_clock_epoch_ms,"
+                    "trusted_clock_source_hash,run_authority_mode,workflow_authority_mode,"
+                    "selected_cost_registry_id,selected_cost_registry_hash,cost_confidence) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "direct-stale-artifact",
+                        "workflow",
+                        "R1",
+                        "promoted",
+                        bundle_hash,
+                        binding["verifier_run_id"],
+                        binding["gate_run_id"],
+                        "known",
+                        "now",
+                        "now",
+                        "run",
+                        "goal-run",
+                        self.evidence_hash,
+                        "run",
+                        binding["transition_id"],
+                        binding["approval_id"],
+                        binding["approval_hash"],
+                        binding["schema_version"],
+                        binding["migration_sha256"],
+                        binding["current_slo_query_count"],
+                        binding["current_slo_query_count"],
+                        bundle_hash,
                         binding["clock_context_id"],
                         binding["gate_clock_epoch_ms"],
                         binding["trusted_clock_source_hash"],
@@ -733,12 +947,25 @@ class TrustPromotionWriterTests(unittest.TestCase):
             observation_id=observation_id,
             scope=scope,
             severity=severity,
-            effective_group_id="workflow:group",
+            effective_group_id=self._expected_effective_group_id(),
             run_id="run",
             goal_run_id="goal-run",
             evidence_hash=self.evidence_hash,
             bounded_at="bounded-now",
             created_at="created-now",
+        )
+
+    def _expected_effective_group_id(self) -> str:
+        schema_version, migration_sha256 = self._current_schema_identity()
+        return _trust_binding_hash(
+            "run",
+            "goal-run",
+            self.evidence_hash,
+            "verifier",
+            "gate",
+            schema_version,
+            migration_sha256,
+            len(SLO_QUERY_CONTRACTS),
         )
 
     def _assert_promotion_fails_without_write(self, message: str, **overrides: str) -> None:

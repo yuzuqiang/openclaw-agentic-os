@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `423bb603321e60d2f9e1e1aa7b2db7caa543b6d914cf847c55bfe97da4ffccad`
+- Current design artifact SHA-256: `e957814a5eca8e0da4ff8fada388038483649b4bb1fd52fbd4e8d9f83b8e5d57`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `2e4d1e7e5ae14477d83e34fae2832f23c0b8cf5eb37552e15b9c6647d7c53a4f`
-- Current migration manifest SHA-256: `9c16042686662f904772e7b5ccbd934859c79da4cfcc4c15be566f93309fe2b7`
+- Current latest migration SHA-256: `abb8fa1ae0fdcd9c751275f3435e1065bc8f0052d7378a1b76a19beb49d92f95`
+- Current migration manifest SHA-256: `f2a1c7a94c621e7bc4befb0f39d0e25813d94c2f9ba1a426038e8d308d6374b7`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -183,16 +183,19 @@ The fifth P1.2 slice lives in `agentic_os.trust_promotion` plus migration v13.
 It records active `trust_observations` only through a local-only `BEGIN
 IMMEDIATE` writer after the database proves same-run goal evidence, an
 approval-bound PASS gate, independent verifier proof, trusted gate clock,
-gate-time file-authority snapshots, complete current SLO PASS audit rows, and
-known-only usage/cost across the selected run budget, selected model cost row,
-non-human budget events, and final settlements. Migration v13 aborts on active
+gate-time file-authority snapshots, a current under-lock blocking-SLO recheck,
+complete current SLO PASS audit rows, and known-only usage/cost across the
+selected run budget, selected model cost row, non-human budget events, and final
+settlements. Migration v13 aborts on active
 legacy unbound trust rows, adds exact binding columns and a deterministic
 `agentic_trust_binding_hash(...)`, and rejects direct active inserts unless
 those fields match the bound evidence view and the requested scope/severity match
-the proven run/goal risk boundary. Unknown or estimated usage/cost, self-verifier
-evidence, wrong-run evidence, stale or missing latest SLO audits,
-database-authority snapshots, changed evidence artifacts, malformed binding
-hashes, post-promotion budget evidence changes before invalidation, and
+the proven run/goal risk boundary, the effective group equals the binding hash,
+and the registered SQL function can re-hash the evidence artifact. Unknown or
+estimated usage/cost, self-verifier evidence, wrong-run evidence, stale or
+missing latest SLO audits, database-authority snapshots, changed evidence
+artifacts, malformed binding hashes, post-promotion budget/SLO/schema/SLO
+registry evidence changes before invalidation, duplicate active bindings, and
 active-row rewrites fail closed without authoritative trust writes. Active rows
 can still be invalidated by setting `invalidated_at`, but cannot otherwise be
 changed or reactivated.

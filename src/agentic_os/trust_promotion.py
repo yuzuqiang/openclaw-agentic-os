@@ -19,6 +19,7 @@ from .pass_gates import (
     _connect,
     _validate_evidence,
 )
+from .slo_contracts import SLO_QUERY_CONTRACTS
 
 
 class TrustPromotionError(RuntimeError):
@@ -80,6 +81,7 @@ def promote_trust(
         connection.execute("BEGIN IMMEDIATE")
         try:
             _verify_schema_identity(connection)
+            _verify_current_blocking_slos(connection)
             binding = _bound_evidence(
                 connection,
                 run_id=run_id,
@@ -105,6 +107,8 @@ def promote_trust(
             )
             if not bundle_hash:
                 raise TrustPromotionError("trust promotion binding hash could not be derived")
+            if effective_group_id != bundle_hash:
+                raise TrustPromotionError("effective_group_id must match bound evidence")
             connection.execute(
                 "INSERT INTO trust_observations("
                 "observation_id,scope,severity,status,effective_group_id,"
@@ -180,6 +184,16 @@ def _verify_schema_identity(connection: sqlite3.Connection) -> None:
         verify_database_connection(connection)
     except (MigrationError, sqlite3.Error) as exc:
         raise TrustPromotionError("trust promotion database schema verification failed") from exc
+
+
+def _verify_current_blocking_slos(connection: sqlite3.Connection) -> None:
+    for contract in SLO_QUERY_CONTRACTS:
+        try:
+            row = connection.execute(contract.sql_text).fetchone()
+        except sqlite3.Error as exc:
+            raise TrustPromotionError("trust promotion SLO recheck failed") from exc
+        if row is not None:
+            raise TrustPromotionError("trust promotion requires current blocking SLO pass")
 
 
 def _bound_evidence(
