@@ -70,6 +70,13 @@ SELECT
    WHERE current_q.schema_version=m.version
      AND current_q.migration_sha256=m.sha256) AS current_slo_query_count
 FROM goal_runs gr
+JOIN goal_manifests gm
+  ON gm.goal_id=gr.goal_id
+ AND gm.predicate_plugin_hash=gr.predicate_plugin_hash
+ AND gm.backend=gr.backend
+JOIN predicate_plugins p
+  ON p.predicate_plugin_hash=gr.predicate_plugin_hash
+ AND p.backend=gr.backend
 JOIN evidence_hashes e
   ON e.evidence_hash=gr.evidence_hash
  AND e.sha256=e.evidence_hash
@@ -137,9 +144,17 @@ WHERE gr.run_id IS NOT NULL
   AND g.workflow_authority_mode='file_authority'
   AND g.run_authority_mode=r.authority_mode
   AND g.workflow_authority_mode=w.mode
+  AND gm.enabled=1
+  AND gm.severity=gr.severity
+  AND gm.manifest_hash<>''
+  AND p.schema_hash<>''
+  AND p.disabled_at IS NULL
+  AND p.sandbox_enforced=gr.sandbox_enforced
+  AND (p.sandbox_required=0 OR gr.sandbox_enforced=1)
   AND g.decision='pass'
   AND g.requires_same_run=1
   AND m.version=(SELECT MAX(version) FROM schema_migrations)
+  AND m.version=13
   AND g.completed_at_epoch_ms=c.now_epoch_ms
   AND c.bound_at_epoch_ms=c.now_epoch_ms
   AND c.consumed_at_epoch_ms=c.now_epoch_ms
@@ -265,6 +280,8 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
     AND b.selected_cost_confidence=NEW.cost_confidence
     AND b.cost_confidence=NEW.cost_confidence
     AND b.usage_confidence=NEW.usage_confidence
+    AND b.schema_version=13
+    AND b.current_slo_query_count=30
     AND b.current_slo_query_count=NEW.blocking_slo_query_count
     AND b.current_slo_query_count=NEW.blocking_slo_pass_audit_count
     AND agentic_evidence_snapshot_current(
@@ -284,9 +301,9 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
     AND NEW.bounded_at IS NOT NULL
     AND NEW.bounded_at<>''
     AND typeof(NEW.schema_version)='integer'
-    AND NEW.schema_version>0
+    AND NEW.schema_version=13
     AND typeof(NEW.blocking_slo_query_count)='integer'
-    AND NEW.blocking_slo_query_count>0
+    AND NEW.blocking_slo_query_count=30
     AND typeof(NEW.blocking_slo_pass_audit_count)='integer'
     AND NEW.blocking_slo_pass_audit_count=NEW.blocking_slo_query_count
     AND typeof(NEW.gate_clock_epoch_ms)='integer'
@@ -446,6 +463,249 @@ BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
 END;
 
+CREATE TRIGGER external_rpc_intents_preserve_active_trust_insert
+BEFORE INSERT ON external_rpc_intents
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_active_trust_update
+BEFORE UPDATE ON external_rpc_intents
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run
+    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
+END;
+
+CREATE TRIGGER external_rpc_intents_preserve_active_trust_delete
+BEFORE DELETE ON external_rpc_intents
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
+END;
+
+CREATE TRIGGER leases_preserve_active_trust_insert
+BEFORE INSERT ON leases
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
+END;
+
+CREATE TRIGGER leases_preserve_active_trust_update
+BEFORE UPDATE ON leases
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run
+    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
+END;
+
+CREATE TRIGGER leases_preserve_active_trust_delete
+BEFORE DELETE ON leases
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
+END;
+
+CREATE TRIGGER spawn_requests_preserve_active_trust_insert
+BEFORE INSERT ON spawn_requests
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
+END;
+
+CREATE TRIGGER spawn_requests_preserve_active_trust_update
+BEFORE UPDATE ON spawn_requests
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run
+    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
+END;
+
+CREATE TRIGGER spawn_requests_preserve_active_trust_delete
+BEFORE DELETE ON spawn_requests
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
+END;
+
+CREATE TRIGGER sessions_preserve_active_trust_insert
+BEFORE INSERT ON sessions
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before session changes');
+END;
+
+CREATE TRIGGER sessions_preserve_active_trust_update
+BEFORE UPDATE ON sessions
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run
+    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before session changes');
+END;
+
+CREATE TRIGGER sessions_preserve_active_trust_delete
+BEFORE DELETE ON sessions
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=changed_run.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before session changes');
+END;
+
+CREATE TRIGGER runs_preserve_active_trust_update
+BEFORE UPDATE ON runs
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      trust.run_id IN (OLD.run_id,NEW.run_id)
+      OR trusted_run.workflow IN (OLD.workflow,NEW.workflow)
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
+END;
+
+CREATE TRIGGER runs_preserve_active_trust_delete
+BEFORE DELETE ON runs
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (trust.run_id=OLD.run_id OR trusted_run.workflow=OLD.workflow)
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
+END;
+
+CREATE TRIGGER model_cost_registry_preserve_active_trust_insert
+BEFORE INSERT ON model_cost_registry
+WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before model cost registry changes');
+END;
+
+CREATE TRIGGER model_cost_registry_preserve_active_trust_update
+BEFORE UPDATE ON model_cost_registry
+WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before model cost registry changes');
+END;
+
+CREATE TRIGGER model_cost_registry_preserve_active_trust_delete
+BEFORE DELETE ON model_cost_registry
+WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before model cost registry changes');
+END;
+
+CREATE TRIGGER endpoint_zero_reserve_policies_preserve_active_trust_insert
+BEFORE INSERT ON endpoint_zero_reserve_policies
+WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before zero reserve policy changes');
+END;
+
+CREATE TRIGGER endpoint_zero_reserve_policies_preserve_active_trust_update
+BEFORE UPDATE ON endpoint_zero_reserve_policies
+WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before zero reserve policy changes');
+END;
+
+CREATE TRIGGER endpoint_zero_reserve_policies_preserve_active_trust_delete
+BEFORE DELETE ON endpoint_zero_reserve_policies
+WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before zero reserve policy changes');
+END;
+
 CREATE TRIGGER slo_audits_preserve_active_trust_insert
 BEFORE INSERT ON slo_audits
 WHEN EXISTS (
@@ -545,6 +805,32 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before SLO registry changes');
+END;
+
+CREATE TRIGGER predicate_plugins_preserve_goal_run_metadata_update
+BEFORE UPDATE OF name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, disabled_at ON predicate_plugins
+WHEN EXISTS (
+  SELECT 1 FROM goal_runs gr
+  WHERE gr.predicate_plugin_hash=OLD.predicate_plugin_hash
+    AND gr.backend=OLD.backend
+) OR EXISTS (
+  SELECT 1 FROM goal_runs gr
+  WHERE gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gr.backend=NEW.backend
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced predicate plugin metadata is immutable');
+END;
+
+CREATE TRIGGER predicate_plugins_preserve_goal_run_metadata_delete
+BEFORE DELETE ON predicate_plugins
+WHEN EXISTS (
+  SELECT 1 FROM goal_runs gr
+  WHERE gr.predicate_plugin_hash=OLD.predicate_plugin_hash
+    AND gr.backend=OLD.backend
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced predicate plugin metadata is immutable');
 END;
 
 CREATE TRIGGER trust_observations_validate_bound_reactivate_update

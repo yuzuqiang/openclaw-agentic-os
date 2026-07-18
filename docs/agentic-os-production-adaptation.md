@@ -3927,10 +3927,12 @@ Current migration v13 trust promotion binding:
 `0013_trust_promotion_binding.sql` keeps historical invalidated
 `trust_observations` inert, but any active row must bind exactly to one run, one
 goal run, one evidence hash, one independent verifier, one approval-bound PASS
-gate, one gate clock, one current schema/migration identity, one complete
-current latest SLO PASS audit set, one file-authority gate snapshot, one known
-selected cost row, and the exact proven run/goal risk boundary. Migration aborts
-if active legacy trust rows exist without those bindings. The active-row trigger
+gate, one gate clock, the accepted v13 schema/migration identity, the exact
+current 30-query SLO contract set, one complete current latest SLO PASS audit
+set, one file-authority gate snapshot, one known selected cost row, current
+goal-manifest and predicate-plugin metadata, and the exact proven run/goal risk
+boundary. Migration aborts if active legacy trust rows exist without those
+bindings. The active-row trigger
 accepts only `status='promoted'`, `usage_confidence='known'`,
 `cost_confidence='known'`, complete current latest SLO PASS coverage, exact
 scope/severity equality with the bound evidence, and a deterministic
@@ -3945,9 +3947,14 @@ rows; rejects database-authority current or gate-time snapshots; and rejects
 self-verifier, wrong-run, non-PASS, stale gate identity, stale trusted clock,
 malformed evidence, missing same-run goal evidence, any older PASS SLO audit
 shadowed by newer audit evidence, and SLO audit rows older than mutable run
-budget or settlement evidence. Post-promotion budget, settlement, SLO audit,
-schema, and SLO registry evidence cannot change while trust is active; callers
-must invalidate the trust row first. Active trust rows are immutable except for
+budget or settlement evidence. Direct SQL insertion is pinned to v13 plus the
+accepted 30-query SLO count, so fake later schema or SLO rows cannot become the
+trust contract. Predicate-plugin metadata referenced by a goal run is immutable
+before promotion, and post-promotion budget, settlement, runtime SLO inputs
+(`external_rpc_intents`, `leases`, `spawn_requests`, `sessions`, `runs`), model
+cost registry, zero-reserve policy, SLO audit, schema, SLO registry, and
+predicate-plugin metadata cannot change while trust is active; callers must
+invalidate the trust row first. Active trust rows are immutable except for
 setting `invalidated_at` to retire stale trust, and invalidated rows cannot be
 reactivated. The local writer derives all authority fields under `BEGIN
 IMMEDIATE`, reruns the current blocking SLO contracts under the write lock, and
