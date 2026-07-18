@@ -10,6 +10,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 from agentic_os.goal_runs import GoalRunError, record_goal_run
 from agentic_os.migrations import (
@@ -18,6 +19,7 @@ from agentic_os.migrations import (
     load_migrations,
     repository_root,
 )
+from agentic_os.pass_gates import PassGateError
 
 
 def _sha(content: bytes) -> str:
@@ -313,6 +315,32 @@ class GoalRunWriterTests(unittest.TestCase):
                 created_at_epoch_ms=1000,
             )
 
+    def test_record_goal_run_rechecks_evidence_artifact_before_commit(self) -> None:
+        with mock.patch(
+            "agentic_os.goal_runs._assert_evidence_snapshot_current",
+            side_effect=[None, PassGateError("drifted before commit")],
+        ):
+            with self.assertRaisesRegex(GoalRunError, "safely retrievable"):
+                record_goal_run(
+                    self.database,
+                    goal_run_id="commit-drift",
+                    goal_id="goal",
+                    run_id="run",
+                    severity="R1",
+                    state="open",
+                    predicate_plugin_hash="plugin",
+                    evidence_hash=self.evidence_hash,
+                    created_at="now",
+                    created_at_epoch_ms=1000,
+                )
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM goal_runs WHERE goal_run_id='commit-drift'"
+                ).fetchone(),
+                (0,),
+            )
+
     def test_writer_refuses_database_authority_runs(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
@@ -399,6 +427,7 @@ class GoalRunWriterTests(unittest.TestCase):
         source_digest = _sha(b"source")
         text_digest = _sha(b"text")
         approval_hash = _sha(b"approval")
+        gate_query_hash, migration_sha256 = self._current_gate_identity(connection)
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
             "VALUES('w','file_authority','now')"
@@ -451,7 +480,7 @@ class GoalRunWriterTests(unittest.TestCase):
                 "VALUES('gate','run','transition','clock','verifier',"
                 "'pass','now',1000,1,'v1',?,?,?,'R1','now','file_authority',"
                 "'file_authority')",
-                (_sha(b"gate-query"), _sha(b"migration"), self.evidence_hash),
+                (gate_query_hash, migration_sha256, self.evidence_hash),
             )
             connection.execute(
                 "INSERT INTO gate_clock_context(clock_context_id,gate_run_id,"
@@ -489,6 +518,19 @@ class GoalRunWriterTests(unittest.TestCase):
                 "updated_at) VALUES('goal','owner','R1','manifest','plugin',"
                 "'agentic_predicate_inproc_v1',0,1,'now','now')"
             )
+
+    def _current_gate_identity(
+        self, connection: sqlite3.Connection
+    ) -> tuple[str, str]:
+        row = connection.execute(
+            "SELECT q.query_hash,q.migration_sha256 FROM schema_migrations m "
+            "JOIN slo_queries q ON q.schema_version=m.version "
+            "AND q.migration_sha256=m.sha256 "
+            "WHERE q.query_name='Completion gate before done for R2+' "
+            "ORDER BY m.version DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        return str(row[0]), str(row[1])
 
 
 if __name__ == "__main__":

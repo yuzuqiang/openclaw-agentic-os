@@ -91,10 +91,13 @@ def record_goal_run(
             _verify_schema_identity(connection)
             if run_id is not None:
                 _reject_database_authority_run(connection, run_id)
+            evidence_snapshot = None
             if evidence_hash is not None:
                 if run_id is None:
                     raise GoalRunError("goal run evidence requires a bound run_id")
-                _assert_evidence_binding(connection, run_id=run_id, evidence_hash=evidence_hash)
+                evidence_snapshot = _assert_evidence_binding(
+                    connection, run_id=run_id, evidence_hash=evidence_hash
+                )
             if approval_id is not None:
                 _consume_goal_approval(
                     connection,
@@ -127,6 +130,8 @@ def record_goal_run(
                     created_at_epoch_ms,
                 ),
             )
+            if evidence_snapshot is not None:
+                _assert_goal_evidence_snapshot_current(evidence_snapshot)
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -258,7 +263,7 @@ def _reject_database_authority_run(connection: sqlite3.Connection, run_id: str) 
 
 def _assert_evidence_binding(
     connection: sqlite3.Connection, *, run_id: str, evidence_hash: str
-) -> None:
+) -> object:
     row = connection.execute(
         "SELECT e.path,e.sha256,e.size_bytes,e.content_type,e.redaction_status,"
         "e.captured_at FROM evidence_hashes e "
@@ -285,9 +290,18 @@ def _assert_evidence_binding(
         " AND a.approval_text_digest=t.approval_text_digest "
         " AND a.consumed_by_transition_id=t.transition_id "
         " AND a.consumed_by_gate_run_id=g.gate_run_id "
+        "JOIN schema_migrations m ON m.sha256=g.migration_sha256 "
+        "JOIN slo_queries q ON q.schema_version=m.version "
+        " AND q.migration_sha256=m.sha256 "
+        " AND q.query_name='Completion gate before done for R2+' "
+        " AND q.query_hash=g.gate_query_hash "
         "WHERE e.evidence_hash=? AND e.sha256=e.evidence_hash "
         "AND length(e.evidence_hash)=64 "
         "AND e.evidence_hash NOT GLOB '*[^0-9a-f]*' "
+        "AND e.path<>'' "
+        "AND e.content_type<>'' "
+        "AND e.redaction_status<>'' "
+        "AND e.captured_at<>'' "
         "AND e.run_id=? AND e.producer_run_id=? "
         "AND e.verifier_run_id IS NOT NULL AND e.gate_run_id IS NOT NULL "
         "AND r.authority_mode='file_authority' "
@@ -297,6 +311,7 @@ def _assert_evidence_binding(
         "AND g.run_authority_mode=r.authority_mode "
         "AND g.workflow_authority_mode=w.mode "
         "AND g.decision='pass' AND g.requires_same_run=1 "
+        "AND m.version=(SELECT MAX(version) FROM schema_migrations) "
         "AND g.completed_at_epoch_ms=c.now_epoch_ms "
         "AND c.bound_at_epoch_ms=c.now_epoch_ms "
         "AND c.consumed_at_epoch_ms=c.now_epoch_ms "
@@ -330,10 +345,10 @@ def _assert_evidence_binding(
         raise GoalRunError(
             "goal run evidence requires same-run independent pass-gate evidence"
         )
-    _assert_safe_evidence_current(row)
+    return _assert_safe_evidence_current(row)
 
 
-def _assert_safe_evidence_current(row: tuple[object, ...]) -> None:
+def _assert_safe_evidence_current(row: tuple[object, ...]) -> object:
     try:
         snapshot = _validate_evidence(
             GateEvidence(
@@ -345,6 +360,16 @@ def _assert_safe_evidence_current(row: tuple[object, ...]) -> None:
                 captured_at=row[5],
             )
         )
+        _assert_evidence_snapshot_current(snapshot)
+        return snapshot
+    except PassGateError as exc:
+        raise GoalRunError(
+            "goal run evidence requires safely retrievable pass-gate evidence"
+        ) from exc
+
+
+def _assert_goal_evidence_snapshot_current(snapshot: object) -> None:
+    try:
         _assert_evidence_snapshot_current(snapshot)
     except PassGateError as exc:
         raise GoalRunError(

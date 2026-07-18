@@ -3065,11 +3065,22 @@ WHERE gr.evidence_hash IS NOT NULL
      AND a.approval_text_digest=t.approval_text_digest
      AND a.consumed_by_transition_id=t.transition_id
      AND a.consumed_by_gate_run_id=g.gate_run_id
+    JOIN schema_migrations m
+      ON m.sha256=g.migration_sha256
+    JOIN slo_queries q
+      ON q.schema_version=m.version
+     AND q.migration_sha256=m.sha256
+     AND q.query_name='Completion gate before done for R2+'
+     AND q.query_hash=g.gate_query_hash
     WHERE gr.run_id IS NOT NULL
       AND e.evidence_hash=gr.evidence_hash
       AND e.sha256=e.evidence_hash
       AND length(e.evidence_hash)=64
       AND e.evidence_hash NOT GLOB '*[^0-9a-f]*'
+      AND e.path<>''
+      AND e.content_type<>''
+      AND e.redaction_status<>''
+      AND e.captured_at<>''
       AND e.run_id=gr.run_id
       AND e.producer_run_id=gr.run_id
       AND e.verifier_run_id IS NOT NULL
@@ -3082,6 +3093,7 @@ WHERE gr.evidence_hash IS NOT NULL
       AND g.workflow_authority_mode=w.mode
       AND g.decision='pass'
       AND g.requires_same_run=1
+      AND m.version=(SELECT MAX(version) FROM schema_migrations)
       AND g.completed_at_epoch_ms=c.now_epoch_ms
       AND c.bound_at_epoch_ms=c.now_epoch_ms
       AND c.consumed_at_epoch_ms=c.now_epoch_ms
@@ -3203,11 +3215,22 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
    AND a.approval_text_digest=t.approval_text_digest
    AND a.consumed_by_transition_id=t.transition_id
    AND a.consumed_by_gate_run_id=g.gate_run_id
+  JOIN schema_migrations m
+    ON m.sha256=g.migration_sha256
+  JOIN slo_queries q
+    ON q.schema_version=m.version
+   AND q.migration_sha256=m.sha256
+   AND q.query_name='Completion gate before done for R2+'
+   AND q.query_hash=g.gate_query_hash
   WHERE NEW.run_id IS NOT NULL
     AND e.evidence_hash=NEW.evidence_hash
     AND e.sha256=e.evidence_hash
     AND length(e.evidence_hash)=64
     AND e.evidence_hash NOT GLOB '*[^0-9a-f]*'
+    AND e.path<>''
+    AND e.content_type<>''
+    AND e.redaction_status<>''
+    AND e.captured_at<>''
     AND e.run_id=NEW.run_id
     AND e.producer_run_id=NEW.run_id
     AND e.verifier_run_id IS NOT NULL
@@ -3220,6 +3243,7 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
     AND g.workflow_authority_mode=w.mode
     AND g.decision='pass'
     AND g.requires_same_run=1
+    AND m.version=(SELECT MAX(version) FROM schema_migrations)
     AND g.completed_at_epoch_ms=c.now_epoch_ms
     AND c.bound_at_epoch_ms=c.now_epoch_ms
     AND c.consumed_at_epoch_ms=c.now_epoch_ms
@@ -3295,11 +3319,22 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
    AND a.approval_text_digest=t.approval_text_digest
    AND a.consumed_by_transition_id=t.transition_id
    AND a.consumed_by_gate_run_id=g.gate_run_id
+  JOIN schema_migrations m
+    ON m.sha256=g.migration_sha256
+  JOIN slo_queries q
+    ON q.schema_version=m.version
+   AND q.migration_sha256=m.sha256
+   AND q.query_name='Completion gate before done for R2+'
+   AND q.query_hash=g.gate_query_hash
   WHERE NEW.run_id IS NOT NULL
     AND e.evidence_hash=NEW.evidence_hash
     AND e.sha256=e.evidence_hash
     AND length(e.evidence_hash)=64
     AND e.evidence_hash NOT GLOB '*[^0-9a-f]*'
+    AND e.path<>''
+    AND e.content_type<>''
+    AND e.redaction_status<>''
+    AND e.captured_at<>''
     AND e.run_id=NEW.run_id
     AND e.producer_run_id=NEW.run_id
     AND e.verifier_run_id IS NOT NULL
@@ -3312,6 +3347,7 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
     AND g.workflow_authority_mode=w.mode
     AND g.decision='pass'
     AND g.requires_same_run=1
+    AND m.version=(SELECT MAX(version) FROM schema_migrations)
     AND g.completed_at_epoch_ms=c.now_epoch_ms
     AND c.bound_at_epoch_ms=c.now_epoch_ms
     AND c.consumed_at_epoch_ms=c.now_epoch_ms
@@ -3533,7 +3569,7 @@ BEGIN
 END;
 
 CREATE TRIGGER judge_verifier_runs_preserve_goal_run_proof_update
-BEFORE UPDATE OF verifier_run_id, worker_run_id, worker_agent_id, verifier_agent_id, provider, model, prompt_hash, context_hash, evidence_hash, independence_class, independence_proof_json ON judge_verifier_runs
+BEFORE UPDATE OF verifier_run_id, worker_run_id, worker_agent_id, verifier_agent_id, provider, model, model_version, prompt_hash, context_hash, evidence_hash, independence_class, independence_proof_json, completed_at ON judge_verifier_runs
 WHEN EXISTS (
   SELECT 1
   FROM goal_runs gr

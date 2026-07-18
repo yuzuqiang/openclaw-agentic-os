@@ -4137,6 +4137,48 @@ class MigrationTests(unittest.TestCase):
                 (hashlib.sha256(b"pass-evidence").hexdigest(),),
             )
 
+    def test_goal_run_evidence_requires_current_gate_identity(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(
+            connection,
+            gate_query_hash=hashlib.sha256(b"stale-gate-query").hexdigest(),
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "same-run independent pass-gate evidence"
+        ):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+                "created_at,created_at_epoch_ms) VALUES('stale-gate-identity','goal',"
+                "'run','R1','open','plugin','agentic_predicate_inproc_v1',1,?,"
+                "'now',1000)",
+                (hashlib.sha256(b"pass-evidence").hexdigest(),),
+            )
+
+    def test_goal_run_evidence_requires_complete_metadata(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(
+            connection,
+            evidence_content_type="",
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "same-run independent pass-gate evidence"
+        ):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+                "created_at,created_at_epoch_ms) VALUES('incomplete-evidence','goal',"
+                "'run','R1','open','plugin','agentic_predicate_inproc_v1',1,?,"
+                "'now',1000)",
+                (hashlib.sha256(b"pass-evidence").hexdigest(),),
+            )
+
     def test_goal_run_evidence_rejects_cutover_after_gate_snapshot(
         self,
     ) -> None:
@@ -4326,6 +4368,14 @@ class MigrationTests(unittest.TestCase):
                 "WHERE verifier_run_id='verifier'",
                 ('{"review":"rewritten"}',),
             )
+        for assignment in ("model_version='other'", "completed_at='later'"):
+            with self.subTest(assignment=assignment), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "verifier proof"
+            ):
+                connection.execute(
+                    f"UPDATE judge_verifier_runs SET {assignment} "
+                    "WHERE verifier_run_id='verifier'"
+                )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "verifier proof"):
             connection.execute(
                 "DELETE FROM judge_verifier_runs WHERE verifier_run_id='verifier'"
@@ -4475,6 +4525,12 @@ class MigrationTests(unittest.TestCase):
         approval_expires_at_epoch_ms: int = 2000,
         verifier_run_id: str = "verifier",
         trusted_clock_source_hash: str | None = None,
+        gate_query_hash: str | None = None,
+        migration_sha256: str | None = None,
+        evidence_path: str = "artifacts/evidence.json",
+        evidence_content_type: str = "application/json",
+        evidence_redaction_status: str = "none",
+        evidence_captured_at: str = "now",
     ) -> None:
         _register_migration_functions(connection)
         evidence_hash = evidence_hash or hashlib.sha256(b"pass-evidence").hexdigest()
@@ -4482,6 +4538,11 @@ class MigrationTests(unittest.TestCase):
         gate_workflow_authority_mode = gate_workflow_authority_mode or authority_mode
         evidence_sha256 = evidence_sha256 or evidence_hash
         trusted_clock_source_hash = trusted_clock_source_hash or _clock_hash(1000, "writer")
+        current_gate_query_hash, current_migration_sha256 = self._current_gate_identity(
+            connection
+        )
+        gate_query_hash = gate_query_hash or current_gate_query_hash
+        migration_sha256 = migration_sha256 or current_migration_sha256
         target_hash = hashlib.sha256(b"target").hexdigest()
         source_digest = hashlib.sha256(b"source").hexdigest()
         text_digest = hashlib.sha256(b"text").hexdigest()
@@ -4568,8 +4629,8 @@ class MigrationTests(unittest.TestCase):
                 "'pass','now',1000,1,'v1',?,?,?,'R1','now',?,?)",
                 (
                     verifier_run_id,
-                    hashlib.sha256(b"gate-query").hexdigest(),
-                    hashlib.sha256(b"migration").hexdigest(),
+                    gate_query_hash,
+                    migration_sha256,
                     evidence_hash,
                     gate_run_authority_mode,
                     gate_workflow_authority_mode,
@@ -4587,9 +4648,16 @@ class MigrationTests(unittest.TestCase):
                 "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
                 "size_bytes,content_type,redaction_status,producer_run_id,"
                 "verifier_run_id,gate_run_id,captured_at) VALUES(?, 'run',"
-                "'artifacts/evidence.json',?,13,'application/json','none','run',"
-                "?,'gate','now')",
-                (evidence_hash, evidence_sha256, verifier_run_id),
+                "?,?,13,?,?,'run',?,'gate',?)",
+                (
+                    evidence_hash,
+                    evidence_path,
+                    evidence_sha256,
+                    evidence_content_type,
+                    evidence_redaction_status,
+                    verifier_run_id,
+                    evidence_captured_at,
+                ),
             )
             connection.commit()
         except Exception:
@@ -4606,6 +4674,19 @@ class MigrationTests(unittest.TestCase):
             "updated_at) VALUES('goal','owner','R1','manifest','plugin',"
             "'agentic_predicate_inproc_v1',0,1,'now','now')"
         )
+
+    def _current_gate_identity(
+        self, connection: sqlite3.Connection
+    ) -> tuple[str, str]:
+        row = connection.execute(
+            "SELECT q.query_hash,q.migration_sha256 FROM schema_migrations m "
+            "JOIN slo_queries q ON q.schema_version=m.version "
+            "AND q.migration_sha256=m.sha256 "
+            "WHERE q.query_name='Completion gate before done for R2+' "
+            "ORDER BY m.version DESC LIMIT 1"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        return str(row[0]), str(row[1])
 
     def test_verifier_independence_class_is_allowlisted(self) -> None:
         apply_migrations(self.database)
@@ -6900,9 +6981,12 @@ class MigrationTests(unittest.TestCase):
         )
         contract = design.split("## Minimum Database Contracts", 1)[1]
         ddl = contract.split("```sql\n", 1)[1].split("\n```", 1)[0] + "\n"
+        projection_ddl = ddl.split(
+            "CREATE TEMP TABLE goal_run_evidence_binding_migration_guard", 1
+        )[0]
         with sqlite3.connect(":memory:") as connection:
             _register_migration_functions(connection)
-            connection.executescript(ddl)
+            connection.executescript(projection_ddl)
         projection_contract = ddl.split("CREATE TABLE artifact_projections (", 1)[1].split(
             "CREATE TABLE evidence_hashes", 1
         )[0]
