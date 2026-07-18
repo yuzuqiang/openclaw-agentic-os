@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -8,11 +10,16 @@ from contextlib import closing
 from pathlib import Path
 
 from agentic_os.goal_runs import GoalRunError, record_goal_run
-from agentic_os.migrations import apply_migrations, repository_root
+from agentic_os.migrations import apply_migrations, load_migrations, repository_root
 
 
 def _sha(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _shadow_projection_id(run_id: str, relative_path: str, digest: str) -> str:
+    payload = f"{run_id}\0{relative_path}\0{digest}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class GoalRunWriterTests(unittest.TestCase):
@@ -28,6 +35,7 @@ class GoalRunWriterTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
             self._seed_valid_goal_run_fixture(connection)
+        self._chmod_database_private(self.database)
 
     def _cleanup_state_root(self) -> None:
         try:
@@ -109,6 +117,57 @@ class GoalRunWriterTests(unittest.TestCase):
                 created_at_epoch_ms=1000,
             )
 
+    def test_writer_refuses_unsafe_database_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            unsafe = Path(temporary) / "control.db"
+            shutil.copy2(self.database, unsafe)
+            os.chmod(unsafe, 0o666)
+            with self.assertRaisesRegex(GoalRunError, "privacy preflight"):
+                record_goal_run(
+                    unsafe,
+                    goal_run_id="unsafe-path",
+                    goal_id="goal",
+                    severity="R1",
+                    state="open",
+                    predicate_plugin_hash="plugin",
+                    created_at="now",
+                    created_at_epoch_ms=1000,
+                )
+
+    def test_writer_requires_recorded_migrations_and_slo_contracts(self) -> None:
+        handmade = Path(self.temporary.name) / "handmade.db"
+        with closing(sqlite3.connect(handmade)) as connection:
+            connection.create_function(
+                "agentic_shadow_projection_id",
+                3,
+                _shadow_projection_id,
+                deterministic=True,
+            )
+            connection.execute("PRAGMA foreign_keys=ON")
+            for migration in load_migrations():
+                connection.executescript(migration.path.read_text(encoding="utf-8"))
+        self._chmod_database_private(handmade)
+        with self.assertRaisesRegex(GoalRunError, "schema verification"):
+            record_goal_run(
+                handmade,
+                goal_run_id="unrecorded",
+                goal_id="goal",
+                severity="R1",
+                state="open",
+                predicate_plugin_hash="plugin",
+                created_at="now",
+                created_at_epoch_ms=1000,
+            )
+
+    def _chmod_database_private(self, database: Path) -> None:
+        os.chmod(database.parent, 0o700)
+        if database.exists():
+            os.chmod(database, 0o600)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(f"{database}{suffix}")
+            if sidecar.exists():
+                os.chmod(sidecar, 0o600)
+
     def _seed_valid_goal_run_fixture(self, connection: sqlite3.Connection) -> None:
         target_hash = _sha(b"target")
         connection.execute(
@@ -159,8 +218,10 @@ class GoalRunWriterTests(unittest.TestCase):
                 "clock_context_id,verifier_run_id,decision,completed_at,"
                 "completed_at_epoch_ms,requires_same_run,gate_version,"
                 "gate_query_hash,migration_sha256,evidence_hash,risk_dominance,"
-                "created_at) VALUES('gate','run','transition','clock','verifier',"
-                "'pass','now',1000,1,'v1',?,?,?,'R1','now')",
+                "created_at,run_authority_mode,workflow_authority_mode) "
+                "VALUES('gate','run','transition','clock','verifier',"
+                "'pass','now',1000,1,'v1',?,?,?,'R1','now','file_authority',"
+                "'file_authority')",
                 (_sha(b"gate-query"), _sha(b"migration"), self.evidence_hash),
             )
             connection.execute(

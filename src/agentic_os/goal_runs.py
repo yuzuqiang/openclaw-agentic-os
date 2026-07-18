@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from .migrations import _connect, _verify_schema, load_migrations
+from .migrations import MigrationError, repository_root, verify_database_connection
 from .predicates import INPROC_PREDICATE_BACKEND
+from .privacy import PrivacyPreflightError, assert_privacy_preflight
 
 
 class GoalRunError(RuntimeError):
@@ -16,6 +19,7 @@ class GoalRunError(RuntimeError):
 
 _MAX_EPOCH_MS = 253_402_300_799_999
 _DB_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 
 @dataclass(frozen=True)
@@ -68,7 +72,7 @@ def record_goal_run(
     triaged_at = _optional_text("triaged_at", triaged_at)
     sandbox_enforced_value = _bool_int("sandbox_enforced", sandbox_enforced)
 
-    connection = _connect(database)
+    connection = _connect_goal_run_database(database)
     try:
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -120,7 +124,100 @@ def record_goal_run(
 
 
 def _verify_schema_identity(connection: sqlite3.Connection) -> None:
-    _verify_schema(connection, load_migrations())
+    try:
+        verify_database_connection(connection)
+    except (MigrationError, sqlite3.Error) as exc:
+        raise GoalRunError("goal run database schema verification failed") from exc
+
+
+def _connect_goal_run_database(database: Path) -> sqlite3.Connection:
+    path = Path(database).expanduser().resolve()
+    try:
+        assert_privacy_preflight(repository_root(), database_paths=(path,))
+    except PrivacyPreflightError as exc:
+        raise GoalRunError("goal run database privacy preflight failed") from exc
+    if not path.is_file():
+        raise GoalRunError("goal run database must already exist")
+    parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+    database_stat = os.stat(path, follow_symlinks=False)
+    file_mode = stat.S_IMODE(database_stat.st_mode)
+    if not stat.S_ISREG(database_stat.st_mode):
+        raise GoalRunError("goal run database must be a regular private file")
+    if parent_mode != 0o700 or file_mode != 0o600:
+        raise GoalRunError("goal run database requires 0700 directory and 0600 file")
+    if int(getattr(database_stat, "st_nlink", 1) or 1) > 1:
+        raise GoalRunError("goal run database cannot use hard-linked file aliases")
+    _refuse_lax_sqlite_sidecars(path)
+    database_uri = path.as_uri() + "?mode=rw"
+    connection: sqlite3.Connection | None = None
+    old_umask = os.umask(0o177)
+    try:
+        connection = sqlite3.connect(database_uri, uri=True, isolation_level=None)
+        connection.execute("PRAGMA busy_timeout=10000")
+        journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+    except sqlite3.Error as exc:
+        if connection is not None:
+            connection.close()
+        raise GoalRunError("goal run database open failed") from exc
+    finally:
+        os.umask(old_umask)
+    actual_journal_mode = journal_mode[0] if journal_mode else None
+    if str(actual_journal_mode).casefold() != "wal":
+        connection.close()
+        raise GoalRunError(
+            "SQLite WAL journal mode is unavailable: "
+            f"requested WAL, got {actual_journal_mode!r}"
+        )
+    connection.execute("PRAGMA foreign_keys=ON")
+    if connection.execute("PRAGMA foreign_keys").fetchone() != (1,):
+        connection.close()
+        raise GoalRunError("SQLite foreign key enforcement is unavailable")
+    try:
+        _chmod_private_sqlite_sidecars(path)
+    except GoalRunError:
+        connection.close()
+        raise
+    return connection
+
+
+def _sqlite_sidecar_paths(database: Path) -> tuple[Path, ...]:
+    return tuple(Path(f"{database}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES)
+
+
+def _stat_existing_path_nofollow(path: Path) -> os.stat_result | None:
+    try:
+        return os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _refuse_lax_sqlite_sidecars(database: Path) -> None:
+    for sidecar in _sqlite_sidecar_paths(database):
+        sidecar_stat = _stat_existing_path_nofollow(sidecar)
+        if sidecar_stat is None:
+            continue
+        if not stat.S_ISREG(sidecar_stat.st_mode):
+            raise GoalRunError("SQLite sidecar must be a regular private file")
+        if int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1:
+            raise GoalRunError("SQLite sidecar cannot use hard-linked file aliases")
+        if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+            raise GoalRunError("SQLite sidecar requires 0600 file mode")
+
+
+def _chmod_private_sqlite_sidecars(database: Path) -> None:
+    for sidecar in _sqlite_sidecar_paths(database):
+        sidecar_stat = _stat_existing_path_nofollow(sidecar)
+        if sidecar_stat is None:
+            continue
+        if not stat.S_ISREG(sidecar_stat.st_mode):
+            raise GoalRunError("SQLite sidecar must be a regular private file")
+        if int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1:
+            raise GoalRunError("SQLite sidecar cannot use hard-linked file aliases")
+        if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+            sidecar.chmod(0o600)
+            sidecar_stat = os.stat(sidecar, follow_symlinks=False)
+            if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+                raise GoalRunError("SQLite sidecar requires 0600 file mode")
 
 
 def _reject_database_authority_run(connection: sqlite3.Connection, run_id: str) -> None:
@@ -141,19 +238,47 @@ def _assert_evidence_binding(
 ) -> None:
     row = connection.execute(
         "SELECT e.evidence_hash FROM evidence_hashes e "
+        "JOIN runs r ON r.run_id=e.run_id "
+        "JOIN workflow_authority w ON w.workflow=r.workflow "
         "JOIN judge_verifier_runs j ON j.verifier_run_id=e.verifier_run_id "
         " AND j.worker_run_id=e.run_id AND j.evidence_hash=e.evidence_hash "
         "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
         " AND g.evidence_hash=e.evidence_hash AND g.run_id=e.run_id "
         " AND g.verifier_run_id=e.verifier_run_id "
-        "JOIN approvals a ON a.run_id=g.run_id "
+        "JOIN transitions t ON t.transition_id=g.transition_id "
+        " AND t.run_id=g.run_id AND t.gate_run_id=g.gate_run_id "
+        " AND t.evidence_hash=g.evidence_hash "
+        "JOIN gate_clock_context c ON c.gate_run_id=g.gate_run_id "
+        " AND c.consumed_by_gate_run_id=g.gate_run_id AND c.run_id=g.run_id "
+        " AND c.transition_id=t.transition_id "
+        "JOIN approvals a ON a.approval_id=t.approval_id "
+        " AND a.run_id=t.run_id AND a.approved_action_type=t.action_type "
+        " AND a.target_type=t.target_type AND a.target_id=t.target_id "
+        " AND a.target_hash=t.target_hash AND a.target_scope=t.target_scope "
+        " AND a.channel=t.approval_channel "
+        " AND a.source_message_digest=t.approval_source_digest "
+        " AND a.approval_text_digest=t.approval_text_digest "
+        " AND a.consumed_by_transition_id=t.transition_id "
         " AND a.consumed_by_gate_run_id=g.gate_run_id "
-        "WHERE e.evidence_hash=? AND e.run_id=? AND e.producer_run_id=? "
+        "WHERE e.evidence_hash=? AND e.sha256=e.evidence_hash "
+        "AND e.run_id=? AND e.producer_run_id=? "
         "AND e.verifier_run_id IS NOT NULL AND e.gate_run_id IS NOT NULL "
+        "AND r.authority_mode NOT IN ('db_authority_canary','db_authority') "
+        "AND w.mode NOT IN ('db_authority_canary','db_authority') "
+        "AND g.run_authority_mode NOT IN ('db_authority_canary','db_authority') "
+        "AND g.workflow_authority_mode NOT IN ('db_authority_canary','db_authority') "
         "AND g.decision='pass' AND g.requires_same_run=1 "
+        "AND t.approval_required=1 "
         "AND j.independence_class='independent' "
         "AND j.worker_agent_id<>j.verifier_agent_id AND j.same_worker_context=0 "
-        "AND a.single_use=1",
+        "AND a.single_use=1 "
+        "AND CASE a.approved_risk_ceiling "
+        "WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 "
+        "WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1 END >= "
+        "CASE t.risk_dominance "
+        "WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 "
+        "WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99 END "
+        "AND a.expires_at_epoch_ms > c.now_epoch_ms",
         (evidence_hash, run_id, run_id),
     ).fetchone()
     if row is None:
