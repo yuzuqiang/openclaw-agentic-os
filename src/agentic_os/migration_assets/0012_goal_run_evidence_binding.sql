@@ -12,8 +12,19 @@ WHERE (g.run_authority_mode IS NOT NULL OR g.workflow_authority_mode IS NOT NULL
   AND (
     g.run_authority_mode IS NULL
     OR g.workflow_authority_mode IS NULL
-    OR g.run_authority_mode<>r.authority_mode
-    OR g.workflow_authority_mode<>w.mode
+    OR g.run_authority_mode NOT IN ('file_authority','db_authority_canary','db_authority')
+    OR g.workflow_authority_mode NOT IN ('file_authority','db_authority_canary','db_authority')
+    OR (
+      (g.run_authority_mode<>r.authority_mode OR g.workflow_authority_mode<>w.mode)
+      AND NOT (
+        g.run_authority_mode='file_authority'
+        AND g.workflow_authority_mode='file_authority'
+        AND r.state='finalized'
+        AND typeof(r.finalized_at_epoch_ms)='integer'
+        AND typeof(g.completed_at_epoch_ms)='integer'
+        AND r.finalized_at_epoch_ms>=g.completed_at_epoch_ms
+      )
+    )
   );
 
 DROP TABLE gate_authority_snapshot_migration_guard;
@@ -87,7 +98,8 @@ WHERE gr.evidence_hash IS NOT NULL
      AND t.gate_run_id=g.gate_run_id
      AND t.evidence_hash=g.evidence_hash
     JOIN gate_clock_context c
-      ON c.gate_run_id=g.gate_run_id
+      ON c.clock_context_id=g.clock_context_id
+     AND c.gate_run_id=g.gate_run_id
      AND c.consumed_by_gate_run_id=g.gate_run_id
      AND c.run_id=g.run_id
      AND c.transition_id=t.transition_id
@@ -117,6 +129,10 @@ WHERE gr.evidence_hash IS NOT NULL
       AND g.workflow_authority_mode='file_authority'
       AND g.decision='pass'
       AND g.requires_same_run=1
+      AND g.completed_at_epoch_ms=c.now_epoch_ms
+      AND c.bound_at_epoch_ms=c.now_epoch_ms
+      AND c.consumed_at_epoch_ms=c.now_epoch_ms
+      AND c.trusted_clock_source_hash=agentic_trusted_clock_source_hash(c.now_epoch_ms,c.bound_by)
       AND t.approval_required=1
       AND j.independence_class='independent'
       AND j.verifier_run_id<>j.worker_run_id
@@ -162,7 +178,8 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
    AND t.gate_run_id=g.gate_run_id
    AND t.evidence_hash=g.evidence_hash
   JOIN gate_clock_context c
-    ON c.gate_run_id=g.gate_run_id
+    ON c.clock_context_id=g.clock_context_id
+   AND c.gate_run_id=g.gate_run_id
    AND c.consumed_by_gate_run_id=g.gate_run_id
    AND c.run_id=g.run_id
    AND c.transition_id=t.transition_id
@@ -192,6 +209,10 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
     AND g.workflow_authority_mode='file_authority'
     AND g.decision='pass'
     AND g.requires_same_run=1
+    AND g.completed_at_epoch_ms=c.now_epoch_ms
+    AND c.bound_at_epoch_ms=c.now_epoch_ms
+    AND c.consumed_at_epoch_ms=c.now_epoch_ms
+    AND c.trusted_clock_source_hash=agentic_trusted_clock_source_hash(c.now_epoch_ms,c.bound_by)
     AND t.approval_required=1
     AND j.independence_class='independent'
     AND j.verifier_run_id<>j.worker_run_id
@@ -238,7 +259,8 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
    AND t.gate_run_id=g.gate_run_id
    AND t.evidence_hash=g.evidence_hash
   JOIN gate_clock_context c
-    ON c.gate_run_id=g.gate_run_id
+    ON c.clock_context_id=g.clock_context_id
+   AND c.gate_run_id=g.gate_run_id
    AND c.consumed_by_gate_run_id=g.gate_run_id
    AND c.run_id=g.run_id
    AND c.transition_id=t.transition_id
@@ -268,6 +290,10 @@ WHEN NEW.evidence_hash IS NOT NULL AND NOT EXISTS (
     AND g.workflow_authority_mode='file_authority'
     AND g.decision='pass'
     AND g.requires_same_run=1
+    AND g.completed_at_epoch_ms=c.now_epoch_ms
+    AND c.bound_at_epoch_ms=c.now_epoch_ms
+    AND c.consumed_at_epoch_ms=c.now_epoch_ms
+    AND c.trusted_clock_source_hash=agentic_trusted_clock_source_hash(c.now_epoch_ms,c.bound_by)
     AND t.approval_required=1
     AND j.independence_class='independent'
     AND j.verifier_run_id<>j.worker_run_id
@@ -312,7 +338,7 @@ WHEN EXISTS (
     AND a.approval_text_digest NOT GLOB '*[^0-9a-f]*'
     AND length(a.approval_hash)=64
     AND a.approval_hash NOT GLOB '*[^0-9a-f]*'
-    AND a.expires_at_epoch_ms > CAST(strftime('%s','now') AS INTEGER) * 1000
+    AND a.expires_at_epoch_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
 )
 BEGIN
   SELECT RAISE(ABORT,'approval-required goal run requires unexpired SHA-256 approval binding');
@@ -336,10 +362,50 @@ WHEN EXISTS (
     AND a.approval_text_digest NOT GLOB '*[^0-9a-f]*'
     AND length(a.approval_hash)=64
     AND a.approval_hash NOT GLOB '*[^0-9a-f]*'
-    AND a.expires_at_epoch_ms > CAST(strftime('%s','now') AS INTEGER) * 1000
+    AND a.expires_at_epoch_ms > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
 )
 BEGIN
   SELECT RAISE(ABORT,'approval-required goal run requires unexpired SHA-256 approval binding');
+END;
+
+CREATE TRIGGER goal_manifests_validate_required_approval_current_update
+AFTER UPDATE OF owner, severity, manifest_hash, predicate_plugin_hash, backend, approval_required, enabled ON goal_manifests
+WHEN NEW.approval_required=1 AND EXISTS (
+  SELECT 1
+  FROM goal_runs gr
+  LEFT JOIN approvals a ON a.approval_id=gr.approval_id
+  WHERE gr.goal_id=NEW.goal_id
+    AND gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+    AND gr.backend=NEW.backend
+    AND (
+      gr.run_id IS NULL
+      OR a.approval_id IS NULL
+      OR a.run_id<>gr.run_id
+      OR a.approved_action_type<>'goal_run'
+      OR a.target_type<>'goal'
+      OR a.target_id<>gr.goal_id
+      OR a.target_hash<>NEW.manifest_hash
+      OR a.target_scope<>NEW.owner
+      OR a.single_use<>1
+      OR a.consumed_by_goal_run_id<>gr.goal_run_id
+      OR length(a.source_message_digest)<>64
+      OR a.source_message_digest GLOB '*[^0-9a-f]*'
+      OR length(a.approval_text_digest)<>64
+      OR a.approval_text_digest GLOB '*[^0-9a-f]*'
+      OR length(a.approval_hash)<>64
+      OR a.approval_hash GLOB '*[^0-9a-f]*'
+      OR a.expires_at_epoch_ms<=CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+      OR CASE a.approved_risk_ceiling
+        WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+        WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+      END < CASE NEW.severity
+        WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+        WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+      END
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'approval-required goal run requires current SHA-256 approval binding');
 END;
 
 CREATE TRIGGER approvals_preserve_goal_run_digest_update
@@ -352,6 +418,24 @@ WHEN EXISTS (
    AND gm.backend=gr.backend
   WHERE gm.approval_required=1
     AND gr.approval_id=OLD.approval_id
+)
+OR EXISTS (
+  SELECT 1
+  FROM goal_runs gr
+  JOIN evidence_hashes e
+    ON e.evidence_hash=gr.evidence_hash
+   AND e.run_id=gr.run_id
+  JOIN gate_runs g
+    ON g.gate_run_id=e.gate_run_id
+   AND g.evidence_hash=e.evidence_hash
+   AND g.run_id=e.run_id
+  JOIN transitions t
+    ON t.transition_id=g.transition_id
+   AND t.run_id=g.run_id
+   AND t.gate_run_id=g.gate_run_id
+   AND t.evidence_hash=g.evidence_hash
+  WHERE gr.evidence_hash IS NOT NULL
+    AND t.approval_id=OLD.approval_id
 )
 BEGIN
   SELECT RAISE(ABORT,'approval-required goal run requires exact approval binding');

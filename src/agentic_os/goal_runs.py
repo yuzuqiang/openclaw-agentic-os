@@ -9,7 +9,18 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .migrations import MigrationError, repository_root, verify_database_connection
+from .migrations import (
+    MigrationError,
+    _register_migration_functions,
+    repository_root,
+    verify_database_connection,
+)
+from .pass_gates import (
+    GateEvidence,
+    PassGateError,
+    _assert_evidence_snapshot_current,
+    _validate_evidence,
+)
 from .predicates import INPROC_PREDICATE_BACKEND
 from .privacy import PrivacyPreflightError, assert_privacy_preflight
 
@@ -164,6 +175,7 @@ def _connect_goal_run_database(database: Path) -> sqlite3.Connection:
     old_umask = os.umask(0o177)
     try:
         connection = sqlite3.connect(database_uri, uri=True, isolation_level=None)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA busy_timeout=10000")
         journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
     except sqlite3.Error as exc:
@@ -248,7 +260,8 @@ def _assert_evidence_binding(
     connection: sqlite3.Connection, *, run_id: str, evidence_hash: str
 ) -> None:
     row = connection.execute(
-        "SELECT e.evidence_hash FROM evidence_hashes e "
+        "SELECT e.path,e.sha256,e.size_bytes,e.content_type,e.redaction_status,"
+        "e.captured_at FROM evidence_hashes e "
         "JOIN judge_verifier_runs j ON j.verifier_run_id=e.verifier_run_id "
         " AND j.worker_run_id=e.run_id AND j.evidence_hash=e.evidence_hash "
         "JOIN gate_runs g ON g.gate_run_id=e.gate_run_id "
@@ -257,7 +270,8 @@ def _assert_evidence_binding(
         "JOIN transitions t ON t.transition_id=g.transition_id "
         " AND t.run_id=g.run_id AND t.gate_run_id=g.gate_run_id "
         " AND t.evidence_hash=g.evidence_hash "
-        "JOIN gate_clock_context c ON c.gate_run_id=g.gate_run_id "
+        "JOIN gate_clock_context c ON c.clock_context_id=g.clock_context_id "
+        " AND c.gate_run_id=g.gate_run_id "
         " AND c.consumed_by_gate_run_id=g.gate_run_id AND c.run_id=g.run_id "
         " AND c.transition_id=t.transition_id "
         "JOIN approvals a ON a.approval_id=t.approval_id "
@@ -277,12 +291,23 @@ def _assert_evidence_binding(
         "AND g.run_authority_mode='file_authority' "
         "AND g.workflow_authority_mode='file_authority' "
         "AND g.decision='pass' AND g.requires_same_run=1 "
+        "AND g.completed_at_epoch_ms=c.now_epoch_ms "
+        "AND c.bound_at_epoch_ms=c.now_epoch_ms "
+        "AND c.consumed_at_epoch_ms=c.now_epoch_ms "
+        "AND c.trusted_clock_source_hash="
+        "agentic_trusted_clock_source_hash(c.now_epoch_ms,c.bound_by) "
         "AND t.approval_required=1 "
         "AND j.independence_class='independent' "
         "AND j.verifier_run_id<>j.worker_run_id "
         "AND j.verifier_run_id<>e.run_id "
         "AND j.worker_agent_id<>j.verifier_agent_id AND j.same_worker_context=0 "
         "AND a.single_use=1 "
+        "AND length(a.source_message_digest)=64 "
+        "AND a.source_message_digest NOT GLOB '*[^0-9a-f]*' "
+        "AND length(a.approval_text_digest)=64 "
+        "AND a.approval_text_digest NOT GLOB '*[^0-9a-f]*' "
+        "AND length(a.approval_hash)=64 "
+        "AND a.approval_hash NOT GLOB '*[^0-9a-f]*' "
         "AND CASE a.approved_risk_ceiling "
         "WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2 "
         "WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1 END >= "
@@ -296,6 +321,26 @@ def _assert_evidence_binding(
         raise GoalRunError(
             "goal run evidence requires same-run independent pass-gate evidence"
         )
+    _assert_safe_evidence_current(row)
+
+
+def _assert_safe_evidence_current(row: tuple[object, ...]) -> None:
+    try:
+        snapshot = _validate_evidence(
+            GateEvidence(
+                path=row[0],
+                sha256=row[1],
+                size_bytes=row[2],
+                content_type=row[3],
+                redaction_status=row[4],
+                captured_at=row[5],
+            )
+        )
+        _assert_evidence_snapshot_current(snapshot)
+    except PassGateError as exc:
+        raise GoalRunError(
+            "goal run evidence requires safely retrievable pass-gate evidence"
+        ) from exc
 
 
 def _consume_goal_approval(

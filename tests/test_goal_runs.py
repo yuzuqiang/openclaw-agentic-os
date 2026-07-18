@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -11,7 +12,12 @@ from contextlib import closing
 from pathlib import Path
 
 from agentic_os.goal_runs import GoalRunError, record_goal_run
-from agentic_os.migrations import apply_migrations, load_migrations, repository_root
+from agentic_os.migrations import (
+    _register_migration_functions,
+    apply_migrations,
+    load_migrations,
+    repository_root,
+)
 
 
 def _sha(content: bytes) -> str:
@@ -23,6 +29,19 @@ def _shadow_projection_id(run_id: str, relative_path: str, digest: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _clock_hash(now_epoch_ms: int, bound_by: str) -> str:
+    payload = json.dumps(
+        {
+            "bound_by": bound_by,
+            "now_epoch_ms": now_epoch_ms,
+            "source": "pass-gate-writer-local-wall-clock-v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class GoalRunWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state_root = repository_root() / "state/agentic-os"
@@ -31,6 +50,13 @@ class GoalRunWriterTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=self.state_root)
         self.addCleanup(self.temporary.cleanup)
         self.database = Path(self.temporary.name) / "control.db"
+        self.artifact_root = repository_root() / "artifacts/goal-run-test"
+        self.artifact_root.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._cleanup_artifact_root)
+        self.evidence_directory = tempfile.TemporaryDirectory(dir=self.artifact_root)
+        self.addCleanup(self.evidence_directory.cleanup)
+        self.evidence_file = Path(self.evidence_directory.name) / "evidence.json"
+        self.evidence_file.write_bytes(b"pass-evidence")
         apply_migrations(self.database)
         self.evidence_hash = _sha(b"pass-evidence")
         with closing(sqlite3.connect(self.database)) as connection:
@@ -42,6 +68,13 @@ class GoalRunWriterTests(unittest.TestCase):
         try:
             self.state_root.rmdir()
             self.state_root.parent.rmdir()
+        except OSError:
+            pass
+
+    def _cleanup_artifact_root(self) -> None:
+        try:
+            self.artifact_root.rmdir()
+            self.artifact_root.parent.rmdir()
         except OSError:
             pass
 
@@ -231,6 +264,22 @@ class GoalRunWriterTests(unittest.TestCase):
                 0,
             )
 
+    def test_record_goal_run_revalidates_current_evidence_artifact(self) -> None:
+        self.evidence_file.write_bytes(b"drifted-evidence")
+        with self.assertRaisesRegex(GoalRunError, "safely retrievable"):
+            record_goal_run(
+                self.database,
+                goal_run_id="stale-artifact",
+                goal_id="goal",
+                run_id="run",
+                severity="R1",
+                state="open",
+                predicate_plugin_hash="plugin",
+                evidence_hash=self.evidence_hash,
+                created_at="now",
+                created_at_epoch_ms=1000,
+            )
+
     def test_writer_refuses_database_authority_runs(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
@@ -280,6 +329,7 @@ class GoalRunWriterTests(unittest.TestCase):
     def test_writer_requires_recorded_migrations_and_slo_contracts(self) -> None:
         handmade = Path(self.temporary.name) / "handmade.db"
         with closing(sqlite3.connect(handmade)) as connection:
+            _register_migration_functions(connection)
             connection.create_function(
                 "agentic_shadow_projection_id",
                 3,
@@ -376,15 +426,18 @@ class GoalRunWriterTests(unittest.TestCase):
                 "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
                 "consumed_at_epoch_ms) VALUES('clock','gate','gate','run',"
                 "'transition','nonce',1000,1000,'writer',?,1000)",
-                (_sha(b"clock"),),
+                (_clock_hash(1000, "writer"),),
             )
+            evidence_relative = self.evidence_file.resolve().relative_to(
+                repository_root()
+            ).as_posix()
             connection.execute(
                 "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
                 "size_bytes,content_type,redaction_status,producer_run_id,"
                 "verifier_run_id,gate_run_id,captured_at) VALUES(?, 'run',"
-                "'artifacts/evidence.json',?,13,'application/json','none','run',"
+                "?,?,13,'application/json','none','run',"
                 "'verifier','gate','now')",
-                (self.evidence_hash, self.evidence_hash),
+                (self.evidence_hash, evidence_relative, self.evidence_hash),
             )
             connection.commit()
         except Exception:

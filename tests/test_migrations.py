@@ -15,6 +15,7 @@ from agentic_os.migrations import (
     MigrationError,
     MigrationHashDrift,
     _connect,
+    _register_migration_functions,
     apply_migrations,
     load_migrations,
     repository_root,
@@ -40,6 +41,19 @@ from agentic_os.slo_contracts import (
 
 def _shadow_projection_id(run_id: str, path: str, digest: str) -> str:
     payload = f"{run_id}\0{path}\0{digest}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _clock_hash(now_epoch_ms: int, bound_by: str) -> str:
+    payload = json.dumps(
+        {
+            "bound_by": bound_by,
+            "now_epoch_ms": now_epoch_ms,
+            "source": "pass-gate-writer-local-wall-clock-v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -1376,6 +1390,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
@@ -1582,6 +1597,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
@@ -3580,6 +3596,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         for plugin in ("manifest-plugin", "other-plugin"):
             connection.execute(
@@ -3696,6 +3713,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
@@ -3839,7 +3857,7 @@ class MigrationTests(unittest.TestCase):
             "owner='new-owner'",
         ):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "referenced goal runs"
+                sqlite3.IntegrityError, "referenced goal runs|current SHA-256"
             ):
                 connection.execute(
                     f"UPDATE goal_manifests SET {assignment} WHERE goal_id='goal'"
@@ -3856,7 +3874,9 @@ class MigrationTests(unittest.TestCase):
             "VALUES('late-approval-run','late-approval-goal','run','R1','open','plugin',"
             "'agentic_predicate_inproc_v1',1,'now',1000)"
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "referenced goal runs"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "referenced goal runs|current SHA-256"
+        ):
             connection.execute(
                 "UPDATE goal_manifests SET approval_required=1 "
                 "WHERE goal_id='late-approval-goal'"
@@ -4108,6 +4128,64 @@ class MigrationTests(unittest.TestCase):
             (hashlib.sha256(b"pass-evidence").hexdigest(),),
         )
 
+    def test_goal_run_evidence_migration_preserves_historical_gate_snapshot_after_cutover(
+        self,
+    ) -> None:
+        self._apply_migrations_through(11, "through-11")
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(connection)
+        connection.execute(
+            "UPDATE runs SET state='finalized',finalized_at='now',"
+            "finalized_at_epoch_ms=1001 WHERE run_id IN ('run','other-run')"
+        )
+        connection.execute(
+            "UPDATE workflow_authority SET mode='db_authority_canary',"
+            "cutover_approved_by='river',cutover_evidence_hash=?,"
+            "rollback_deadline='deadline',last_parity_audit_hash=?,"
+            "open_file_authority_runs=0 WHERE workflow='w'",
+            (
+                hashlib.sha256(b"cutover").hexdigest(),
+                hashlib.sha256(b"parity").hexdigest(),
+            ),
+        )
+        connection.execute(
+            "UPDATE runs SET authority_mode='db_authority_canary' "
+            "WHERE run_id='run'"
+        )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+            "created_at,created_at_epoch_ms) VALUES('legacy-after-cutover','goal',"
+            "'run','R1','open','plugin','agentic_predicate_inproc_v1',1,?,"
+            "'now',1000)",
+            (hashlib.sha256(b"pass-evidence").hexdigest(),),
+        )
+        connection.commit()
+        connection.close()
+        self.assertEqual(apply_migrations(self.database), (12,))
+
+    def test_goal_run_evidence_requires_derived_trusted_gate_clock(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(
+            connection,
+            trusted_clock_source_hash="a" * 64,
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "same-run independent pass-gate evidence"
+        ):
+            connection.execute(
+                "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+                "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+                "created_at,created_at_epoch_ms) VALUES('forged-clock','goal','run',"
+                "'R1','open','plugin','agentic_predicate_inproc_v1',1,?,'now',1000)",
+                (hashlib.sha256(b"pass-evidence").hexdigest(),),
+            )
+
     def test_goal_run_evidence_requires_exact_unexpired_transition_approval(self) -> None:
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
@@ -4131,6 +4209,81 @@ class MigrationTests(unittest.TestCase):
             repository_root() / "migrations/0012_goal_run_evidence_binding.sql"
         ).read_text(encoding="utf-8")
         self.assertIn("a.expires_at_epoch_ms > c.now_epoch_ms", migration_sql)
+        self.assertNotIn("strftime('%s','now')", migration_sql)
+
+    def test_goal_run_evidence_freezes_transition_approval_digest_after_binding(
+        self,
+    ) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        self._seed_goal_run_evidence_binding_fixture(connection)
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,evidence_hash,"
+            "created_at,created_at_epoch_ms) VALUES('bound-approval-freeze','goal',"
+            "'run','R1','open','plugin','agentic_predicate_inproc_v1',1,?,'now',1000)",
+            (hashlib.sha256(b"pass-evidence").hexdigest(),),
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "approval"):
+            connection.execute(
+                "UPDATE approvals SET approval_hash=? WHERE approval_id='approval'",
+                (hashlib.sha256(b"rewritten-approval").hexdigest(),),
+            )
+
+    def test_goal_manifest_required_flip_rechecks_current_approval_clock_and_shape(
+        self,
+    ) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        _register_migration_functions(connection)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('w','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES('run',"
+            "'prepare','w','file_authority','candidate','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,backend,"
+            "schema_hash,sandbox_required,sandbox_enforced,created_at) VALUES("
+            "'plugin','safe','1','agentic_predicate_inproc_v1','schema',0,1,'now')"
+        )
+        connection.execute(
+            "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
+            "predicate_plugin_hash,backend,approval_required,enabled,created_at,"
+            "updated_at) VALUES('flip-goal','owner','R1','manifest','plugin',"
+            "'agentic_predicate_inproc_v1',0,1,'now','now')"
+        )
+        connection.execute(
+            "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+            "source_message_digest,approval_text_digest,approved_action_type,"
+            "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+            "expires_at_epoch_ms,approval_hash,consumed_by_goal_run_id,approved_at) "
+            "VALUES('flip-approval','run','river','telegram',?,?,'goal_run','goal',"
+            "'flip-goal','manifest','owner','R1',1000,?,'flip-run','now')",
+            (
+                hashlib.sha256(b"flip-source").hexdigest(),
+                hashlib.sha256(b"flip-text").hexdigest(),
+                hashlib.sha256(b"flip-approval").hexdigest(),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO goal_runs(goal_run_id,goal_id,run_id,severity,state,"
+            "predicate_plugin_hash,backend,sandbox_enforced,approval_id,created_at,"
+            "created_at_epoch_ms) VALUES('flip-run','flip-goal','run','R1','open',"
+            "'plugin','agentic_predicate_inproc_v1',1,'flip-approval','backdated',1)"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "current SHA-256"):
+            connection.execute(
+                "UPDATE goal_manifests SET approval_required=1 "
+                "WHERE goal_id='flip-goal'"
+            )
 
     def _seed_goal_run_evidence_binding_fixture(
         self,
@@ -4144,11 +4297,14 @@ class MigrationTests(unittest.TestCase):
         transition_approval_required: bool = True,
         approval_expires_at_epoch_ms: int = 2000,
         verifier_run_id: str = "verifier",
+        trusted_clock_source_hash: str | None = None,
     ) -> None:
+        _register_migration_functions(connection)
         evidence_hash = evidence_hash or hashlib.sha256(b"pass-evidence").hexdigest()
         gate_run_authority_mode = gate_run_authority_mode or authority_mode
         gate_workflow_authority_mode = gate_workflow_authority_mode or authority_mode
         evidence_sha256 = evidence_sha256 or evidence_hash
+        trusted_clock_source_hash = trusted_clock_source_hash or _clock_hash(1000, "writer")
         target_hash = hashlib.sha256(b"target").hexdigest()
         source_digest = hashlib.sha256(b"source").hexdigest()
         text_digest = hashlib.sha256(b"text").hexdigest()
@@ -4248,7 +4404,7 @@ class MigrationTests(unittest.TestCase):
                 "now_epoch_ms,bound_at_epoch_ms,bound_by,trusted_clock_source_hash,"
                 "consumed_at_epoch_ms) VALUES('clock','gate','gate','run',"
                 "'transition','nonce',1000,1000,'writer',?,1000)",
-                (hashlib.sha256(b"clock").hexdigest(),),
+                (trusted_clock_source_hash,),
             )
             connection.execute(
                 "INSERT INTO evidence_hashes(evidence_hash,run_id,path,sha256,"
