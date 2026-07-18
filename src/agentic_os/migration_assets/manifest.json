@@ -71,6 +71,12 @@
       "name": "goal_run_evidence_binding",
       "file": "0012_goal_run_evidence_binding.sql",
       "sha256": "f5daa6388e70c68ca9de8c551341e09370cb389c2f763dff817c670fd87baec7"
+    },
+    {
+      "version": 13,
+      "name": "trust_promotion_binding",
+      "file": "0013_trust_promotion_binding.sql",
+      "sha256": "2ac84d9266c3d2a8b2daa994c7961a6049445bf23811f086750f05e71615db70"
     }
   ]
 }

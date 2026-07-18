@@ -577,7 +577,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10, 11, 12))
+        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -946,7 +946,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
         )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
@@ -1045,7 +1045,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
         )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -1067,6 +1067,7 @@ class MigrationTests(unittest.TestCase):
                     (10, current_hash),
                     (11, current_hash),
                     (12, current_hash),
+                    (13, current_hash),
                 ],
             )
 
@@ -1233,6 +1234,7 @@ class MigrationTests(unittest.TestCase):
                 "runtime_dispatch_binding",
                 "gate_authority_snapshot",
                 "goal_run_evidence_binding",
+                "trust_promotion_binding",
             ],
         )
         for migration in migrations:
@@ -1257,7 +1259,7 @@ class MigrationTests(unittest.TestCase):
         before_mtime = verify_target.stat().st_mtime_ns
         self.assertEqual(
             verify_database(verify_target),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
         )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
@@ -6712,7 +6714,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(13,'future_contract',?,'now')",
+            "VALUES(14,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -6721,7 +6723,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                13,
+                14,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -6735,7 +6737,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (13,),
+            (14,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -6944,6 +6946,7 @@ class MigrationTests(unittest.TestCase):
                 (10, "runtime_dispatch_binding"),
                 (11, "gate_authority_snapshot"),
                 (12, "goal_run_evidence_binding"),
+                (13, "trust_promotion_binding"),
             ],
         )
 

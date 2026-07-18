@@ -80,6 +80,48 @@ def _trusted_clock_source_hash(now_epoch_ms: object, bound_by: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _trust_binding_hash(
+    run_id: object,
+    goal_run_id: object,
+    evidence_hash: object,
+    verifier_run_id: object,
+    gate_run_id: object,
+    schema_version: object,
+    migration_sha256: object,
+    blocking_slo_query_count: object,
+) -> str:
+    if not all(
+        isinstance(item, str) and item
+        for item in (
+            run_id,
+            goal_run_id,
+            evidence_hash,
+            verifier_run_id,
+            gate_run_id,
+            migration_sha256,
+        )
+    ):
+        return ""
+    if type(schema_version) is not int or type(blocking_slo_query_count) is not int:
+        return ""
+    payload = json.dumps(
+        {
+            "blocking_slo_query_count": blocking_slo_query_count,
+            "evidence_hash": evidence_hash,
+            "gate_run_id": gate_run_id,
+            "goal_run_id": goal_run_id,
+            "migration_sha256": migration_sha256,
+            "run_id": run_id,
+            "schema_version": schema_version,
+            "source": "trust-promotion-binding-v1",
+            "verifier_run_id": verifier_run_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _register_migration_functions(connection: sqlite3.Connection) -> None:
     connection.create_function(
         "agentic_shadow_projection_id",
@@ -91,6 +133,12 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         "agentic_trusted_clock_source_hash",
         2,
         _trusted_clock_source_hash,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_trust_binding_hash",
+        8,
+        _trust_binding_hash,
         deterministic=True,
     )
 

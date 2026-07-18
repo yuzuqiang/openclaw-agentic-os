@@ -10,12 +10,12 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `780d1b35fa07389c3aa2dbb5d700b69d9011e70de9c854f6dbb289cae815185e`
+- Current design artifact SHA-256: `28074dee566152a0ddd7b2ccd45bb488c0463bc884cbb11ff5f66453b2a978d7`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `f5daa6388e70c68ca9de8c551341e09370cb389c2f763dff817c670fd87baec7`
-- Current migration manifest SHA-256: `d0f7871f8a121436088f6d29e7f92a65906d9c66af27ab17343ce22d38ff7909`
-- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, and one runtime dispatch binding table, 30 executable SLO queries
-- Remaining implementation scope: P0/P1 schema, adapters, reconciler, predicate runner integrations, trust promotion, crash fixtures, rollback drills, and production smoke tests
+- Current latest migration SHA-256: `2ac84d9266c3d2a8b2daa994c7961a6049445bf23811f086750f05e71615db70`
+- Current migration manifest SHA-256: `e655d0bdffb93d8d8926ff1d41e7be4b0dc5e8cf4f960207932e61cf853745b4`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
+- Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
@@ -178,6 +178,22 @@ or malformed approvals, deletes of evidenced goal runs, and attempts to rewrite
 an established goal-run evidence binding fail closed. This slice does not
 promote trust, call OpenClaw/Gateway/Cron, or enable production database
 authority.
+
+The fifth P1.2 slice lives in `agentic_os.trust_promotion` plus migration v13.
+It records active `trust_observations` only through a local-only `BEGIN
+IMMEDIATE` writer after the database proves same-run goal evidence, an
+approval-bound PASS gate, independent verifier proof, trusted gate clock,
+gate-time file-authority snapshots, complete current SLO PASS audit rows, and
+known-only usage/cost across the selected run budget, selected model cost row,
+non-human budget events, and final settlements. Migration v13 aborts on active
+legacy unbound trust rows, adds exact binding columns and a deterministic
+`agentic_trust_binding_hash(...)`, and rejects direct active inserts unless
+those fields match the bound evidence view. Unknown or estimated usage/cost,
+self-verifier evidence, wrong-run evidence, stale or missing SLO audits,
+database-authority snapshots, changed evidence artifacts, malformed binding
+hashes, and active-row rewrites fail closed without authoritative trust writes.
+This slice does not call OpenClaw, Gateway, Cron, request external review, or
+enable production database authority.
 
 The first P1.0 executable budget fixture pack lives under
 `tests/fixtures/budgets/` plus `tests/fixtures/sqlite_type_affinity_h1_h4.sql`.
