@@ -65,11 +65,32 @@ def _shadow_projection_id(run_id: object, relative_path: object, digest: object)
     return hashlib.sha256(payload).hexdigest()
 
 
+def _trusted_clock_source_hash(now_epoch_ms: object, bound_by: object) -> str:
+    if type(now_epoch_ms) is not int or not isinstance(bound_by, str) or not bound_by:
+        return ""
+    payload = json.dumps(
+        {
+            "bound_by": bound_by,
+            "now_epoch_ms": now_epoch_ms,
+            "source": "pass-gate-writer-local-wall-clock-v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _register_migration_functions(connection: sqlite3.Connection) -> None:
     connection.create_function(
         "agentic_shadow_projection_id",
         3,
         _shadow_projection_id,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_trusted_clock_source_hash",
+        2,
+        _trusted_clock_source_hash,
         deterministic=True,
     )
 
