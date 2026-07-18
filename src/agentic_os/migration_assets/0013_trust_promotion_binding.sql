@@ -44,6 +44,8 @@ SELECT
   e.verifier_run_id,
   e.gate_run_id,
   g.transition_id,
+  r.workflow AS promoted_scope,
+  gr.severity AS promoted_severity,
   t.approval_id,
   a.approval_hash,
   g.clock_context_id,
@@ -206,6 +208,16 @@ WHERE gr.run_id IS NOT NULL
           AND sa.evidence_run_id=e.run_id
           AND sa.verifier_run_id=e.verifier_run_id
           AND sa.gate_run_id=e.gate_run_id
+          AND sa.slo_audit_id=(
+            SELECT latest.slo_audit_id
+            FROM slo_audits latest
+            WHERE latest.query_name=current_q.query_name
+              AND latest.schema_version=current_q.schema_version
+              AND latest.migration_sha256=current_q.migration_sha256
+              AND latest.query_hash=current_q.query_hash
+            ORDER BY latest.run_at_epoch_ms DESC, latest.slo_audit_id DESC
+            LIMIT 1
+          )
       )
   );
 
@@ -221,6 +233,8 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
     AND b.verifier_run_id=NEW.verifier_run_id
     AND b.gate_run_id=NEW.gate_run_id
     AND b.transition_id=NEW.transition_id
+    AND b.promoted_scope=NEW.scope
+    AND b.promoted_severity=NEW.severity
     AND b.approval_id=NEW.approval_id
     AND b.approval_hash=NEW.approval_hash
     AND b.clock_context_id=NEW.clock_context_id
@@ -281,8 +295,130 @@ END;
 CREATE TRIGGER trust_observations_validate_bound_update
 BEFORE UPDATE ON trust_observations
 WHEN OLD.invalidated_at IS NULL
+  AND NOT (
+    NEW.invalidated_at IS NOT NULL
+    AND NEW.invalidated_at<>''
+    AND NEW.observation_id IS OLD.observation_id
+    AND NEW.scope IS OLD.scope
+    AND NEW.severity IS OLD.severity
+    AND NEW.status IS OLD.status
+    AND NEW.effective_group_id IS OLD.effective_group_id
+    AND NEW.verifier_run_id IS OLD.verifier_run_id
+    AND NEW.gate_run_id IS OLD.gate_run_id
+    AND NEW.usage_confidence IS OLD.usage_confidence
+    AND NEW.bounded_at IS OLD.bounded_at
+    AND NEW.created_at IS OLD.created_at
+    AND NEW.run_id IS OLD.run_id
+    AND NEW.goal_run_id IS OLD.goal_run_id
+    AND NEW.evidence_hash IS OLD.evidence_hash
+    AND NEW.evidence_run_id IS OLD.evidence_run_id
+    AND NEW.transition_id IS OLD.transition_id
+    AND NEW.approval_id IS OLD.approval_id
+    AND NEW.approval_hash IS OLD.approval_hash
+    AND NEW.schema_version IS OLD.schema_version
+    AND NEW.migration_sha256 IS OLD.migration_sha256
+    AND NEW.blocking_slo_query_count IS OLD.blocking_slo_query_count
+    AND NEW.blocking_slo_pass_audit_count IS OLD.blocking_slo_pass_audit_count
+    AND NEW.blocking_slo_bundle_hash IS OLD.blocking_slo_bundle_hash
+    AND NEW.clock_context_id IS OLD.clock_context_id
+    AND NEW.gate_clock_epoch_ms IS OLD.gate_clock_epoch_ms
+    AND NEW.trusted_clock_source_hash IS OLD.trusted_clock_source_hash
+    AND NEW.run_authority_mode IS OLD.run_authority_mode
+    AND NEW.workflow_authority_mode IS OLD.workflow_authority_mode
+    AND NEW.selected_cost_registry_id IS OLD.selected_cost_registry_id
+    AND NEW.selected_cost_registry_hash IS OLD.selected_cost_registry_hash
+    AND NEW.cost_confidence IS OLD.cost_confidence
+  )
 BEGIN
   SELECT RAISE(ABORT,'active trust observation is immutable');
+END;
+
+CREATE TRIGGER budget_events_preserve_active_trust_insert
+BEFORE INSERT ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.run_id=NEW.run_id
+    AND trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before budget event changes');
+END;
+
+CREATE TRIGGER budget_events_preserve_active_trust_update
+BEFORE UPDATE ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (trust.run_id=OLD.run_id OR trust.run_id=NEW.run_id)
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before budget event changes');
+END;
+
+CREATE TRIGGER budget_events_preserve_active_trust_delete
+BEFORE DELETE ON budget_events
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.run_id=OLD.run_id
+    AND trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before budget event changes');
+END;
+
+CREATE TRIGGER run_budgets_preserve_active_trust_update
+BEFORE UPDATE ON run_budgets
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (trust.run_id=OLD.run_id OR trust.run_id=NEW.run_id)
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
+END;
+
+CREATE TRIGGER run_budgets_preserve_active_trust_delete
+BEFORE DELETE ON run_budgets
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.run_id=OLD.run_id
+    AND trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
+END;
+
+CREATE TRIGGER budget_settlements_preserve_active_trust_insert
+BEFORE INSERT ON budget_settlements
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.run_id=NEW.run_id
+    AND trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
+END;
+
+CREATE TRIGGER budget_settlements_preserve_active_trust_update
+BEFORE UPDATE ON budget_settlements
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (trust.run_id=OLD.run_id OR trust.run_id=NEW.run_id)
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
+END;
+
+CREATE TRIGGER budget_settlements_preserve_active_trust_delete
+BEFORE DELETE ON budget_settlements
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.run_id=OLD.run_id
+    AND trust.invalidated_at IS NULL
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
 END;
 
 CREATE TRIGGER trust_observations_validate_bound_reactivate_update

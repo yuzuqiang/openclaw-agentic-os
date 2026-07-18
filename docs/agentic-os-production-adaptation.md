@@ -3928,19 +3928,25 @@ Current migration v13 trust promotion binding:
 `trust_observations` inert, but any active row must bind exactly to one run, one
 goal run, one evidence hash, one independent verifier, one approval-bound PASS
 gate, one gate clock, one current schema/migration identity, one complete
-current SLO PASS audit set, one file-authority gate snapshot, and one known
-selected cost row. Migration aborts if active legacy trust rows exist without
-those bindings. The active-row trigger accepts only `status='promoted'`,
-`usage_confidence='known'`, `cost_confidence='known'`, complete current SLO PASS
-coverage, and a deterministic `agentic_trust_binding_hash(...)` over the
-run/goal/evidence binding. Raw SQLite clients that do not register the local
-SQL functions fail closed. The binding view rejects unknown or estimated
-usage/cost across run budgets, non-human budget events, final settlements, and
-selected model cost registry rows; rejects database-authority current or
-gate-time snapshots; and rejects self-verifier, wrong-run, non-PASS, stale gate
-identity, stale trusted clock, malformed evidence, and missing same-run goal
-evidence. The local writer derives all authority fields under `BEGIN IMMEDIATE`
-and rechecks the evidence artifact before commit; it performs no
+current latest SLO PASS audit set, one file-authority gate snapshot, one known
+selected cost row, and the exact proven run/goal risk boundary. Migration aborts
+if active legacy trust rows exist without those bindings. The active-row trigger
+accepts only `status='promoted'`, `usage_confidence='known'`,
+`cost_confidence='known'`, complete current latest SLO PASS coverage, exact
+scope/severity equality with the bound evidence, and a deterministic
+`agentic_trust_binding_hash(...)` over the run/goal/evidence binding. Raw SQLite
+clients that do not register the local SQL functions fail closed. The binding
+view rejects unknown or estimated usage/cost across run budgets, non-human
+budget events, final settlements, and selected model cost registry rows; rejects
+database-authority current or gate-time snapshots; and rejects self-verifier,
+wrong-run, non-PASS, stale gate identity, stale trusted clock, malformed
+evidence, missing same-run goal evidence, and any older PASS SLO audit shadowed
+by a newer failing audit. Post-promotion budget and settlement evidence cannot
+change while trust is active; callers must invalidate the trust row first.
+Active trust rows are immutable except for setting `invalidated_at` to retire
+stale trust, and invalidated rows cannot be reactivated. The local writer
+derives all authority fields under `BEGIN IMMEDIATE` and rechecks the evidence
+artifact before commit; it performs no
 OpenClaw/Gateway/Cron or production-authority calls.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`

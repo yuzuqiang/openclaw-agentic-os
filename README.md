@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `28074dee566152a0ddd7b2ccd45bb488c0463bc884cbb11ff5f66453b2a978d7`
+- Current design artifact SHA-256: `423bb603321e60d2f9e1e1aa7b2db7caa543b6d914cf847c55bfe97da4ffccad`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `2ac84d9266c3d2a8b2daa994c7961a6049445bf23811f086750f05e71615db70`
-- Current migration manifest SHA-256: `e655d0bdffb93d8d8926ff1d41e7be4b0dc5e8cf4f960207932e61cf853745b4`
+- Current latest migration SHA-256: `2e4d1e7e5ae14477d83e34fae2832f23c0b8cf5eb37552e15b9c6647d7c53a4f`
+- Current migration manifest SHA-256: `9c16042686662f904772e7b5ccbd934859c79da4cfcc4c15be566f93309fe2b7`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -188,10 +188,14 @@ known-only usage/cost across the selected run budget, selected model cost row,
 non-human budget events, and final settlements. Migration v13 aborts on active
 legacy unbound trust rows, adds exact binding columns and a deterministic
 `agentic_trust_binding_hash(...)`, and rejects direct active inserts unless
-those fields match the bound evidence view. Unknown or estimated usage/cost,
-self-verifier evidence, wrong-run evidence, stale or missing SLO audits,
+those fields match the bound evidence view and the requested scope/severity match
+the proven run/goal risk boundary. Unknown or estimated usage/cost, self-verifier
+evidence, wrong-run evidence, stale or missing latest SLO audits,
 database-authority snapshots, changed evidence artifacts, malformed binding
-hashes, and active-row rewrites fail closed without authoritative trust writes.
+hashes, post-promotion budget evidence changes before invalidation, and
+active-row rewrites fail closed without authoritative trust writes. Active rows
+can still be invalidated by setting `invalidated_at`, but cannot otherwise be
+changed or reactivated.
 This slice does not call OpenClaw, Gateway, Cron, request external review, or
 enable production database authority.
 

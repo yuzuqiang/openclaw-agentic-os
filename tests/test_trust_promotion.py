@@ -206,6 +206,125 @@ class TrustPromotionWriterTests(unittest.TestCase):
         self._seed_valid_fixture(seed_slo_audits=False)
         self._assert_promotion_fails_without_write("complete bound evidence")
 
+    def test_later_failing_slo_audit_blocks_stale_pass_promotion(self) -> None:
+        self._seed_valid_fixture()
+        schema_version, migration_sha256 = self._current_schema_identity()
+        contract = SLO_QUERY_CONTRACTS[0]
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            latest_epoch = connection.execute(
+                "SELECT MAX(run_at_epoch_ms) FROM slo_audits WHERE query_name=?",
+                (contract.query_name,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                "fixture_db_status,run_at,run_at_epoch_ms) VALUES("
+                "'slo-latest-fail',?,?,?,?,1,'fail','fail','fail','audit-later',?)",
+                (
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    int(latest_epoch) + 1000,
+                ),
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_trust_scope_and_severity_must_match_bound_evidence(self) -> None:
+        for field, value in (("scope", "global"), ("severity", "R2")):
+            with self.subTest(field=field):
+                self._reset_database()
+                self._seed_valid_fixture()
+                self._assert_promotion_fails_without_write(
+                    "complete bound evidence", **{field: value}
+                )
+
+    def test_active_trust_can_only_be_invalidated_fail_closed(self) -> None:
+        self._seed_valid_fixture()
+        self._promote()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "active trust"):
+                connection.execute(
+                    "UPDATE trust_observations SET status='stale' "
+                    "WHERE observation_id='trust'"
+                )
+            connection.execute(
+                "UPDATE trust_observations SET invalidated_at='invalid-now' "
+                "WHERE observation_id='trust'"
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM trust_observations "
+                    "WHERE observation_id='trust' AND invalidated_at IS NULL"
+                ).fetchone()[0],
+                0,
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "reactivated"):
+                connection.execute(
+                    "UPDATE trust_observations SET invalidated_at=NULL "
+                    "WHERE observation_id='trust'"
+                )
+
+    def test_post_promotion_budget_evidence_changes_require_invalidation(self) -> None:
+        self._seed_valid_fixture()
+        self._promote()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "budget event changes"):
+                connection.execute(
+                    "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                    "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                    "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                    "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                    "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                    "VALUES('post-trust-unknown','post-trust-unknown-idem',"
+                    "'post-trust-unknown-dedupe',"
+                    "1,'run','transition','provider','model','endpoint','capability',"
+                    "'cost-row','effective','cost-hash','known','consume',1,'unknown',"
+                    "'test','now',2000)"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "budget event changes"):
+                connection.execute(
+                    "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                    "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                    "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                    "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                    "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                    "VALUES('post-trust-known','post-trust-known-idem',"
+                    "'post-trust-known-dedupe',"
+                    "1,'run','transition','provider','model','endpoint','capability',"
+                    "'cost-row','effective','cost-hash','known','consume',1,'known',"
+                    "'test','now',2000)"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "selected budget changes"):
+                connection.execute(
+                    "UPDATE run_budgets SET selected_provider='other-provider' "
+                    "WHERE run_id='run'"
+                )
+            connection.execute(
+                "UPDATE trust_observations SET invalidated_at='invalid-now' "
+                "WHERE observation_id='trust'"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('post-invalidated-unknown','post-invalidated-unknown-idem',"
+                "'post-invalidated-unknown-dedupe',"
+                "1,'run','transition','provider','model','endpoint','capability',"
+                "'cost-row','effective','cost-hash','known','consume',1,'unknown',"
+                "'test','now',2000)"
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT usage_confidence FROM budget_events "
+                    "WHERE budget_event_id='post-invalidated-unknown'"
+                ).fetchone()[0],
+                "unknown",
+            )
+
     def test_wrong_run_self_verifier_db_authority_and_stale_clock_fail(self) -> None:
         mutations = (
             ("wrong run", "UPDATE goal_runs SET run_id='other-run' WHERE goal_run_id='goal-run'"),
@@ -602,12 +721,18 @@ class TrustPromotionWriterTests(unittest.TestCase):
         self.assertIsNotNone(row)
         return int(row[0]), str(row[1])
 
-    def _promote(self, *, observation_id: str = "trust"):
+    def _promote(
+        self,
+        *,
+        observation_id: str = "trust",
+        scope: str = "workflow",
+        severity: str = "R1",
+    ):
         return promote_trust(
             self.database,
             observation_id=observation_id,
-            scope="workflow",
-            severity="R1",
+            scope=scope,
+            severity=severity,
             effective_group_id="workflow:group",
             run_id="run",
             goal_run_id="goal-run",
@@ -616,11 +741,11 @@ class TrustPromotionWriterTests(unittest.TestCase):
             created_at="created-now",
         )
 
-    def _assert_promotion_fails_without_write(self, message: str) -> None:
+    def _assert_promotion_fails_without_write(self, message: str, **overrides: str) -> None:
         with closing(sqlite3.connect(self.database)) as connection:
             before = self._trust_count(connection)
         with self.assertRaisesRegex(TrustPromotionError, message):
-            self._promote()
+            self._promote(**overrides)
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(self._trust_count(connection), before)
 
