@@ -203,6 +203,39 @@ class GoalRunWriterTests(unittest.TestCase):
                 created_at_epoch_ms=int(time.time() * 1000),
             )
 
+    def test_record_goal_run_rejects_approval_without_identity(self) -> None:
+        source_digest = _sha(b"identity-source")
+        text_digest = _sha(b"identity-text")
+        approval_hash = _sha(b"identity-approval")
+        expires_at = int(time.time() * 1000) + 60_000
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "UPDATE goal_manifests SET approval_required=1 WHERE goal_id='goal'"
+            )
+            connection.execute(
+                "INSERT INTO approvals(approval_id,run_id,approver,channel,"
+                "source_message_digest,approval_text_digest,approved_action_type,"
+                "target_type,target_id,target_hash,target_scope,approved_risk_ceiling,"
+                "expires_at_epoch_ms,approval_hash,approved_at) VALUES("
+                "'identityless-goal-approval','run','','telegram',?,?,'goal_run',"
+                "'goal','goal','manifest','owner','R1',?,?,'now')",
+                (source_digest, text_digest, expires_at, approval_hash),
+            )
+        with self.assertRaisesRegex(GoalRunError, "approval could not be consumed"):
+            record_goal_run(
+                self.database,
+                goal_run_id="identityless-approval-bound",
+                goal_id="goal",
+                run_id="run",
+                severity="R1",
+                state="open",
+                predicate_plugin_hash="plugin",
+                approval_id="identityless-goal-approval",
+                created_at="now",
+                created_at_epoch_ms=int(time.time() * 1000),
+            )
+
     def test_record_goal_run_rejects_approval_for_non_required_manifest(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
