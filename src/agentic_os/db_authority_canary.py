@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
+import stat
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import DB_AUTHORITY_ENABLED
+import agentic_os
 from .migrations import apply_migrations, verify_database_connection
+from .privacy import PrivacyPreflightError, assert_privacy_preflight
 from .shadow import (
     ShadowBackfillError,
     ShadowProjection,
@@ -16,11 +20,13 @@ from .shadow import (
     _checkpoint_offline_snapshot,
     _connect,
     _normalize_artifact_target,
+    _normalize_artifacts,
     _normalize_required_identity,
     _projection_id,
     _remove_checkpointed_sidecars,
     _repo_relative,
     _sha256,
+    _utc_iso_epoch_ms,
     _utc_now,
 )
 
@@ -76,7 +82,7 @@ def db_authority_canary_artifact(
     this is canary fixture evidence, not production DB authority.
     """
 
-    if DB_AUTHORITY_ENABLED:
+    if agentic_os.DB_AUTHORITY_ENABLED:
         raise DbAuthorityCanaryError("production DB authority must remain disabled")
     workflow = _normalize_required_identity("workflow", workflow)
     run_id = _normalize_required_identity("run_id", run_id)
@@ -86,9 +92,7 @@ def db_authority_canary_artifact(
     cutover_evidence_hash = _sha256_text(
         "cutover_evidence_hash", cutover_evidence_hash
     )
-    rollback_deadline = _normalize_required_identity(
-        "rollback_deadline", rollback_deadline
-    )
+    rollback_deadline = _normalize_required_identity("rollback_deadline", rollback_deadline)
     last_parity_audit_hash = _sha256_text(
         "last_parity_audit_hash", last_parity_audit_hash
     )
@@ -110,6 +114,9 @@ def db_authority_canary_artifact(
     database_path = Path(database).expanduser().resolve()
     apply_migrations(database_path, repo_root=root)
     created_at, created_epoch_ms = _utc_now()
+    rollback_deadline = _normalize_future_deadline(
+        rollback_deadline, after_epoch_ms=created_epoch_ms
+    )
     connection = _connect(database_path)
     checkpointed = False
     try:
@@ -232,8 +239,11 @@ def rollback_db_authority_canary(
     if not artifacts:
         raise DbAuthorityCanaryError("at least one artifact is required")
     root = Path(repo_root_path or Path(__file__).resolve().parents[2]).resolve()
-    database_path = Path(database).expanduser().resolve()
-    connection = _connect(database_path)
+    database_input = Path(database).expanduser()
+    if database_input.is_symlink():
+        raise DbAuthorityCanaryError("canary database cannot be a symlink")
+    database_path = database_input.resolve()
+    connection = _connect_existing_canary_database(database_path, root=root)
     regenerated: list[ShadowProjection] = []
     checkpointed = False
     rolled_back_at, _epoch_ms = _utc_now()
@@ -248,48 +258,71 @@ def rollback_db_authority_canary(
                 raise DbAuthorityCanaryError(
                     "rollback requires an active db_authority_canary workflow"
                 )
-            open_canary = connection.execute(
-                "SELECT run_id FROM runs WHERE workflow=? "
-                "AND authority_mode='db_authority_canary' "
-                "AND state NOT IN ('finalized','rolled_back','rejected') LIMIT 1",
+            canary_runs = connection.execute(
+                "SELECT run_id,state,finalized_at,finalized_at_epoch_ms FROM runs "
+                "WHERE workflow=? AND authority_mode='db_authority_canary'",
                 (workflow,),
-            ).fetchone()
-            if open_canary is not None:
-                raise DbAuthorityCanaryError("cannot rollback an open canary run")
-            for artifact in artifacts:
-                path = Path(artifact)
-                relative = _repo_relative(root, path, resolve=False)
-                absolute = (path if path.is_absolute() else root / path).resolve()
-                if not absolute.is_file():
+            ).fetchall()
+            if not canary_runs:
+                raise DbAuthorityCanaryError("rollback requires finalized canary runs")
+            for run_id, state, finalized_at, finalized_epoch_ms in canary_runs:
+                if (
+                    state != "finalized"
+                    or type(finalized_epoch_ms) is not int
+                    or _utc_iso_epoch_ms(finalized_at) != finalized_epoch_ms
+                ):
+                    raise DbAuthorityCanaryError("cannot rollback an open or invalid canary run")
+                _assert_no_real_session_control(connection, run_id=run_id)
+
+            expected_rows = connection.execute(
+                "SELECT p.projection_id,p.run_id,p.path,p.sha256 "
+                "FROM artifact_projections p JOIN runs r ON r.run_id=p.run_id "
+                "WHERE r.workflow=? AND r.authority_mode='db_authority_canary' "
+                "AND r.state='finalized' AND p.source_authority='db_authority_canary'",
+                (workflow,),
+            ).fetchall()
+            expected_by_path: dict[str, tuple[str, str, str]] = {}
+            for projection_id, run_id, path, digest in expected_rows:
+                if path in expected_by_path:
                     raise DbAuthorityCanaryError(
-                        f"rollback artifact is missing: {relative}"
+                        f"ambiguous canary projection path for workflow {workflow!r}: {path}"
                     )
-                digest = _sha256(absolute)
-                row = connection.execute(
-                    "SELECT projection_id,run_id,sha256 FROM artifact_projections "
-                    "WHERE path=? AND source_authority='db_authority_canary'",
-                    (relative,),
-                ).fetchone()
-                if row is None or row[2] != digest:
+                expected_by_path[path] = (projection_id, run_id, digest)
+            if not expected_by_path:
+                raise DbAuthorityCanaryError("rollback requires canary projections")
+
+            supplied = _normalize_artifacts(artifacts, repo_root_path=root)
+            supplied_by_path = {
+                relative: (absolute, digest)
+                for absolute, relative, digest in supplied
+            }
+            if set(supplied_by_path) != set(expected_by_path):
+                raise DbAuthorityCanaryError(
+                    "rollback artifacts must exactly match the workflow canary projection set"
+                )
+            for relative in sorted(expected_by_path):
+                projection_id, run_id, expected_digest = expected_by_path[relative]
+                _absolute, actual_digest = supplied_by_path[relative]
+                regenerated_projection = ShadowProjection(
+                    path=relative,
+                    sha256=actual_digest,
+                    projection_id=_projection_id(run_id, relative, actual_digest),
+                )
+                if (
+                    actual_digest != expected_digest
+                    or regenerated_projection.projection_id != projection_id
+                ):
                     raise DbAuthorityCanaryError(
                         f"canary projection cannot be regenerated for {relative}"
                     )
-                regenerated.append(
-                    ShadowProjection(
-                        path=relative,
-                        sha256=digest,
-                        projection_id=_projection_id(row[1], relative, digest),
-                    )
-                )
-                if regenerated[-1].projection_id != row[0]:
-                    raise DbAuthorityCanaryError(
-                        f"canary projection id drift for {relative}"
-                    )
-            connection.execute(
+                regenerated.append(regenerated_projection)
+            updated = connection.execute(
                 "UPDATE workflow_authority SET mode='rollback_to_file_authority',"
                 "updated_at=? WHERE workflow=? AND mode='db_authority_canary'",
                 (rolled_back_at, workflow),
-            )
+            ).rowcount
+            if updated != 1:
+                raise DbAuthorityCanaryError("canary workflow could not be rolled back")
             connection.execute("COMMIT")
             _checkpoint_offline_snapshot(connection)
             checkpointed = True
@@ -317,6 +350,77 @@ def _sha256_text(name: str, value: str) -> str:
     if len(normalized) != 64 or any(c not in "0123456789abcdef" for c in normalized):
         raise DbAuthorityCanaryError(f"{name} must be a lowercase SHA-256 digest")
     return normalized
+
+
+def _normalize_future_deadline(value: str, *, after_epoch_ms: int) -> str:
+    deadline_epoch_ms = _utc_iso_epoch_ms(value)
+    if deadline_epoch_ms is None:
+        raise DbAuthorityCanaryError(
+            "rollback_deadline must be a timezone-aware ISO-8601 timestamp"
+        )
+    if deadline_epoch_ms <= after_epoch_ms:
+        raise DbAuthorityCanaryError(
+            "rollback_deadline must be later than the canary preparation clock"
+        )
+    return datetime.fromtimestamp(
+        deadline_epoch_ms / 1000, tz=timezone.utc
+    ).isoformat()
+
+
+def _connect_existing_canary_database(
+    database: Path, *, root: Path
+) -> sqlite3.Connection:
+    try:
+        assert_privacy_preflight(root, database_paths=(database,))
+    except PrivacyPreflightError as exc:
+        raise DbAuthorityCanaryError("canary database privacy preflight failed") from exc
+    if not database.is_file():
+        raise DbAuthorityCanaryError("canary database must already exist")
+    database_stat = os.stat(database, follow_symlinks=False)
+    parent_mode = stat.S_IMODE(database.parent.stat().st_mode)
+    file_mode = stat.S_IMODE(database_stat.st_mode)
+    if not stat.S_ISREG(database_stat.st_mode):
+        raise DbAuthorityCanaryError("canary database must be a regular private file")
+    if parent_mode != 0o700 or file_mode != 0o600:
+        raise DbAuthorityCanaryError(
+            "canary database requires 0700 directory and 0600 file"
+        )
+    if int(getattr(database_stat, "st_nlink", 1) or 1) > 1:
+        raise DbAuthorityCanaryError("canary database cannot use hard-linked aliases")
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{database}{suffix}")
+        if not sidecar.exists():
+            continue
+        sidecar_stat = os.stat(sidecar, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(sidecar_stat.st_mode)
+            or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
+            or int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1
+        ):
+            raise DbAuthorityCanaryError(
+                f"canary database sidecar must be a private regular file: {sidecar}"
+            )
+    connection: sqlite3.Connection | None = None
+    old_umask = os.umask(0o177)
+    try:
+        connection = sqlite3.connect(
+            f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
+        )
+        connection.execute("PRAGMA busy_timeout=10000")
+        journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+        if str(journal_mode[0] if journal_mode else "").casefold() != "wal":
+            raise DbAuthorityCanaryError("SQLite WAL journal mode is unavailable")
+        connection.execute("PRAGMA foreign_keys=ON")
+        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise DbAuthorityCanaryError("SQLite foreign key enforcement is unavailable")
+        verify_database_connection(connection)
+        return connection
+    except Exception:
+        if connection is not None:
+            connection.close()
+        raise
+    finally:
+        os.umask(old_umask)
 
 
 def _assert_no_real_session_control(
@@ -405,7 +509,11 @@ def _canary_run_state(
         raise DbAuthorityCanaryError(f"run {run_id!r} is not a matching canary run")
     if row[3] == "prepared" and row[6] is None and row[7] is None:
         return "prepared"
-    if row[3] == "finalized" and isinstance(row[6], str) and type(row[7]) is int:
+    if (
+        row[3] == "finalized"
+        and type(row[7]) is int
+        and _utc_iso_epoch_ms(row[6]) == row[7]
+    ):
         return "finalized"
     raise DbAuthorityCanaryError(f"run {run_id!r} has invalid canary state")
 
