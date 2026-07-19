@@ -3668,7 +3668,7 @@ class MigrationTests(unittest.TestCase):
             "severity='R2'",
         ):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "referenced goal runs"
+                sqlite3.IntegrityError, "referenced goal runs|goal manifest identity"
             ):
                 connection.execute(
                     f"UPDATE goal_manifests SET {assignment} WHERE goal_id='sandbox-goal'"
@@ -3859,7 +3859,7 @@ class MigrationTests(unittest.TestCase):
             "owner='new-owner'",
         ):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "referenced goal runs|current SHA-256"
+                sqlite3.IntegrityError, "referenced goal runs|current SHA-256|goal manifest identity"
             ):
                 connection.execute(
                     f"UPDATE goal_manifests SET {assignment} WHERE goal_id='goal'"
@@ -3877,7 +3877,7 @@ class MigrationTests(unittest.TestCase):
             "'agentic_predicate_inproc_v1',1,'now',1000)"
         )
         with self.assertRaisesRegex(
-            sqlite3.IntegrityError, "referenced goal runs|current SHA-256"
+            sqlite3.IntegrityError, "referenced goal runs|current SHA-256|goal manifest identity"
         ):
             connection.execute(
                 "UPDATE goal_manifests SET approval_required=1 "
@@ -4459,7 +4459,9 @@ class MigrationTests(unittest.TestCase):
             "created_at_epoch_ms) VALUES('flip-run','flip-goal','run','R1','open',"
             "'plugin','agentic_predicate_inproc_v1',1,'flip-approval','backdated',1)"
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "current SHA-256"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "current SHA-256|goal manifest identity"
+        ):
             connection.execute(
                 "UPDATE goal_manifests SET approval_required=1 "
                 "WHERE goal_id='flip-goal'"

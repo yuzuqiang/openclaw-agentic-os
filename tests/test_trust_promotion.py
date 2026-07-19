@@ -220,6 +220,35 @@ class TrustPromotionWriterTests(unittest.TestCase):
             "current blocking SLO pass|complete bound evidence"
         )
 
+    def test_same_workflow_estimated_budget_confidence_fails_without_write(self) -> None:
+        self._seed_valid_fixture()
+        self._seed_sibling_run()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('estimated-cost-row','provider','model',"
+                "'endpoint','capability',1,1,'estimated','effective-estimated',"
+                "'estimated-cost-hash')"
+            )
+            connection.execute(
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                "selected_provider,selected_model,selected_endpoint_binding_id,"
+                "selected_cost_registry_id,selected_cost_effective_at,"
+                "selected_cost_registry_hash,selected_cost_confidence,"
+                "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+                "output_token_budget,cost_budget_microusd,retry_budget,"
+                "human_attention_budget,usage_confidence,updated_at) VALUES("
+                "'sibling-run','workflow','capability','provider','model','endpoint',"
+                "'estimated-cost-row','effective-estimated','estimated-cost-hash','estimated',"
+                "'sibling-transition',10,10,10,10,1,1,'known','now')"
+            )
+
+        self._assert_promotion_fails_without_write(
+            "current blocking SLO pass|complete bound evidence"
+        )
+
     def test_missing_or_stale_slo_audit_fails_without_write(self) -> None:
         for statement in (
             "DELETE FROM slo_audits WHERE query_name='Duplicate live dispatch blocked'",
@@ -242,6 +271,40 @@ class TrustPromotionWriterTests(unittest.TestCase):
         self._assert_promotion_fails_without_write(
             "current blocking SLO pass|complete bound evidence"
         )
+
+    def test_slo_audits_before_bound_gate_clock_fail_without_write(self) -> None:
+        self._seed_valid_fixture(seed_slo_audits=False)
+        schema_version, migration_sha256 = self._current_schema_identity()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            gate_epoch_ms = int(
+                connection.execute(
+                    "SELECT now_epoch_ms FROM gate_clock_context "
+                    "WHERE clock_context_id='clock'"
+                ).fetchone()[0]
+            )
+            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
+                    "'pass','pass',?,?,?,?,?,?)",
+                    (
+                        f"stale-slo-{index}",
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        self.evidence_hash,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "audit-before-gate",
+                        gate_epoch_ms - index,
+                    ),
+                )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
 
     def test_later_failing_slo_audit_blocks_stale_pass_promotion(self) -> None:
         self._seed_valid_fixture()
@@ -316,6 +379,22 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 connection.execute(
                     "UPDATE predicate_plugins SET schema_hash='mutated-schema' "
                     "WHERE predicate_plugin_hash='plugin'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "predicate plugin metadata"):
+                connection.execute(
+                    "UPDATE predicate_plugins SET approved_at='mutated-approval-time' "
+                    "WHERE predicate_plugin_hash='plugin'"
+                )
+
+        self._promote()
+
+    def test_goal_manifest_identity_is_frozen_before_trust_promotion(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "goal manifest identity"):
+                connection.execute(
+                    "UPDATE goal_manifests SET manifest_hash='mutated-manifest' "
+                    "WHERE goal_id='goal'"
                 )
 
         self._promote()
@@ -1418,6 +1497,29 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     connection, "direct-stale-external-rpc", binding, bundle_hash
                 )
 
+    def test_direct_sql_rejects_missing_risk_assessment_binding(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            _register_migration_functions(connection)
+            binding = self._trust_binding(connection)
+            bundle_hash = _trust_binding_hash(
+                "run",
+                "goal-run",
+                self.evidence_hash,
+                binding["verifier_run_id"],
+                binding["gate_run_id"],
+                binding["schema_version"],
+                binding["migration_sha256"],
+                binding["current_slo_query_count"],
+            )
+            connection.execute(
+                "DELETE FROM risk_assessments WHERE transition_id='transition'"
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                self._insert_direct_trust(
+                    connection, "direct-missing-risk-assessment", binding, bundle_hash
+                )
+
     def test_migration_aborts_on_active_legacy_trust_rows(self) -> None:
         legacy = Path(self.temporary.name) / "legacy-minimal.db"
         with closing(sqlite3.connect(legacy)) as connection:
@@ -1556,9 +1658,10 @@ class TrustPromotionWriterTests(unittest.TestCase):
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
                 "INSERT INTO predicate_plugins(predicate_plugin_hash,name,version,"
-                "backend,schema_hash,sandbox_required,sandbox_enforced,created_at) "
-                "VALUES('plugin','safe','1','agentic_predicate_inproc_v1','schema',"
-                "0,1,'now')"
+                "backend,schema_hash,sandbox_required,sandbox_enforced,sensitive,"
+                "approved_at,created_at) VALUES('plugin','safe','1',"
+                "'agentic_predicate_inproc_v1','schema',0,1,1,"
+                "'plugin-approved-now','now')"
             )
             connection.execute(
                 "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"

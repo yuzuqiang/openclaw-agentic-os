@@ -100,6 +100,10 @@ JOIN transitions t
  AND t.run_id=g.run_id
  AND t.gate_run_id=g.gate_run_id
  AND t.evidence_hash=g.evidence_hash
+JOIN risk_assessments ra
+  ON ra.run_id=t.run_id
+ AND ra.transition_id=t.transition_id
+ AND ra.risk_dominance=t.risk_dominance
 JOIN gate_clock_context c
   ON c.clock_context_id=g.clock_context_id
  AND c.gate_run_id=g.gate_run_id
@@ -148,9 +152,17 @@ WHERE gr.run_id IS NOT NULL
   AND gm.severity=gr.severity
   AND gm.manifest_hash<>''
   AND p.schema_hash<>''
+  AND (p.sensitive=0 OR (p.approved_at IS NOT NULL AND p.approved_at<>''))
   AND p.disabled_at IS NULL
   AND p.sandbox_enforced=gr.sandbox_enforced
   AND (p.sandbox_required=0 OR gr.sandbox_enforced=1)
+  AND ra.assessed_at<>''
+  AND ra.action_risk<>''
+  AND ra.target_risk<>''
+  AND ra.data_risk<>''
+  AND ra.side_effect_risk<>''
+  AND ra.permission_risk<>''
+  AND ra.irreversibility_risk<>''
   AND g.decision='pass'
   AND g.requires_same_run=1
   AND m.version=(SELECT MAX(version) FROM schema_migrations)
@@ -211,6 +223,26 @@ WHERE gr.run_id IS NOT NULL
     JOIN runs settlement_run ON settlement_run.run_id=bs.run_id
     WHERE settlement_run.workflow=r.workflow
       AND (bs.usage_confidence<>'known' OR bs.cost_confidence<>'known')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM run_budgets current_rb
+    LEFT JOIN model_cost_registry current_mc
+      ON current_mc.cost_registry_id=current_rb.selected_cost_registry_id
+     AND current_mc.provider=current_rb.selected_provider
+     AND current_mc.model=current_rb.selected_model
+     AND current_mc.endpoint_binding_id=current_rb.selected_endpoint_binding_id
+     AND current_mc.capability_class=current_rb.capability_class
+     AND current_mc.effective_at=current_rb.selected_cost_effective_at
+     AND current_mc.registry_row_hash=current_rb.selected_cost_registry_hash
+     AND current_mc.confidence=current_rb.selected_cost_confidence
+    WHERE current_rb.workflow=r.workflow
+      AND (
+        current_rb.usage_confidence<>'known'
+        OR current_rb.selected_cost_confidence<>'known'
+        OR current_mc.cost_registry_id IS NULL
+        OR current_mc.confidence<>'known'
+      )
   )
   AND NOT EXISTS (
     SELECT 1
@@ -290,6 +322,7 @@ WHERE gr.run_id IS NOT NULL
           AND sa.evidence_run_id=e.run_id
           AND sa.verifier_run_id=e.verifier_run_id
           AND sa.gate_run_id=e.gate_run_id
+          AND sa.run_at_epoch_ms >= c.now_epoch_ms
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(be.created_at_epoch_ms)
             FROM budget_events be
@@ -1017,7 +1050,7 @@ BEGIN
 END;
 
 CREATE TRIGGER predicate_plugins_preserve_goal_run_metadata_update
-BEFORE UPDATE OF predicate_plugin_hash, name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, disabled_at, created_at ON predicate_plugins
+BEFORE UPDATE OF predicate_plugin_hash, name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, approved_at, disabled_at, created_at ON predicate_plugins
 WHEN EXISTS (
   SELECT 1 FROM goal_runs gr
   WHERE gr.predicate_plugin_hash=OLD.predicate_plugin_hash
@@ -1040,6 +1073,26 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'referenced predicate plugin metadata is immutable');
+END;
+
+CREATE TRIGGER goal_manifests_preserve_goal_run_identity_update
+BEFORE UPDATE OF goal_id, owner, severity, manifest_hash, predicate_plugin_hash, backend, approval_required, enabled ON goal_manifests
+WHEN EXISTS (
+  SELECT 1
+  FROM goal_runs gr
+  WHERE (
+      gr.goal_id=OLD.goal_id
+      AND gr.predicate_plugin_hash=OLD.predicate_plugin_hash
+      AND gr.backend=OLD.backend
+    )
+    OR (
+      gr.goal_id=NEW.goal_id
+      AND gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+      AND gr.backend=NEW.backend
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'referenced goal manifest identity is immutable');
 END;
 
 CREATE TRIGGER goal_manifests_preserve_active_trust_update
