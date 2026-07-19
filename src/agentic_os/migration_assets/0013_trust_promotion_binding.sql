@@ -194,8 +194,10 @@ WHERE gr.run_id IS NOT NULL
   AND rb.usage_confidence='known'
   AND mc.confidence='known'
   AND NOT EXISTS (
-    SELECT 1 FROM budget_events be
-    WHERE be.run_id=r.run_id
+    SELECT 1
+    FROM budget_events be
+    JOIN runs be_run ON be_run.run_id=be.run_id
+    WHERE be_run.workflow=r.workflow
       AND (
         be.usage_confidence<>'known'
         OR (
@@ -299,6 +301,29 @@ WHERE gr.run_id IS NOT NULL
             FROM budget_settlements bs
             JOIN runs bs_run ON bs_run.run_id=bs.run_id
             WHERE bs_run.workflow=r.workflow
+          ),0)
+          AND sa.run_at_epoch_ms >= COALESCE((
+            SELECT MAX(
+              MAX(
+                eri.requested_at_epoch_ms,
+                COALESCE(eri.accepted_at_epoch_ms,0),
+                COALESCE(eri.resolved_at_epoch_ms,0)
+              )
+            )
+            FROM external_rpc_intents eri
+            JOIN runs eri_run ON eri_run.run_id=eri.run_id
+            WHERE eri_run.workflow=r.workflow
+          ),0)
+          AND sa.run_at_epoch_ms >= COALESCE((
+            SELECT MAX(l.expires_at_epoch_ms)
+            FROM leases l
+            JOIN runs lease_run ON lease_run.run_id=l.run_id
+            WHERE lease_run.workflow=r.workflow
+          ),0)
+          AND sa.run_at_epoch_ms >= COALESCE((
+            SELECT MAX(r2.finalized_at_epoch_ms)
+            FROM runs r2
+            WHERE r2.workflow=r.workflow
           ),0)
           AND sa.slo_audit_id=(
             SELECT latest.slo_audit_id
@@ -821,14 +846,8 @@ END;
 CREATE TRIGGER runs_preserve_active_trust_update
 BEFORE UPDATE ON runs
 WHEN EXISTS (
-  SELECT 1
-  FROM trust_observations trust
-  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  SELECT 1 FROM trust_observations trust
   WHERE trust.invalidated_at IS NULL
-    AND (
-      trust.run_id IN (OLD.run_id,NEW.run_id)
-      OR trusted_run.workflow IN (OLD.workflow,NEW.workflow)
-    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
@@ -837,14 +856,8 @@ END;
 CREATE TRIGGER runs_preserve_active_trust_insert
 BEFORE INSERT ON runs
 WHEN EXISTS (
-  SELECT 1
-  FROM trust_observations trust
-  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  SELECT 1 FROM trust_observations trust
   WHERE trust.invalidated_at IS NULL
-    AND (
-      trust.run_id=NEW.run_id
-      OR trusted_run.workflow=NEW.workflow
-    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
@@ -853,11 +866,8 @@ END;
 CREATE TRIGGER runs_preserve_active_trust_delete
 BEFORE DELETE ON runs
 WHEN EXISTS (
-  SELECT 1
-  FROM trust_observations trust
-  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  SELECT 1 FROM trust_observations trust
   WHERE trust.invalidated_at IS NULL
-    AND (trust.run_id=OLD.run_id OR trusted_run.workflow=OLD.workflow)
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
@@ -1007,7 +1017,7 @@ BEGIN
 END;
 
 CREATE TRIGGER predicate_plugins_preserve_goal_run_metadata_update
-BEFORE UPDATE OF predicate_plugin_hash, name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, disabled_at ON predicate_plugins
+BEFORE UPDATE OF predicate_plugin_hash, name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, disabled_at, created_at ON predicate_plugins
 WHEN EXISTS (
   SELECT 1 FROM goal_runs gr
   WHERE gr.predicate_plugin_hash=OLD.predicate_plugin_hash
@@ -1127,6 +1137,54 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before risk assessment changes');
+END;
+
+CREATE TRIGGER goal_runs_preserve_active_trust_update
+BEFORE UPDATE ON goal_runs
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND trust.goal_run_id IN (OLD.goal_run_id,NEW.goal_run_id)
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before goal run changes');
+END;
+
+CREATE TRIGGER goal_runs_preserve_active_trust_delete
+BEFORE DELETE ON goal_runs
+WHEN EXISTS (
+  SELECT 1 FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND trust.goal_run_id=OLD.goal_run_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before goal run changes');
+END;
+
+CREATE TRIGGER workflow_authority_preserve_active_trust_update
+BEFORE UPDATE ON workflow_authority
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow IN (OLD.workflow,NEW.workflow)
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before workflow authority changes');
+END;
+
+CREATE TRIGGER workflow_authority_preserve_active_trust_delete
+BEFORE DELETE ON workflow_authority
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND trusted_run.workflow=OLD.workflow
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before workflow authority changes');
 END;
 
 CREATE TRIGGER trust_observations_validate_bound_reactivate_update

@@ -6144,6 +6144,7 @@ class MigrationTests(unittest.TestCase):
                 database = Path(self.temporary.name) / f"fixture-{index}.db"
                 apply_migrations(database)
                 connection = sqlite3.connect(database)
+                _register_migration_functions(connection)
                 self.addCleanup(connection.close)
                 connection.executescript(
                     (fixture_root / fixture).read_text(encoding="utf-8")

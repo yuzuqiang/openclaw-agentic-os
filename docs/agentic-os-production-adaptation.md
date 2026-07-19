@@ -3941,7 +3941,7 @@ binding hash is the required effective group, and duplicate active bindings for
 the same run/goal/evidence are rejected. Raw SQLite clients that do not register
 the local SQL functions fail closed, and clients that do register them must pass
 an immediate `agentic_evidence_snapshot_current(...)` artifact re-hash. The
-binding view rejects unknown or estimated usage/cost across run budgets,
+binding view rejects unknown or estimated usage/cost across trusted-workflow run budgets,
 non-human budget events, final settlements, and selected model cost registry
 rows; rejects database-authority current or gate-time snapshots; and rejects
 self-verifier, wrong-run, non-PASS, stale gate identity, stale trusted clock,
@@ -3950,11 +3950,11 @@ shadowed by newer audit evidence, and SLO audit rows older than mutable run
 budget or settlement evidence. Direct SQL insertion is pinned to v13 plus the
 accepted 30-query SLO count, so fake later schema or SLO rows cannot become the
 trust contract. Predicate-plugin metadata referenced by a goal run is immutable
-before promotion, and post-promotion budget, settlement, runtime SLO inputs
+before promotion, and post-promotion bound goal-run sandbox evidence, budget, settlement, runtime SLO inputs
 (`external_rpc_intents`, `leases`, `spawn_requests`, `sessions`, `runs`), model
 cost registry, zero-reserve policy, SLO audit, schema, SLO registry, and
-predicate-plugin metadata, same-workflow settlements, unbound runtime rows, and
-risk assessments cannot change while trust is active; callers must invalidate
+predicate-plugin metadata, same-workflow settlements, workflow authority,
+unbound runtime rows, and all run-row mutations cannot change while trust is active; callers must invalidate
 the trust row first. Active trust rows are immutable except for setting
 `invalidated_at` to retire stale trust, and invalidated rows cannot be
 reactivated. The local writer derives all authority fields under `BEGIN

@@ -162,6 +162,33 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         "current blocking SLO pass|complete bound evidence"
                     )
 
+    def test_same_workflow_budget_event_confidence_fails_without_write(self) -> None:
+        for usage_confidence, cost_confidence in (
+            ("unknown", "known"),
+            ("estimated", "known"),
+            ("known", "estimated"),
+        ):
+            with self.subTest(usage=usage_confidence, cost=cost_confidence):
+                self._reset_database()
+                self._seed_valid_fixture()
+                self._seed_sibling_run()
+                with closing(sqlite3.connect(self.database)) as connection, connection:
+                    connection.execute(
+                        "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                        "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                        "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                        "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                        "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                        "VALUES('sibling-budget-event','sibling-budget-event-idem',"
+                        "'sibling-budget-event-dedupe',1,'sibling-run','sibling-transition',"
+                        "'provider','model','endpoint','capability','cost-row','effective',"
+                        "'cost-hash',?,'consume',1,?,'test','now',2000)",
+                        (cost_confidence, usage_confidence),
+                    )
+                self._assert_promotion_fails_without_write(
+                    "current blocking SLO pass|complete bound evidence"
+                )
+
     def test_unknown_or_estimated_final_settlement_confidence_fails_without_write(self) -> None:
         for usage_confidence, cost_confidence in (
             ("unknown", "known"),
@@ -693,6 +720,393 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 "'sibling-transition',10,10,10,10,1,1,'known','now')"
             )
 
+    def test_active_trust_fail_closed_mutations_leave_authority_snapshot_unchanged(
+        self,
+    ) -> None:
+        self._seed_valid_fixture()
+        self._seed_sibling_run()
+        self._seed_bound_runtime_rows()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            gate_epoch_ms = int(
+                connection.execute(
+                    "SELECT now_epoch_ms FROM gate_clock_context "
+                    "WHERE clock_context_id='clock'"
+                ).fetchone()[0]
+            )
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('other-workflow','file_authority','now')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+                "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('pretrust-reserve','pretrust-reserve-idem',"
+                "'pretrust-reserve-dedupe',1,'run','transition','pretrust-spawn',"
+                "'provider','model','endpoint','capability','cost-row','effective',"
+                "'cost-hash','known','reserve',1,1,'known','test','now',?)",
+                (gate_epoch_ms - 3,),
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=1,"
+                "reserved_cost_microusd=1 WHERE run_id='run'"
+            )
+            connection.execute(
+                "UPDATE leases SET release_idempotency_key='release-idem' "
+                "WHERE lease_id='pretrust-lease'"
+            )
+            connection.execute(
+                "INSERT INTO runtime_dispatch_bindings(spawn_request_id,lease_id,run_id,"
+                "transition_id,phase,agent_id,requester_agent_id,task_digest,"
+                "client_lease_id,acquire_idempotency_key,release_idempotency_key,"
+                "spawn_client_request_id,spawn_idempotency_key,reserve_budget_event_id,"
+                "created_at) VALUES('pretrust-spawn','pretrust-lease','run',"
+                "'transition','phase','agent','requester','task','pretrust-lease-client',"
+                "'pretrust-acquire','release-idem','client','spawn-idem',"
+                "'pretrust-reserve','now')"
+            )
+            metadata = (
+                '{"run_id":"run","transition_id":"transition",'
+                '"client_request_id":"client","idempotency_key":"spawn-idem",'
+                '"phase":"phase","agent_id":"agent","task_digest":"task"}'
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+                "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_transition_id,"
+                "external_client_request_id,external_idempotency_key,external_phase,"
+                "external_agent_id,external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+                "'pretrust-intent','run','transition','sessions_spawn','pretrust-spawn',"
+                "'pretrust-reserve','client','spawn-idem','phase','agent','task','v1',"
+                "?,?,'run','transition','client','spawn-idem','phase','agent','task',"
+                "'accepted','session-key','requested-now',?,'accepted-now',?)",
+                (metadata, metadata, gate_epoch_ms - 2, gate_epoch_ms - 1),
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET state='completed' "
+                "WHERE spawn_request_id='pretrust-spawn'"
+            )
+            schema_version, migration_sha256 = self._current_schema_identity()
+            latest_epoch = max(
+                int(connection.execute("SELECT MAX(run_at_epoch_ms) FROM slo_audits").fetchone()[0]),
+                gate_epoch_ms,
+            )
+            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
+                    "'pass','pass',?,?,?,?,?,?)",
+                    (
+                        f"slo-later-{index}",
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        self.evidence_hash,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "audit-later",
+                        latest_epoch + index + 1000,
+                    ),
+                )
+        self._promote()
+
+        mutation_cases = (
+            (
+                "budget event sibling insert",
+                "budget event changes",
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('post-trust-sibling-event','post-trust-sibling-event-idem',"
+                "'post-trust-sibling-event-dedupe',1,'sibling-run',"
+                "'sibling-transition','provider','model','endpoint','capability',"
+                "'cost-row','effective','cost-hash','known','consume',1,'known',"
+                "'test','now',2000)",
+                False,
+            ),
+            (
+                "budget event unbound insert",
+                "budget event changes",
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                "VALUES('post-trust-unbound-event','post-trust-unbound-event-idem',"
+                "'post-trust-unbound-event-dedupe',1,'missing-run','transition',"
+                "'provider','model','endpoint','capability','cost-row','effective',"
+                "'cost-hash','known','consume',1,'known','test','now',2000)",
+                True,
+            ),
+            (
+                "budget event unbound update",
+                "budget event changes",
+                "UPDATE budget_events SET run_id='missing-run' "
+                "WHERE budget_event_id='pretrust-reserve'",
+                True,
+            ),
+            (
+                "budget event delete",
+                "budget event changes",
+                "DELETE FROM budget_events WHERE budget_event_id='pretrust-reserve'",
+                False,
+            ),
+            (
+                "run budget sibling insert",
+                "selected budget changes",
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                "selected_provider,selected_model,selected_endpoint_binding_id,"
+                "selected_cost_registry_id,selected_cost_effective_at,"
+                "selected_cost_registry_hash,selected_cost_confidence,"
+                "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+                "output_token_budget,cost_budget_microusd,retry_budget,"
+                "human_attention_budget,usage_confidence,updated_at) VALUES("
+                "'sibling-run','workflow','capability','provider','model','endpoint',"
+                "'cost-row','effective','cost-hash','known','sibling-transition',"
+                "10,10,10,10,1,1,'known','now')",
+                False,
+            ),
+            (
+                "run budget unbound insert",
+                "selected budget changes",
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                "selected_provider,selected_model,selected_endpoint_binding_id,"
+                "selected_cost_registry_id,selected_cost_effective_at,"
+                "selected_cost_registry_hash,selected_cost_confidence,"
+                "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+                "output_token_budget,cost_budget_microusd,retry_budget,"
+                "human_attention_budget,usage_confidence,updated_at) VALUES("
+                "'missing-run','workflow','capability','provider','model','endpoint',"
+                "'cost-row','effective','cost-hash','known','transition',"
+                "10,10,10,10,1,1,'known','now')",
+                True,
+            ),
+            (
+                "run budget unbound update",
+                "selected budget changes",
+                "UPDATE run_budgets SET run_id='missing-run' WHERE run_id='run'",
+                True,
+            ),
+            (
+                "run budget delete",
+                "selected budget changes",
+                "DELETE FROM run_budgets WHERE run_id='run'",
+                False,
+            ),
+            (
+                "external RPC unbound insert",
+                "external RPC intent changes",
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,client_request_id,idempotency_key,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'post-trust-unbound-intent-2','missing-run','transition',"
+                "'allow_lease_release','post-trust-unbound-intent-client-2',"
+                "'post-trust-unbound-intent-idem-2','{}','pending','later',2000)",
+                True,
+            ),
+            (
+                "external RPC unbound update",
+                "external RPC intent changes",
+                "UPDATE external_rpc_intents SET run_id='missing-run' "
+                "WHERE intent_id='pretrust-intent'",
+                True,
+            ),
+            (
+                "external RPC delete",
+                "external RPC intent changes",
+                "DELETE FROM external_rpc_intents WHERE intent_id='pretrust-intent'",
+                False,
+            ),
+            (
+                "lease unbound insert",
+                "lease changes",
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                "'post-trust-unbound-lease-2','missing-run','phase','transition',"
+                "'agent','requester','acquire_pending','post-trust-unbound-lease-client-2',"
+                "'post-trust-unbound-lease-acquire-2',60000,'later',2000)",
+                True,
+            ),
+            (
+                "lease unbound update",
+                "lease changes",
+                "UPDATE leases SET run_id='missing-run' WHERE lease_id='pretrust-lease'",
+                True,
+            ),
+            (
+                "lease delete",
+                "lease changes",
+                "DELETE FROM leases WHERE lease_id='pretrust-lease'",
+                False,
+            ),
+            (
+                "spawn request unbound insert",
+                "spawn request changes",
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,"
+                "state,created_at,updated_at) VALUES('post-trust-unbound-spawn-2',"
+                "'missing-run','phase','agent','transition','client-2','spawn-idem-2',"
+                "'task','pending','now','now')",
+                True,
+            ),
+            (
+                "spawn request unbound update",
+                "spawn request changes",
+                "UPDATE spawn_requests SET run_id='missing-run' "
+                "WHERE spawn_request_id='pretrust-spawn'",
+                True,
+            ),
+            (
+                "spawn request delete",
+                "spawn request changes",
+                "DELETE FROM spawn_requests WHERE spawn_request_id='pretrust-spawn'",
+                False,
+            ),
+            (
+                "session unbound insert",
+                "session changes",
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+                "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+                "task_digest,state,spawned_at,completed_at) VALUES("
+                "'post-trust-unbound-session-2','spawn','missing-run','transition',"
+                "'phase','agent','client-2','spawn-idem-2','session-key-2','task',"
+                "'completed','spawned-now','completed-now')",
+                True,
+            ),
+            (
+                "session unbound update",
+                "session changes",
+                "UPDATE sessions SET run_id='missing-run' WHERE session_id='pretrust-session'",
+                True,
+            ),
+            (
+                "session delete",
+                "session changes",
+                "DELETE FROM sessions WHERE session_id='pretrust-session'",
+                False,
+            ),
+            (
+                "run sibling insert",
+                "run changes",
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'post-trust-run-sibling','post-trust-run-sibling-prepare','workflow',"
+                "'file_authority','candidate','R1','R1','now','now')",
+                False,
+            ),
+            (
+                "run unrelated insert",
+                "run changes",
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'post-trust-run-unrelated','post-trust-run-unrelated-prepare',"
+                "'other-workflow','file_authority','candidate','R1','R1','now','now')",
+                False,
+            ),
+            (
+                "run update",
+                "run changes",
+                "UPDATE runs SET workflow='other-workflow' WHERE run_id='sibling-run'",
+                False,
+            ),
+            (
+                "run delete",
+                "run changes",
+                "DELETE FROM runs WHERE run_id='sibling-run'",
+                False,
+            ),
+            (
+                "predicate plugin hash update",
+                "predicate plugin metadata",
+                "UPDATE predicate_plugins SET predicate_plugin_hash='plugin-mutated' "
+                "WHERE predicate_plugin_hash='plugin'",
+                False,
+            ),
+            (
+                "predicate plugin created_at update",
+                "predicate plugin metadata",
+                "UPDATE predicate_plugins SET created_at='mutated-now' "
+                "WHERE predicate_plugin_hash='plugin'",
+                False,
+            ),
+            (
+                "predicate plugin delete",
+                "predicate plugin metadata",
+                "DELETE FROM predicate_plugins WHERE predicate_plugin_hash='plugin'",
+                False,
+            ),
+            (
+                "goal run sandbox update",
+                "goal run changes",
+                "UPDATE goal_runs SET sandbox_enforced=0 WHERE goal_run_id='goal-run'",
+                False,
+            ),
+            (
+                "goal run delete",
+                "goal run changes",
+                "DELETE FROM goal_runs WHERE goal_run_id='goal-run'",
+                False,
+            ),
+            (
+                "goal manifest goal id update",
+                "goal manifest changes",
+                "UPDATE goal_manifests SET goal_id='goal-mutated' WHERE goal_id='goal'",
+                False,
+            ),
+            (
+                "goal manifest identity update",
+                "goal manifest changes",
+                "UPDATE goal_manifests SET predicate_plugin_hash='plugin-mutated' "
+                "WHERE goal_id='goal'",
+                False,
+            ),
+            (
+                "goal manifest delete",
+                "goal manifest changes",
+                "DELETE FROM goal_manifests WHERE goal_id='goal'",
+                False,
+            ),
+            (
+                "workflow authority update",
+                "workflow authority changes",
+                "UPDATE workflow_authority SET updated_at='mutated-now' "
+                "WHERE workflow='workflow'",
+                False,
+            ),
+            (
+                "workflow authority delete",
+                "workflow authority changes",
+                "DELETE FROM workflow_authority WHERE workflow='workflow'",
+                True,
+            ),
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            for label, message, statement, disable_foreign_keys in mutation_cases:
+                with self.subTest(label=label):
+                    if disable_foreign_keys:
+                        connection.commit()
+                        connection.execute("PRAGMA foreign_keys=OFF")
+                    self._assert_integrity_error_without_authority_or_trust_write(
+                        connection, message, statement
+                    )
+                    if disable_foreign_keys:
+                        connection.commit()
+                        connection.execute("PRAGMA foreign_keys=ON")
+
     def test_wrong_run_self_verifier_db_authority_and_stale_clock_fail(self) -> None:
         mutations = (
             ("wrong run", "UPDATE goal_runs SET run_id='other-run' WHERE goal_run_id='goal-run'"),
@@ -971,6 +1385,38 @@ class TrustPromotionWriterTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
                 self._insert_direct_trust(connection, "direct-stale-budget", binding, bundle_hash)
+
+    def test_direct_sql_rejects_stale_audits_after_external_rpc_input_drift(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            _register_migration_functions(connection)
+            binding = self._trust_binding(connection)
+            latest_epoch = connection.execute(
+                "SELECT MAX(run_at_epoch_ms) FROM slo_audits"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,client_request_id,idempotency_key,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'post-audit-direct-intent','run','transition','allow_lease_release',"
+                "'post-audit-direct-client','post-audit-direct-idem','{}','pending',"
+                "'later',?)",
+                (int(latest_epoch) + 1000,),
+            )
+            bundle_hash = _trust_binding_hash(
+                "run",
+                "goal-run",
+                self.evidence_hash,
+                binding["verifier_run_id"],
+                binding["gate_run_id"],
+                binding["schema_version"],
+                binding["migration_sha256"],
+                binding["current_slo_query_count"],
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                self._insert_direct_trust(
+                    connection, "direct-stale-external-rpc", binding, bundle_hash
+                )
 
     def test_migration_aborts_on_active_legacy_trust_rows(self) -> None:
         legacy = Path(self.temporary.name) / "legacy-minimal.db"
@@ -1435,7 +1881,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
             connection.execute(statement)
         self.assertEqual(self._authority_and_trust_state(connection), before)
 
-    def _authority_and_trust_state(self, connection: sqlite3.Connection) -> tuple[int, int, int]:
+    def _authority_and_trust_state(
+        self, connection: sqlite3.Connection
+    ) -> tuple[int, int, int, int, int]:
         return (
             int(connection.execute("SELECT COUNT(*) FROM trust_observations").fetchone()[0]),
             int(
@@ -1453,6 +1901,8 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM workflow_authority WHERE mode<>'file_authority'"
                 ).fetchone()[0]
             ),
+            int(connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0]),
+            int(connection.execute("SELECT COUNT(*) FROM workflow_authority").fetchone()[0]),
         )
 
     def _trust_count(self, connection: sqlite3.Connection) -> int:
