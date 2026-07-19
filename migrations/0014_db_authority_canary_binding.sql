@@ -81,6 +81,30 @@ BEGIN
   SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
 END;
 
+CREATE TRIGGER artifact_projections_preserve_db_authority_canary_insert
+BEFORE INSERT ON artifact_projections
+WHEN EXISTS (
+  SELECT 1
+  FROM artifact_projections existing
+  WHERE existing.source_authority='db_authority_canary'
+    AND (
+      existing.projection_id=NEW.projection_id
+      OR (existing.path=NEW.path AND existing.sha256=NEW.sha256)
+      OR (
+        existing.run_id=NEW.run_id
+        AND existing.path=NEW.path
+        AND existing.source_authority=NEW.source_authority
+      )
+      OR (
+        NEW.source_authority='db_authority_canary'
+        AND existing.run_id=NEW.run_id
+      )
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
+END;
+
 CREATE TRIGGER artifact_projections_preserve_db_authority_canary_delete
 BEFORE DELETE ON artifact_projections
 WHEN OLD.source_authority='db_authority_canary'

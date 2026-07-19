@@ -590,6 +590,77 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         )
         self.assertEqual(rollback.status, "rolled_back")
 
+    def test_insert_or_replace_cannot_remove_canary_projection(self) -> None:
+        written = db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        original = (
+            written.projection.projection_id,
+            "canary-run",
+            written.projection.path,
+            written.projection.sha256,
+            "db_authority_canary",
+        )
+
+        with sqlite3.connect(self.database, isolation_level=None) as connection:
+            replacements = (
+                (
+                    written.projection.projection_id,
+                    "canary-run",
+                    "tmp/replacement-primary.json",
+                    "f" * 64,
+                    "file_authority",
+                    "now",
+                ),
+                (
+                    "non-canary-replacement",
+                    "canary-run",
+                    written.projection.path,
+                    written.projection.sha256,
+                    "file_authority",
+                    "now",
+                ),
+            )
+            for replacement in replacements:
+                with self.subTest(replacement=replacement), self.assertRaisesRegex(
+                    sqlite3.IntegrityError, "canary projection identity is immutable"
+                ):
+                    connection.execute(
+                        "INSERT OR REPLACE INTO artifact_projections("
+                        "projection_id,run_id,path,sha256,source_authority,generated_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        replacement,
+                    )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT projection_id,run_id,path,sha256,source_authority "
+                    "FROM artifact_projections WHERE run_id='canary-run'"
+                ).fetchone(),
+                original,
+            )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary projection binding is immutable"
+            ):
+                connection.execute(
+                    "UPDATE runs SET authority_mode='file_authority' "
+                    "WHERE run_id='canary-run'"
+                )
+
+        rollback = rollback_db_authority_canary(
+            self.database,
+            (self.artifact,),
+            workflow="heartbeat",
+        )
+        self.assertEqual(rollback.status, "rolled_back")
+
     def test_canary_rejects_malformed_and_past_deadlines(self) -> None:
         for deadline in ("not-a-time", "2000-01-01T00:00:00+00:00"):
             with self.subTest(deadline=deadline), self.assertRaisesRegex(

@@ -82,7 +82,7 @@
       "version": 14,
       "name": "db_authority_canary_binding",
       "file": "0014_db_authority_canary_binding.sql",
-      "sha256": "00a1cff617d7eeb3f3ecd361b186fccd8c2a2f3f127a270331cf1cb4d0a82d9b"
+      "sha256": "33bb021e94c38662a6726f3573b90cc6a7e1caca92f8550e32d8042dc923ac95"
     }
   ]
 }
