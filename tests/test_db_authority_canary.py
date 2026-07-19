@@ -17,7 +17,11 @@ from agentic_os.db_authority_canary import (
     db_authority_canary_artifact,
     rollback_db_authority_canary,
 )
-from agentic_os.migrations import apply_migrations, repository_root
+from agentic_os.migrations import (
+    _register_migration_functions,
+    apply_migrations,
+    repository_root,
+)
 
 
 class DbAuthorityCanaryTests(unittest.TestCase):
@@ -153,6 +157,29 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 ("finalized",),
             )
 
+    def test_first_canary_write_rejects_preexisting_artifact(self) -> None:
+        self.artifact.parent.mkdir(parents=True, exist_ok=True)
+        self.artifact.write_bytes(self.payload)
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "must not already exist"):
+            db_authority_canary_artifact(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="heartbeat",
+                run_id="canary-run",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+        with sqlite3.connect(self.database) as connection:
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM runs WHERE run_id='canary-run'"
+                ).fetchone()
+            )
+
     def test_rollback_proves_projection_regeneration(self) -> None:
         written = db_authority_canary_artifact(
             self.database,
@@ -196,6 +223,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         )
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
                 "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
@@ -270,6 +298,98 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 workflow="heartbeat",
             )
 
+    def test_rollback_ignores_unrelated_prepared_canary(self) -> None:
+        other_artifact = Path(self.temporary.name) / "reports" / "other.json"
+        written = db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):
+            db_authority_canary_artifact(
+                self.database,
+                other_artifact,
+                b'{"workflow":"other","synthetic":true}\n',
+                workflow="other",
+                run_id="other-run",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+                crash_after_prepare=True,
+            )
+
+        rollback = rollback_db_authority_canary(
+            self.database,
+            (self.artifact,),
+            workflow="heartbeat",
+        )
+        self.assertEqual(rollback.regenerated, (written.projection,))
+
+    def test_rollback_rejects_corrupted_cutover_metadata(self) -> None:
+        db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary workflow binding is immutable"
+            ):
+                connection.execute(
+                    "UPDATE workflow_authority SET cutover_evidence_hash='bad' "
+                    "WHERE workflow='heartbeat'"
+                )
+        rollback = rollback_db_authority_canary(
+            self.database,
+            (self.artifact,),
+            workflow="heartbeat",
+        )
+        self.assertEqual(rollback.status, "rolled_back")
+
+    def test_rollback_rehashes_artifact_immediately_before_commit(self) -> None:
+        db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        original_normalize = canary_module._normalize_artifacts
+
+        def stale_normalize(*args, **kwargs):
+            normalized = original_normalize(*args, **kwargs)
+            self.artifact.write_bytes(b'{"workflow":"heartbeat","stale":true}\n')
+            return normalized
+
+        with mock.patch.object(
+            canary_module, "_normalize_artifacts", side_effect=stale_normalize
+        ), self.assertRaisesRegex(
+            DbAuthorityCanaryError, "cannot be regenerated"
+        ):
+            rollback_db_authority_canary(
+                self.database,
+                (self.artifact,),
+                workflow="heartbeat",
+            )
+
     def test_rollback_requires_complete_projection_set(self) -> None:
         second_artifact = Path(self.temporary.name) / "reports" / "second.json"
         db_authority_canary_artifact(
@@ -327,6 +447,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             last_parity_audit_hash=self.parity_hash,
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             with self.assertRaisesRegex(
                 sqlite3.IntegrityError, "canary projection identity is immutable"
             ):
@@ -550,6 +671,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         )
 
         with sqlite3.connect(self.database, isolation_level=None) as connection:
+            _register_migration_functions(connection)
             for statement in (
                 "UPDATE artifact_projections SET source_authority='file_authority' "
                 "WHERE run_id='canary-run-2'",
@@ -570,11 +692,42 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 "UPDATE runs SET authority_mode='file_authority' "
                 "WHERE run_id='canary-run-2'",
                 "UPDATE runs SET workflow='other' WHERE run_id='canary-run-2'",
+                "UPDATE runs SET state='prepared' WHERE run_id='canary-run-2'",
+                "UPDATE runs SET risk_dominance='R2' WHERE run_id='canary-run-2'",
+                "UPDATE runs SET prepare_idempotency_key='other-prepare' "
+                "WHERE run_id='canary-run-2'",
+                "UPDATE runs SET finalized_at='tampered' "
+                "WHERE run_id='canary-run-2'",
             ):
                 with self.subTest(statement=statement), self.assertRaisesRegex(
                     sqlite3.IntegrityError, "canary projection binding is immutable"
                 ):
                     connection.execute(statement)
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary projection identity is immutable"
+            ):
+                connection.execute(
+                    "INSERT INTO artifact_projections("
+                    "projection_id,run_id,path,sha256,source_authority,generated_at) "
+                    "VALUES('non-canary-extra','canary-run-2','tmp/extra.json',?,"
+                    "'file_authority','now')",
+                    ("f" * 64,),
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary workflow binding is immutable"
+            ):
+                connection.execute(
+                    "UPDATE workflow_authority SET mode='file_authority' "
+                    "WHERE workflow='heartbeat'"
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary workflow binding is immutable"
+            ):
+                connection.execute(
+                    "UPDATE workflow_authority SET cutover_evidence_hash=? "
+                    "WHERE workflow='heartbeat'",
+                    ("f" * 64,),
+                )
             self.assertEqual(
                 connection.execute(
                     "SELECT workflow,authority_mode FROM runs "
@@ -611,6 +764,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         )
 
         with sqlite3.connect(self.database, isolation_level=None) as connection:
+            _register_migration_functions(connection)
             replacements = (
                 (
                     written.projection.projection_id,
@@ -691,22 +845,26 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             last_parity_audit_hash=self.parity_hash,
         )
         with sqlite3.connect(self.database) as connection:
-            connection.execute(
-                "UPDATE runs SET finalized_at='tampered' WHERE run_id='canary-run'"
-            )
+            _register_migration_functions(connection)
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary projection binding is immutable"
+            ):
+                connection.execute(
+                    "UPDATE runs SET finalized_at='tampered' WHERE run_id='canary-run'"
+                )
 
-        with self.assertRaisesRegex(DbAuthorityCanaryError, "invalid canary state"):
-            db_authority_canary_artifact(
-                self.database,
-                self.artifact,
-                self.payload,
-                workflow="heartbeat",
-                run_id="canary-run",
-                cutover_approved_by="local-fixture",
-                cutover_evidence_hash=self.cutover_hash,
-                rollback_deadline="2099-01-01T00:00:00+00:00",
-                last_parity_audit_hash=self.parity_hash,
-            )
+        replay = db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        self.assertEqual(replay.status, "replayed")
 
     def test_canary_reads_authority_disable_flag_at_call_time(self) -> None:
         original = agentic_os.DB_AUTHORITY_ENABLED

@@ -3985,11 +3985,18 @@ of a run immutable once that run owns an `artifact_projections` row whose
 canary projections have a missing run, a non-canary run authority, an invalid
 prepared/finalized lifecycle, non-R1 risk, malformed digest or deterministic
 projection identity, multiple canary projections for one run, or no active
-canary/rollback workflow binding. Subsequent direct SQL cannot update, delete,
-or replace the canary projection through a primary/unique identity collision,
-even when replacement data claims non-canary authority; nor can it move the run
-to another workflow, change the run's authority mode, or delete the run. The
-overlay also rebinds trust-promotion
+canary/rollback workflow binding. Subsequent direct SQL cannot insert a canary
+projection for a non-canary run, mix non-canary projections into a canary run,
+update, delete, or replace the canary projection through a primary/unique
+identity collision, even when replacement data claims non-canary authority; nor
+can it move the run to another workflow, change the run's authority mode, mutate
+its prepared/finalized lifecycle or R1 risk identity, delete the run, or flip the
+workflow authority away from `db_authority_canary` except through the validated
+`rollback_to_file_authority` transition. Runtime rollback additionally validates
+the original cutover/parity metadata, scopes projection checks to the requested
+workflow so unrelated prepared canaries remain recoverable, and rehashes supplied
+artifacts immediately before recording rollback proof. The overlay also rebinds
+trust-promotion
 evidence and its insert guard
 to the current v14 schema and migration identity, preserving the complete
 current-SLO proof requirement after the schema advances. This preserves the

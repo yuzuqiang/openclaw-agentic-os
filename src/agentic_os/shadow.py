@@ -13,6 +13,7 @@ from typing import Iterable
 
 from .migrations import (
     MigrationError,
+    _register_migration_functions,
     apply_migrations,
     repository_root,
     verify_database,
@@ -245,6 +246,7 @@ def _connect(database: Path, *, existing: bool = False) -> sqlite3.Connection:
         connection.execute("PRAGMA query_only=ON")
     else:
         connection = sqlite3.connect(database, isolation_level=None)
+    _register_migration_functions(connection)
     connection.execute("PRAGMA busy_timeout=10000")
     connection.execute("PRAGMA foreign_keys=ON")
     if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:

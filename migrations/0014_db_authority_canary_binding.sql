@@ -47,16 +47,35 @@ SELECT CASE WHEN EXISTS (
 DROP TABLE db_authority_canary_binding_migration_guard;
 
 CREATE TRIGGER runs_preserve_db_authority_canary_projection_binding_update
-BEFORE UPDATE OF workflow, authority_mode ON runs
-WHEN (
-  NEW.workflow IS NOT OLD.workflow
-  OR NEW.authority_mode IS NOT OLD.authority_mode
-)
-AND EXISTS (
+BEFORE UPDATE ON runs
+WHEN EXISTS (
   SELECT 1
   FROM artifact_projections p
   WHERE p.run_id=OLD.run_id
     AND p.source_authority='db_authority_canary'
+)
+AND NOT (
+  OLD.workflow IS NEW.workflow
+  AND OLD.authority_mode IS NEW.authority_mode
+  AND OLD.prepare_idempotency_key IS NEW.prepare_idempotency_key
+  AND OLD.risk_class IS NEW.risk_class
+  AND OLD.risk_dominance IS NEW.risk_dominance
+  AND (
+    (
+      OLD.state='prepared'
+      AND OLD.finalized_at IS NULL
+      AND OLD.finalized_at_epoch_ms IS NULL
+      AND NEW.state='finalized'
+      AND NEW.finalized_at IS NOT NULL
+      AND NEW.finalized_at<>''
+      AND typeof(NEW.finalized_at_epoch_ms)='integer'
+    )
+    OR (
+      OLD.state IS NEW.state
+      AND OLD.finalized_at IS NEW.finalized_at
+      AND OLD.finalized_at_epoch_ms IS NEW.finalized_at_epoch_ms
+    )
+  )
 )
 BEGIN
   SELECT RAISE(ABORT,'db-authority canary projection binding is immutable');
@@ -81,6 +100,49 @@ BEGIN
   SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
 END;
 
+CREATE TRIGGER artifact_projections_validate_db_authority_canary_insert
+BEFORE INSERT ON artifact_projections
+WHEN NEW.source_authority='db_authority_canary'
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM runs r
+    JOIN workflow_authority w ON w.workflow=r.workflow
+    WHERE r.run_id=NEW.run_id
+      AND r.authority_mode='db_authority_canary'
+      AND r.state IN ('prepared','finalized')
+      AND r.risk_class='R1'
+      AND r.risk_dominance='R1'
+      AND NEW.path<>''
+      AND length(NEW.sha256)=64
+      AND NEW.sha256 NOT GLOB '*[^0-9a-f]*'
+      AND NEW.projection_id=agentic_shadow_projection_id(
+        NEW.run_id,NEW.path,NEW.sha256
+      )
+      AND (
+        SELECT COUNT(*)
+        FROM artifact_projections same_run
+        WHERE same_run.run_id=NEW.run_id
+      )=0
+      AND (
+        r.state<>'prepared'
+        OR (r.finalized_at IS NULL AND r.finalized_at_epoch_ms IS NULL)
+      )
+      AND (
+        r.state<>'finalized'
+        OR (
+          r.finalized_at IS NOT NULL
+          AND r.finalized_at<>''
+          AND typeof(r.finalized_at_epoch_ms)='integer'
+          AND agentic_utc_iso_epoch_ms(r.finalized_at)
+              IS r.finalized_at_epoch_ms
+        )
+      )
+      AND w.mode IN ('db_authority_canary','rollback_to_file_authority')
+  )
+  THEN RAISE(ABORT,'db-authority canary projection identity is immutable') END;
+END;
+
 CREATE TRIGGER artifact_projections_preserve_db_authority_canary_insert
 BEFORE INSERT ON artifact_projections
 WHEN EXISTS (
@@ -90,16 +152,21 @@ WHEN EXISTS (
     AND (
       existing.projection_id=NEW.projection_id
       OR (existing.path=NEW.path AND existing.sha256=NEW.sha256)
-      OR (
-        existing.run_id=NEW.run_id
-        AND existing.path=NEW.path
-        AND existing.source_authority=NEW.source_authority
-      )
-      OR (
-        NEW.source_authority='db_authority_canary'
-        AND existing.run_id=NEW.run_id
-      )
+      OR existing.run_id=NEW.run_id
     )
+)
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
+END;
+
+CREATE TRIGGER artifact_projections_preserve_db_authority_canary_run_insert
+BEFORE INSERT ON artifact_projections
+WHEN NEW.source_authority<>'db_authority_canary'
+AND EXISTS (
+  SELECT 1
+  FROM runs r
+  WHERE r.run_id=NEW.run_id
+    AND r.authority_mode='db_authority_canary'
 )
 BEGIN
   SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
@@ -110,6 +177,37 @@ BEFORE DELETE ON artifact_projections
 WHEN OLD.source_authority='db_authority_canary'
 BEGIN
   SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
+END;
+
+CREATE TRIGGER workflow_authority_preserve_db_authority_canary_binding_update
+BEFORE UPDATE ON workflow_authority
+WHEN EXISTS (
+  SELECT 1
+  FROM runs r
+  JOIN artifact_projections p
+    ON p.run_id=r.run_id
+   AND p.source_authority='db_authority_canary'
+  WHERE r.workflow=OLD.workflow
+    AND r.authority_mode='db_authority_canary'
+    AND r.state='finalized'
+)
+AND NOT (
+  OLD.workflow IS NEW.workflow
+  AND OLD.cutover_approved_by IS NEW.cutover_approved_by
+  AND OLD.cutover_evidence_hash IS NEW.cutover_evidence_hash
+  AND OLD.rollback_deadline IS NEW.rollback_deadline
+  AND OLD.last_parity_audit_hash IS NEW.last_parity_audit_hash
+  AND OLD.open_file_authority_runs IS NEW.open_file_authority_runs
+  AND (
+    OLD.mode IS NEW.mode
+    OR (
+      OLD.mode='db_authority_canary'
+      AND NEW.mode='rollback_to_file_authority'
+    )
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary workflow binding is immutable');
 END;
 
 DROP TRIGGER trust_observations_validate_bound_insert;

@@ -991,6 +991,7 @@ class MigrationTests(unittest.TestCase):
             "run-a", "reports/summary.json", "a" * 64
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT projection_id,sha256 FROM artifact_projections "
@@ -1534,6 +1535,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         for workflow in ("canary-a", "canary-b"):
             connection.execute(
@@ -1582,18 +1584,81 @@ class MigrationTests(unittest.TestCase):
         for statement in (
             "UPDATE runs SET workflow='canary-b' WHERE run_id='canary-run'",
             "UPDATE runs SET authority_mode='db_authority' WHERE run_id='canary-run'",
+            "UPDATE runs SET state='prepared' WHERE run_id='canary-run'",
+            "UPDATE runs SET risk_class='R2' WHERE run_id='canary-run'",
+            "UPDATE runs SET risk_dominance='R2' WHERE run_id='canary-run'",
+            "UPDATE runs SET prepare_idempotency_key='prepare-other' "
+            "WHERE run_id='canary-run'",
+            "UPDATE runs SET finalized_at='tampered' WHERE run_id='canary-run'",
             "DELETE FROM runs WHERE run_id='canary-run'",
         ):
             with self.subTest(statement=statement), self.assertRaisesRegex(
                 sqlite3.IntegrityError, "canary projection binding is immutable"
             ):
                 connection.execute(statement)
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "canary projection identity is immutable"
+        ):
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES('non-canary-extra',"
+                "'canary-run','tmp/extra.json',?,'file_authority','now')",
+                ("f" * 64,),
+            )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "canary workflow binding is immutable"
+        ):
+            connection.execute(
+                "UPDATE workflow_authority SET mode='file_authority' "
+                "WHERE workflow='canary-a'"
+            )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "canary workflow binding is immutable"
+        ):
+            connection.execute(
+                "UPDATE workflow_authority SET cutover_evidence_hash=? "
+                "WHERE workflow='canary-a'",
+                ("f" * 64,),
+            )
         self.assertEqual(
             connection.execute(
                 "SELECT workflow,authority_mode FROM runs WHERE run_id='canary-run'"
             ).fetchone(),
             ("canary-a", "db_authority_canary"),
         )
+
+    def test_canary_projection_insert_requires_valid_canary_binding(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        _register_migration_functions(connection)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+            "VALUES('file-workflow','file_authority','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) "
+            "VALUES('file-run','prepare-file','file-workflow','file_authority',"
+            "'prepared','R1','R1','now','now')"
+        )
+        digest = "d" * 64
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "canary projection identity is immutable"
+        ):
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    _shadow_projection_id("file-run", "tmp/forged.json", digest),
+                    "file-run",
+                    "tmp/forged.json",
+                    digest,
+                    "db_authority_canary",
+                    "now",
+                ),
+            )
 
     def test_canary_binding_migration_rejects_existing_authority_drift(self) -> None:
         self._apply_migrations_through(13, "through-v13-canary-binding")

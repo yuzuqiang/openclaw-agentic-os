@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import agentic_os
-from .migrations import apply_migrations, verify_database_connection
+from .migrations import (
+    _register_migration_functions,
+    apply_migrations,
+    verify_database_connection,
+)
 from .privacy import PrivacyPreflightError, assert_privacy_preflight
 from .shadow import (
     ShadowBackfillError,
@@ -185,6 +189,10 @@ def db_authority_canary_artifact(
                     raise DbAuthorityCanaryError(
                         f"canary artifact path already belongs to run {existing_path[0]!r}"
                     )
+                if target.exists():
+                    raise DbAuthorityCanaryError(
+                        "canary artifact must not already exist for a first write"
+                    )
                 _insert_prepared_canary_run(
                     connection,
                     workflow=workflow,
@@ -281,19 +289,34 @@ def rollback_db_authority_canary(
         try:
             verify_database_connection(connection)
             row = connection.execute(
-                "SELECT mode FROM workflow_authority WHERE workflow=?", (workflow,)
+                "SELECT mode,cutover_approved_by,cutover_evidence_hash,"
+                "rollback_deadline,last_parity_audit_hash,open_file_authority_runs "
+                "FROM workflow_authority WHERE workflow=?",
+                (workflow,),
             ).fetchone()
             if row is None or row[0] != "db_authority_canary":
                 raise DbAuthorityCanaryError(
                     "rollback requires an active db_authority_canary workflow"
                 )
+            if (
+                not row[1]
+                or row[5] != 0
+                or _sha256_text("cutover_evidence_hash", row[2]) != row[2]
+                or _normalize_deadline(row[3])[0] != row[3]
+                or _sha256_text("last_parity_audit_hash", row[4]) != row[4]
+            ):
+                raise DbAuthorityCanaryError(
+                    "rollback requires intact db_authority_canary cutover evidence"
+                )
             projection_bindings = connection.execute(
                 "SELECT p.projection_id,p.run_id,p.path,p.sha256,"
                 "r.workflow,r.authority_mode,r.state,w.mode "
                 "FROM artifact_projections p "
-                "LEFT JOIN runs r ON r.run_id=p.run_id "
+                "JOIN runs r ON r.run_id=p.run_id "
                 "LEFT JOIN workflow_authority w ON w.workflow=r.workflow "
-                "WHERE p.source_authority='db_authority_canary'"
+                "WHERE p.source_authority='db_authority_canary' "
+                "AND r.workflow=?",
+                (workflow,),
             ).fetchall()
             for (
                 _projection_id_value,
@@ -351,6 +374,23 @@ def rollback_db_authority_canary(
             ]
             canary_run_ids = {run_id for run_id, *_rest in canary_runs}
             projection_counts = {run_id: 0 for run_id in canary_run_ids}
+            all_projection_counts = {
+                row[0]: row[1]
+                for row in connection.execute(
+                    "SELECT run_id,COUNT(*) FROM artifact_projections "
+                    "WHERE run_id IN ("
+                    + ",".join("?" for _run_id in canary_run_ids)
+                    + ") GROUP BY run_id",
+                    tuple(canary_run_ids),
+                ).fetchall()
+            }
+            if any(
+                all_projection_counts.get(run_id, 0) != 1
+                for run_id in canary_run_ids
+            ):
+                raise DbAuthorityCanaryError(
+                    "rollback requires exactly one projection per finalized canary run"
+                )
             expected_by_path: dict[str, tuple[str, str, str]] = {}
             for projection_id, run_id, path, digest in expected_rows:
                 if run_id not in projection_counts:
@@ -379,7 +419,8 @@ def rollback_db_authority_canary(
                 )
             for relative in sorted(expected_by_path):
                 projection_id, run_id, expected_digest = expected_by_path[relative]
-                _absolute, actual_digest = supplied_by_path[relative]
+                absolute, _cached_digest = supplied_by_path[relative]
+                actual_digest = _sha256(absolute)
                 regenerated_projection = ShadowProjection(
                     path=relative,
                     sha256=actual_digest,
@@ -458,6 +499,7 @@ def _connect_existing_canary_database(
         connection = sqlite3.connect(
             f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
         )
+        _register_migration_functions(connection)
         opened_identity = _validate_canary_database_path(
             database, root=root, must_exist=True, check_sidecars=False
         )
