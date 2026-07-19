@@ -561,7 +561,7 @@ class MigrationTests(unittest.TestCase):
                 (SLO_QUERY_COUNT * len(migrations),),
             )
 
-    def test_legacy_slo_fixture_metadata_upgrades_to_v13_contract(self) -> None:
+    def test_legacy_slo_fixture_metadata_upgrades_to_current_contract(self) -> None:
         self._apply_migrations_through(12, "legacy-slo-fixture-metadata")
         for version in range(1, 13):
             meta_contract = next(
@@ -572,7 +572,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(meta_contract.empty_db_expected_status, "pass")
         current_meta_contract = next(
             contract
-            for contract in slo_query_contracts_for_schema_version(13)
+            for contract in slo_query_contracts_for_schema_version(14)
             if contract.query_name == "SLO query fixture status"
         )
         self.assertEqual(
@@ -580,7 +580,7 @@ class MigrationTests(unittest.TestCase):
             "self_bootstrap_empty",
         )
 
-        self.assertEqual(apply_migrations(self.database), (13,))
+        self.assertEqual(apply_migrations(self.database), (13, 14))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -594,9 +594,9 @@ class MigrationTests(unittest.TestCase):
                 connection.execute(
                     "SELECT empty_db_expected_status FROM slo_queries "
                     "WHERE query_name='SLO query fixture status' "
-                    "AND schema_version=13"
-                ).fetchone(),
-                ("self_bootstrap_empty",),
+                    "AND schema_version IN (13,14) ORDER BY schema_version"
+                ).fetchall(),
+                [("self_bootstrap_empty",), ("self_bootstrap_empty",)],
             )
 
     def test_v10_backfills_exact_v9_dispatches_for_replay_and_reconciliation(self) -> None:
@@ -616,7 +616,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13))
+        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -985,7 +985,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
         )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
@@ -1084,7 +1084,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
         )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -1107,6 +1107,7 @@ class MigrationTests(unittest.TestCase):
                     (11, current_hash),
                     (12, current_hash),
                     (13, current_hash),
+                    (14, current_hash),
                 ],
             )
 
@@ -1274,6 +1275,7 @@ class MigrationTests(unittest.TestCase):
                 "gate_authority_snapshot",
                 "goal_run_evidence_binding",
                 "trust_promotion_binding",
+                "db_authority_canary_binding",
             ],
         )
         for migration in migrations:
@@ -1298,7 +1300,7 @@ class MigrationTests(unittest.TestCase):
         before_mtime = verify_target.stat().st_mtime_ns
         self.assertEqual(
             verify_database(verify_target),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
         )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
@@ -1527,6 +1529,95 @@ class MigrationTests(unittest.TestCase):
             ).fetchone(),
             ("file_authority",),
         )
+
+    def test_canary_projection_freezes_run_authority_binding(self) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        for workflow in ("canary-a", "canary-b"):
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES(?,'db_authority_canary','local-fixture',?,"
+                "'2099-01-01T00:00:00+00:00',?,'now')",
+                (workflow, "c" * 64, "p" * 64),
+            )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+            "finalized_at_epoch_ms) VALUES('canary-run','prepare-canary','canary-a',"
+            "'db_authority_canary','finalized','R1','R1','now','now',"
+            "'2099-01-01T00:00:00+00:00',4070908800000)"
+        )
+        digest = "d" * 64
+        connection.execute(
+            "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+            "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+            (
+                _shadow_projection_id("canary-run", "tmp/canary.json", digest),
+                "canary-run",
+                "tmp/canary.json",
+                digest,
+                "db_authority_canary",
+                "2099-01-01T00:00:00+00:00",
+            ),
+        )
+
+        for statement in (
+            "UPDATE runs SET workflow='canary-b' WHERE run_id='canary-run'",
+            "UPDATE runs SET authority_mode='db_authority' WHERE run_id='canary-run'",
+            "DELETE FROM runs WHERE run_id='canary-run'",
+        ):
+            with self.subTest(statement=statement), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary projection binding is immutable"
+            ):
+                connection.execute(statement)
+        self.assertEqual(
+            connection.execute(
+                "SELECT workflow,authority_mode FROM runs WHERE run_id='canary-run'"
+            ).fetchone(),
+            ("canary-a", "db_authority_canary"),
+        )
+
+    def test_canary_binding_migration_rejects_existing_authority_drift(self) -> None:
+        self._apply_migrations_through(13, "through-v13-canary-binding")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES('canary','db_authority_canary','local-fixture',?,"
+                "'2099-01-01T00:00:00+00:00',?,'now')",
+                ("c" * 64, "e" * 64),
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+                "finalized_at_epoch_ms) VALUES('canary-run','prepare-canary','canary',"
+                "'db_authority_canary','finalized','R1','R1','now','now',"
+                "'2099-01-01T00:00:00+00:00',4070908800000)"
+            )
+            digest = "d" * 64
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    _shadow_projection_id("canary-run", "tmp/canary.json", digest),
+                    "canary-run",
+                    "tmp/canary.json",
+                    digest,
+                    "db_authority_canary",
+                    "2099-01-01T00:00:00+00:00",
+                ),
+            )
+            connection.execute(
+                "UPDATE runs SET authority_mode='file_authority' "
+                "WHERE run_id='canary-run'"
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
 
     def test_run_risk_dominance_is_allowlisted(self) -> None:
         apply_migrations(self.database)
@@ -6765,7 +6856,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(14,'future_contract',?,'now')",
+            "VALUES(15,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -6774,7 +6865,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                14,
+                15,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -6788,7 +6879,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (14,),
+            (15,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -6998,6 +7089,7 @@ class MigrationTests(unittest.TestCase):
                 (11, "gate_authority_snapshot"),
                 (12, "goal_run_evidence_binding"),
                 (13, "trust_promotion_binding"),
+                (14, "db_authority_canary_binding"),
             ],
         )
 

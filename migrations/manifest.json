@@ -77,6 +77,12 @@
       "name": "trust_promotion_binding",
       "file": "0013_trust_promotion_binding.sql",
       "sha256": "efa7fedf0da5880b91756202a9746cb1d045a83cd5fee593fa73e63f7b098985"
+    },
+    {
+      "version": 14,
+      "name": "db_authority_canary_binding",
+      "file": "0014_db_authority_canary_binding.sql",
+      "sha256": "e1252930cd22fa8e17f9354fcf2bbc1886b72e4f0c1598741788241c9afc3ab0"
     }
   ]
 }

@@ -112,10 +112,30 @@ def db_authority_canary_artifact(
         sha256=digest,
         projection_id=_projection_id(run_id, relative, digest),
     )
-    database_path = Path(database).expanduser().resolve()
+    database_input = Path(database).expanduser()
+    if database_input.is_symlink():
+        raise DbAuthorityCanaryError("canary database cannot be a symlink")
+    database_path = database_input.resolve()
+    pre_migration_identity = _validate_canary_database_path(
+        database_path, root=root, must_exist=False
+    )
     apply_migrations(database_path, repo_root=root)
+    post_migration_identity = _validate_canary_database_path(
+        database_path, root=root, must_exist=True
+    )
+    if (
+        pre_migration_identity is not None
+        and post_migration_identity != pre_migration_identity
+    ):
+        raise DbAuthorityCanaryError(
+            "canary database identity changed while applying migrations"
+        )
     created_at, created_epoch_ms = _utc_now()
-    connection = _connect(database_path)
+    connection = _connect_existing_canary_database(
+        database_path,
+        root=root,
+        expected_identity=post_migration_identity,
+    )
     try:
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -267,6 +287,36 @@ def rollback_db_authority_canary(
                 raise DbAuthorityCanaryError(
                     "rollback requires an active db_authority_canary workflow"
                 )
+            projection_bindings = connection.execute(
+                "SELECT p.projection_id,p.run_id,p.path,p.sha256,"
+                "r.workflow,r.authority_mode,r.state,w.mode "
+                "FROM artifact_projections p "
+                "LEFT JOIN runs r ON r.run_id=p.run_id "
+                "LEFT JOIN workflow_authority w ON w.workflow=r.workflow "
+                "WHERE p.source_authority='db_authority_canary'"
+            ).fetchall()
+            for (
+                _projection_id_value,
+                projection_run_id,
+                _path,
+                _digest,
+                run_workflow,
+                run_authority_mode,
+                _run_state,
+                workflow_mode,
+            ) in projection_bindings:
+                if (
+                    run_workflow is None
+                    or run_authority_mode != "db_authority_canary"
+                    or _run_state != "finalized"
+                    or workflow_mode
+                    not in {"db_authority_canary", "rollback_to_file_authority"}
+                ):
+                    raise DbAuthorityCanaryError(
+                        "db_authority_canary projection has workflow/run/authority binding drift: "
+                        f"{projection_run_id}"
+                    )
+
             canary_runs = connection.execute(
                 "SELECT run_id,state,finalized_at,finalized_at_epoch_ms FROM runs "
                 "WHERE workflow=? AND authority_mode='db_authority_canary'",
@@ -283,13 +333,22 @@ def rollback_db_authority_canary(
                     raise DbAuthorityCanaryError("cannot rollback an open or invalid canary run")
                 _assert_no_real_session_control(connection, run_id=run_id)
 
-            expected_rows = connection.execute(
-                "SELECT p.projection_id,p.run_id,p.path,p.sha256 "
-                "FROM artifact_projections p JOIN runs r ON r.run_id=p.run_id "
-                "WHERE r.workflow=? AND r.authority_mode='db_authority_canary' "
-                "AND r.state='finalized' AND p.source_authority='db_authority_canary'",
-                (workflow,),
-            ).fetchall()
+            expected_rows = [
+                (projection_id, projection_run_id, path, digest)
+                for (
+                    projection_id,
+                    projection_run_id,
+                    path,
+                    digest,
+                    run_workflow,
+                    run_authority_mode,
+                    run_state,
+                    _workflow_mode,
+                ) in projection_bindings
+                if run_workflow == workflow
+                and run_authority_mode == "db_authority_canary"
+                and run_state == "finalized"
+            ]
             canary_run_ids = {run_id for run_id, *_rest in canary_runs}
             projection_counts = {run_id: 0 for run_id in canary_run_ids}
             expected_by_path: dict[str, tuple[str, str, str]] = {}
@@ -384,43 +443,26 @@ def _normalize_deadline(value: str) -> tuple[str, int]:
 
 
 def _connect_existing_canary_database(
-    database: Path, *, root: Path
+    database: Path,
+    *,
+    root: Path,
+    expected_identity: tuple[int, int] | None = None,
 ) -> sqlite3.Connection:
-    try:
-        assert_privacy_preflight(root, database_paths=(database,))
-    except PrivacyPreflightError as exc:
-        raise DbAuthorityCanaryError("canary database privacy preflight failed") from exc
-    if not database.is_file():
-        raise DbAuthorityCanaryError("canary database must already exist")
-    database_stat = os.stat(database, follow_symlinks=False)
-    parent_mode = stat.S_IMODE(database.parent.stat().st_mode)
-    file_mode = stat.S_IMODE(database_stat.st_mode)
-    if not stat.S_ISREG(database_stat.st_mode):
-        raise DbAuthorityCanaryError("canary database must be a regular private file")
-    if parent_mode != 0o700 or file_mode != 0o600:
-        raise DbAuthorityCanaryError(
-            "canary database requires 0700 directory and 0600 file"
-        )
-    if int(getattr(database_stat, "st_nlink", 1) or 1) > 1:
-        raise DbAuthorityCanaryError("canary database cannot use hard-linked aliases")
-    for suffix in ("-wal", "-shm", "-journal"):
-        sidecar = Path(f"{database}{suffix}")
-        if not sidecar.exists():
-            continue
-        sidecar_stat = os.stat(sidecar, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(sidecar_stat.st_mode)
-            or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
-            or int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1
-        ):
-            raise DbAuthorityCanaryError(
-                f"canary database sidecar must be a private regular file: {sidecar}"
-            )
+    database_identity = _validate_canary_database_path(
+        database, root=root, must_exist=True
+    )
+    if expected_identity is not None and database_identity != expected_identity:
+        raise DbAuthorityCanaryError("canary database identity changed before open")
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
             f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
         )
+        opened_identity = _validate_canary_database_path(
+            database, root=root, must_exist=True, check_sidecars=False
+        )
+        if opened_identity != database_identity:
+            raise DbAuthorityCanaryError("canary database identity changed while opening")
         connection.execute("PRAGMA busy_timeout=10000")
         journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
         if str(journal_mode[0] if journal_mode else "").casefold() != "wal":
@@ -436,12 +478,59 @@ def _connect_existing_canary_database(
         raise
 
 
+def _validate_canary_database_path(
+    database: Path,
+    *,
+    root: Path,
+    must_exist: bool,
+    check_sidecars: bool = True,
+) -> tuple[int, int] | None:
+    try:
+        assert_privacy_preflight(root, database_paths=(database,))
+    except PrivacyPreflightError as exc:
+        raise DbAuthorityCanaryError("canary database privacy preflight failed") from exc
+    try:
+        database_stat = os.lstat(database)
+    except FileNotFoundError:
+        if must_exist:
+            raise DbAuthorityCanaryError("canary database must already exist") from None
+        return None
+    parent_mode = stat.S_IMODE(database.parent.stat().st_mode)
+    file_mode = stat.S_IMODE(database_stat.st_mode)
+    if not stat.S_ISREG(database_stat.st_mode):
+        raise DbAuthorityCanaryError("canary database must be a regular private file")
+    if parent_mode != 0o700 or file_mode != 0o600:
+        raise DbAuthorityCanaryError(
+            "canary database requires 0700 directory and 0600 file"
+        )
+    if int(getattr(database_stat, "st_nlink", 1) or 1) > 1:
+        raise DbAuthorityCanaryError("canary database cannot use hard-linked aliases")
+    if not check_sidecars:
+        return database_stat.st_dev, database_stat.st_ino
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{database}{suffix}")
+        try:
+            sidecar_stat = os.lstat(sidecar)
+        except FileNotFoundError:
+            continue
+        if (
+            not stat.S_ISREG(sidecar_stat.st_mode)
+            or stat.S_IMODE(sidecar_stat.st_mode) != 0o600
+            or int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1
+        ):
+            raise DbAuthorityCanaryError(
+                f"canary database sidecar must be a private regular file: {sidecar}"
+            )
+    return database_stat.st_dev, database_stat.st_ino
+
+
 def _harden_canary_sidecars(database: Path) -> None:
     for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(f"{database}{suffix}")
-        if not sidecar.exists():
+        try:
+            sidecar_stat = os.lstat(sidecar)
+        except FileNotFoundError:
             continue
-        sidecar_stat = os.stat(sidecar, follow_symlinks=False)
         if (
             not stat.S_ISREG(sidecar_stat.st_mode)
             or int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1

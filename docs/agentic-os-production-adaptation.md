@@ -3977,6 +3977,20 @@ IMMEDIATE`, reruns the current blocking SLO contracts under the write lock, and
 rechecks the evidence artifact before commit; it performs no OpenClaw/Gateway/Cron
 or production-authority calls.
 
+Current migration v14 database-authority canary binding:
+
+`0014_db_authority_canary_binding.sql` makes the workflow and authority identity
+of a run immutable once that run owns an `artifact_projections` row whose
+`source_authority` is `db_authority_canary`. The migration aborts when existing
+canary projections have a missing run, a non-canary run authority, or no active
+canary/rollback workflow binding. Subsequent direct SQL cannot move the run to
+another workflow, change its authority mode, or delete it while the projection
+exists. The overlay also rebinds trust-promotion evidence and its insert guard
+to the current v14 schema and migration identity, preserving the complete
+current-SLO proof requirement after the schema advances. This preserves the
+original canary proof boundary across rollback validation; it does not enable
+production database authority or external RPC.
+
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:
 

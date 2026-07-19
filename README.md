@@ -10,11 +10,11 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `ee832ba097ca21d0546f00f7af31ca236a546bb97924b3d986aaec2895baaca4`
+- Current design artifact SHA-256: `d0717eba3e564eea7fcbd513a9af6ad7d56c8b2c36185b7b01491330e4ab29ba`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `efa7fedf0da5880b91756202a9746cb1d045a83cd5fee593fa73e63f7b098985`
-- Current migration manifest SHA-256: `54a39bd96dd1a88792244e8b0e6ede695b5ed57181ba1c83e63d2bb903564fea`
-- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
+- Current latest migration SHA-256: `e1252930cd22fa8e17f9354fcf2bbc1886b72e4f0c1598741788241c9afc3ab0`
+- Current migration manifest SHA-256: `f9248469ed54e7a4169b5443884913c72fe69716964f8ed900b3ce14febdec77`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary binding immutability overlay, and 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies

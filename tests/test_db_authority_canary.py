@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -438,6 +439,137 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                     workflow="heartbeat",
                 )
             self.assertFalse(missing_db.exists())
+
+    def test_canary_writer_rejects_preexisting_hard_link_before_migration(self) -> None:
+        self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("CREATE TABLE sentinel(value TEXT NOT NULL)")
+            connection.execute("INSERT INTO sentinel VALUES('unchanged')")
+        self.database.chmod(0o600)
+        with tempfile.TemporaryDirectory() as outside:
+            alias = Path(outside) / "external-hard-link.db"
+            os.link(self.database, alias)
+            before = alias.read_bytes()
+
+            with self.assertRaisesRegex(DbAuthorityCanaryError, "hard-linked"):
+                db_authority_canary_artifact(
+                    self.database,
+                    self.artifact,
+                    self.payload,
+                    workflow="heartbeat",
+                    run_id="canary-run",
+                    cutover_approved_by="local-fixture",
+                    cutover_evidence_hash=self.cutover_hash,
+                    rollback_deadline="2099-01-01T00:00:00+00:00",
+                    last_parity_audit_hash=self.parity_hash,
+                )
+
+            self.assertEqual(alias.read_bytes(), before)
+            with sqlite3.connect(alias) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM sentinel").fetchone(),
+                    ("unchanged",),
+                )
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name='schema_migrations'"
+                    ).fetchone()
+                )
+
+    def test_canary_writer_rejects_unsafe_sidecar_before_migration(self) -> None:
+        self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("CREATE TABLE sentinel(value TEXT NOT NULL)")
+            connection.execute("INSERT INTO sentinel VALUES('unchanged')")
+        self.database.chmod(0o600)
+        sidecar = Path(f"{self.database}-wal")
+        sidecar.symlink_to(self.database.parent / "missing-sidecar-target")
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "sidecar"):
+            db_authority_canary_artifact(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="heartbeat",
+                run_id="canary-run",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT value FROM sentinel").fetchone(),
+                ("unchanged",),
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='schema_migrations'"
+                ).fetchone()
+            )
+
+    def test_canary_projection_prevents_run_binding_tampering(self) -> None:
+        second_artifact = Path(self.temporary.name) / "reports" / "second.json"
+        other_artifact = Path(self.temporary.name) / "reports" / "other.json"
+        db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        db_authority_canary_artifact(
+            self.database,
+            second_artifact,
+            b'{"workflow":"heartbeat","sequence":2}\n',
+            workflow="heartbeat",
+            run_id="canary-run-2",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        db_authority_canary_artifact(
+            self.database,
+            other_artifact,
+            b'{"workflow":"other","synthetic":true}\n',
+            workflow="other",
+            run_id="other-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+
+        with sqlite3.connect(self.database, isolation_level=None) as connection:
+            for statement in (
+                "UPDATE runs SET authority_mode='file_authority' "
+                "WHERE run_id='canary-run-2'",
+                "UPDATE runs SET workflow='other' WHERE run_id='canary-run-2'",
+            ):
+                with self.subTest(statement=statement), self.assertRaisesRegex(
+                    sqlite3.IntegrityError, "canary projection binding is immutable"
+                ):
+                    connection.execute(statement)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT workflow,authority_mode FROM runs "
+                    "WHERE run_id='canary-run-2'"
+                ).fetchone(),
+                ("heartbeat", "db_authority_canary"),
+            )
+
+        rollback = rollback_db_authority_canary(
+            self.database,
+            (self.artifact, second_artifact),
+            workflow="heartbeat",
+        )
+        self.assertEqual(rollback.status, "rolled_back")
 
     def test_canary_rejects_malformed_and_past_deadlines(self) -> None:
         for deadline in ("not-a-time", "2000-01-01T00:00:00+00:00"):
