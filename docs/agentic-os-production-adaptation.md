@@ -3946,6 +3946,9 @@ an immediate `agentic_evidence_snapshot_current(...)` artifact re-hash. The
 binding view rejects unknown or estimated usage/cost across trusted-workflow run budgets,
 non-human budget events, final settlements, and selected model cost registry
 rows; rejects database-authority current or gate-time snapshots; and rejects
+run budgets whose workflow or selected reserve transition does not exactly match
+the bound run/transition. Trusted-workflow non-human budget events must also
+match the run's selected provider/model/endpoint/capability/cost registry row.
 self-verifier, wrong-run, non-PASS, stale gate identity, stale trusted clock,
 malformed evidence, missing same-run goal evidence, any older PASS SLO audit
 shadowed by newer audit evidence, SLO audit rows older than the bound gate clock

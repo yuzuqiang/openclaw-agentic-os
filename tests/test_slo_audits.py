@@ -350,6 +350,23 @@ class SloAuditWriterTests(unittest.TestCase):
                 ("pass", 0, "pass", "pass", evidence.sha256, "run", "verifier", "gate"),
             )
 
+    def test_pass_audit_refuses_unproven_fixture_status_without_write(self) -> None:
+        evidence = self._record_pass_gate()
+
+        with mock.patch(
+            "agentic_os.slo_audits._execute_fixture_probes",
+            return_value=("pass", "fail"),
+        ):
+            with self.assertRaisesRegex(SloAuditError, "fixture probes"):
+                self._record_slo(
+                    evidence_hash=evidence.sha256,
+                    evidence_run_id="run",
+                    verifier_run_id="verifier",
+                    gate_run_id="gate",
+                )
+
+        self._assert_no_slo_audit_rows()
+
     def test_pass_status_requires_existing_pass_gate_evidence(self) -> None:
         with self.assertRaisesRegex(SloAuditError, "pass-gate evidence"):
             self._record_slo(

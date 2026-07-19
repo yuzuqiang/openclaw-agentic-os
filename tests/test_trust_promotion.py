@@ -249,6 +249,62 @@ class TrustPromotionWriterTests(unittest.TestCase):
             "current blocking SLO pass|complete bound evidence"
         )
 
+    def test_bound_run_budget_requires_exact_workflow_and_transition(self) -> None:
+        for assignment in (
+            "workflow='stale-workflow'",
+            "selected_reserve_transition_id='stale-transition'",
+        ):
+            with self.subTest(assignment=assignment):
+                self._reset_database()
+                self._seed_valid_fixture()
+                with closing(sqlite3.connect(self.database)) as connection, connection:
+                    if "selected_reserve_transition_id" in assignment:
+                        connection.execute(
+                            "INSERT INTO transitions(transition_id,run_id,state_before,"
+                            "state_after,transition_type,action_type,target_type,"
+                            "target_id,target_hash,target_scope,risk_dominance,"
+                            "idempotency_key,guard_version_before,created_at) VALUES("
+                            "'other-transition','run','prepared','candidate','noop',"
+                            "'observe','artifact','artifact-other',?,'repo','R1',"
+                            "'other-transition-idem',0,'now')",
+                            (_sha("other-artifact"),),
+                        )
+                        assignment = "selected_reserve_transition_id='other-transition'"
+                    connection.execute(
+                        f"UPDATE run_budgets SET {assignment} WHERE run_id='run'"
+                    )
+
+                self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_budget_events_must_match_selected_budget_cost_row(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('other-cost-row','provider','other-model',"
+                "'endpoint','capability',1,1,'known','effective','other-cost-hash')"
+            )
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('mismatched-selected-cost',"
+                "'mismatched-selected-cost-idem','mismatched-selected-cost-dedupe',"
+                "1,'run','transition','provider','other-model','endpoint',"
+                "'capability','other-cost-row','effective','other-cost-hash',"
+                "'known','reserve',1,1,'known','test','now',1)"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=1,"
+                "reserved_cost_microusd=1 WHERE run_id='run'"
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
     def test_missing_or_stale_slo_audit_fails_without_write(self) -> None:
         for statement in (
             "DELETE FROM slo_audits WHERE query_name='Duplicate live dispatch blocked'",

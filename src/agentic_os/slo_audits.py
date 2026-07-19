@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from .migrations import (
     _database_checks,
     _verify_schema,
     _verify_slo_queries,
+    apply_migrations,
     load_migrations,
 )
 from .pass_gates import (
@@ -116,8 +118,13 @@ def record_slo_audit(
                     pass_evidence.verifier_run_id,
                     pass_evidence.gate_run_id,
                 )
-                empty_db_status = "pass"
-                fixture_db_status = "pass"
+                empty_db_status, fixture_db_status = _execute_fixture_probes(
+                    database, connection, query
+                )
+                if empty_db_status != "pass" or fixture_db_status != "pass":
+                    raise SloAuditError(
+                        "passing SLO audit requires executable empty/fixture probes"
+                    )
             else:
                 evidence_fields = (None, None, None, None)
                 empty_db_status = "not_run"
@@ -224,6 +231,69 @@ def _execute_pinned_slo(connection: sqlite3.Connection, sql_text: str) -> int:
         return sum(1 for _row in cursor)
     except sqlite3.Error as exc:
         raise SloAuditError("pinned SLO SQL failed to execute") from exc
+
+
+def _execute_fixture_probes(
+    database: Path, connection: sqlite3.Connection, query: _CurrentSloQuery
+) -> tuple[str, str]:
+    empty_status = _execute_empty_database_probe(database, query.sql_text)
+    fixture_status = _execute_snapshot_fixture_probe(database, connection, query.sql_text)
+    if (
+        empty_status != query.empty_db_expected_status
+        or fixture_status != query.fixture_db_expected_status
+        or empty_status != "pass"
+        or fixture_status != "pass"
+    ):
+        raise SloAuditError("passing SLO audit requires executable empty/fixture probes")
+    return empty_status, fixture_status
+
+
+def _execute_empty_database_probe(database: Path, sql_text: str) -> str:
+    with _probe_database(database, "empty") as probe_path:
+        try:
+            apply_migrations(probe_path)
+            with sqlite3.connect(probe_path) as probe:
+                return _status_for_result_count(_execute_pinned_slo(probe, sql_text))
+        except (MigrationError, sqlite3.Error) as exc:
+            raise SloAuditError("empty SLO fixture database failed to execute") from exc
+
+
+def _execute_snapshot_fixture_probe(
+    database: Path, connection: sqlite3.Connection, sql_text: str
+) -> str:
+    with _probe_database(database, "fixture") as probe_path:
+        try:
+            with sqlite3.connect(probe_path) as probe:
+                probe.executescript("\n".join(connection.iterdump()))
+                return _status_for_result_count(_execute_pinned_slo(probe, sql_text))
+        except sqlite3.Error as exc:
+            raise SloAuditError("SLO fixture database failed to execute") from exc
+
+
+def _status_for_result_count(result_count: int) -> str:
+    return "pass" if result_count == 0 else "fail"
+
+
+class _probe_database:
+    def __init__(self, database: Path, label: str) -> None:
+        self._database = Path(database)
+        self._label = label
+        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self.path: Path | None = None
+
+    def __enter__(self) -> Path:
+        probe_root = self._database.parent / ".slo-audit-probes"
+        probe_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        probe_root.chmod(0o700)
+        self._temporary = tempfile.TemporaryDirectory(
+            prefix=f"{self._label}-", dir=probe_root
+        )
+        self.path = Path(self._temporary.name) / "control.db"
+        return self.path
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._temporary is not None:
+            self._temporary.cleanup()
 
 
 def _require_pass_evidence(

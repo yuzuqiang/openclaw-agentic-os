@@ -132,6 +132,8 @@ JOIN slo_queries q
  AND q.query_hash=g.gate_query_hash
 JOIN run_budgets rb
   ON rb.run_id=r.run_id
+ AND rb.workflow=r.workflow
+ AND rb.selected_reserve_transition_id=t.transition_id
 JOIN model_cost_registry mc
   ON mc.cost_registry_id=rb.selected_cost_registry_id
 WHERE gr.run_id IS NOT NULL
@@ -323,12 +325,39 @@ WHERE gr.run_id IS NOT NULL
     SELECT 1
     FROM budget_events be
     JOIN runs be_run ON be_run.run_id=be.run_id
+    LEFT JOIN run_budgets be_rb
+      ON be_rb.run_id=be.run_id
+    LEFT JOIN model_cost_registry be_mc
+      ON be_mc.cost_registry_id=be.cost_registry_id
+     AND be_mc.provider=be.provider
+     AND be_mc.model=be.model
+     AND be_mc.endpoint_binding_id=be.endpoint_binding_id
+     AND be_mc.capability_class=be.capability_class
+     AND be_mc.effective_at=be.cost_effective_at
+     AND be_mc.registry_row_hash=be.cost_registry_hash
+     AND be_mc.confidence=be.cost_confidence
     WHERE be_run.workflow=r.workflow
       AND (
         be.usage_confidence<>'known'
         OR (
           be.event_type<>'human_attention'
           AND (be.cost_confidence IS NULL OR be.cost_confidence<>'known')
+        )
+        OR (
+          be.event_type<>'human_attention'
+          AND (
+            be_rb.run_id IS NULL
+            OR be.provider IS NOT be_rb.selected_provider
+            OR be.model IS NOT be_rb.selected_model
+            OR be.endpoint_binding_id IS NOT be_rb.selected_endpoint_binding_id
+            OR be.capability_class IS NOT be_rb.capability_class
+            OR be.cost_registry_id IS NOT be_rb.selected_cost_registry_id
+            OR be.cost_effective_at IS NOT be_rb.selected_cost_effective_at
+            OR be.cost_registry_hash IS NOT be_rb.selected_cost_registry_hash
+            OR be.cost_confidence IS NOT be_rb.selected_cost_confidence
+            OR be_mc.cost_registry_id IS NULL
+            OR be_mc.confidence<>'known'
+          )
         )
       )
   )
