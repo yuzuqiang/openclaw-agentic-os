@@ -75,6 +75,18 @@ def _shadow_projection_id(run_id: object, relative_path: object, digest: object)
     return hashlib.sha256(payload).hexdigest()
 
 
+def _utc_iso_epoch_ms(value: object) -> int | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return int(parsed.astimezone(timezone.utc).timestamp() * 1000)
+
+
 def _trusted_clock_source_hash(now_epoch_ms: object, bound_by: object) -> str:
     if type(now_epoch_ms) is not int or not isinstance(bound_by, str) or not bound_by:
         return ""
@@ -402,6 +414,12 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         "agentic_shadow_projection_id",
         3,
         _shadow_projection_id,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_utc_iso_epoch_ms",
+        1,
+        _utc_iso_epoch_ms,
         deterministic=True,
     )
     connection.create_function(

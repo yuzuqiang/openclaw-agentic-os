@@ -302,7 +302,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 workflow="heartbeat",
             )
 
-    def test_rollback_requires_one_projection_for_every_finalized_run(self) -> None:
+    def test_projection_delete_cannot_hide_finalized_run_from_rollback(self) -> None:
         second_artifact = Path(self.temporary.name) / "reports" / "second.json"
         db_authority_canary_artifact(
             self.database,
@@ -327,16 +327,19 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             last_parity_audit_hash=self.parity_hash,
         )
         with sqlite3.connect(self.database) as connection:
-            connection.execute(
-                "DELETE FROM artifact_projections WHERE run_id='canary-run-2'"
-            )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary projection identity is immutable"
+            ):
+                connection.execute(
+                    "DELETE FROM artifact_projections WHERE run_id='canary-run-2'"
+                )
 
-        with self.assertRaisesRegex(DbAuthorityCanaryError, "one projection"):
-            rollback_db_authority_canary(
-                self.database,
-                (self.artifact,),
-                workflow="heartbeat",
-            )
+        rollback = rollback_db_authority_canary(
+            self.database,
+            (self.artifact, second_artifact),
+            workflow="heartbeat",
+        )
+        self.assertEqual(rollback.status, "rolled_back")
 
     def test_second_canary_run_cannot_reuse_artifact_path(self) -> None:
         db_authority_canary_artifact(
@@ -547,6 +550,22 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         )
 
         with sqlite3.connect(self.database, isolation_level=None) as connection:
+            for statement in (
+                "UPDATE artifact_projections SET source_authority='file_authority' "
+                "WHERE run_id='canary-run-2'",
+                "UPDATE artifact_projections SET run_id='other-run' "
+                "WHERE run_id='canary-run-2'",
+                "UPDATE artifact_projections SET path='tmp/tampered.json' "
+                "WHERE run_id='canary-run-2'",
+                "UPDATE artifact_projections SET sha256=? "
+                "WHERE run_id='canary-run-2'",
+                "DELETE FROM artifact_projections WHERE run_id='canary-run-2'",
+            ):
+                parameters = ("f" * 64,) if "sha256=?" in statement else ()
+                with self.subTest(statement=statement), self.assertRaisesRegex(
+                    sqlite3.IntegrityError, "canary projection identity is immutable"
+                ):
+                    connection.execute(statement, parameters)
             for statement in (
                 "UPDATE runs SET authority_mode='file_authority' "
                 "WHERE run_id='canary-run-2'",

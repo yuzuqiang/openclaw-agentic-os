@@ -1565,6 +1565,21 @@ class MigrationTests(unittest.TestCase):
         )
 
         for statement in (
+            "UPDATE artifact_projections SET source_authority='file_authority' "
+            "WHERE run_id='canary-run'",
+            "UPDATE artifact_projections SET run_id='missing' "
+            "WHERE run_id='canary-run'",
+            "UPDATE artifact_projections SET path='tmp/other.json' "
+            "WHERE run_id='canary-run'",
+            "UPDATE artifact_projections SET sha256='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' WHERE run_id='canary-run'",
+            "DELETE FROM artifact_projections WHERE run_id='canary-run'",
+        ):
+            with self.subTest(statement=statement), self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary projection identity is immutable"
+            ):
+                connection.execute(statement)
+        for statement in (
             "UPDATE runs SET workflow='canary-b' WHERE run_id='canary-run'",
             "UPDATE runs SET authority_mode='db_authority' WHERE run_id='canary-run'",
             "DELETE FROM runs WHERE run_id='canary-run'",
@@ -1618,6 +1633,104 @@ class MigrationTests(unittest.TestCase):
 
         with self.assertRaises(sqlite3.IntegrityError):
             apply_migrations(self.database)
+
+    def test_canary_binding_migration_rejects_candidate_projection_atomically(self) -> None:
+        self._apply_migrations_through(13, "through-v13-candidate-canary")
+        projection_id = _shadow_projection_id(
+            "candidate-run", "tmp/candidate.json", "d" * 64
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES('canary','db_authority_canary','local-fixture',?,"
+                "'2099-01-01T00:00:00+00:00',?,'now')",
+                ("c" * 64, "e" * 64),
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'candidate-run','prepare-candidate','canary','db_authority_canary',"
+                "'candidate','R1','R1','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?, 'candidate-run',"
+                "'tmp/candidate.json',?,'db_authority_canary','now')",
+                (projection_id, "d" * 64),
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone(),
+                (13,),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM runs WHERE run_id='candidate-run'"
+                ).fetchone(),
+                ("candidate",),
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='trigger' AND "
+                    "name='artifact_projections_preserve_db_authority_canary_delete'"
+                ).fetchone()
+            )
+
+    def test_canary_binding_migration_accepts_valid_prepared_and_finalized_runs(self) -> None:
+        self._apply_migrations_through(13, "through-v13-valid-canary-lifecycle")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES('canary','db_authority_canary','local-fixture',?,"
+                "'2099-01-01T00:00:00+00:00',?,'now')",
+                ("c" * 64, "e" * 64),
+            )
+            for run_id, state, finalized_at, finalized_epoch_ms in (
+                ("prepared-run", "prepared", None, None),
+                (
+                    "finalized-run",
+                    "finalized",
+                    "2099-01-01T00:00:00+00:00",
+                    4070908800000,
+                ),
+            ):
+                connection.execute(
+                    "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                    "authority_mode,state,risk_class,risk_dominance,created_at,updated_at,"
+                    "finalized_at,finalized_at_epoch_ms) VALUES(?,?,'canary',"
+                    "'db_authority_canary',?,'R1','R1','now','now',?,?)",
+                    (run_id, f"prepare-{run_id}", state, finalized_at, finalized_epoch_ms),
+                )
+                path = f"tmp/{run_id}.json"
+                digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                    "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        _shadow_projection_id(run_id, path, digest),
+                        run_id,
+                        path,
+                        digest,
+                        "db_authority_canary",
+                        "2099-01-01T00:00:00+00:00",
+                    ),
+                )
+
+        self.assertEqual(apply_migrations(self.database), (14,))
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT run_id,state FROM runs ORDER BY run_id"
+                ).fetchall(),
+                [("finalized-run", "finalized"), ("prepared-run", "prepared")],
+            )
 
     def test_run_risk_dominance_is_allowlisted(self) -> None:
         apply_migrations(self.database)

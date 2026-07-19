@@ -12,6 +12,33 @@ SELECT CASE WHEN EXISTS (
     AND (
       r.run_id IS NULL
       OR r.authority_mode<>'db_authority_canary'
+      OR r.state NOT IN ('prepared','finalized')
+      OR r.risk_class<>'R1'
+      OR r.risk_dominance<>'R1'
+      OR p.path=''
+      OR length(p.sha256)<>64
+      OR p.sha256 GLOB '*[^0-9a-f]*'
+      OR p.projection_id<>agentic_shadow_projection_id(p.run_id,p.path,p.sha256)
+      OR (
+        SELECT COUNT(*)
+        FROM artifact_projections same_run
+        WHERE same_run.run_id=p.run_id
+          AND same_run.source_authority='db_authority_canary'
+      )<>1
+      OR (
+        r.state='prepared'
+        AND (r.finalized_at IS NOT NULL OR r.finalized_at_epoch_ms IS NOT NULL)
+      )
+      OR (
+        r.state='finalized'
+        AND (
+          r.finalized_at IS NULL
+          OR r.finalized_at=''
+          OR typeof(r.finalized_at_epoch_ms)<>'integer'
+          OR agentic_utc_iso_epoch_ms(r.finalized_at)
+             IS NOT r.finalized_at_epoch_ms
+        )
+      )
       OR w.workflow IS NULL
       OR w.mode NOT IN ('db_authority_canary','rollback_to_file_authority')
     )
@@ -33,6 +60,32 @@ AND EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'db-authority canary projection binding is immutable');
+END;
+
+CREATE TRIGGER artifact_projections_preserve_db_authority_canary_update
+BEFORE UPDATE ON artifact_projections
+WHEN (
+  OLD.source_authority='db_authority_canary'
+  OR NEW.source_authority='db_authority_canary'
+)
+AND (
+  NEW.projection_id IS NOT OLD.projection_id
+  OR NEW.run_id IS NOT OLD.run_id
+  OR NEW.path IS NOT OLD.path
+  OR NEW.sha256 IS NOT OLD.sha256
+  OR NEW.source_authority IS NOT OLD.source_authority
+  OR NEW.generated_from_transition_id IS NOT OLD.generated_from_transition_id
+  OR NEW.generated_at IS NOT OLD.generated_at
+)
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
+END;
+
+CREATE TRIGGER artifact_projections_preserve_db_authority_canary_delete
+BEFORE DELETE ON artifact_projections
+WHEN OLD.source_authority='db_authority_canary'
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary projection identity is immutable');
 END;
 
 DROP TRIGGER trust_observations_validate_bound_insert;
