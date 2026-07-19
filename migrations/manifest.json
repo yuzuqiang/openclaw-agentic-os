@@ -4,7 +4,7 @@
       "version": 1,
       "name": "minimum_contract",
       "file": "0001_minimum_contract.sql",
-      "sha256": "2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01"
+      "sha256": "6924bbf11785fa9ce8a448bdbf30cce64bc253a89356fc6b2379bb60b68e65c7"
     },
     {
       "version": 2,
@@ -76,7 +76,7 @@
       "version": 13,
       "name": "trust_promotion_binding",
       "file": "0013_trust_promotion_binding.sql",
-      "sha256": "e4dae96c24a40979a75e6a0a4cf7631edb64c02349bc2b2cd8c4b10b8985ae26"
+      "sha256": "d89155d4d47a52e27c2b8d0455260d5bca6679c5a564880f850898091b934566"
     }
   ]
 }

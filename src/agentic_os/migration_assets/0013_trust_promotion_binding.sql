@@ -35,6 +35,19 @@ CREATE UNIQUE INDEX trust_observations_run_goal_idx
 ON trust_observations(run_id,goal_run_id,evidence_hash)
 WHERE invalidated_at IS NULL;
 
+CREATE TABLE slo_evidence_events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_kind TEXT NOT NULL,
+  source_table TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  schema_version ANY,
+  migration_sha256 TEXT,
+  query_name TEXT,
+  recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CHECK (event_kind IN ('slo_input','slo_audit')),
+  CHECK (source_table<>'' AND source_id<>'')
+) STRICT;
+
 CREATE VIEW trust_promotion_bound_evidence AS
 SELECT
   r.run_id,
@@ -461,8 +474,18 @@ WHERE gr.run_id IS NOT NULL
           AND sa.query_hash=current_q.query_hash
           AND sa.result_count=0
           AND sa.status='pass'
-          AND sa.empty_db_status='pass'
-          AND sa.fixture_db_status='pass'
+          AND (
+            (
+              current_q.query_name<>'SLO query fixture status'
+              AND sa.empty_db_status='pass'
+              AND sa.fixture_db_status='pass'
+            )
+            OR (
+              current_q.query_name='SLO query fixture status'
+              AND sa.empty_db_status='self_bootstrap_empty'
+              AND sa.fixture_db_status='pass'
+            )
+          )
           AND sa.evidence_hash=e.evidence_hash
           AND sa.evidence_run_id=e.run_id
           AND sa.verifier_run_id=e.verifier_run_id
@@ -474,24 +497,27 @@ WHERE gr.run_id IS NOT NULL
             JOIN runs be_run ON be_run.run_id=be.run_id
             WHERE be_run.workflow=r.workflow
           ),0)
-          AND sa.rowid > COALESCE((
-            SELECT MAX(be.rowid)
-            FROM budget_events be
-            JOIN runs be_run ON be_run.run_id=be.run_id
-            WHERE be_run.workflow=r.workflow
-          ),0)
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(bs.created_at_epoch_ms)
             FROM budget_settlements bs
             JOIN runs bs_run ON bs_run.run_id=bs.run_id
             WHERE bs_run.workflow=r.workflow
           ),0)
-          AND sa.rowid > COALESCE((
-            SELECT MAX(bs.rowid)
-            FROM budget_settlements bs
-            JOIN runs bs_run ON bs_run.run_id=bs.run_id
-            WHERE bs_run.workflow=r.workflow
-          ),0)
+          AND COALESCE((
+            SELECT MAX(audit_event.event_id)
+            FROM slo_evidence_events audit_event
+            WHERE audit_event.event_kind='slo_audit'
+              AND audit_event.source_table='slo_audits'
+              AND audit_event.source_id=sa.slo_audit_id
+              AND audit_event.schema_version=sa.schema_version
+              AND audit_event.migration_sha256=sa.migration_sha256
+              AND audit_event.query_name=sa.query_name
+          ),0) > COALESCE((
+            SELECT MAX(input_event.event_id)
+            FROM slo_evidence_events input_event
+            WHERE input_event.event_kind='slo_input'
+              AND input_event.source_table IN ('budget_events','budget_settlements')
+          ),-1)
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(
               MAX(
@@ -657,6 +683,27 @@ BEGIN
   SELECT RAISE(ABORT,'active trust observation is immutable');
 END;
 
+CREATE TRIGGER budget_events_log_slo_input_insert
+AFTER INSERT ON budget_events
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','budget_events',NEW.budget_event_id);
+END;
+
+CREATE TRIGGER budget_events_log_slo_input_update
+AFTER UPDATE ON budget_events
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','budget_events',NEW.budget_event_id);
+END;
+
+CREATE TRIGGER budget_events_log_slo_input_delete
+AFTER DELETE ON budget_events
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','budget_events',OLD.budget_event_id);
+END;
+
 CREATE TRIGGER budget_events_preserve_active_trust_insert
 BEFORE INSERT ON budget_events
 WHEN EXISTS (
@@ -767,6 +814,27 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
+END;
+
+CREATE TRIGGER budget_settlements_log_slo_input_insert
+AFTER INSERT ON budget_settlements
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','budget_settlements',NEW.settlement_id);
+END;
+
+CREATE TRIGGER budget_settlements_log_slo_input_update
+AFTER UPDATE ON budget_settlements
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','budget_settlements',NEW.settlement_id);
+END;
+
+CREATE TRIGGER budget_settlements_log_slo_input_delete
+AFTER DELETE ON budget_settlements
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','budget_settlements',OLD.settlement_id);
 END;
 
 CREATE TRIGGER budget_settlements_preserve_active_trust_insert
@@ -1063,6 +1131,60 @@ BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before session changes');
 END;
 
+CREATE TRIGGER transitions_preserve_active_trust_insert
+BEFORE INSERT ON transitions
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before transition changes');
+END;
+
+CREATE TRIGGER transitions_preserve_active_trust_update
+BEFORE UPDATE ON transitions
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before transition changes');
+END;
+
+CREATE TRIGGER transitions_preserve_active_trust_delete
+BEFORE DELETE ON transitions
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before transition changes');
+END;
+
 CREATE TRIGGER runs_preserve_active_trust_update
 BEFORE UPDATE ON runs
 WHEN EXISTS (
@@ -1133,6 +1255,19 @@ BEFORE DELETE ON endpoint_zero_reserve_policies
 WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before zero reserve policy changes');
+END;
+
+CREATE TRIGGER slo_audits_log_slo_evidence_event_insert
+AFTER INSERT ON slo_audits
+WHEN NEW.status='pass'
+BEGIN
+  INSERT INTO slo_evidence_events(
+    event_kind,source_table,source_id,schema_version,migration_sha256,query_name
+  )
+  VALUES(
+    'slo_audit','slo_audits',NEW.slo_audit_id,
+    NEW.schema_version,NEW.migration_sha256,NEW.query_name
+  );
 END;
 
 CREATE TRIGGER slo_audits_preserve_active_trust_insert

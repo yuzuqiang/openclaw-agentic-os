@@ -122,7 +122,10 @@ def record_slo_audit(
                 empty_db_status, fixture_db_status = _execute_fixture_probes(
                     database, connection, query
                 )
-                if empty_db_status != "pass" or fixture_db_status != "pass":
+                if (
+                    empty_db_status != "pass"
+                    and empty_db_status != "self_bootstrap_empty"
+                ) or fixture_db_status != "pass":
                     raise SloAuditError(
                         "passing SLO audit requires executable empty/fixture probes"
                     )
@@ -239,17 +242,20 @@ def _execute_fixture_probes(
 ) -> tuple[str, str]:
     empty_status = _execute_empty_database_probe(database, query.sql_text)
     fixture_status = _execute_snapshot_fixture_probe(database, connection, query.sql_text)
-    normalized_empty_status = empty_status
+    recorded_empty_status = empty_status
     if query.query_name == _META_SLO_QUERY_NAME and empty_status == "fail":
-        normalized_empty_status = "pass"
+        recorded_empty_status = "self_bootstrap_empty"
     if (
-        normalized_empty_status != query.empty_db_expected_status
+        recorded_empty_status != query.empty_db_expected_status
         or fixture_status != query.fixture_db_expected_status
-        or normalized_empty_status != "pass"
+        or (
+            recorded_empty_status != "pass"
+            and recorded_empty_status != "self_bootstrap_empty"
+        )
         or fixture_status != "pass"
     ):
         raise SloAuditError("passing SLO audit requires executable empty/fixture probes")
-    return normalized_empty_status, fixture_status
+    return recorded_empty_status, fixture_status
 
 
 def _execute_empty_database_probe(database: Path, sql_text: str) -> str:

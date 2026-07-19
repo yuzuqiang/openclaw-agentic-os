@@ -397,7 +397,7 @@ class SloAuditWriterTests(unittest.TestCase):
                     "SELECT status,result_count,empty_db_status,fixture_db_status "
                     "FROM slo_audits WHERE slo_audit_id='meta-slo'"
                 ).fetchone(),
-                ("pass", 0, "pass", "pass"),
+                ("pass", 0, "self_bootstrap_empty", "pass"),
             )
 
     def test_pass_audit_refuses_unproven_fixture_status_without_write(self) -> None:

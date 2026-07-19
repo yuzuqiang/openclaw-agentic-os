@@ -542,7 +542,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 33)
+            self.assertEqual(len(tables), 34)
             rows = connection.execute(
                 "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
             ).fetchall()

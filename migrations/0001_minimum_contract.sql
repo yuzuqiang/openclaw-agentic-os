@@ -2779,8 +2779,14 @@ CREATE TABLE slo_audits (
   CHECK (typeof(run_at_epoch_ms)='integer' AND run_at_epoch_ms BETWEEN 1 AND 253402300799999),
   CHECK (status<>'pass' OR (
     result_count=0
-    AND empty_db_status='pass'
-    AND fixture_db_status='pass'
+    AND (
+      (empty_db_status='pass' AND fixture_db_status='pass')
+      OR (
+        query_name='SLO query fixture status'
+        AND empty_db_status='self_bootstrap_empty'
+        AND fixture_db_status='pass'
+      )
+    )
     AND evidence_hash IS NOT NULL AND evidence_hash<>''
     AND evidence_run_id IS NOT NULL AND evidence_run_id<>''
     AND verifier_run_id IS NOT NULL AND verifier_run_id<>''

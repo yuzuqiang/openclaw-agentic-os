@@ -328,9 +328,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 "reserved_cost_microusd=1 WHERE run_id='run'"
             )
 
-        self._assert_promotion_fails_without_write(
-            "current blocking SLO pass|complete bound evidence"
-        )
+        self._assert_promotion_fails_without_write("complete bound evidence")
 
     def test_missing_or_stale_slo_audit_fails_without_write(self) -> None:
         for statement in (
@@ -974,18 +972,24 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 gate_epoch_ms,
             )
             for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                empty_db_status = (
+                    "self_bootstrap_empty"
+                    if contract.query_name == "SLO query fixture status"
+                    else "pass"
+                )
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
                     "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
                     "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
-                    "'pass','pass',?,?,?,?,?,?)",
+                    "?,'pass',?,?,?,?,?,?)",
                     (
                         f"slo-later-{index}",
                         contract.query_name,
                         schema_version,
                         migration_sha256,
                         slo_query_hash(contract.sql_text),
+                        empty_db_status,
                         self.evidence_hash,
                         "run",
                         "verifier",
@@ -1725,6 +1729,29 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "'completed','now')"
                 )
 
+    def test_transitions_require_invalidation_after_active_trust(self) -> None:
+        self._seed_valid_fixture()
+        self._promote()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "transition changes"):
+                connection.execute(
+                    "INSERT INTO transitions(transition_id,run_id,state_before,"
+                    "state_after,transition_type,action_type,target_type,target_id,"
+                    "target_hash,target_scope,risk_dominance,idempotency_key,"
+                    "guard_version_before,created_at) VALUES('late-transition','run',"
+                    "'gate_passed','candidate','noop','observe','artifact',"
+                    "'artifact-late',?,'repo','R1','late-transition-idem',0,'now')",
+                    (_sha("late-artifact"),),
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "transition changes"):
+                connection.execute(
+                    "UPDATE transitions SET action_type='changed' "
+                    "WHERE transition_id='transition'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "transition changes"):
+                connection.execute("DELETE FROM transitions WHERE transition_id='transition'")
+
     def test_direct_sql_rejects_missing_risk_assessment_binding(self) -> None:
         self._seed_valid_fixture()
         with closing(sqlite3.connect(self.database)) as connection:
@@ -1994,18 +2021,24 @@ class TrustPromotionWriterTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=ON")
             for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                empty_db_status = (
+                    "self_bootstrap_empty"
+                    if contract.query_name == "SLO query fixture status"
+                    else "pass"
+                )
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
                     "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
                     "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
-                    "'pass','pass',?,?,?,?,?,?)",
+                    "?,'pass',?,?,?,?,?,?)",
                     (
                         f"slo-{index}",
                         contract.query_name,
                         schema_version,
                         migration_sha256,
                         slo_query_hash(contract.sql_text),
+                        empty_db_status,
                         self.evidence_hash,
                         "run",
                         "verifier",
