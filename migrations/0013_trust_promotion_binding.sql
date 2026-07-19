@@ -227,6 +227,7 @@ WHERE gr.run_id IS NOT NULL
   AND NOT EXISTS (
     SELECT 1
     FROM run_budgets current_rb
+    LEFT JOIN runs current_run ON current_run.run_id=current_rb.run_id
     LEFT JOIN model_cost_registry current_mc
       ON current_mc.cost_registry_id=current_rb.selected_cost_registry_id
      AND current_mc.provider=current_rb.selected_provider
@@ -236,7 +237,7 @@ WHERE gr.run_id IS NOT NULL
      AND current_mc.effective_at=current_rb.selected_cost_effective_at
      AND current_mc.registry_row_hash=current_rb.selected_cost_registry_hash
      AND current_mc.confidence=current_rb.selected_cost_confidence
-    WHERE current_rb.workflow=r.workflow
+    WHERE (current_run.run_id IS NULL OR current_run.workflow=r.workflow)
       AND (
         current_rb.usage_confidence<>'known'
         OR current_rb.selected_cost_confidence<>'known'
@@ -247,6 +248,7 @@ WHERE gr.run_id IS NOT NULL
   AND NOT EXISTS (
     SELECT 1
     FROM run_budgets current_rb
+    LEFT JOIN runs current_run ON current_run.run_id=current_rb.run_id
     LEFT JOIN (
       SELECT
         be.run_id,
@@ -280,7 +282,7 @@ WHERE gr.run_id IS NOT NULL
       FROM budget_events be
       GROUP BY be.run_id
     ) budget_sums ON budget_sums.run_id=current_rb.run_id
-    WHERE current_rb.workflow=r.workflow
+    WHERE (current_run.run_id IS NULL OR current_run.workflow=r.workflow)
       AND (
         COALESCE(budget_sums.net_reserved_time,0)<0
         OR COALESCE(budget_sums.net_reserved_input,0)<0
@@ -403,6 +405,9 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
     AND b.current_slo_query_count=30
     AND b.current_slo_query_count=NEW.blocking_slo_query_count
     AND b.current_slo_query_count=NEW.blocking_slo_pass_audit_count
+    AND agentic_trust_promotion_current_slos_pass(
+      b.schema_version,b.migration_sha256
+    )=1
     AND agentic_evidence_snapshot_current(
       b.evidence_path,
       b.evidence_sha256,
@@ -829,10 +834,16 @@ WHEN EXISTS (
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
   LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  LEFT JOIN spawn_requests changed_spawn
+    ON changed_spawn.spawn_request_id=NEW.spawn_request_id
+  LEFT JOIN runs spawn_run ON spawn_run.run_id=changed_spawn.run_id
   WHERE trust.invalidated_at IS NULL
     AND (
       changed_run.run_id IS NULL
       OR trusted_run.workflow=changed_run.workflow
+      OR changed_spawn.spawn_request_id IS NULL
+      OR spawn_run.run_id IS NULL
+      OR trusted_run.workflow=spawn_run.workflow
     )
 )
 BEGIN
@@ -847,12 +858,24 @@ WHEN EXISTS (
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
   LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
   LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
+  LEFT JOIN spawn_requests old_changed_spawn
+    ON old_changed_spawn.spawn_request_id=OLD.spawn_request_id
+  LEFT JOIN spawn_requests new_changed_spawn
+    ON new_changed_spawn.spawn_request_id=NEW.spawn_request_id
+  LEFT JOIN runs old_spawn_run ON old_spawn_run.run_id=old_changed_spawn.run_id
+  LEFT JOIN runs new_spawn_run ON new_spawn_run.run_id=new_changed_spawn.run_id
   WHERE trust.invalidated_at IS NULL
     AND (
       old_changed_run.run_id IS NULL
       OR new_changed_run.run_id IS NULL
       OR trusted_run.workflow=old_changed_run.workflow
       OR trusted_run.workflow=new_changed_run.workflow
+      OR old_changed_spawn.spawn_request_id IS NULL
+      OR new_changed_spawn.spawn_request_id IS NULL
+      OR old_spawn_run.run_id IS NULL
+      OR new_spawn_run.run_id IS NULL
+      OR trusted_run.workflow=old_spawn_run.workflow
+      OR trusted_run.workflow=new_spawn_run.workflow
     )
 )
 BEGIN
@@ -866,10 +889,16 @@ WHEN EXISTS (
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
   LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  LEFT JOIN spawn_requests changed_spawn
+    ON changed_spawn.spawn_request_id=OLD.spawn_request_id
+  LEFT JOIN runs spawn_run ON spawn_run.run_id=changed_spawn.run_id
   WHERE trust.invalidated_at IS NULL
     AND (
       changed_run.run_id IS NULL
       OR trusted_run.workflow=changed_run.workflow
+      OR changed_spawn.spawn_request_id IS NULL
+      OR spawn_run.run_id IS NULL
+      OR trusted_run.workflow=spawn_run.workflow
     )
 )
 BEGIN

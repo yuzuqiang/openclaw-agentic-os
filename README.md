@@ -12,8 +12,8 @@ revalidation, and neither artifact proves production runtime behavior.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `f112f56cfea35ce3a4f998386c975c09745a6f1c1438cf261a9b753873b0b4ce`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `62e1068288f7dd503e58cfb9509c3073831973a919ebb494036a9f7446356875`
-- Current migration manifest SHA-256: `a4bfe6f4530d1925170b3243d7a7db8513d779e8f53903cf369aefcd38d6edb4`
+- Current latest migration SHA-256: `9e172954af6fe0327b71ea079595011078e6dc2af61ecfc7786badc5018d8801`
+- Current migration manifest SHA-256: `e788e322b8a1a70d6a9d773f791c06b17ceeff0d92fd4a3c92af669f44f292b2`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -193,7 +193,8 @@ legacy unbound trust rows, adds exact binding columns and a deterministic
 those fields match the bound evidence view and the requested scope/severity match
 the proven run/goal risk boundary, the effective group equals the binding hash,
 the current risk assessment still binds to the trusted transition, and the
-registered SQL function can re-hash the evidence artifact. Unknown or
+registered SQL functions can re-hash the evidence artifact and rerun the
+current blocking SLO contracts. Unknown or
 estimated usage/cost anywhere in the trusted workflow, self-verifier evidence,
 wrong-run evidence, stale or
 missing latest SLO audits, database-authority snapshots, changed evidence

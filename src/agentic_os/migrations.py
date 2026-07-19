@@ -201,6 +201,42 @@ def _evidence_snapshot_current(
     return 1 if digest.hexdigest() == sha256 else 0
 
 
+def _current_slos_pass(
+    connection: sqlite3.Connection, schema_version: object, migration_sha256: object
+) -> int:
+    if type(schema_version) is not int or not isinstance(migration_sha256, str):
+        return 0
+    if len(migration_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in migration_sha256
+    ):
+        return 0
+    try:
+        current = connection.execute(
+            "SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if current != (schema_version, migration_sha256):
+            return 0
+        query_count = connection.execute(
+            "SELECT COUNT(*) FROM slo_queries WHERE schema_version=? AND migration_sha256=?",
+            (schema_version, migration_sha256),
+        ).fetchone()[0]
+        if query_count != SLO_QUERY_COUNT:
+            return 0
+        for contract in slo_query_contracts_for_schema_version(schema_version):
+            query = connection.execute(
+                "SELECT query_hash FROM slo_queries "
+                "WHERE query_name=? AND schema_version=? AND migration_sha256=?",
+                (contract.query_name, schema_version, migration_sha256),
+            ).fetchone()
+            if query is None or query[0] != slo_query_hash(contract.sql_text):
+                return 0
+            if connection.execute(contract.sql_text).fetchone() is not None:
+                return 0
+    except sqlite3.Error:
+        return 0
+    return 1
+
+
 def _register_migration_functions(connection: sqlite3.Connection) -> None:
     connection.create_function(
         "agentic_shadow_projection_id",
@@ -224,6 +260,13 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         "agentic_evidence_snapshot_current",
         6,
         _evidence_snapshot_current,
+    )
+    connection.create_function(
+        "agentic_trust_promotion_current_slos_pass",
+        2,
+        lambda schema_version, migration_sha256: _current_slos_pass(
+            connection, schema_version, migration_sha256
+        ),
     )
 
 

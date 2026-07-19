@@ -1497,6 +1497,114 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     connection, "direct-stale-external-rpc", binding, bundle_hash
                 )
 
+    def test_direct_sql_rechecks_current_slos_despite_future_pass_audits(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            _register_migration_functions(connection)
+            binding = self._trust_binding(connection)
+            latest_epoch = int(
+                connection.execute("SELECT MAX(run_at_epoch_ms) FROM slo_audits").fetchone()[0]
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,client_request_id,idempotency_key,metadata_json,state,"
+                "requested_at,requested_at_epoch_ms) VALUES("
+                "'future-audit-bad-intent','run','transition','allow_lease_release',"
+                "'future-audit-client','future-audit-idem','{}','pending','later',?)",
+                (latest_epoch + 1000,),
+            )
+            schema_version, migration_sha256 = self._current_schema_identity()
+            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
+                    "'pass','pass',?,?,?,?,?,?)",
+                    (
+                        f"slo-future-direct-{index}",
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        self.evidence_hash,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "future-audit",
+                        latest_epoch + 1_000_000 + index,
+                    ),
+                )
+            bundle_hash = _trust_binding_hash(
+                "run",
+                "goal-run",
+                self.evidence_hash,
+                binding["verifier_run_id"],
+                binding["gate_run_id"],
+                binding["schema_version"],
+                binding["migration_sha256"],
+                binding["current_slo_query_count"],
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                self._insert_direct_trust(
+                    connection, "direct-future-audit-current-slo-fail", binding, bundle_hash
+                )
+
+    def test_budget_confidence_scope_uses_runs_workflow_not_budget_row(self) -> None:
+        self._seed_valid_fixture()
+        self._seed_sibling_run()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                "selected_provider,selected_model,selected_endpoint_binding_id,"
+                "selected_cost_registry_id,selected_cost_effective_at,"
+                "selected_cost_registry_hash,selected_cost_confidence,"
+                "selected_reserve_transition_id,time_budget_seconds,input_token_budget,"
+                "output_token_budget,cost_budget_microusd,retry_budget,"
+                "human_attention_budget,usage_confidence,updated_at) VALUES("
+                "'sibling-run','stale-row-workflow','capability','provider','model',"
+                "'endpoint','cost-row','effective','cost-hash','known',"
+                "'sibling-transition',10,10,10,10,1,1,'unknown','now')"
+            )
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_session_active_trust_guard_uses_referenced_spawn_proof(self) -> None:
+        self._seed_valid_fixture()
+        self._seed_bound_runtime_rows()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('other-workflow','file_authority','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+                "'other-run','other-prepare','other-workflow','file_authority',"
+                "'candidate','R1','R1','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,target_type,target_id,target_hash,"
+                "target_scope,risk_dominance,idempotency_key,guard_version_before,"
+                "created_at) VALUES('other-transition','other-run','prepared',"
+                "'candidate','noop','observe','artifact','artifact-other',?,'repo',"
+                "'R1','other-transition-idem',0,'now')",
+                (_sha("other-artifact"),),
+            )
+        self._promote()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "session changes"):
+                connection.execute(
+                    "INSERT INTO sessions(session_id,spawn_request_id,run_id,"
+                    "transition_id,phase,agent_id,client_request_id,"
+                    "spawn_idempotency_key,session_key,task_digest,state,spawned_at) "
+                    "VALUES('malformed-session','pretrust-spawn','other-run',"
+                    "'other-transition','phase','agent','malformed-client',"
+                    "'malformed-spawn-idem','malformed-session-key','task',"
+                    "'completed','now')"
+                )
+
     def test_direct_sql_rejects_missing_risk_assessment_binding(self) -> None:
         self._seed_valid_fixture()
         with closing(sqlite3.connect(self.database)) as connection:
