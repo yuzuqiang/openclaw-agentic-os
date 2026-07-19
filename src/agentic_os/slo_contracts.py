@@ -469,6 +469,16 @@ def _replace_contract(
     )
 
 
+def _self_bootstrap_meta_slo_contract() -> SloQueryContract:
+    contract = _contract_by_name("SLO query fixture status")
+    return SloQueryContract(
+        contract.query_name,
+        contract.sql_text,
+        empty_db_expected_status="self_bootstrap_empty",
+        fixture_db_expected_status=contract.fixture_db_expected_status,
+    )
+
+
 def _runtime_dispatch_binding_contract() -> SloQueryContract:
     contract = _contract_by_name(
         '`sessions_spawn` intent without exact spawn request binding'
@@ -563,6 +573,11 @@ SLO_QUERY_CONTRACTS = _replace_contract(
     SLO_QUERY_CONTRACTS,
     _runtime_dispatch_binding_contract(),
 )
+_SLO_QUERY_CONTRACTS_V10_V12 = SLO_QUERY_CONTRACTS
+SLO_QUERY_CONTRACTS = _replace_contract(
+    SLO_QUERY_CONTRACTS,
+    _self_bootstrap_meta_slo_contract(),
+)
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
@@ -574,6 +589,9 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     7: _SLO_QUERY_CONTRACTS_V7,
     8: _SLO_QUERY_CONTRACTS_V8_V9,
     9: _SLO_QUERY_CONTRACTS_V8_V9,
+    10: _SLO_QUERY_CONTRACTS_V10_V12,
+    11: _SLO_QUERY_CONTRACTS_V10_V12,
+    12: _SLO_QUERY_CONTRACTS_V10_V12,
 }
 
 

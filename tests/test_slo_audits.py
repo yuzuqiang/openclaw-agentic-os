@@ -11,7 +11,13 @@ from pathlib import Path
 from unittest import mock
 
 import agentic_os
-from agentic_os.migrations import apply_migrations, repository_root
+from agentic_os.migrations import (
+    _allow_next_slo_audit_write,
+    _register_migration_functions,
+    _slo_audit_writer_hash,
+    apply_migrations,
+    repository_root,
+)
 from agentic_os.pass_gates import (
     ApprovalGrant,
     GateEvidence,
@@ -19,6 +25,7 @@ from agentic_os.pass_gates import (
     record_approval_pass_gate,
 )
 from agentic_os.slo_audits import SloAuditError, record_slo_audit
+from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS, slo_query_hash
 
 
 def _sha(text: str) -> str:
@@ -328,16 +335,124 @@ class SloAuditWriterTests(unittest.TestCase):
         kwargs.update(overrides)
         return record_slo_audit(self.database, **kwargs)
 
-    def test_refuses_to_stamp_fixture_passes_without_fixture_evidence(self) -> None:
+    def test_records_pass_audit_with_pass_gate_evidence(self) -> None:
         evidence = self._record_pass_gate()
 
-        with self.assertRaisesRegex(SloAuditError, "fixture execution evidence"):
-            self._record_slo(
-                evidence_hash=evidence.sha256,
-                evidence_run_id="run",
-                verifier_run_id="verifier",
-                gate_run_id="gate",
+        record = self._record_slo(
+            evidence_hash=evidence.sha256,
+            evidence_run_id="run",
+            verifier_run_id="verifier",
+            gate_run_id="gate",
+        )
+
+        self.assertEqual(record.status, "pass")
+        self.assertEqual(record.result_count, 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status,result_count,empty_db_status,fixture_db_status,"
+                    "evidence_hash,evidence_run_id,verifier_run_id,gate_run_id "
+                    "FROM slo_audits WHERE slo_audit_id='slo-audit'"
+                ).fetchone(),
+                ("pass", 0, "pass", "pass", evidence.sha256, "run", "verifier", "gate"),
             )
+
+    def test_records_meta_slo_pass_after_other_slo_audits(self) -> None:
+        evidence = self._record_pass_gate()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
+            schema_version, migration_sha256 = connection.execute(
+                "SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                if contract.query_name == "SLO query fixture status":
+                    continue
+                slo_audit_id = f"seed-slo-{index}"
+                run_at_epoch_ms = int(time.time() * 1000) + index
+                writer_provenance_hash = _slo_audit_writer_hash(
+                    slo_audit_id,
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    0,
+                    "pass",
+                    "pass",
+                    "pass",
+                    evidence.sha256,
+                    "run",
+                    "verifier",
+                    "gate",
+                    run_at_epoch_ms,
+                )
+                _allow_next_slo_audit_write(connection, slo_audit_id)
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
+                    "VALUES(?,?,?,?,?,0,'pass','pass','pass',?,?,?,?,?,?,?)",
+                    (
+                        slo_audit_id,
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        evidence.sha256,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "seed-now",
+                        run_at_epoch_ms,
+                        writer_provenance_hash,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO slo_evidence_events("
+                    "event_kind,source_table,source_id,schema_version,"
+                    "migration_sha256,query_name) VALUES("
+                    "'slo_audit','slo_audits',?,?,?,?)",
+                    (
+                        slo_audit_id,
+                        schema_version,
+                        migration_sha256,
+                        contract.query_name,
+                    ),
+                )
+
+        record = self._record_slo(
+            slo_audit_id="meta-slo",
+            query_name="SLO query fixture status",
+            evidence_hash=evidence.sha256,
+            evidence_run_id="run",
+            verifier_run_id="verifier",
+            gate_run_id="gate",
+        )
+
+        self.assertEqual(record.status, "pass")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status,result_count,empty_db_status,fixture_db_status "
+                    "FROM slo_audits WHERE slo_audit_id='meta-slo'"
+                ).fetchone(),
+                ("pass", 0, "self_bootstrap_empty", "pass"),
+            )
+
+    def test_pass_audit_refuses_unproven_fixture_status_without_write(self) -> None:
+        evidence = self._record_pass_gate()
+
+        with mock.patch(
+            "agentic_os.slo_audits._execute_fixture_probes",
+            return_value=("pass", "fail"),
+        ):
+            with self.assertRaisesRegex(SloAuditError, "fixture probes"):
+                self._record_slo(
+                    evidence_hash=evidence.sha256,
+                    evidence_run_id="run",
+                    verifier_run_id="verifier",
+                    gate_run_id="gate",
+                )
 
         self._assert_no_slo_audit_rows()
 
@@ -680,16 +795,19 @@ class SloAuditWriterTests(unittest.TestCase):
             "agentic_os.slo_audits._verify_schema_identity",
             side_effect=assert_write_transaction,
         ):
-            with self.assertRaisesRegex(SloAuditError, "fixture execution evidence"):
-                self._record_slo(
-                    evidence_hash=evidence.sha256,
-                    evidence_run_id="run",
-                    verifier_run_id="verifier",
-                    gate_run_id="gate",
-                )
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
 
         self.assertEqual(observed_transactions, [True])
-        self._assert_no_slo_audit_rows()
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT status FROM slo_audits").fetchone()[0],
+                "pass",
+            )
 
     def test_unknown_query_name_is_rejected_without_audit_row(self) -> None:
         with self.assertRaisesRegex(SloAuditError, "identity is missing"):

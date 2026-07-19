@@ -23,6 +23,8 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-07-18: Added the local fail-closed trust promotion writer and migration v13 binding overlay:
+  - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete local-writer SLO PASS audit rows at or after the bound gate clock, append-only SLO evidence events after all runtime SLO inputs, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence with immutable approval hashes, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
   - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; accepted acquire-pending leases with Gateway ownership cannot be deleted or hidden before release proof; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive; pass gates and their referenced transitions are immutable; verifier independence proof evidence must be a non-empty JSON object; R2+ completion gates must bind to the finalizing transition.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
@@ -3919,6 +3921,55 @@ arbitration. Competing or post-timeout attempts therefore fail before any new
 lease or spawn RPC, while external RPC remains outside the SQLite transaction.
 The acceptance transaction repeats the guard as defense in depth. Runtime
 authority remains disabled.
+
+Current migration v13 trust promotion binding:
+
+`0013_trust_promotion_binding.sql` keeps historical invalidated
+`trust_observations` inert, but any active row must bind exactly to one run, one
+goal run, one evidence hash, one independent verifier, one approval-bound PASS
+gate, one gate clock, the accepted v13 schema/migration identity, the exact
+current 30-query SLO contract set, one complete current latest SLO PASS audit
+set, one file-authority gate snapshot, one known selected cost row, current
+goal-manifest and predicate-plugin metadata, and the exact proven run/goal risk
+boundary plus current risk-assessment row. Conflicting risk-assessment rows for
+the same transition fail closed, and goal-run severity cannot downgrade below
+the bound transition/run risk. Migration aborts if active legacy trust rows exist without those
+bindings. The active-row trigger
+accepts only `status='promoted'`, `usage_confidence='known'`,
+`cost_confidence='known'`, non-empty `bounded_at` and `created_at`, complete current latest SLO PASS coverage, exact
+scope/severity equality with the bound evidence, and a deterministic
+`agentic_trust_binding_hash(...)` over the run/goal/evidence binding. The same
+binding hash is the required effective group, and duplicate active bindings for
+the same run/goal/evidence are rejected. Raw SQLite clients that do not register
+the local SQL functions fail closed, and clients that do register them must pass
+an immediate `agentic_evidence_snapshot_current(...)` artifact re-hash. The
+binding view rejects unknown or estimated usage/cost across trusted-workflow run budgets,
+non-human budget events, final settlements, and selected model cost registry
+rows; rejects database-authority current or gate-time snapshots; and rejects
+run budgets whose workflow or selected reserve transition does not exactly match
+the bound run/transition. Trusted-workflow non-human budget events must also
+match the run's selected provider/model/endpoint/capability/cost registry row.
+self-verifier, wrong-run, non-PASS, stale gate identity, stale trusted clock,
+malformed evidence, missing same-run goal evidence, any older PASS SLO audit
+shadowed by newer audit evidence, SLO audit rows older than the bound gate clock
+or mutable runtime evidence, forged PASS SLO audits, mutable SLO evidence events,
+mutated PASS-gate approval hashes, and missing current risk-assessment binding.
+Direct SQL insertion is pinned to v13 plus the
+accepted 30-query SLO count, so fake later schema or SLO rows cannot become the
+trust contract. Predicate-plugin metadata referenced by a goal run is immutable
+before promotion, including sensitive-plugin approval timestamps; goal-manifest
+identity is immutable once referenced by a goal run. Post-promotion bound
+goal-run sandbox evidence, budget, settlement, runtime SLO inputs
+(`external_rpc_intents`, `leases`, `spawn_requests`, `sessions`, `runs`), model
+cost registry, zero-reserve policy, SLO audit, schema, SLO registry, and
+predicate-plugin metadata, same-workflow settlements, workflow authority,
+unbound runtime rows, risk assessments, bound gate-clock context rows, and all run-row mutations cannot change while trust is active; callers must invalidate
+the trust row first. Active trust rows are immutable except for setting
+`invalidated_at` to retire stale trust, and invalidated rows cannot be
+reactivated. The local writer derives all authority fields under `BEGIN
+IMMEDIATE`, reruns the current blocking SLO contracts under the write lock, and
+rechecks the evidence artifact before commit; it performs no OpenClaw/Gateway/Cron
+or production-authority calls.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:

@@ -15,6 +15,7 @@ from typing import Mapping
 from .migrations import (
     MigrationError,
     _database_checks,
+    _register_migration_functions,
     _verify_schema,
     _verify_slo_queries,
     load_migrations,
@@ -414,6 +415,7 @@ def _connect(database: Path) -> sqlite3.Connection:
     old_umask = os.umask(0o177)
     try:
         connection = sqlite3.connect(database_uri, uri=True, isolation_level=None)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA busy_timeout=10000")
         journal_mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()
     finally:

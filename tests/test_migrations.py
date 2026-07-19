@@ -14,6 +14,7 @@ from agentic_os import DB_AUTHORITY_ENABLED
 from agentic_os.migrations import (
     MigrationError,
     MigrationHashDrift,
+    _allow_next_slo_audit_write,
     _connect,
     _register_migration_functions,
     apply_migrations,
@@ -542,7 +543,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 33)
+            self.assertEqual(len(tables), 34)
             rows = connection.execute(
                 "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -558,6 +559,44 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM slo_queries").fetchone(),
                 (SLO_QUERY_COUNT * len(migrations),),
+            )
+
+    def test_legacy_slo_fixture_metadata_upgrades_to_v13_contract(self) -> None:
+        self._apply_migrations_through(12, "legacy-slo-fixture-metadata")
+        for version in range(1, 13):
+            meta_contract = next(
+                contract
+                for contract in slo_query_contracts_for_schema_version(version)
+                if contract.query_name == "SLO query fixture status"
+            )
+            self.assertEqual(meta_contract.empty_db_expected_status, "pass")
+        current_meta_contract = next(
+            contract
+            for contract in slo_query_contracts_for_schema_version(13)
+            if contract.query_name == "SLO query fixture status"
+        )
+        self.assertEqual(
+            current_meta_contract.empty_db_expected_status,
+            "self_bootstrap_empty",
+        )
+
+        self.assertEqual(apply_migrations(self.database), (13,))
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT DISTINCT empty_db_expected_status FROM slo_queries "
+                    "WHERE query_name='SLO query fixture status' "
+                    "AND schema_version BETWEEN 1 AND 12"
+                ).fetchall(),
+                [("pass",)],
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT empty_db_expected_status FROM slo_queries "
+                    "WHERE query_name='SLO query fixture status' "
+                    "AND schema_version=13"
+                ).fetchone(),
+                ("self_bootstrap_empty",),
             )
 
     def test_v10_backfills_exact_v9_dispatches_for_replay_and_reconciliation(self) -> None:
@@ -577,7 +616,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10, 11, 12))
+        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -946,7 +985,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
         )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
@@ -1045,7 +1084,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
         )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -1067,6 +1106,7 @@ class MigrationTests(unittest.TestCase):
                     (10, current_hash),
                     (11, current_hash),
                     (12, current_hash),
+                    (13, current_hash),
                 ],
             )
 
@@ -1233,6 +1273,7 @@ class MigrationTests(unittest.TestCase):
                 "runtime_dispatch_binding",
                 "gate_authority_snapshot",
                 "goal_run_evidence_binding",
+                "trust_promotion_binding",
             ],
         )
         for migration in migrations:
@@ -1257,7 +1298,7 @@ class MigrationTests(unittest.TestCase):
         before_mtime = verify_target.stat().st_mtime_ns
         self.assertEqual(
             verify_database(verify_target),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13),
         )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
@@ -1302,6 +1343,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone(), (1,))
         with self.assertRaises(sqlite3.IntegrityError):
@@ -1666,6 +1708,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
@@ -3666,7 +3709,7 @@ class MigrationTests(unittest.TestCase):
             "severity='R2'",
         ):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "referenced goal runs"
+                sqlite3.IntegrityError, "referenced goal runs|goal manifest identity"
             ):
                 connection.execute(
                     f"UPDATE goal_manifests SET {assignment} WHERE goal_id='sandbox-goal'"
@@ -3857,7 +3900,7 @@ class MigrationTests(unittest.TestCase):
             "owner='new-owner'",
         ):
             with self.subTest(assignment=assignment), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "referenced goal runs|current SHA-256"
+                sqlite3.IntegrityError, "referenced goal runs|current SHA-256|goal manifest identity"
             ):
                 connection.execute(
                     f"UPDATE goal_manifests SET {assignment} WHERE goal_id='goal'"
@@ -3875,7 +3918,7 @@ class MigrationTests(unittest.TestCase):
             "'agentic_predicate_inproc_v1',1,'now',1000)"
         )
         with self.assertRaisesRegex(
-            sqlite3.IntegrityError, "referenced goal runs|current SHA-256"
+            sqlite3.IntegrityError, "referenced goal runs|current SHA-256|goal manifest identity"
         ):
             connection.execute(
                 "UPDATE goal_manifests SET approval_required=1 "
@@ -4457,7 +4500,9 @@ class MigrationTests(unittest.TestCase):
             "created_at_epoch_ms) VALUES('flip-run','flip-goal','run','R1','open',"
             "'plugin','agentic_predicate_inproc_v1',1,'flip-approval','backdated',1)"
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "current SHA-256"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "current SHA-256|goal manifest identity"
+        ):
             connection.execute(
                 "UPDATE goal_manifests SET approval_required=1 "
                 "WHERE goal_id='flip-goal'"
@@ -6142,6 +6187,7 @@ class MigrationTests(unittest.TestCase):
                 database = Path(self.temporary.name) / f"fixture-{index}.db"
                 apply_migrations(database)
                 connection = sqlite3.connect(database)
+                _register_migration_functions(connection)
                 self.addCleanup(connection.close)
                 connection.executescript(
                     (fixture_root / fixture).read_text(encoding="utf-8")
@@ -6458,6 +6504,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         status_query = next(
             contract.sql_text
@@ -6522,7 +6569,9 @@ class MigrationTests(unittest.TestCase):
                 "'a-nonzero',?,?,?,?,1,'pass','pass','pass',?,'now',1000)",
                 (contract.query_name, schema_version, migration_hash, query_hash, "e" * 64),
             )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "evidence|writer provenance"
+        ):
             connection.execute(
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6546,7 +6595,9 @@ class MigrationTests(unittest.TestCase):
             evidence_hash="slo-evidence-stale",
             suffix="stale",
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "evidence|writer provenance"
+        ):
             connection.execute(
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6577,7 +6628,7 @@ class MigrationTests(unittest.TestCase):
                 decision=decision,
             )
             with self.subTest(decision=decision), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "pass-gate evidence"
+                sqlite3.IntegrityError, "pass-gate evidence|writer provenance"
             ):
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
@@ -6597,6 +6648,7 @@ class MigrationTests(unittest.TestCase):
                         non_pass_gate_id,
                     ),
                 )
+        _allow_next_slo_audit_write(connection, "a-stale-pass")
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6615,6 +6667,7 @@ class MigrationTests(unittest.TestCase):
                 stale_gate_id,
             ),
         )
+        _allow_next_slo_audit_write(connection, "a-valid")
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6712,7 +6765,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(13,'future_contract',?,'now')",
+            "VALUES(14,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -6721,7 +6774,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                13,
+                14,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -6735,7 +6788,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (13,),
+            (14,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -6944,6 +6997,7 @@ class MigrationTests(unittest.TestCase):
                 (10, "runtime_dispatch_binding"),
                 (11, "gate_authority_snapshot"),
                 (12, "goal_run_evidence_binding"),
+                (13, "trust_promotion_binding"),
             ],
         )
 

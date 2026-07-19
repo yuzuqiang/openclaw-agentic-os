@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .privacy import assert_privacy_preflight
+from .predicates import (
+    MAX_FILE_EVIDENCE_BYTES,
+    PredicateContractError,
+    _assert_predicate_path_allowed,
+    _is_credential_path_denied,
+    _reject_symlink_evidence_path,
+)
 from .slo_contracts import (
     SLO_QUERY_COUNT,
     slo_query_contracts_for_schema_version,
@@ -32,6 +39,9 @@ class MigrationError(RuntimeError):
 
 class MigrationHashDrift(MigrationError):
     """A migration differs from its pinned or recorded digest."""
+
+
+_MIGRATION_CONNECTION_STATES: dict[int, dict[str, set[tuple[str, ...]]]] = {}
 
 
 @dataclass(frozen=True)
@@ -80,7 +90,314 @@ def _trusted_clock_source_hash(now_epoch_ms: object, bound_by: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _trust_binding_hash(
+    run_id: object,
+    goal_run_id: object,
+    evidence_hash: object,
+    verifier_run_id: object,
+    gate_run_id: object,
+    schema_version: object,
+    migration_sha256: object,
+    blocking_slo_query_count: object,
+) -> str:
+    if not all(
+        isinstance(item, str) and item
+        for item in (
+            run_id,
+            goal_run_id,
+            evidence_hash,
+            verifier_run_id,
+            gate_run_id,
+            migration_sha256,
+        )
+    ):
+        return ""
+    if type(schema_version) is not int or type(blocking_slo_query_count) is not int:
+        return ""
+    payload = json.dumps(
+        {
+            "blocking_slo_query_count": blocking_slo_query_count,
+            "evidence_hash": evidence_hash,
+            "gate_run_id": gate_run_id,
+            "goal_run_id": goal_run_id,
+            "migration_sha256": migration_sha256,
+            "run_id": run_id,
+            "schema_version": schema_version,
+            "source": "trust-promotion-binding-v1",
+            "verifier_run_id": verifier_run_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _approval_hash_sql(
+    approval_id: object,
+    run_id: object,
+    transition_id: object,
+    gate_run_id: object,
+    action_type: object,
+    target_type: object,
+    target_id: object,
+    target_hash: object,
+    target_scope: object,
+    channel: object,
+    source_message_digest: object,
+    approval_text_digest: object,
+    approved_risk_ceiling: object,
+    expires_at_epoch_ms: object,
+) -> str:
+    text_fields = (
+        approval_id,
+        run_id,
+        transition_id,
+        gate_run_id,
+        action_type,
+        target_type,
+        target_id,
+        target_hash,
+        target_scope,
+        channel,
+        source_message_digest,
+        approval_text_digest,
+        approved_risk_ceiling,
+    )
+    if not all(isinstance(item, str) and item for item in text_fields):
+        return ""
+    if type(expires_at_epoch_ms) is not int:
+        return ""
+    payload = json.dumps(
+        {
+            "approval_id": approval_id,
+            "run_id": run_id,
+            "transition_id": transition_id,
+            "gate_run_id": gate_run_id,
+            "action_type": action_type,
+            "target_type": target_type,
+            "target_id": target_id,
+            "target_hash": target_hash,
+            "target_scope": target_scope,
+            "channel": channel,
+            "source_message_digest": source_message_digest,
+            "approval_text_digest": approval_text_digest,
+            "approved_risk_ceiling": approved_risk_ceiling,
+            "expires_at_epoch_ms": expires_at_epoch_ms,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _slo_audit_writer_hash(
+    slo_audit_id: object,
+    query_name: object,
+    schema_version: object,
+    migration_sha256: object,
+    query_hash: object,
+    result_count: object,
+    status: object,
+    empty_db_status: object,
+    fixture_db_status: object,
+    evidence_hash: object,
+    evidence_run_id: object,
+    verifier_run_id: object,
+    gate_run_id: object,
+    run_at_epoch_ms: object,
+) -> str:
+    text_fields = (
+        slo_audit_id,
+        query_name,
+        migration_sha256,
+        query_hash,
+        status,
+        empty_db_status,
+        fixture_db_status,
+        evidence_hash,
+        evidence_run_id,
+        verifier_run_id,
+        gate_run_id,
+    )
+    if not all(isinstance(item, str) and item for item in text_fields):
+        return ""
+    if type(schema_version) is not int or type(result_count) is not int:
+        return ""
+    if type(run_at_epoch_ms) is not int:
+        return ""
+    payload = json.dumps(
+        {
+            "empty_db_status": empty_db_status,
+            "evidence_hash": evidence_hash,
+            "evidence_run_id": evidence_run_id,
+            "fixture_db_status": fixture_db_status,
+            "gate_run_id": gate_run_id,
+            "migration_sha256": migration_sha256,
+            "query_hash": query_hash,
+            "query_name": query_name,
+            "result_count": result_count,
+            "run_at_epoch_ms": run_at_epoch_ms,
+            "schema_version": schema_version,
+            "slo_audit_id": slo_audit_id,
+            "source": "agentic-os-slo-audit-writer-v1",
+            "status": status,
+            "verifier_run_id": verifier_run_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _migration_state(connection: sqlite3.Connection) -> dict[str, set[tuple[str, ...]]]:
+    return _MIGRATION_CONNECTION_STATES.setdefault(
+        id(connection),
+        {
+            "slo_audit_writes": set(),
+        },
+    )
+
+
+def _allow_next_slo_audit_write(
+    connection: sqlite3.Connection, slo_audit_id: str
+) -> None:
+    if not isinstance(slo_audit_id, str) or not slo_audit_id:
+        raise MigrationError("SLO audit writer guard requires a non-empty audit id")
+    _migration_state(connection)["slo_audit_writes"].add((slo_audit_id,))
+
+
+def _consume_guard(
+    state: dict[str, set[tuple[str, ...]]], guard_name: str, key: tuple[str, ...]
+) -> int:
+    guard = state[guard_name]
+    if key not in guard:
+        return 0
+    guard.remove(key)
+    return 1
+
+
+def _evidence_snapshot_current(
+    path: object,
+    sha256: object,
+    size_bytes: object,
+    content_type: object,
+    redaction_status: object,
+    captured_at: object,
+) -> int:
+    if not all(
+        isinstance(item, str) and item
+        for item in (path, sha256, content_type, redaction_status, captured_at)
+    ):
+        return 0
+    if len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+        return 0
+    if type(size_bytes) is not int or size_bytes < 0:
+        return 0
+    repo_root = repository_root().resolve()
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        try:
+            relative = candidate.relative_to(repo_root)
+        except ValueError:
+            return 0
+    else:
+        relative = candidate
+        candidate = repo_root / relative
+    if ".." in relative.parts or not relative.parts:
+        return 0
+    try:
+        _assert_predicate_path_allowed(relative.as_posix())
+    except PredicateContractError:
+        return 0
+    if _is_credential_path_denied(path) or _is_credential_path_denied(
+        relative.as_posix()
+    ):
+        return 0
+    try:
+        _reject_symlink_evidence_path(repo_root, relative)
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(repo_root)
+    except (OSError, PredicateContractError):
+        return 0
+    except ValueError:
+        return 0
+    resolved_relative = resolved.relative_to(repo_root).as_posix()
+    try:
+        _assert_predicate_path_allowed(resolved_relative)
+    except PredicateContractError:
+        return 0
+    if _is_credential_path_denied(resolved_relative):
+        return 0
+    digest = hashlib.sha256()
+    fd: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(resolved, flags)
+        stat_result = os.fstat(fd)
+        if stat_result.st_size > MAX_FILE_EVIDENCE_BYTES:
+            return 0
+        if stat_result.st_size != size_bytes:
+            return 0
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            total_read = 0
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total_read += len(chunk)
+                if total_read > MAX_FILE_EVIDENCE_BYTES:
+                    return 0
+                digest.update(chunk)
+    except OSError:
+        return 0
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if not stat.S_ISREG(stat_result.st_mode):
+        return 0
+    if int(getattr(stat_result, "st_nlink", 1) or 1) > 1:
+        return 0
+    return 1 if digest.hexdigest() == sha256 else 0
+
+
+def _current_slos_pass(
+    connection: sqlite3.Connection, schema_version: object, migration_sha256: object
+) -> int:
+    if type(schema_version) is not int or not isinstance(migration_sha256, str):
+        return 0
+    if len(migration_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in migration_sha256
+    ):
+        return 0
+    try:
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            return 0
+        current = connection.execute(
+            "SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        if current != (schema_version, migration_sha256):
+            return 0
+        query_count = connection.execute(
+            "SELECT COUNT(*) FROM slo_queries WHERE schema_version=? AND migration_sha256=?",
+            (schema_version, migration_sha256),
+        ).fetchone()[0]
+        if query_count != SLO_QUERY_COUNT:
+            return 0
+        for contract in slo_query_contracts_for_schema_version(schema_version):
+            query = connection.execute(
+                "SELECT query_hash FROM slo_queries "
+                "WHERE query_name=? AND schema_version=? AND migration_sha256=?",
+                (contract.query_name, schema_version, migration_sha256),
+            ).fetchone()
+            if query is None or query[0] != slo_query_hash(contract.sql_text):
+                return 0
+            if connection.execute(contract.sql_text).fetchone() is not None:
+                return 0
+    except sqlite3.Error:
+        return 0
+    return 1
+
+
 def _register_migration_functions(connection: sqlite3.Connection) -> None:
+    state = _migration_state(connection)
     connection.create_function(
         "agentic_shadow_projection_id",
         3,
@@ -92,6 +409,45 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         2,
         _trusted_clock_source_hash,
         deterministic=True,
+    )
+    connection.create_function(
+        "agentic_trust_binding_hash",
+        8,
+        _trust_binding_hash,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_approval_hash",
+        14,
+        _approval_hash_sql,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_slo_audit_writer_hash",
+        14,
+        _slo_audit_writer_hash,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_slo_audit_write_allowed",
+        1,
+        lambda slo_audit_id: _consume_guard(
+            state,
+            "slo_audit_writes",
+            (slo_audit_id,) if isinstance(slo_audit_id, str) else ("",),
+        ),
+    )
+    connection.create_function(
+        "agentic_evidence_snapshot_current",
+        6,
+        _evidence_snapshot_current,
+    )
+    connection.create_function(
+        "agentic_trust_promotion_current_slos_pass",
+        2,
+        lambda schema_version, migration_sha256: _current_slos_pass(
+            connection, schema_version, migration_sha256
+        ),
     )
 
 

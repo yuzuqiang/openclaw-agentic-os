@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,8 +11,11 @@ from pathlib import Path
 from .migrations import (
     MigrationError,
     _database_checks,
+    _allow_next_slo_audit_write,
+    _slo_audit_writer_hash,
     _verify_schema,
     _verify_slo_queries,
+    apply_migrations,
     load_migrations,
 )
 from .pass_gates import (
@@ -64,6 +68,7 @@ class _PassEvidenceBinding:
 _MAX_EPOCH_MS = 253_402_300_799_999
 _REFUSED_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
 _PASS_GATE_QUERY_NAME = "Completion gate before done for R2+"
+_META_SLO_QUERY_NAME = "SLO query fixture status"
 _FILE_AUTHORITY_MODE = "file_authority"
 
 
@@ -116,18 +121,46 @@ def record_slo_audit(
                     pass_evidence.verifier_run_id,
                     pass_evidence.gate_run_id,
                 )
-                raise SloAuditError(
-                    "passing SLO audit requires fixture execution evidence"
+                empty_db_status, fixture_db_status = _execute_fixture_probes(
+                    database, connection, query
                 )
+                if (
+                    empty_db_status != "pass"
+                    and empty_db_status != "self_bootstrap_empty"
+                ) or fixture_db_status != "pass":
+                    raise SloAuditError(
+                        "passing SLO audit requires executable empty/fixture probes"
+                    )
             else:
                 evidence_fields = (None, None, None, None)
+                empty_db_status = "not_run"
+                fixture_db_status = "not_run"
             writer_run_at_epoch_ms = _writer_audit_epoch_ms()
+            writer_provenance_hash = _slo_audit_writer_hash(
+                slo_audit_id,
+                query.query_name,
+                query.schema_version,
+                query.migration_sha256,
+                query.query_hash,
+                result_count,
+                status,
+                empty_db_status,
+                fixture_db_status,
+                evidence_fields[0],
+                evidence_fields[1],
+                evidence_fields[2],
+                evidence_fields[3],
+                writer_run_at_epoch_ms,
+            )
+            if status == "pass":
+                _allow_next_slo_audit_write(connection, slo_audit_id)
             connection.execute(
                 "INSERT INTO slo_audits("
                 "slo_audit_id,query_name,schema_version,migration_sha256,"
                 "query_hash,result_count,status,empty_db_status,fixture_db_status,"
                 "evidence_hash,evidence_run_id,verifier_run_id,gate_run_id,"
-                "run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "run_at,run_at_epoch_ms,writer_provenance_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     slo_audit_id,
                     query.query_name,
@@ -136,16 +169,30 @@ def record_slo_audit(
                     query.query_hash,
                     result_count,
                     status,
-                    "not_run",
-                    "not_run",
+                    empty_db_status,
+                    fixture_db_status,
                     evidence_fields[0],
                     evidence_fields[1],
                     evidence_fields[2],
                     evidence_fields[3],
                     run_at,
                     writer_run_at_epoch_ms,
+                    writer_provenance_hash,
                 ),
             )
+            if status == "pass":
+                connection.execute(
+                    "INSERT INTO slo_evidence_events("
+                    "event_kind,source_table,source_id,schema_version,"
+                    "migration_sha256,query_name) VALUES("
+                    "'slo_audit','slo_audits',?,?,?,?)",
+                    (
+                        slo_audit_id,
+                        query.schema_version,
+                        query.migration_sha256,
+                        query.query_name,
+                    ),
+                )
             if pass_evidence is not None:
                 _assert_safe_pass_evidence_current(pass_evidence)
             connection.execute("COMMIT")
@@ -223,6 +270,75 @@ def _execute_pinned_slo(connection: sqlite3.Connection, sql_text: str) -> int:
         return sum(1 for _row in cursor)
     except sqlite3.Error as exc:
         raise SloAuditError("pinned SLO SQL failed to execute") from exc
+
+
+def _execute_fixture_probes(
+    database: Path, connection: sqlite3.Connection, query: _CurrentSloQuery
+) -> tuple[str, str]:
+    empty_status = _execute_empty_database_probe(database, query.sql_text)
+    fixture_status = _execute_snapshot_fixture_probe(database, connection, query.sql_text)
+    recorded_empty_status = empty_status
+    if query.query_name == _META_SLO_QUERY_NAME and empty_status == "fail":
+        recorded_empty_status = "self_bootstrap_empty"
+    if (
+        recorded_empty_status != query.empty_db_expected_status
+        or fixture_status != query.fixture_db_expected_status
+        or (
+            recorded_empty_status != "pass"
+            and recorded_empty_status != "self_bootstrap_empty"
+        )
+        or fixture_status != "pass"
+    ):
+        raise SloAuditError("passing SLO audit requires executable empty/fixture probes")
+    return recorded_empty_status, fixture_status
+
+
+def _execute_empty_database_probe(database: Path, sql_text: str) -> str:
+    with _probe_database(database, "empty") as probe_path:
+        try:
+            apply_migrations(probe_path)
+            with sqlite3.connect(probe_path) as probe:
+                return _status_for_result_count(_execute_pinned_slo(probe, sql_text))
+        except (MigrationError, sqlite3.Error) as exc:
+            raise SloAuditError("empty SLO fixture database failed to execute") from exc
+
+
+def _execute_snapshot_fixture_probe(
+    database: Path, connection: sqlite3.Connection, sql_text: str
+) -> str:
+    with _probe_database(database, "fixture") as probe_path:
+        try:
+            with sqlite3.connect(probe_path) as probe:
+                probe.executescript("\n".join(connection.iterdump()))
+                return _status_for_result_count(_execute_pinned_slo(probe, sql_text))
+        except sqlite3.Error as exc:
+            raise SloAuditError("SLO fixture database failed to execute") from exc
+
+
+def _status_for_result_count(result_count: int) -> str:
+    return "pass" if result_count == 0 else "fail"
+
+
+class _probe_database:
+    def __init__(self, database: Path, label: str) -> None:
+        self._database = Path(database)
+        self._label = label
+        self._temporary: tempfile.TemporaryDirectory[str] | None = None
+        self.path: Path | None = None
+
+    def __enter__(self) -> Path:
+        probe_root = self._database.parent / ".slo-audit-probes"
+        probe_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        probe_root.chmod(0o700)
+        self._temporary = tempfile.TemporaryDirectory(
+            prefix=f"{self._label}-", dir=probe_root
+        )
+        self.path = Path(self._temporary.name) / "control.db"
+        return self.path
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._temporary is not None:
+            self._temporary.cleanup()
 
 
 def _require_pass_evidence(
