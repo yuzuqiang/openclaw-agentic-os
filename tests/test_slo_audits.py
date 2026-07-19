@@ -19,6 +19,7 @@ from agentic_os.pass_gates import (
     record_approval_pass_gate,
 )
 from agentic_os.slo_audits import SloAuditError, record_slo_audit
+from agentic_os.slo_contracts import SLO_QUERY_CONTRACTS, slo_query_hash
 
 
 def _sha(text: str) -> str:
@@ -348,6 +349,55 @@ class SloAuditWriterTests(unittest.TestCase):
                     "FROM slo_audits WHERE slo_audit_id='slo-audit'"
                 ).fetchone(),
                 ("pass", 0, "pass", "pass", evidence.sha256, "run", "verifier", "gate"),
+            )
+
+    def test_records_meta_slo_pass_after_other_slo_audits(self) -> None:
+        evidence = self._record_pass_gate()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            schema_version, migration_sha256 = connection.execute(
+                "SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                if contract.query_name == "SLO query fixture status":
+                    continue
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
+                    "'pass','pass',?,?,?,?,?,?)",
+                    (
+                        f"seed-slo-{index}",
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        evidence.sha256,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "seed-now",
+                        int(time.time() * 1000) + index,
+                    ),
+                )
+
+        record = self._record_slo(
+            slo_audit_id="meta-slo",
+            query_name="SLO query fixture status",
+            evidence_hash=evidence.sha256,
+            evidence_run_id="run",
+            verifier_run_id="verifier",
+            gate_run_id="gate",
+        )
+
+        self.assertEqual(record.status, "pass")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status,result_count,empty_db_status,fixture_db_status "
+                    "FROM slo_audits WHERE slo_audit_id='meta-slo'"
+                ).fetchone(),
+                ("pass", 0, "pass", "pass"),
             )
 
     def test_pass_audit_refuses_unproven_fixture_status_without_write(self) -> None:

@@ -305,6 +305,33 @@ class TrustPromotionWriterTests(unittest.TestCase):
 
         self._assert_promotion_fails_without_write("complete bound evidence")
 
+    def test_backdated_budget_event_after_slo_audits_fails_without_write(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            gate_epoch_ms = connection.execute(
+                "SELECT now_epoch_ms FROM gate_clock_context WHERE clock_context_id='clock'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('backdated-budget','backdated-budget-idem',"
+                "'backdated-budget-dedupe',2,'run','transition','provider','model',"
+                "'endpoint','capability','cost-row','effective','cost-hash','known',"
+                "'reserve',1,1,'known','test','backdated',?)",
+                (gate_epoch_ms - 1,),
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=1,"
+                "reserved_cost_microusd=1 WHERE run_id='run'"
+            )
+
+        self._assert_promotion_fails_without_write(
+            "current blocking SLO pass|complete bound evidence"
+        )
+
     def test_missing_or_stale_slo_audit_fails_without_write(self) -> None:
         for statement in (
             "DELETE FROM slo_audits WHERE query_name='Duplicate live dispatch blocked'",
@@ -525,7 +552,16 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 connection.execute(
                     "UPDATE trust_observations SET invalidated_at=NULL "
                     "WHERE observation_id='trust'"
-            )
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "UPDATE trust_observations SET scope='global' "
+                    "WHERE observation_id='trust'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
+                connection.execute(
+                    "DELETE FROM trust_observations WHERE observation_id='trust'"
+                )
 
     def test_post_promotion_slo_schema_and_registry_changes_require_invalidation(self) -> None:
         self._seed_valid_fixture()

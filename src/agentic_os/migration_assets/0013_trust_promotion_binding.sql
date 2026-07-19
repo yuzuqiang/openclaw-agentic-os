@@ -474,8 +474,20 @@ WHERE gr.run_id IS NOT NULL
             JOIN runs be_run ON be_run.run_id=be.run_id
             WHERE be_run.workflow=r.workflow
           ),0)
+          AND sa.rowid > COALESCE((
+            SELECT MAX(be.rowid)
+            FROM budget_events be
+            JOIN runs be_run ON be_run.run_id=be.run_id
+            WHERE be_run.workflow=r.workflow
+          ),0)
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(bs.created_at_epoch_ms)
+            FROM budget_settlements bs
+            JOIN runs bs_run ON bs_run.run_id=bs.run_id
+            WHERE bs_run.workflow=r.workflow
+          ),0)
+          AND sa.rowid > COALESCE((
+            SELECT MAX(bs.rowid)
             FROM budget_settlements bs
             JOIN runs bs_run ON bs_run.run_id=bs.run_id
             WHERE bs_run.workflow=r.workflow
@@ -605,8 +617,9 @@ END;
 
 CREATE TRIGGER trust_observations_validate_bound_update
 BEFORE UPDATE ON trust_observations
-WHEN OLD.invalidated_at IS NULL
-  AND NOT (
+WHEN NOT (
+    OLD.invalidated_at IS NULL
+    AND
     NEW.invalidated_at IS NOT NULL
     AND NEW.invalidated_at<>''
     AND NEW.observation_id IS OLD.observation_id
@@ -1474,7 +1487,6 @@ END;
 
 CREATE TRIGGER trust_observations_validate_bound_delete
 BEFORE DELETE ON trust_observations
-WHEN OLD.invalidated_at IS NULL
 BEGIN
   SELECT RAISE(ABORT,'active trust observation is immutable');
 END;

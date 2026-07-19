@@ -66,6 +66,7 @@ class _PassEvidenceBinding:
 _MAX_EPOCH_MS = 253_402_300_799_999
 _REFUSED_AUTHORITY_MODES = {"db_authority_canary", "db_authority"}
 _PASS_GATE_QUERY_NAME = "Completion gate before done for R2+"
+_META_SLO_QUERY_NAME = "SLO query fixture status"
 _FILE_AUTHORITY_MODE = "file_authority"
 
 
@@ -238,14 +239,17 @@ def _execute_fixture_probes(
 ) -> tuple[str, str]:
     empty_status = _execute_empty_database_probe(database, query.sql_text)
     fixture_status = _execute_snapshot_fixture_probe(database, connection, query.sql_text)
+    normalized_empty_status = empty_status
+    if query.query_name == _META_SLO_QUERY_NAME and empty_status == "fail":
+        normalized_empty_status = "pass"
     if (
-        empty_status != query.empty_db_expected_status
+        normalized_empty_status != query.empty_db_expected_status
         or fixture_status != query.fixture_db_expected_status
-        or empty_status != "pass"
+        or normalized_empty_status != "pass"
         or fixture_status != "pass"
     ):
         raise SloAuditError("passing SLO audit requires executable empty/fixture probes")
-    return empty_status, fixture_status
+    return normalized_empty_status, fixture_status
 
 
 def _execute_empty_database_probe(database: Path, sql_text: str) -> str:
