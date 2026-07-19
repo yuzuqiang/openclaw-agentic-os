@@ -3931,10 +3931,12 @@ gate, one gate clock, the accepted v13 schema/migration identity, the exact
 current 30-query SLO contract set, one complete current latest SLO PASS audit
 set, one file-authority gate snapshot, one known selected cost row, current
 goal-manifest and predicate-plugin metadata, and the exact proven run/goal risk
-boundary plus current risk-assessment row. Migration aborts if active legacy trust rows exist without those
+boundary plus current risk-assessment row. Conflicting risk-assessment rows for
+the same transition fail closed, and goal-run severity cannot downgrade below
+the bound transition/run risk. Migration aborts if active legacy trust rows exist without those
 bindings. The active-row trigger
 accepts only `status='promoted'`, `usage_confidence='known'`,
-`cost_confidence='known'`, complete current latest SLO PASS coverage, exact
+`cost_confidence='known'`, non-empty `bounded_at` and `created_at`, complete current latest SLO PASS coverage, exact
 scope/severity equality with the bound evidence, and a deterministic
 `agentic_trust_binding_hash(...)` over the run/goal/evidence binding. The same
 binding hash is the required effective group, and duplicate active bindings for
@@ -3957,7 +3959,7 @@ goal-run sandbox evidence, budget, settlement, runtime SLO inputs
 (`external_rpc_intents`, `leases`, `spawn_requests`, `sessions`, `runs`), model
 cost registry, zero-reserve policy, SLO audit, schema, SLO registry, and
 predicate-plugin metadata, same-workflow settlements, workflow authority,
-unbound runtime rows, risk assessments, and all run-row mutations cannot change while trust is active; callers must invalidate
+unbound runtime rows, risk assessments, bound gate-clock context rows, and all run-row mutations cannot change while trust is active; callers must invalidate
 the trust row first. Active trust rows are immutable except for setting
 `invalidated_at` to retire stale trust, and invalidated rows cannot be
 reactivated. The local writer derives all authority fields under `BEGIN

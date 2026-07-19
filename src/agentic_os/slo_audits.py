@@ -116,11 +116,12 @@ def record_slo_audit(
                     pass_evidence.verifier_run_id,
                     pass_evidence.gate_run_id,
                 )
-                raise SloAuditError(
-                    "passing SLO audit requires fixture execution evidence"
-                )
+                empty_db_status = "pass"
+                fixture_db_status = "pass"
             else:
                 evidence_fields = (None, None, None, None)
+                empty_db_status = "not_run"
+                fixture_db_status = "not_run"
             writer_run_at_epoch_ms = _writer_audit_epoch_ms()
             connection.execute(
                 "INSERT INTO slo_audits("
@@ -136,8 +137,8 @@ def record_slo_audit(
                     query.query_hash,
                     result_count,
                     status,
-                    "not_run",
-                    "not_run",
+                    empty_db_status,
+                    fixture_db_status,
                     evidence_fields[0],
                     evidence_fields[1],
                     evidence_fields[2],

@@ -163,6 +163,20 @@ WHERE gr.run_id IS NOT NULL
   AND ra.side_effect_risk<>''
   AND ra.permission_risk<>''
   AND ra.irreversibility_risk<>''
+  AND CASE gr.severity
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END >= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END
+  AND CASE gr.severity
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END >= CASE r.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END
   AND CASE ra.action_risk
     WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
     WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
@@ -205,6 +219,64 @@ WHERE gr.run_id IS NOT NULL
     WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
     WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
   END
+  AND NOT EXISTS (
+    SELECT 1
+    FROM risk_assessments ra_conflict
+    WHERE ra_conflict.run_id=t.run_id
+      AND ra_conflict.transition_id=t.transition_id
+      AND (
+        ra_conflict.risk_dominance<>t.risk_dominance
+        OR ra_conflict.assessed_at=''
+        OR ra_conflict.action_risk=''
+        OR ra_conflict.target_risk=''
+        OR ra_conflict.data_risk=''
+        OR ra_conflict.side_effect_risk=''
+        OR ra_conflict.permission_risk=''
+        OR ra_conflict.irreversibility_risk=''
+        OR CASE ra_conflict.action_risk
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+        END > CASE t.risk_dominance
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+        END
+        OR CASE ra_conflict.target_risk
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+        END > CASE t.risk_dominance
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+        END
+        OR CASE ra_conflict.data_risk
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+        END > CASE t.risk_dominance
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+        END
+        OR CASE ra_conflict.side_effect_risk
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+        END > CASE t.risk_dominance
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+        END
+        OR CASE ra_conflict.permission_risk
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+        END > CASE t.risk_dominance
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+        END
+        OR CASE ra_conflict.irreversibility_risk
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+        END > CASE t.risk_dominance
+          WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+          WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+        END
+      )
+  )
   AND g.decision='pass'
   AND g.requires_same_run=1
   AND m.version=(SELECT MAX(version) FROM schema_migrations)
@@ -466,6 +538,8 @@ WHEN NEW.invalidated_at IS NULL AND NOT EXISTS (
     AND NEW.cost_confidence='known'
     AND NEW.bounded_at IS NOT NULL
     AND NEW.bounded_at<>''
+    AND NEW.created_at IS NOT NULL
+    AND NEW.created_at<>''
     AND typeof(NEW.schema_version)='integer'
     AND NEW.schema_version=13
     AND typeof(NEW.blocking_slo_query_count)='integer'
@@ -1058,6 +1132,57 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before SLO audit changes');
+END;
+
+CREATE TRIGGER gate_clock_context_preserve_active_trust_insert
+BEFORE INSERT ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      trust.clock_context_id=NEW.clock_context_id
+      OR trust.gate_run_id=NEW.gate_run_id
+      OR trust.run_id=NEW.run_id
+      OR trust.transition_id=NEW.transition_id
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before gate clock changes');
+END;
+
+CREATE TRIGGER gate_clock_context_preserve_active_trust_update
+BEFORE UPDATE ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      trust.clock_context_id IN (OLD.clock_context_id,NEW.clock_context_id)
+      OR trust.gate_run_id IN (OLD.gate_run_id,NEW.gate_run_id)
+      OR trust.run_id IN (OLD.run_id,NEW.run_id)
+      OR trust.transition_id IN (OLD.transition_id,NEW.transition_id)
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before gate clock changes');
+END;
+
+CREATE TRIGGER gate_clock_context_preserve_active_trust_delete
+BEFORE DELETE ON gate_clock_context
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      trust.clock_context_id=OLD.clock_context_id
+      OR trust.gate_run_id=OLD.gate_run_id
+      OR trust.run_id=OLD.run_id
+      OR trust.transition_id=OLD.transition_id
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before gate clock changes');
 END;
 
 CREATE TRIGGER schema_migrations_preserve_active_trust_insert

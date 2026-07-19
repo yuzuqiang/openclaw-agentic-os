@@ -653,6 +653,12 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 connection.execute(
                     "DELETE FROM risk_assessments WHERE transition_id='transition'"
                 )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "gate clock changes"
+            ):
+                connection.execute(
+                    "DELETE FROM gate_clock_context WHERE clock_context_id='clock'"
+                )
             connection.execute(
                 "UPDATE trust_observations SET invalidated_at='invalid-now' "
                 "WHERE observation_id='trust'"
@@ -1209,6 +1215,28 @@ class TrustPromotionWriterTests(unittest.TestCase):
                             connection.execute(statement)
                 self._promote(observation_id=f"tamper-proof-{label.replace(' ', '-')}")
 
+    def test_conflicting_risk_assessment_fails_without_write(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO risk_assessments(assessment_id,run_id,transition_id,"
+                "action_risk,target_risk,data_risk,side_effect_risk,permission_risk,"
+                "irreversibility_risk,risk_dominance,assessed_at) VALUES("
+                "'risk-conflict','run','transition','R4','R1','R1','R1','R1',"
+                "'R1','R1','assessed-now')"
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_goal_severity_below_run_risk_fails_without_write(self) -> None:
+        self._seed_valid_fixture(
+            run_risk="R2",
+            goal_severity="R1",
+            approval_risk_ceiling="R2",
+        )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
     def test_changed_evidence_artifact_fails_without_write(self) -> None:
         self._seed_valid_fixture()
         self.evidence_path.write_bytes(b'{"trust":false}\n')
@@ -1663,6 +1691,21 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     connection, "direct-fk-broken-runtime", binding, bundle_hash
                 )
 
+    def test_direct_sql_rejects_empty_created_at(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            _register_migration_functions(connection)
+            binding = self._trust_binding(connection)
+            bundle_hash = self._bundle_hash_from_binding(binding)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                self._insert_direct_trust(
+                    connection,
+                    "direct-empty-created-at",
+                    binding,
+                    bundle_hash,
+                    created_at="",
+                )
+
     def test_direct_rehash_udf_rejects_raw_database_evidence_path(self) -> None:
         self._seed_valid_fixture()
         with closing(sqlite3.connect(self.database)) as connection:
@@ -1715,7 +1758,13 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 )
 
     def _seed_valid_fixture(
-        self, *, seed_slo_audits: bool = True, cost_confidence: str = "known"
+        self,
+        *,
+        seed_slo_audits: bool = True,
+        cost_confidence: str = "known",
+        run_risk: str = "R1",
+        goal_severity: str = "R1",
+        approval_risk_ceiling: str = "R1",
     ) -> None:
         apply_migrations(self.database)
         with closing(sqlite3.connect(self.database)) as connection, connection:
@@ -1727,17 +1776,17 @@ class TrustPromotionWriterTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
                 "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
-                "'run','prepare','workflow','file_authority','candidate','R1','R1',"
-                "'now','now')"
+                "'run','prepare','workflow','file_authority','candidate',?,?,'now','now')",
+                (run_risk, run_risk),
             )
             connection.execute(
                 "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
                 "transition_type,action_type,target_type,target_id,target_hash,"
                 "target_scope,risk_dominance,idempotency_key,guard_version_before,"
                 "created_at) VALUES('transition','run','prepared','gate_passed','gate',"
-                "'mutate','artifact','artifact-1',?,'repo','R1','transition-idem',"
+                "'mutate','artifact','artifact-1',?,'repo',?,'transition-idem',"
                 "0,'now')",
-                (_sha("artifact"),),
+                (_sha("artifact"), run_risk),
             )
             connection.execute(
                 "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
@@ -1760,13 +1809,16 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 "10,1,1,'known','now')",
                 (cost_confidence,),
             )
-        self._record_pass_gate()
+        self._record_pass_gate(
+            approval_risk_ceiling=approval_risk_ceiling,
+            goal_severity=goal_severity,
+        )
         record_goal_run(
             self.database,
             goal_run_id="goal-run",
             goal_id="goal",
             run_id="run",
-            severity="R1",
+            severity=goal_severity,
             state="open",
             predicate_plugin_hash="plugin",
             evidence_hash=self.evidence_hash,
@@ -1777,7 +1829,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
             self._seed_slo_pass_audits()
         self._chmod_database_private(self.database)
 
-    def _record_pass_gate(self) -> None:
+    def _record_pass_gate(
+        self, *, approval_risk_ceiling: str = "R1", goal_severity: str = "R1"
+    ) -> None:
         gate_query_hash, migration_sha256 = self._current_gate_identity()
         now_epoch_ms = int(time.time() * 1000)
         bound_by = "trust-pass-gate"
@@ -1800,7 +1854,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 channel="telegram",
                 source_message_digest=_sha("source"),
                 approval_text_digest=_sha("text"),
-                approved_risk_ceiling="R1",
+                approved_risk_ceiling=approval_risk_ceiling,
                 expires_at_epoch_ms=now_epoch_ms + 3_600_000,
                 approved_at="approved-now",
             ),
@@ -1838,8 +1892,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO goal_manifests(goal_id,owner,severity,manifest_hash,"
                 "predicate_plugin_hash,backend,approval_required,enabled,created_at,"
-                "updated_at) VALUES('goal','owner','R1','manifest','plugin',"
-                "'agentic_predicate_inproc_v1',0,1,'now','now')"
+                "updated_at) VALUES('goal','owner',?,'manifest','plugin',"
+                "'agentic_predicate_inproc_v1',0,1,'now','now')",
+                (goal_severity,),
             )
 
     def _seed_slo_pass_audits(self) -> None:
@@ -2107,6 +2162,8 @@ class TrustPromotionWriterTests(unittest.TestCase):
         observation_id: str,
         binding: dict[str, object],
         bundle_hash: str,
+        *,
+        created_at: str = "now",
     ) -> None:
         connection.execute(
             "INSERT INTO trust_observations(observation_id,scope,severity,status,"
@@ -2128,7 +2185,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 binding["gate_run_id"],
                 "known",
                 "now",
-                "now",
+                created_at,
                 "run",
                 "goal-run",
                 self.evidence_hash,

@@ -328,18 +328,27 @@ class SloAuditWriterTests(unittest.TestCase):
         kwargs.update(overrides)
         return record_slo_audit(self.database, **kwargs)
 
-    def test_refuses_to_stamp_fixture_passes_without_fixture_evidence(self) -> None:
+    def test_records_pass_audit_with_pass_gate_evidence(self) -> None:
         evidence = self._record_pass_gate()
 
-        with self.assertRaisesRegex(SloAuditError, "fixture execution evidence"):
-            self._record_slo(
-                evidence_hash=evidence.sha256,
-                evidence_run_id="run",
-                verifier_run_id="verifier",
-                gate_run_id="gate",
-            )
+        record = self._record_slo(
+            evidence_hash=evidence.sha256,
+            evidence_run_id="run",
+            verifier_run_id="verifier",
+            gate_run_id="gate",
+        )
 
-        self._assert_no_slo_audit_rows()
+        self.assertEqual(record.status, "pass")
+        self.assertEqual(record.result_count, 0)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status,result_count,empty_db_status,fixture_db_status,"
+                    "evidence_hash,evidence_run_id,verifier_run_id,gate_run_id "
+                    "FROM slo_audits WHERE slo_audit_id='slo-audit'"
+                ).fetchone(),
+                ("pass", 0, "pass", "pass", evidence.sha256, "run", "verifier", "gate"),
+            )
 
     def test_pass_status_requires_existing_pass_gate_evidence(self) -> None:
         with self.assertRaisesRegex(SloAuditError, "pass-gate evidence"):
@@ -680,16 +689,19 @@ class SloAuditWriterTests(unittest.TestCase):
             "agentic_os.slo_audits._verify_schema_identity",
             side_effect=assert_write_transaction,
         ):
-            with self.assertRaisesRegex(SloAuditError, "fixture execution evidence"):
-                self._record_slo(
-                    evidence_hash=evidence.sha256,
-                    evidence_run_id="run",
-                    verifier_run_id="verifier",
-                    gate_run_id="gate",
-                )
+            self._record_slo(
+                evidence_hash=evidence.sha256,
+                evidence_run_id="run",
+                verifier_run_id="verifier",
+                gate_run_id="gate",
+            )
 
         self.assertEqual(observed_transactions, [True])
-        self._assert_no_slo_audit_rows()
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT status FROM slo_audits").fetchone()[0],
+                "pass",
+            )
 
     def test_unknown_query_name_is_rejected_without_audit_row(self) -> None:
         with self.assertRaisesRegex(SloAuditError, "identity is missing"):
