@@ -23,7 +23,6 @@ from .shadow import (
     _normalize_artifacts,
     _normalize_required_identity,
     _projection_id,
-    _remove_checkpointed_sidecars,
     _repo_relative,
     _sha256,
     _utc_iso_epoch_ms,
@@ -92,7 +91,9 @@ def db_authority_canary_artifact(
     cutover_evidence_hash = _sha256_text(
         "cutover_evidence_hash", cutover_evidence_hash
     )
-    rollback_deadline = _normalize_required_identity("rollback_deadline", rollback_deadline)
+    rollback_deadline, rollback_deadline_epoch_ms = _normalize_deadline(
+        rollback_deadline
+    )
     last_parity_audit_hash = _sha256_text(
         "last_parity_audit_hash", last_parity_audit_hash
     )
@@ -114,11 +115,7 @@ def db_authority_canary_artifact(
     database_path = Path(database).expanduser().resolve()
     apply_migrations(database_path, repo_root=root)
     created_at, created_epoch_ms = _utc_now()
-    rollback_deadline = _normalize_future_deadline(
-        rollback_deadline, after_epoch_ms=created_epoch_ms
-    )
     connection = _connect(database_path)
-    checkpointed = False
     try:
         connection.execute("BEGIN IMMEDIATE")
         try:
@@ -139,6 +136,10 @@ def db_authority_canary_artifact(
                 run_id=run_id,
                 prepare_idempotency_key=prepare_key,
             )
+            if run_state is None and rollback_deadline_epoch_ms <= created_epoch_ms:
+                raise DbAuthorityCanaryError(
+                    "rollback_deadline must be later than the canary preparation clock"
+                )
             if run_state == "finalized":
                 _assert_artifact_matches(target, digest, relative)
                 _assert_projection_matches(
@@ -146,7 +147,6 @@ def db_authority_canary_artifact(
                 )
                 connection.execute("COMMIT")
                 _checkpoint_offline_snapshot(connection)
-                checkpointed = True
                 return DbAuthorityCanaryResult(
                     workflow=workflow,
                     run_id=run_id,
@@ -155,6 +155,16 @@ def db_authority_canary_artifact(
                     rollback_deadline=rollback_deadline,
                 )
             if run_state is None:
+                existing_path = connection.execute(
+                    "SELECT p.run_id FROM artifact_projections p "
+                    "WHERE p.path=? AND p.source_authority='db_authority_canary' "
+                    "AND p.run_id<>? LIMIT 1",
+                    (relative, run_id),
+                ).fetchone()
+                if existing_path is not None:
+                    raise DbAuthorityCanaryError(
+                        f"canary artifact path already belongs to run {existing_path[0]!r}"
+                    )
                 _insert_prepared_canary_run(
                     connection,
                     workflow=workflow,
@@ -204,7 +214,6 @@ def db_authority_canary_artifact(
                 raise DbAuthorityCanaryError("canary run could not be finalized")
             connection.execute("COMMIT")
             _checkpoint_offline_snapshot(connection)
-            checkpointed = True
         except Exception:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
@@ -214,9 +223,10 @@ def db_authority_canary_artifact(
     except ShadowBackfillError as exc:
         raise DbAuthorityCanaryError(str(exc)) from exc
     finally:
-        connection.close()
-        if checkpointed:
-            _remove_checkpointed_sidecars(database_path)
+        try:
+            _harden_canary_sidecars(database_path)
+        finally:
+            connection.close()
     return DbAuthorityCanaryResult(
         workflow=workflow,
         run_id=run_id,
@@ -245,7 +255,6 @@ def rollback_db_authority_canary(
     database_path = database_input.resolve()
     connection = _connect_existing_canary_database(database_path, root=root)
     regenerated: list[ShadowProjection] = []
-    checkpointed = False
     rolled_back_at, _epoch_ms = _utc_now()
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -281,15 +290,24 @@ def rollback_db_authority_canary(
                 "AND r.state='finalized' AND p.source_authority='db_authority_canary'",
                 (workflow,),
             ).fetchall()
+            canary_run_ids = {run_id for run_id, *_rest in canary_runs}
+            projection_counts = {run_id: 0 for run_id in canary_run_ids}
             expected_by_path: dict[str, tuple[str, str, str]] = {}
             for projection_id, run_id, path, digest in expected_rows:
+                if run_id not in projection_counts:
+                    raise DbAuthorityCanaryError(
+                        f"projection references an unexpected canary run: {run_id}"
+                    )
+                projection_counts[run_id] += 1
                 if path in expected_by_path:
                     raise DbAuthorityCanaryError(
                         f"ambiguous canary projection path for workflow {workflow!r}: {path}"
                     )
                 expected_by_path[path] = (projection_id, run_id, digest)
-            if not expected_by_path:
-                raise DbAuthorityCanaryError("rollback requires canary projections")
+            if any(count != 1 for count in projection_counts.values()):
+                raise DbAuthorityCanaryError(
+                    "rollback requires exactly one projection per finalized canary run"
+                )
 
             supplied = _normalize_artifacts(artifacts, repo_root_path=root)
             supplied_by_path = {
@@ -325,7 +343,6 @@ def rollback_db_authority_canary(
                 raise DbAuthorityCanaryError("canary workflow could not be rolled back")
             connection.execute("COMMIT")
             _checkpoint_offline_snapshot(connection)
-            checkpointed = True
         except Exception:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
@@ -335,9 +352,10 @@ def rollback_db_authority_canary(
     except ShadowBackfillError as exc:
         raise DbAuthorityCanaryError(str(exc)) from exc
     finally:
-        connection.close()
-        if checkpointed:
-            _remove_checkpointed_sidecars(database_path)
+        try:
+            _harden_canary_sidecars(database_path)
+        finally:
+            connection.close()
     return DbAuthorityRollbackResult(
         workflow=workflow,
         status="rolled_back",
@@ -352,19 +370,17 @@ def _sha256_text(name: str, value: str) -> str:
     return normalized
 
 
-def _normalize_future_deadline(value: str, *, after_epoch_ms: int) -> str:
+def _normalize_deadline(value: str) -> tuple[str, int]:
+    value = _normalize_required_identity("rollback_deadline", value)
     deadline_epoch_ms = _utc_iso_epoch_ms(value)
     if deadline_epoch_ms is None:
         raise DbAuthorityCanaryError(
             "rollback_deadline must be a timezone-aware ISO-8601 timestamp"
         )
-    if deadline_epoch_ms <= after_epoch_ms:
-        raise DbAuthorityCanaryError(
-            "rollback_deadline must be later than the canary preparation clock"
-        )
-    return datetime.fromtimestamp(
+    normalized = datetime.fromtimestamp(
         deadline_epoch_ms / 1000, tz=timezone.utc
     ).isoformat()
+    return normalized, deadline_epoch_ms
 
 
 def _connect_existing_canary_database(
@@ -401,7 +417,6 @@ def _connect_existing_canary_database(
                 f"canary database sidecar must be a private regular file: {sidecar}"
             )
     connection: sqlite3.Connection | None = None
-    old_umask = os.umask(0o177)
     try:
         connection = sqlite3.connect(
             f"{database.as_uri()}?mode=rw", uri=True, isolation_level=None
@@ -419,8 +434,28 @@ def _connect_existing_canary_database(
         if connection is not None:
             connection.close()
         raise
-    finally:
-        os.umask(old_umask)
+
+
+def _harden_canary_sidecars(database: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{database}{suffix}")
+        if not sidecar.exists():
+            continue
+        sidecar_stat = os.stat(sidecar, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(sidecar_stat.st_mode)
+            or int(getattr(sidecar_stat, "st_nlink", 1) or 1) > 1
+        ):
+            raise DbAuthorityCanaryError(
+                f"canary database sidecar must be a private regular file: {sidecar}"
+            )
+        if stat.S_IMODE(sidecar_stat.st_mode) != 0o600:
+            os.chmod(sidecar, 0o600, follow_symlinks=False)
+            hardened = os.stat(sidecar, follow_symlinks=False)
+            if stat.S_IMODE(hardened.st_mode) != 0o600:
+                raise DbAuthorityCanaryError(
+                    f"canary database sidecar must have mode 0600: {sidecar}"
+                )
 
 
 def _assert_no_real_session_control(

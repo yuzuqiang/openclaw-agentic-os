@@ -6,8 +6,10 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import agentic_os
+import agentic_os.db_authority_canary as canary_module
 from agentic_os.cli import main as cli_main
 from agentic_os.db_authority_canary import (
     DbAuthorityCanaryError,
@@ -298,6 +300,114 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 (self.artifact,),
                 workflow="heartbeat",
             )
+
+    def test_rollback_requires_one_projection_for_every_finalized_run(self) -> None:
+        second_artifact = Path(self.temporary.name) / "reports" / "second.json"
+        db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        db_authority_canary_artifact(
+            self.database,
+            second_artifact,
+            b'{"workflow":"heartbeat","sequence":2}\n',
+            workflow="heartbeat",
+            run_id="canary-run-2",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "DELETE FROM artifact_projections WHERE run_id='canary-run-2'"
+            )
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "one projection"):
+            rollback_db_authority_canary(
+                self.database,
+                (self.artifact,),
+                workflow="heartbeat",
+            )
+
+    def test_second_canary_run_cannot_reuse_artifact_path(self) -> None:
+        db_authority_canary_artifact(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="heartbeat",
+            run_id="canary-run",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "already belongs"):
+            db_authority_canary_artifact(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="heartbeat",
+                run_id="canary-run-2",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+
+    def test_expired_prepared_canary_can_exact_recover_and_rollback(self) -> None:
+        deadline = "2027-01-01T00:00:00+00:00"
+        with mock.patch.object(
+            canary_module,
+            "_utc_now",
+            return_value=("2026-01-01T00:00:00+00:00", 1767225600000),
+        ), self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):
+            db_authority_canary_artifact(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="heartbeat",
+                run_id="canary-run",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline=deadline,
+                last_parity_audit_hash=self.parity_hash,
+                crash_after_prepare=True,
+            )
+
+        with mock.patch.object(
+            canary_module,
+            "_utc_now",
+            side_effect=[
+                ("2028-01-01T00:00:00+00:00", 1830297600000),
+                ("2028-01-01T00:00:01+00:00", 1830297601000),
+            ],
+        ):
+            recovered = db_authority_canary_artifact(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="heartbeat",
+                run_id="canary-run",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline=deadline,
+                last_parity_audit_hash=self.parity_hash,
+            )
+        self.assertEqual(recovered.status, "recovered")
+        rollback = rollback_db_authority_canary(
+            self.database,
+            (self.artifact,),
+            workflow="heartbeat",
+        )
+        self.assertEqual(rollback.status, "rolled_back")
 
     def test_rollback_rejects_outside_and_nonexistent_databases(self) -> None:
         db_authority_canary_artifact(
