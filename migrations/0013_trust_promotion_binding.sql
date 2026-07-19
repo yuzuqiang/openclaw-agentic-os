@@ -378,9 +378,15 @@ END;
 CREATE TRIGGER budget_events_preserve_active_trust_insert
 BEFORE INSERT ON budget_events
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
-  WHERE trust.run_id=NEW.run_id
-    AND trust.invalidated_at IS NULL
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before budget event changes');
@@ -389,9 +395,18 @@ END;
 CREATE TRIGGER budget_events_preserve_active_trust_update
 BEFORE UPDATE ON budget_events
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND (trust.run_id=OLD.run_id OR trust.run_id=NEW.run_id)
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before budget event changes');
@@ -400,20 +415,55 @@ END;
 CREATE TRIGGER budget_events_preserve_active_trust_delete
 BEFORE DELETE ON budget_events
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
-  WHERE trust.run_id=OLD.run_id
-    AND trust.invalidated_at IS NULL
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before budget event changes');
 END;
 
+CREATE TRIGGER run_budgets_preserve_active_trust_insert
+BEFORE INSERT ON run_budgets
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+      OR trusted_run.workflow=NEW.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
+END;
+
 CREATE TRIGGER run_budgets_preserve_active_trust_update
 BEFORE UPDATE ON run_budgets
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND (trust.run_id=OLD.run_id OR trust.run_id=NEW.run_id)
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+      OR trusted_run.workflow=OLD.workflow
+      OR trusted_run.workflow=NEW.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
@@ -422,9 +472,16 @@ END;
 CREATE TRIGGER run_budgets_preserve_active_trust_delete
 BEFORE DELETE ON run_budgets
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
-  WHERE trust.run_id=OLD.run_id
-    AND trust.invalidated_at IS NULL
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+      OR trusted_run.workflow=OLD.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
@@ -469,9 +526,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
@@ -483,10 +543,15 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run
-    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
@@ -498,9 +563,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
@@ -645,6 +713,22 @@ WHEN EXISTS (
     AND (
       trust.run_id IN (OLD.run_id,NEW.run_id)
       OR trusted_run.workflow IN (OLD.workflow,NEW.workflow)
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
+END;
+
+CREATE TRIGGER runs_preserve_active_trust_insert
+BEFORE INSERT ON runs
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      trust.run_id=NEW.run_id
+      OR trusted_run.workflow=NEW.workflow
     )
 )
 BEGIN
@@ -808,7 +892,7 @@ BEGIN
 END;
 
 CREATE TRIGGER predicate_plugins_preserve_goal_run_metadata_update
-BEFORE UPDATE OF name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, disabled_at ON predicate_plugins
+BEFORE UPDATE OF predicate_plugin_hash, name, version, backend, schema_hash, sandbox_required, sandbox_enforced, sensitive, disabled_at ON predicate_plugins
 WHEN EXISTS (
   SELECT 1 FROM goal_runs gr
   WHERE gr.predicate_plugin_hash=OLD.predicate_plugin_hash
@@ -831,6 +915,49 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'referenced predicate plugin metadata is immutable');
+END;
+
+CREATE TRIGGER goal_manifests_preserve_active_trust_update
+BEFORE UPDATE OF goal_id, owner, severity, manifest_hash, predicate_plugin_hash, backend, approval_required, enabled ON goal_manifests
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN goal_runs gr ON gr.goal_run_id=trust.goal_run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      gr.goal_id=OLD.goal_id
+      OR gr.goal_id=NEW.goal_id
+      OR (
+        gr.predicate_plugin_hash=OLD.predicate_plugin_hash
+        AND gr.backend=OLD.backend
+      )
+      OR (
+        gr.predicate_plugin_hash=NEW.predicate_plugin_hash
+        AND gr.backend=NEW.backend
+      )
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before goal manifest changes');
+END;
+
+CREATE TRIGGER goal_manifests_preserve_active_trust_delete
+BEFORE DELETE ON goal_manifests
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN goal_runs gr ON gr.goal_run_id=trust.goal_run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      gr.goal_id=OLD.goal_id
+      OR (
+        gr.predicate_plugin_hash=OLD.predicate_plugin_hash
+        AND gr.backend=OLD.backend
+      )
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before goal manifest changes');
 END;
 
 CREATE TRIGGER trust_observations_validate_bound_reactivate_update

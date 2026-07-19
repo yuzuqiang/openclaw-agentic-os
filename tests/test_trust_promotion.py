@@ -420,6 +420,19 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "'post-trust-intent','run','transition','allow_lease_release',"
                     "'post-trust-client','post-trust-idem','{}','pending','later',2000)"
                 )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "external RPC intent changes"
+            ):
+                connection.execute("PRAGMA foreign_keys=OFF")
+                connection.execute(
+                    "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                    "rpc_kind,client_request_id,idempotency_key,metadata_json,state,"
+                    "requested_at,requested_at_epoch_ms) VALUES("
+                    "'post-trust-unbound-intent','missing-run','transition',"
+                    "'allow_lease_release','post-trust-unbound-client',"
+                    "'post-trust-unbound-idem','{}','pending','later',2000)"
+                )
+            connection.execute("PRAGMA foreign_keys=ON")
             with self.assertRaisesRegex(sqlite3.IntegrityError, "lease changes"):
                 connection.execute(
                     "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
@@ -433,12 +446,33 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 connection.execute(
                     "UPDATE runs SET state='gate_passed' WHERE run_id='run'"
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "run changes"):
+                connection.execute(
+                    "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                    "authority_mode,state,risk_class,risk_dominance,created_at,"
+                    "updated_at) VALUES('post-trust-run','post-trust-prepare',"
+                    "'workflow','file_authority','finalized','R2','R2','now','now')"
+                )
             with self.assertRaisesRegex(
                 sqlite3.IntegrityError, "predicate plugin metadata"
             ):
                 connection.execute(
                     "UPDATE predicate_plugins SET schema_hash='mutated-after-trust' "
                     "WHERE predicate_plugin_hash='plugin'"
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "predicate plugin metadata"
+            ):
+                connection.execute(
+                    "UPDATE predicate_plugins SET predicate_plugin_hash='plugin-mutated' "
+                    "WHERE predicate_plugin_hash='plugin'"
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "goal manifest changes"
+            ):
+                connection.execute(
+                    "UPDATE goal_manifests SET goal_id='goal-mutated' "
+                    "WHERE goal_id='goal'"
                 )
             connection.execute(
                 "UPDATE trust_observations SET invalidated_at='invalid-now' "
@@ -468,6 +502,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
 
     def test_post_promotion_budget_evidence_changes_require_invalidation(self) -> None:
         self._seed_valid_fixture()
+        self._seed_sibling_run()
         self._promote()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             with self.assertRaisesRegex(sqlite3.IntegrityError, "budget event changes"):
@@ -496,6 +531,32 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "'cost-row','effective','cost-hash','known','consume',1,'known',"
                     "'test','now',2000)"
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "budget event changes"):
+                connection.execute(
+                    "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                    "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                    "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                    "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                    "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+                    "VALUES('post-trust-sibling-known','post-trust-sibling-known-idem',"
+                    "'post-trust-sibling-known-dedupe',"
+                    "1,'sibling-run','sibling-transition','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known','consume',"
+                    "1,'known','test','now',2000)"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "selected budget changes"):
+                connection.execute(
+                    "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                    "selected_provider,selected_model,selected_endpoint_binding_id,"
+                    "selected_cost_registry_id,selected_cost_effective_at,"
+                    "selected_cost_registry_hash,selected_cost_confidence,"
+                    "selected_reserve_transition_id,time_budget_seconds,"
+                    "input_token_budget,output_token_budget,cost_budget_microusd,"
+                    "retry_budget,human_attention_budget,usage_confidence,updated_at) "
+                    "VALUES('sibling-run','workflow','capability','provider','model',"
+                    "'endpoint','cost-row','effective','cost-hash','known',"
+                    "'sibling-transition',10,10,10,10,1,1,'known','now')"
+                )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "selected budget changes"):
                 connection.execute(
                     "UPDATE run_budgets SET selected_provider='other-provider' "
@@ -523,6 +584,18 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "WHERE budget_event_id='post-invalidated-unknown'"
                 ).fetchone()[0],
                 "unknown",
+            )
+            connection.execute(
+                "INSERT INTO run_budgets(run_id,workflow,capability_class,"
+                "selected_provider,selected_model,selected_endpoint_binding_id,"
+                "selected_cost_registry_id,selected_cost_effective_at,"
+                "selected_cost_registry_hash,selected_cost_confidence,"
+                "selected_reserve_transition_id,time_budget_seconds,"
+                "input_token_budget,output_token_budget,cost_budget_microusd,"
+                "retry_budget,human_attention_budget,usage_confidence,updated_at) "
+                "VALUES('sibling-run','workflow','capability','provider','model',"
+                "'endpoint','cost-row','effective','cost-hash','known',"
+                "'sibling-transition',10,10,10,10,1,1,'known','now')"
             )
 
     def test_wrong_run_self_verifier_db_authority_and_stale_clock_fail(self) -> None:
@@ -941,6 +1014,25 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         int(time.time() * 1000) + index,
                     ),
                 )
+
+    def _seed_sibling_run(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,updated_at) "
+                "VALUES('sibling-run','sibling-prepare','workflow','file_authority',"
+                "'candidate','R1','R1','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,target_type,target_id,target_hash,"
+                "target_scope,risk_dominance,idempotency_key,guard_version_before,"
+                "created_at) VALUES('sibling-transition','sibling-run','prepared',"
+                "'candidate','noop','observe','artifact','artifact-2',?,'repo','R1',"
+                "'sibling-transition-idem',0,'now')",
+                (_sha("sibling-artifact"),),
+            )
 
     def _seed_completed_spawn_and_settlement(
         self, *, usage_confidence: str, cost_confidence: str

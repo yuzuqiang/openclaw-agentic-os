@@ -12,8 +12,8 @@ revalidation, and neither artifact proves production runtime behavior.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `a154aa44d0ba0b6e258939e8bb29cf973d8039aaf064d333a0a9619e60332f4a`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `4badc7220b18d474684c9375b75e05e45fc0d3ec01a698054cac38312ce003a9`
-- Current migration manifest SHA-256: `0c545c0f502c5977aa9c8706a07c9b29e30185bf58bb4083ca3b9a3ec817a290`
+- Current latest migration SHA-256: `60586ab5b77830661d084ae4bb11403cf090f92a443b780263e3d69b42ad05c9`
+- Current migration manifest SHA-256: `487f51e98ae0f44e31ae59a57753f8e601830c227d06379fb0767a8f4c5085aa`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -195,10 +195,12 @@ and the registered SQL function can re-hash the evidence artifact. Unknown or
 estimated usage/cost, self-verifier evidence, wrong-run evidence, stale or
 missing latest SLO audits, database-authority snapshots, changed evidence
 artifacts, malformed binding hashes, post-promotion budget/SLO/schema/SLO
-registry evidence changes before invalidation, duplicate active bindings, and
-active-row rewrites fail closed without authoritative trust writes. Active rows
-can still be invalidated by setting `invalidated_at`, but cannot otherwise be
-changed or reactivated.
+registry evidence changes before invalidation, runtime SLO input inserts in the
+trusted workflow, unbound external RPC rows, predicate-plugin identity drift,
+goal-manifest identity drift, duplicate active bindings, and active-row rewrites
+fail closed without authoritative trust writes. Active rows can still be
+invalidated by setting `invalidated_at`, but cannot otherwise be changed or
+reactivated.
 This slice does not call OpenClaw, Gateway, Cron, request external review, or
 enable production database authority.
 
