@@ -144,6 +144,23 @@ BEGIN
   SELECT RAISE(ABORT,'pass-audited SLO query is immutable');
 END;
 
+CREATE TRIGGER slo_audits_require_writer_pass_insert
+BEFORE INSERT ON slo_audits
+WHEN NEW.status='pass'
+ AND agentic_slo_audit_write_allowed(NEW.slo_audit_id)<>1
+BEGIN
+  SELECT RAISE(ABORT,'passing SLO audit requires local writer provenance');
+END;
+
+CREATE TRIGGER slo_audits_require_writer_pass_update
+BEFORE UPDATE ON slo_audits
+WHEN NEW.status='pass'
+ AND OLD.status<>'pass'
+ AND agentic_slo_audit_write_allowed(NEW.slo_audit_id)<>1
+BEGIN
+  SELECT RAISE(ABORT,'passing SLO audit requires local writer provenance');
+END;
+
 ALTER TABLE trust_observations ADD COLUMN run_id TEXT REFERENCES runs(run_id);
 ALTER TABLE trust_observations ADD COLUMN goal_run_id TEXT REFERENCES goal_runs(goal_run_id);
 ALTER TABLE trust_observations ADD COLUMN evidence_hash TEXT;
@@ -181,6 +198,38 @@ CREATE TABLE slo_evidence_events (
   CHECK (event_kind IN ('slo_input','slo_audit')),
   CHECK (source_table<>'' AND source_id<>'')
 ) STRICT;
+
+CREATE UNIQUE INDEX slo_evidence_events_slo_audit_once_idx
+ON slo_evidence_events(event_kind,source_table,source_id)
+WHERE event_kind='slo_audit';
+
+CREATE TRIGGER slo_evidence_events_validate_slo_audit_insert
+BEFORE INSERT ON slo_evidence_events
+WHEN NEW.event_kind='slo_audit'
+ AND NOT EXISTS (
+   SELECT 1
+   FROM slo_audits sa
+   WHERE NEW.source_table='slo_audits'
+     AND sa.slo_audit_id=NEW.source_id
+     AND sa.status='pass'
+     AND sa.writer_provenance_hash IS NOT NULL
+     AND sa.writer_provenance_hash<>''
+ )
+BEGIN
+  SELECT RAISE(ABORT,'SLO audit evidence event requires passing audit provenance');
+END;
+
+CREATE TRIGGER slo_evidence_events_preserve_update
+BEFORE UPDATE ON slo_evidence_events
+BEGIN
+  SELECT RAISE(ABORT,'SLO evidence events are append-only');
+END;
+
+CREATE TRIGGER slo_evidence_events_preserve_delete
+BEFORE DELETE ON slo_evidence_events
+BEGIN
+  SELECT RAISE(ABORT,'SLO evidence events are append-only');
+END;
 
 CREATE VIEW trust_promotion_bound_evidence AS
 SELECT
@@ -447,6 +496,22 @@ WHERE gr.run_id IS NOT NULL
   AND a.approval_text_digest NOT GLOB '*[^0-9a-f]*'
   AND length(a.approval_hash)=64
   AND a.approval_hash NOT GLOB '*[^0-9a-f]*'
+  AND a.approval_hash=agentic_approval_hash(
+    a.approval_id,
+    a.run_id,
+    t.transition_id,
+    g.gate_run_id,
+    t.action_type,
+    t.target_type,
+    t.target_id,
+    t.target_hash,
+    t.target_scope,
+    a.channel,
+    a.source_message_digest,
+    a.approval_text_digest,
+    a.approved_risk_ceiling,
+    a.expires_at_epoch_ms
+  )
   AND a.approver<>''
   AND a.channel<>''
   AND a.approved_at<>''
@@ -670,8 +735,11 @@ WHERE gr.run_id IS NOT NULL
                 'budget_events',
                 'budget_settlements',
                 'external_rpc_intents',
+                'leases',
                 'run_budgets',
-                'runs'
+                'runs',
+                'sessions',
+                'spawn_requests'
               )
           ),-1)
           AND sa.run_at_epoch_ms >= COALESCE((
@@ -837,6 +905,21 @@ WHEN NOT (
   )
 BEGIN
   SELECT RAISE(ABORT,'active trust observation is immutable');
+END;
+
+CREATE TRIGGER approvals_preserve_pass_gate_digest_update
+BEFORE UPDATE OF approver, channel, source_message_digest, approval_text_digest,
+  approval_hash, approved_at ON approvals
+WHEN EXISTS (
+  SELECT 1
+  FROM transitions t
+  JOIN gate_runs g ON g.gate_run_id=t.gate_run_id
+  WHERE g.decision='pass'
+    AND t.approval_required=1
+    AND t.approval_id=OLD.approval_id
+)
+BEGIN
+  SELECT RAISE(ABORT,'PASS-gated approval digest is immutable');
 END;
 
 CREATE TRIGGER budget_events_log_slo_input_insert
@@ -1143,6 +1226,27 @@ BEGIN
   VALUES('slo_input','external_rpc_intents',OLD.intent_id);
 END;
 
+CREATE TRIGGER leases_log_slo_input_insert
+AFTER INSERT ON leases
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','leases',NEW.lease_id);
+END;
+
+CREATE TRIGGER leases_log_slo_input_update
+AFTER UPDATE ON leases
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','leases',NEW.lease_id);
+END;
+
+CREATE TRIGGER leases_log_slo_input_delete
+AFTER DELETE ON leases
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','leases',OLD.lease_id);
+END;
+
 CREATE TRIGGER leases_preserve_active_trust_insert
 BEFORE INSERT ON leases
 WHEN EXISTS (
@@ -1197,6 +1301,27 @@ BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
 END;
 
+CREATE TRIGGER spawn_requests_log_slo_input_insert
+AFTER INSERT ON spawn_requests
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','spawn_requests',NEW.spawn_request_id);
+END;
+
+CREATE TRIGGER spawn_requests_log_slo_input_update
+AFTER UPDATE ON spawn_requests
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','spawn_requests',NEW.spawn_request_id);
+END;
+
+CREATE TRIGGER spawn_requests_log_slo_input_delete
+AFTER DELETE ON spawn_requests
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','spawn_requests',OLD.spawn_request_id);
+END;
+
 CREATE TRIGGER spawn_requests_preserve_active_trust_insert
 BEFORE INSERT ON spawn_requests
 WHEN EXISTS (
@@ -1249,6 +1374,27 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
+END;
+
+CREATE TRIGGER sessions_log_slo_input_insert
+AFTER INSERT ON sessions
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','sessions',NEW.session_id);
+END;
+
+CREATE TRIGGER sessions_log_slo_input_update
+AFTER UPDATE ON sessions
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','sessions',NEW.session_id);
+END;
+
+CREATE TRIGGER sessions_log_slo_input_delete
+AFTER DELETE ON sessions
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','sessions',OLD.session_id);
 END;
 
 CREATE TRIGGER sessions_preserve_active_trust_insert
@@ -1474,36 +1620,6 @@ BEFORE DELETE ON endpoint_zero_reserve_policies
 WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before zero reserve policy changes');
-END;
-
-CREATE TRIGGER slo_audits_log_slo_evidence_event_insert
-AFTER INSERT ON slo_audits
-WHEN NEW.status='pass'
- AND NEW.writer_provenance_hash IS NOT NULL
- AND NEW.writer_provenance_hash<>''
-BEGIN
-  INSERT INTO slo_evidence_events(
-    event_kind,source_table,source_id,schema_version,migration_sha256,query_name
-  )
-  SELECT
-    'slo_audit','slo_audits',NEW.slo_audit_id,
-    NEW.schema_version,NEW.migration_sha256,NEW.query_name
-  WHERE NEW.writer_provenance_hash=agentic_slo_audit_writer_hash(
-    NEW.slo_audit_id,
-    NEW.query_name,
-    NEW.schema_version,
-    NEW.migration_sha256,
-    NEW.query_hash,
-    NEW.result_count,
-    NEW.status,
-    NEW.empty_db_status,
-    NEW.fixture_db_status,
-    NEW.evidence_hash,
-    NEW.evidence_run_id,
-    NEW.verifier_run_id,
-    NEW.gate_run_id,
-    NEW.run_at_epoch_ms
-  );
 END;
 
 CREATE TRIGGER slo_audits_preserve_active_trust_insert

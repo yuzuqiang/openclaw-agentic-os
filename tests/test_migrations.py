@@ -14,6 +14,7 @@ from agentic_os import DB_AUTHORITY_ENABLED
 from agentic_os.migrations import (
     MigrationError,
     MigrationHashDrift,
+    _allow_next_slo_audit_write,
     _connect,
     _register_migration_functions,
     apply_migrations,
@@ -6530,7 +6531,9 @@ class MigrationTests(unittest.TestCase):
                 "'a-nonzero',?,?,?,?,1,'pass','pass','pass',?,'now',1000)",
                 (contract.query_name, schema_version, migration_hash, query_hash, "e" * 64),
             )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "evidence|writer provenance"
+        ):
             connection.execute(
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6554,7 +6557,9 @@ class MigrationTests(unittest.TestCase):
             evidence_hash="slo-evidence-stale",
             suffix="stale",
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "evidence"):
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "evidence|writer provenance"
+        ):
             connection.execute(
                 "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                 "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6585,7 +6590,7 @@ class MigrationTests(unittest.TestCase):
                 decision=decision,
             )
             with self.subTest(decision=decision), self.assertRaisesRegex(
-                sqlite3.IntegrityError, "pass-gate evidence"
+                sqlite3.IntegrityError, "pass-gate evidence|writer provenance"
             ):
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
@@ -6605,6 +6610,7 @@ class MigrationTests(unittest.TestCase):
                         non_pass_gate_id,
                     ),
                 )
+        _allow_next_slo_audit_write(connection, "a-stale-pass")
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -6623,6 +6629,7 @@ class MigrationTests(unittest.TestCase):
                 stale_gate_id,
             ),
         )
+        _allow_next_slo_audit_write(connection, "a-valid")
         connection.execute(
             "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
             "migration_sha256,query_hash,result_count,status,empty_db_status,"

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from agentic_os.goal_runs import record_goal_run
 from agentic_os.migrations import (
+    _allow_next_slo_audit_write,
     _register_migration_functions,
     _slo_audit_writer_hash,
     _trust_binding_hash,
@@ -409,12 +410,8 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 "'R1','R1','created','updated','finalized',?)",
                 (latest_epoch - 1,),
             )
-            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
-                empty_db_status = (
-                    "self_bootstrap_empty"
-                    if contract.query_name == "SLO query fixture status"
-                    else "pass"
-                )
+            contract = SLO_QUERY_CONTRACTS[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "local writer provenance"):
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -422,18 +419,18 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
                     "?,'pass',?,?,?,?,?,?)",
                     (
-                        f"forged-slo-{index}",
+                        "forged-slo",
                         contract.query_name,
                         schema_version,
                         migration_sha256,
                         slo_query_hash(contract.sql_text),
-                        empty_db_status,
+                        "pass",
                         self.evidence_hash,
                         "run",
                         "verifier",
                         "gate",
                         "forged-audit",
-                        latest_epoch + index + 1000,
+                        latest_epoch + 1000,
                     ),
                 )
 
@@ -474,25 +471,21 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 ).fetchone()[0]
             )
             for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
-                connection.execute(
-                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
-                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
-                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
-                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
-                    "'pass','pass',?,?,?,?,?,?)",
-                    (
-                        f"stale-slo-{index}",
-                        contract.query_name,
-                        schema_version,
-                        migration_sha256,
-                        slo_query_hash(contract.sql_text),
-                        self.evidence_hash,
-                        "run",
-                        "verifier",
-                        "gate",
-                        "audit-before-gate",
-                        gate_epoch_ms - index,
-                    ),
+                empty_db_status = (
+                    "self_bootstrap_empty"
+                    if contract.query_name == "SLO query fixture status"
+                    else "pass"
+                )
+                self._insert_writer_pass_slo_audit(
+                    connection,
+                    f"stale-slo-{index}",
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    empty_db_status,
+                    "audit-before-gate",
+                    gate_epoch_ms - index,
                 )
 
         self._assert_promotion_fails_without_write("complete bound evidence")
@@ -579,6 +572,86 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 )
 
         self._promote()
+
+    def test_pass_gate_approval_hash_is_frozen_before_goal_run(self) -> None:
+        self._seed_valid_fixture(seed_slo_audits=False, seed_goal_run=False)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "approval digest"):
+                connection.execute(
+                    "UPDATE approvals SET approval_hash=? WHERE approval_id='approval'",
+                    ("a" * 64,),
+                )
+
+    def test_direct_sql_cannot_forge_passing_slo_audits(self) -> None:
+        self._seed_valid_fixture(seed_slo_audits=False)
+        schema_version, migration_sha256 = self._current_schema_identity()
+        contract = SLO_QUERY_CONTRACTS[0]
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "local writer provenance"):
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
+                    "VALUES('forged-pass',?,?,?,?,0,'pass','pass','pass',"
+                    "?,?,?,?,?,?,?)",
+                    (
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        self.evidence_hash,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "forged-now",
+                        int(time.time() * 1000),
+                        "a" * 64,
+                    ),
+                )
+
+    def test_direct_sql_cannot_forge_slo_audit_events(self) -> None:
+        self._seed_valid_fixture()
+        schema_version, migration_sha256 = self._current_schema_identity()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "UNIQUE|passing audit provenance"
+            ):
+                connection.execute(
+                    "INSERT INTO slo_evidence_events(event_kind,source_table,"
+                    "source_id,schema_version,migration_sha256,query_name) "
+                    "VALUES('slo_audit','slo_audits','slo-1',?,?,"
+                    "'Completion gate before done for R2+')",
+                    (schema_version, migration_sha256),
+                )
+
+    def test_slo_evidence_events_are_append_only(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+                connection.execute(
+                    "DELETE FROM slo_evidence_events WHERE event_kind='slo_input'"
+                )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "append-only"):
+                connection.execute(
+                    "UPDATE slo_evidence_events SET source_id='mutated' "
+                    "WHERE event_kind='slo_input'"
+                )
+
+    def test_runtime_identity_writes_emit_slo_input_events(self) -> None:
+        self._seed_valid_fixture()
+        self._seed_bound_runtime_rows()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            for source_table in ("leases", "spawn_requests", "sessions"):
+                count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM slo_evidence_events WHERE source_table=?",
+                        (source_table,),
+                    ).fetchone()[0]
+                )
+                self.assertGreater(count, 0, source_table)
 
     def test_goal_manifest_identity_is_frozen_before_trust_promotion(self) -> None:
         self._seed_valid_fixture()
@@ -673,8 +746,9 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 )
 
     def test_post_promotion_slo_schema_and_registry_changes_require_invalidation(self) -> None:
-        self._seed_valid_fixture()
+        self._seed_valid_fixture(seed_slo_audits=False)
         self._seed_bound_runtime_rows()
+        self._seed_slo_pass_audits()
         self._promote()
         schema_version, migration_sha256 = self._current_schema_identity()
         contract = SLO_QUERY_CONTRACTS[0]
@@ -1092,43 +1166,16 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     else "pass"
                 )
                 run_at_epoch_ms = latest_epoch + index + 1000
-                provenance_hash = _slo_audit_writer_hash(
+                self._insert_writer_pass_slo_audit(
+                    connection,
                     f"slo-later-{index}",
                     contract.query_name,
                     schema_version,
                     migration_sha256,
                     slo_query_hash(contract.sql_text),
-                    0,
-                    "pass",
                     empty_db_status,
-                    "pass",
-                    self.evidence_hash,
-                    "run",
-                    "verifier",
-                    "gate",
+                    "audit-later",
                     run_at_epoch_ms,
-                )
-                connection.execute(
-                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
-                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
-                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
-                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
-                    "VALUES(?,?,?,?,?,0,'pass',?,'pass',?,?,?,?,?,?,?)",
-                    (
-                        f"slo-later-{index}",
-                        contract.query_name,
-                        schema_version,
-                        migration_sha256,
-                        slo_query_hash(contract.sql_text),
-                        empty_db_status,
-                        self.evidence_hash,
-                        "run",
-                        "verifier",
-                        "gate",
-                        "audit-later",
-                        run_at_epoch_ms,
-                        provenance_hash,
-                    ),
                 )
         self._promote()
 
@@ -1770,7 +1817,8 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 (latest_epoch + 1000,),
             )
             schema_version, migration_sha256 = self._current_schema_identity()
-            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+            contract = SLO_QUERY_CONTRACTS[0]
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "local writer provenance"):
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -1778,7 +1826,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
                     "'pass','pass',?,?,?,?,?,?)",
                     (
-                        f"slo-future-direct-{index}",
+                        "slo-future-direct",
                         contract.query_name,
                         schema_version,
                         migration_sha256,
@@ -1788,7 +1836,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         "verifier",
                         "gate",
                         "future-audit",
-                        latest_epoch + 1_000_000 + index,
+                        latest_epoch + 1_000_000,
                     ),
                 )
             bundle_hash = _trust_binding_hash(
@@ -2017,6 +2065,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
         run_risk: str = "R1",
         goal_severity: str = "R1",
         approval_risk_ceiling: str = "R1",
+        seed_goal_run: bool = True,
     ) -> None:
         apply_migrations(self.database)
         with closing(sqlite3.connect(self.database)) as connection, connection:
@@ -2065,18 +2114,19 @@ class TrustPromotionWriterTests(unittest.TestCase):
             approval_risk_ceiling=approval_risk_ceiling,
             goal_severity=goal_severity,
         )
-        record_goal_run(
-            self.database,
-            goal_run_id="goal-run",
-            goal_id="goal",
-            run_id="run",
-            severity=goal_severity,
-            state="open",
-            predicate_plugin_hash="plugin",
-            evidence_hash=self.evidence_hash,
-            created_at="now",
-            created_at_epoch_ms=int(time.time() * 1000),
-        )
+        if seed_goal_run:
+            record_goal_run(
+                self.database,
+                goal_run_id="goal-run",
+                goal_id="goal",
+                run_id="run",
+                severity=goal_severity,
+                state="open",
+                predicate_plugin_hash="plugin",
+                evidence_hash=self.evidence_hash,
+                created_at="now",
+                created_at_epoch_ms=int(time.time() * 1000),
+            )
         if seed_slo_audits:
             self._seed_slo_pass_audits()
         self._chmod_database_private(self.database)
@@ -2162,44 +2212,75 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 )
                 slo_audit_id = f"{prefix}-{index}"
                 run_at_epoch_ms = int(time.time() * 1000) + index
-                provenance_hash = _slo_audit_writer_hash(
+                self._insert_writer_pass_slo_audit(
+                    connection,
                     slo_audit_id,
                     contract.query_name,
                     schema_version,
                     migration_sha256,
                     slo_query_hash(contract.sql_text),
-                    0,
-                    "pass",
                     empty_db_status,
-                    "pass",
-                    self.evidence_hash,
-                    "run",
-                    "verifier",
-                    "gate",
+                    "audit-now",
                     run_at_epoch_ms,
                 )
-                connection.execute(
-                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
-                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
-                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
-                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
-                    "VALUES(?,?,?,?,?,0,'pass',?,'pass',?,?,?,?,?,?,?)",
-                    (
-                        slo_audit_id,
-                        contract.query_name,
-                        schema_version,
-                        migration_sha256,
-                        slo_query_hash(contract.sql_text),
-                        empty_db_status,
-                        self.evidence_hash,
-                        "run",
-                        "verifier",
-                        "gate",
-                        "audit-now",
-                        run_at_epoch_ms,
-                        provenance_hash,
-                    ),
-                )
+
+    def _insert_writer_pass_slo_audit(
+        self,
+        connection: sqlite3.Connection,
+        slo_audit_id: str,
+        query_name: str,
+        schema_version: int,
+        migration_sha256: str,
+        query_hash: str,
+        empty_db_status: str,
+        run_at: str,
+        run_at_epoch_ms: int,
+    ) -> None:
+        provenance_hash = _slo_audit_writer_hash(
+            slo_audit_id,
+            query_name,
+            schema_version,
+            migration_sha256,
+            query_hash,
+            0,
+            "pass",
+            empty_db_status,
+            "pass",
+            self.evidence_hash,
+            "run",
+            "verifier",
+            "gate",
+            run_at_epoch_ms,
+        )
+        _allow_next_slo_audit_write(connection, slo_audit_id)
+        connection.execute(
+            "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+            "migration_sha256,query_hash,result_count,status,empty_db_status,"
+            "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+            "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
+            "VALUES(?,?,?,?,?,0,'pass',?,'pass',?,?,?,?,?,?,?)",
+            (
+                slo_audit_id,
+                query_name,
+                schema_version,
+                migration_sha256,
+                query_hash,
+                empty_db_status,
+                self.evidence_hash,
+                "run",
+                "verifier",
+                "gate",
+                run_at,
+                run_at_epoch_ms,
+                provenance_hash,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO slo_evidence_events("
+            "event_kind,source_table,source_id,schema_version,migration_sha256,"
+            "query_name) VALUES('slo_audit','slo_audits',?,?,?,?)",
+            (slo_audit_id, schema_version, migration_sha256, query_name),
+        )
 
     def _seed_sibling_run(self) -> None:
         with closing(sqlite3.connect(self.database)) as connection, connection:

@@ -12,6 +12,7 @@ from unittest import mock
 
 import agentic_os
 from agentic_os.migrations import (
+    _allow_next_slo_audit_write,
     _register_migration_functions,
     _slo_audit_writer_hash,
     apply_migrations,
@@ -384,6 +385,7 @@ class SloAuditWriterTests(unittest.TestCase):
                     "gate",
                     run_at_epoch_ms,
                 )
+                _allow_next_slo_audit_write(connection, slo_audit_id)
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
@@ -403,6 +405,18 @@ class SloAuditWriterTests(unittest.TestCase):
                         "seed-now",
                         run_at_epoch_ms,
                         writer_provenance_hash,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO slo_evidence_events("
+                    "event_kind,source_table,source_id,schema_version,"
+                    "migration_sha256,query_name) VALUES("
+                    "'slo_audit','slo_audits',?,?,?,?)",
+                    (
+                        slo_audit_id,
+                        schema_version,
+                        migration_sha256,
+                        contract.query_name,
                     ),
                 )
 

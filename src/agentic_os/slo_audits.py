@@ -11,6 +11,7 @@ from pathlib import Path
 from .migrations import (
     MigrationError,
     _database_checks,
+    _allow_next_slo_audit_write,
     _slo_audit_writer_hash,
     _verify_schema,
     _verify_slo_queries,
@@ -151,6 +152,8 @@ def record_slo_audit(
                 evidence_fields[3],
                 writer_run_at_epoch_ms,
             )
+            if status == "pass":
+                _allow_next_slo_audit_write(connection, slo_audit_id)
             connection.execute(
                 "INSERT INTO slo_audits("
                 "slo_audit_id,query_name,schema_version,migration_sha256,"
@@ -177,6 +180,19 @@ def record_slo_audit(
                     writer_provenance_hash,
                 ),
             )
+            if status == "pass":
+                connection.execute(
+                    "INSERT INTO slo_evidence_events("
+                    "event_kind,source_table,source_id,schema_version,"
+                    "migration_sha256,query_name) VALUES("
+                    "'slo_audit','slo_audits',?,?,?,?)",
+                    (
+                        slo_audit_id,
+                        query.schema_version,
+                        query.migration_sha256,
+                        query.query_name,
+                    ),
+                )
             if pass_evidence is not None:
                 _assert_safe_pass_evidence_current(pass_evidence)
             connection.execute("COMMIT")

@@ -41,6 +41,9 @@ class MigrationHashDrift(MigrationError):
     """A migration differs from its pinned or recorded digest."""
 
 
+_MIGRATION_CONNECTION_STATES: dict[int, dict[str, set[tuple[str, ...]]]] = {}
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -129,6 +132,64 @@ def _trust_binding_hash(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _approval_hash_sql(
+    approval_id: object,
+    run_id: object,
+    transition_id: object,
+    gate_run_id: object,
+    action_type: object,
+    target_type: object,
+    target_id: object,
+    target_hash: object,
+    target_scope: object,
+    channel: object,
+    source_message_digest: object,
+    approval_text_digest: object,
+    approved_risk_ceiling: object,
+    expires_at_epoch_ms: object,
+) -> str:
+    text_fields = (
+        approval_id,
+        run_id,
+        transition_id,
+        gate_run_id,
+        action_type,
+        target_type,
+        target_id,
+        target_hash,
+        target_scope,
+        channel,
+        source_message_digest,
+        approval_text_digest,
+        approved_risk_ceiling,
+    )
+    if not all(isinstance(item, str) and item for item in text_fields):
+        return ""
+    if type(expires_at_epoch_ms) is not int:
+        return ""
+    payload = json.dumps(
+        {
+            "approval_id": approval_id,
+            "run_id": run_id,
+            "transition_id": transition_id,
+            "gate_run_id": gate_run_id,
+            "action_type": action_type,
+            "target_type": target_type,
+            "target_id": target_id,
+            "target_hash": target_hash,
+            "target_scope": target_scope,
+            "channel": channel,
+            "source_message_digest": source_message_digest,
+            "approval_text_digest": approval_text_digest,
+            "approved_risk_ceiling": approved_risk_ceiling,
+            "expires_at_epoch_ms": expires_at_epoch_ms,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _slo_audit_writer_hash(
     slo_audit_id: object,
     query_name: object,
@@ -186,6 +247,33 @@ def _slo_audit_writer_hash(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _migration_state(connection: sqlite3.Connection) -> dict[str, set[tuple[str, ...]]]:
+    return _MIGRATION_CONNECTION_STATES.setdefault(
+        id(connection),
+        {
+            "slo_audit_writes": set(),
+        },
+    )
+
+
+def _allow_next_slo_audit_write(
+    connection: sqlite3.Connection, slo_audit_id: str
+) -> None:
+    if not isinstance(slo_audit_id, str) or not slo_audit_id:
+        raise MigrationError("SLO audit writer guard requires a non-empty audit id")
+    _migration_state(connection)["slo_audit_writes"].add((slo_audit_id,))
+
+
+def _consume_guard(
+    state: dict[str, set[tuple[str, ...]]], guard_name: str, key: tuple[str, ...]
+) -> int:
+    guard = state[guard_name]
+    if key not in guard:
+        return 0
+    guard.remove(key)
+    return 1
 
 
 def _evidence_snapshot_current(
@@ -309,6 +397,7 @@ def _current_slos_pass(
 
 
 def _register_migration_functions(connection: sqlite3.Connection) -> None:
+    state = _migration_state(connection)
     connection.create_function(
         "agentic_shadow_projection_id",
         3,
@@ -328,10 +417,25 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         deterministic=True,
     )
     connection.create_function(
+        "agentic_approval_hash",
+        14,
+        _approval_hash_sql,
+        deterministic=True,
+    )
+    connection.create_function(
         "agentic_slo_audit_writer_hash",
         14,
         _slo_audit_writer_hash,
         deterministic=True,
+    )
+    connection.create_function(
+        "agentic_slo_audit_write_allowed",
+        1,
+        lambda slo_audit_id: _consume_guard(
+            state,
+            "slo_audit_writes",
+            (slo_audit_id,) if isinstance(slo_audit_id, str) else ("",),
+        ),
     )
     connection.create_function(
         "agentic_evidence_snapshot_current",

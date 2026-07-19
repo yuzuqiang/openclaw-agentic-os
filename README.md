@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `d68b5637c3894fab4f88f275e4146db58e129522f1739d34bf0e8f0e2be54bec`
+- Current design artifact SHA-256: `be7a7e26435afc9b0f5cbad3f0baf1ca6a9903fd5dd99dd289c23e205970063d`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `98220b71f60f2061eb5a23ee6300b54a7f727dc107b2c6c7427415a01a117e10`
-- Current migration manifest SHA-256: `bcc597f36ef2919d881761f379af046b8c1057f4852220f8004a68eb1efec893`
+- Current latest migration SHA-256: `4cdcd5da6cbf9c4be2d8bc482c9ff36930dd6b49dc161ae7d873f0601bbdafae`
+- Current migration manifest SHA-256: `3a2a7428f0906528050e30a1116ec00e08a81bee1f61df25be3c688feac1c7ef`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -192,7 +192,7 @@ usage/cost across the trusted workflow's selected run budgets, selected model
 cost rows, non-human budget events, and final settlements. Those PASS audits
 must be no older than the bound gate clock and must have append-only write-event
 evidence after trusted workflow budget, external RPC, run-budget, settlement,
-and run lifecycle inputs. Migration v13 aborts on active
+lease, spawn-request, session, and run lifecycle inputs. Migration v13 aborts on active
 legacy unbound trust rows, adds exact binding columns and a deterministic
 `agentic_trust_binding_hash(...)`, and rejects direct active inserts unless
 those fields match the bound evidence view and the requested scope/severity match
@@ -204,7 +204,7 @@ estimated usage/cost anywhere in the trusted workflow, self-verifier evidence,
 wrong-run evidence, stale or
 missing latest SLO audits, forged direct PASS audit rows, database-authority
 snapshots, changed evidence artifacts, malformed binding hashes,
-post-promotion budget/SLO/schema/SLO
+mutated PASS-gate approval hashes, mutable SLO evidence events, post-promotion budget/SLO/schema/SLO
 registry evidence changes before invalidation, same-workflow budget settlement
 changes, runtime SLO input inserts in the trusted workflow, unbound external RPC
 intents, leases, spawn requests, sessions, run rows, predicate-plugin identity

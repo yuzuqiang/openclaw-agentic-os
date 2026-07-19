@@ -24,7 +24,7 @@ Non-goals:
 ## Delivery Change Log
 
 - 2026-07-18: Added the local fail-closed trust promotion writer and migration v13 binding overlay:
-  - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete current SLO PASS audit rows at or after the bound gate clock, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
+  - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete local-writer SLO PASS audit rows at or after the bound gate clock, append-only SLO evidence events after all runtime SLO inputs, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence with immutable approval hashes, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
   - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; accepted acquire-pending leases with Gateway ownership cannot be deleted or hidden before release proof; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive; pass gates and their referenced transitions are immutable; verifier independence proof evidence must be a non-empty JSON object; R2+ completion gates must bind to the finalizing transition.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
@@ -3952,7 +3952,8 @@ match the run's selected provider/model/endpoint/capability/cost registry row.
 self-verifier, wrong-run, non-PASS, stale gate identity, stale trusted clock,
 malformed evidence, missing same-run goal evidence, any older PASS SLO audit
 shadowed by newer audit evidence, SLO audit rows older than the bound gate clock
-or mutable runtime evidence, and missing current risk-assessment binding.
+or mutable runtime evidence, forged PASS SLO audits, mutable SLO evidence events,
+mutated PASS-gate approval hashes, and missing current risk-assessment binding.
 Direct SQL insertion is pinned to v13 plus the
 accepted 30-query SLO count, so fake later schema or SLO rows cannot become the
 trust contract. Predicate-plugin metadata referenced by a goal run is immutable
