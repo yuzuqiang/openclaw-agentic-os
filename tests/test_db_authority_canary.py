@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import shutil
 import sqlite3
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +18,10 @@ from agentic_os.db_authority_canary import (
     DbAuthorityCanaryError,
     db_authority_canary_artifact,
     rollback_db_authority_canary,
+)
+from agentic_os.db_authority_controller import (
+    DbAuthorityControllerError,
+    run_synthetic_db_authority_expansion,
 )
 from agentic_os.migrations import (
     _register_migration_functions,
@@ -111,6 +117,67 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             last_parity_audit_hash=self.parity_hash,
         )
         self.assertEqual(replay.status, "replayed")
+
+    def test_expansion_controller_admits_only_fixed_low_risk_workflow(self) -> None:
+        result = run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+
+        self.assertFalse(result.db_authority_enabled)
+        self.assertEqual(result.controller_status, "artifact_only_canary_recorded")
+        self.assertTrue(result.proof["artifact_only"])
+        self.assertFalse(result.proof["real_openclaw_rpc"])
+        self.assertFalse(result.proof["real_gateway_rpc"])
+        self.assertFalse(result.proof["real_cron_rpc"])
+        self.assertFalse(result.proof["real_session_rpc"])
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT workflow,authority_mode,risk_class,risk_dominance "
+                    "FROM runs WHERE run_id='canary-run'"
+                ).fetchone(),
+                ("local-artifact-canary", "db_authority_canary", "R1", "R1"),
+            )
+
+    def test_expansion_controller_rejects_cross_workflow_and_r3_r4(self) -> None:
+        with self.assertRaisesRegex(DbAuthorityControllerError, "only"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="heartbeat",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+        with self.assertRaisesRegex(DbAuthorityControllerError, "human-required"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R3",
+                risk_dominance="R3",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
 
     def test_canary_recovers_after_local_crash_fixture(self) -> None:
         with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):
@@ -956,6 +1023,44 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             ]
         )
         self.assertEqual(rollback_status, 0)
+
+    def test_expansion_controller_cli_emits_artifact_only_proof(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = cli_main(
+                [
+                    "db-authority-expansion",
+                    "--db",
+                    str(self.database),
+                    "--workflow",
+                    "local-artifact-canary",
+                    "--run-id",
+                    "canary-run",
+                    "--risk-class",
+                    "R1",
+                    "--risk-dominance",
+                    "R1",
+                    "--cutover-approved-by",
+                    "local-fixture",
+                    "--cutover-evidence-hash",
+                    self.cutover_hash,
+                    "--rollback-deadline",
+                    "2099-01-01T00:00:00+00:00",
+                    "--last-parity-audit-hash",
+                    self.parity_hash,
+                    "--artifact",
+                    str(self.artifact),
+                    "--content",
+                    self.payload.decode("utf-8"),
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        emitted = output.getvalue()
+        self.assertIn("db-authority expansion written", emitted)
+        self.assertIn('"artifact_only":true', emitted)
+        self.assertIn('"db_authority_enabled":false', emitted)
+        self.assertIn('"real_session_rpc":false', emitted)
 
 
 if __name__ == "__main__":
