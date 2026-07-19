@@ -11,7 +11,12 @@ from pathlib import Path
 from unittest import mock
 
 import agentic_os
-from agentic_os.migrations import apply_migrations, repository_root
+from agentic_os.migrations import (
+    _register_migration_functions,
+    _slo_audit_writer_hash,
+    apply_migrations,
+    repository_root,
+)
 from agentic_os.pass_gates import (
     ApprovalGrant,
     GateEvidence,
@@ -354,20 +359,39 @@ class SloAuditWriterTests(unittest.TestCase):
     def test_records_meta_slo_pass_after_other_slo_audits(self) -> None:
         evidence = self._record_pass_gate()
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
             schema_version, migration_sha256 = connection.execute(
                 "SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1"
             ).fetchone()
             for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
                 if contract.query_name == "SLO query fixture status":
                     continue
+                slo_audit_id = f"seed-slo-{index}"
+                run_at_epoch_ms = int(time.time() * 1000) + index
+                writer_provenance_hash = _slo_audit_writer_hash(
+                    slo_audit_id,
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    0,
+                    "pass",
+                    "pass",
+                    "pass",
+                    evidence.sha256,
+                    "run",
+                    "verifier",
+                    "gate",
+                    run_at_epoch_ms,
+                )
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
                     "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
-                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
-                    "'pass','pass',?,?,?,?,?,?)",
+                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
+                    "VALUES(?,?,?,?,?,0,'pass','pass','pass',?,?,?,?,?,?,?)",
                     (
-                        f"seed-slo-{index}",
+                        slo_audit_id,
                         contract.query_name,
                         schema_version,
                         migration_sha256,
@@ -377,7 +401,8 @@ class SloAuditWriterTests(unittest.TestCase):
                         "verifier",
                         "gate",
                         "seed-now",
-                        int(time.time() * 1000) + index,
+                        run_at_epoch_ms,
+                        writer_provenance_hash,
                     ),
                 )
 

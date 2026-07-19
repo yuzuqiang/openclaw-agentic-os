@@ -11,6 +11,7 @@ from pathlib import Path
 from .migrations import (
     MigrationError,
     _database_checks,
+    _slo_audit_writer_hash,
     _verify_schema,
     _verify_slo_queries,
     apply_migrations,
@@ -134,12 +135,29 @@ def record_slo_audit(
                 empty_db_status = "not_run"
                 fixture_db_status = "not_run"
             writer_run_at_epoch_ms = _writer_audit_epoch_ms()
+            writer_provenance_hash = _slo_audit_writer_hash(
+                slo_audit_id,
+                query.query_name,
+                query.schema_version,
+                query.migration_sha256,
+                query.query_hash,
+                result_count,
+                status,
+                empty_db_status,
+                fixture_db_status,
+                evidence_fields[0],
+                evidence_fields[1],
+                evidence_fields[2],
+                evidence_fields[3],
+                writer_run_at_epoch_ms,
+            )
             connection.execute(
                 "INSERT INTO slo_audits("
                 "slo_audit_id,query_name,schema_version,migration_sha256,"
                 "query_hash,result_count,status,empty_db_status,fixture_db_status,"
                 "evidence_hash,evidence_run_id,verifier_run_id,gate_run_id,"
-                "run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "run_at,run_at_epoch_ms,writer_provenance_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     slo_audit_id,
                     query.query_name,
@@ -156,6 +174,7 @@ def record_slo_audit(
                     evidence_fields[3],
                     run_at,
                     writer_run_at_epoch_ms,
+                    writer_provenance_hash,
                 ),
             )
             if pass_evidence is not None:

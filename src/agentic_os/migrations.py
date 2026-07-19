@@ -129,6 +129,65 @@ def _trust_binding_hash(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _slo_audit_writer_hash(
+    slo_audit_id: object,
+    query_name: object,
+    schema_version: object,
+    migration_sha256: object,
+    query_hash: object,
+    result_count: object,
+    status: object,
+    empty_db_status: object,
+    fixture_db_status: object,
+    evidence_hash: object,
+    evidence_run_id: object,
+    verifier_run_id: object,
+    gate_run_id: object,
+    run_at_epoch_ms: object,
+) -> str:
+    text_fields = (
+        slo_audit_id,
+        query_name,
+        migration_sha256,
+        query_hash,
+        status,
+        empty_db_status,
+        fixture_db_status,
+        evidence_hash,
+        evidence_run_id,
+        verifier_run_id,
+        gate_run_id,
+    )
+    if not all(isinstance(item, str) and item for item in text_fields):
+        return ""
+    if type(schema_version) is not int or type(result_count) is not int:
+        return ""
+    if type(run_at_epoch_ms) is not int:
+        return ""
+    payload = json.dumps(
+        {
+            "empty_db_status": empty_db_status,
+            "evidence_hash": evidence_hash,
+            "evidence_run_id": evidence_run_id,
+            "fixture_db_status": fixture_db_status,
+            "gate_run_id": gate_run_id,
+            "migration_sha256": migration_sha256,
+            "query_hash": query_hash,
+            "query_name": query_name,
+            "result_count": result_count,
+            "run_at_epoch_ms": run_at_epoch_ms,
+            "schema_version": schema_version,
+            "slo_audit_id": slo_audit_id,
+            "source": "agentic-os-slo-audit-writer-v1",
+            "status": status,
+            "verifier_run_id": verifier_run_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _evidence_snapshot_current(
     path: object,
     sha256: object,
@@ -266,6 +325,12 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
         "agentic_trust_binding_hash",
         8,
         _trust_binding_hash,
+        deterministic=True,
+    )
+    connection.create_function(
+        "agentic_slo_audit_writer_hash",
+        14,
+        _slo_audit_writer_hash,
         deterministic=True,
     )
     connection.create_function(

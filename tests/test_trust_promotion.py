@@ -14,6 +14,7 @@ from pathlib import Path
 from agentic_os.goal_runs import record_goal_run
 from agentic_os.migrations import (
     _register_migration_functions,
+    _slo_audit_writer_hash,
     _trust_binding_hash,
     apply_migrations,
     repository_root,
@@ -330,6 +331,114 @@ class TrustPromotionWriterTests(unittest.TestCase):
 
         self._assert_promotion_fails_without_write("complete bound evidence")
 
+    def test_selected_budget_update_after_slo_audits_requires_fresh_write_evidence(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+                "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+                "output_cost_microusd_per_million,confidence,effective_at,"
+                "registry_row_hash) VALUES('alt-cost-row','provider','alt-model',"
+                "'endpoint','capability',1,1,'known','alt-effective','alt-cost-hash')"
+            )
+            connection.execute(
+                "UPDATE run_budgets SET selected_model='alt-model',"
+                "selected_cost_registry_id='alt-cost-row',"
+                "selected_cost_effective_at='alt-effective',"
+                "selected_cost_registry_hash='alt-cost-hash' WHERE run_id='run'"
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_backdated_external_rpc_write_after_slo_audits_requires_write_evidence(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            gate_epoch_ms = connection.execute(
+                "SELECT now_epoch_ms FROM gate_clock_context WHERE clock_context_id='clock'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,client_request_id,idempotency_key,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_idempotency_key,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms,"
+                "resolved_at,resolved_at_epoch_ms) VALUES('backdated-rpc','run',"
+                "'transition','allow_lease_release','backdated-rpc-client',"
+                "'backdated-rpc-idem','v1','{}',"
+                "'{\"run_id\":\"run\",\"transition_id\":\"transition\","
+                "\"idempotency_key\":\"backdated-rpc-idem\","
+                "\"gateway_lease_id\":\"released\"}',"
+                "'run','transition',"
+                "'backdated-rpc-idem','reconciled','released','requested',?,"
+                "'accepted',?,'resolved',?)",
+                (gate_epoch_ms - 3, gate_epoch_ms - 2, gate_epoch_ms - 1),
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_backdated_run_write_after_slo_audits_requires_write_evidence(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            gate_epoch_ms = connection.execute(
+                "SELECT now_epoch_ms FROM gate_clock_context WHERE clock_context_id='clock'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,updated_at,"
+                "finalized_at,finalized_at_epoch_ms) VALUES('post-audit-run',"
+                "'post-audit-prepare','workflow','file_authority','finalized','R1',"
+                "'R1','created','updated','finalized',?)",
+                (gate_epoch_ms - 1,),
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
+    def test_forged_slo_pass_audits_do_not_refresh_write_evidence(self) -> None:
+        self._seed_valid_fixture()
+        schema_version, migration_sha256 = self._current_schema_identity()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
+            latest_epoch = int(
+                connection.execute("SELECT MAX(run_at_epoch_ms) FROM slo_audits").fetchone()[0]
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,updated_at,"
+                "finalized_at,finalized_at_epoch_ms) VALUES('forged-audit-run',"
+                "'forged-audit-prepare','workflow','file_authority','finalized',"
+                "'R1','R1','created','updated','finalized',?)",
+                (latest_epoch - 1,),
+            )
+            for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
+                empty_db_status = (
+                    "self_bootstrap_empty"
+                    if contract.query_name == "SLO query fixture status"
+                    else "pass"
+                )
+                connection.execute(
+                    "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
+                    "migration_sha256,query_hash,result_count,status,empty_db_status,"
+                    "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
+                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
+                    "?,'pass',?,?,?,?,?,?)",
+                    (
+                        f"forged-slo-{index}",
+                        contract.query_name,
+                        schema_version,
+                        migration_sha256,
+                        slo_query_hash(contract.sql_text),
+                        empty_db_status,
+                        self.evidence_hash,
+                        "run",
+                        "verifier",
+                        "gate",
+                        "forged-audit",
+                        latest_epoch + index + 1000,
+                    ),
+                )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
     def test_missing_or_stale_slo_audit_fails_without_write(self) -> None:
         for statement in (
             "DELETE FROM slo_audits WHERE query_name='Duplicate live dispatch blocked'",
@@ -357,6 +466,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
         self._seed_valid_fixture(seed_slo_audits=False)
         schema_version, migration_sha256 = self._current_schema_identity()
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
             gate_epoch_ms = int(
                 connection.execute(
                     "SELECT now_epoch_ms FROM gate_clock_context "
@@ -392,6 +502,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
         schema_version, migration_sha256 = self._current_schema_identity()
         contract = SLO_QUERY_CONTRACTS[0]
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
             latest_epoch = connection.execute(
                 "SELECT MAX(run_at_epoch_ms) FROM slo_audits WHERE query_name=?",
                 (contract.query_name,),
@@ -568,6 +679,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
         schema_version, migration_sha256 = self._current_schema_identity()
         contract = SLO_QUERY_CONTRACTS[0]
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
             latest_epoch = connection.execute(
                 "SELECT MAX(run_at_epoch_ms) FROM slo_audits"
             ).fetchone()[0]
@@ -778,6 +890,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
     def test_post_promotion_budget_evidence_changes_require_invalidation(self) -> None:
         self._seed_valid_fixture()
         self._seed_sibling_run()
+        self._seed_slo_pass_audits(prefix="slo-after-sibling")
         self._promote()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             with self.assertRaisesRegex(sqlite3.IntegrityError, "budget event changes"):
@@ -902,6 +1015,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
         self._seed_sibling_run()
         self._seed_bound_runtime_rows()
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
             connection.execute("PRAGMA foreign_keys=ON")
             gate_epoch_ms = int(
                 connection.execute(
@@ -977,12 +1091,29 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     if contract.query_name == "SLO query fixture status"
                     else "pass"
                 )
+                run_at_epoch_ms = latest_epoch + index + 1000
+                provenance_hash = _slo_audit_writer_hash(
+                    f"slo-later-{index}",
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    0,
+                    "pass",
+                    empty_db_status,
+                    "pass",
+                    self.evidence_hash,
+                    "run",
+                    "verifier",
+                    "gate",
+                    run_at_epoch_ms,
+                )
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
                     "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
-                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
-                    "?,'pass',?,?,?,?,?,?)",
+                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
+                    "VALUES(?,?,?,?,?,0,'pass',?,'pass',?,?,?,?,?,?,?)",
                     (
                         f"slo-later-{index}",
                         contract.query_name,
@@ -995,7 +1126,8 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         "verifier",
                         "gate",
                         "audit-later",
-                        latest_epoch + index + 1000,
+                        run_at_epoch_ms,
+                        provenance_hash,
                     ),
                 )
         self._promote()
@@ -1715,6 +1847,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 "'R1','other-transition-idem',0,'now')",
                 (_sha("other-artifact"),),
             )
+        self._seed_slo_pass_audits(prefix="slo-after-other-run")
         self._promote()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("PRAGMA foreign_keys=OFF")
@@ -2016,9 +2149,10 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 (goal_severity,),
             )
 
-    def _seed_slo_pass_audits(self) -> None:
+    def _seed_slo_pass_audits(self, *, prefix: str = "slo") -> None:
         schema_version, migration_sha256 = self._current_schema_identity()
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            _register_migration_functions(connection)
             connection.execute("PRAGMA foreign_keys=ON")
             for index, contract in enumerate(SLO_QUERY_CONTRACTS, start=1):
                 empty_db_status = (
@@ -2026,14 +2160,32 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     if contract.query_name == "SLO query fixture status"
                     else "pass"
                 )
+                slo_audit_id = f"{prefix}-{index}"
+                run_at_epoch_ms = int(time.time() * 1000) + index
+                provenance_hash = _slo_audit_writer_hash(
+                    slo_audit_id,
+                    contract.query_name,
+                    schema_version,
+                    migration_sha256,
+                    slo_query_hash(contract.sql_text),
+                    0,
+                    "pass",
+                    empty_db_status,
+                    "pass",
+                    self.evidence_hash,
+                    "run",
+                    "verifier",
+                    "gate",
+                    run_at_epoch_ms,
+                )
                 connection.execute(
                     "INSERT INTO slo_audits(slo_audit_id,query_name,schema_version,"
                     "migration_sha256,query_hash,result_count,status,empty_db_status,"
                     "fixture_db_status,evidence_hash,evidence_run_id,verifier_run_id,"
-                    "gate_run_id,run_at,run_at_epoch_ms) VALUES(?,?,?,?,?,0,'pass',"
-                    "?,'pass',?,?,?,?,?,?)",
+                    "gate_run_id,run_at,run_at_epoch_ms,writer_provenance_hash) "
+                    "VALUES(?,?,?,?,?,0,'pass',?,'pass',?,?,?,?,?,?,?)",
                     (
-                        f"slo-{index}",
+                        slo_audit_id,
                         contract.query_name,
                         schema_version,
                         migration_sha256,
@@ -2044,7 +2196,8 @@ class TrustPromotionWriterTests(unittest.TestCase):
                         "verifier",
                         "gate",
                         "audit-now",
-                        int(time.time() * 1000) + index,
+                        run_at_epoch_ms,
+                        provenance_hash,
                     ),
                 )
 

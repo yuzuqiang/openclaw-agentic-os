@@ -1304,6 +1304,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone(), (1,))
         with self.assertRaises(sqlite3.IntegrityError):
@@ -1668,6 +1669,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute(
             "INSERT INTO workflow_authority(workflow,mode,updated_at) "
@@ -6463,6 +6465,7 @@ class MigrationTests(unittest.TestCase):
         apply_migrations(self.database)
         connection = sqlite3.connect(self.database)
         self.addCleanup(connection.close)
+        _register_migration_functions(connection)
         connection.execute("PRAGMA foreign_keys=ON")
         status_query = next(
             contract.sql_text

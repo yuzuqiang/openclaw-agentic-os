@@ -10,6 +10,140 @@ WHERE invalidated_at IS NULL;
 
 DROP TABLE trust_promotion_legacy_guard;
 
+DROP TRIGGER slo_queries_reject_pass_audited_update;
+DROP TRIGGER slo_audits_preserve_pass_delete;
+DROP TRIGGER slo_audits_preserve_pass_update;
+DROP TRIGGER slo_audits_validate_pass_evidence_update;
+DROP TRIGGER slo_audits_validate_pass_evidence_insert;
+
+ALTER TABLE slo_audits RENAME TO slo_audits_v12;
+
+CREATE TABLE slo_audits (
+  slo_audit_id TEXT PRIMARY KEY,
+  query_name TEXT NOT NULL,
+  schema_version ANY NOT NULL,
+  migration_sha256 TEXT NOT NULL,
+  query_hash TEXT NOT NULL,
+  result_count ANY NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pass','fail','compile_error','not_run')),
+  empty_db_status TEXT NOT NULL,
+  fixture_db_status TEXT NOT NULL,
+  evidence_hash TEXT,
+  evidence_run_id TEXT,
+  verifier_run_id TEXT,
+  gate_run_id TEXT,
+  run_at TEXT NOT NULL,
+  run_at_epoch_ms ANY NOT NULL,
+  writer_provenance_hash TEXT,
+  CHECK (typeof(schema_version)='integer' AND schema_version > 0),
+  CHECK (typeof(result_count)='integer' AND result_count >= 0),
+  CHECK (typeof(run_at_epoch_ms)='integer' AND run_at_epoch_ms BETWEEN 1 AND 253402300799999),
+  CHECK (status<>'pass' OR (
+    result_count=0
+    AND (
+      (empty_db_status='pass' AND fixture_db_status='pass')
+      OR (
+        query_name='SLO query fixture status'
+        AND empty_db_status='self_bootstrap_empty'
+        AND fixture_db_status='pass'
+      )
+    )
+    AND evidence_hash IS NOT NULL AND evidence_hash<>''
+    AND evidence_run_id IS NOT NULL AND evidence_run_id<>''
+    AND verifier_run_id IS NOT NULL AND verifier_run_id<>''
+    AND gate_run_id IS NOT NULL AND gate_run_id<>''
+  )),
+  FOREIGN KEY(query_name,schema_version,migration_sha256,query_hash)
+    REFERENCES slo_queries(query_name,schema_version,migration_sha256,query_hash),
+  FOREIGN KEY(gate_run_id,evidence_hash,evidence_run_id,verifier_run_id)
+    REFERENCES evidence_hashes(gate_run_id,evidence_hash,run_id,verifier_run_id)
+) STRICT;
+
+INSERT INTO slo_audits(
+  slo_audit_id,query_name,schema_version,migration_sha256,query_hash,
+  result_count,status,empty_db_status,fixture_db_status,evidence_hash,
+  evidence_run_id,verifier_run_id,gate_run_id,run_at,run_at_epoch_ms,
+  writer_provenance_hash
+)
+SELECT
+  slo_audit_id,query_name,schema_version,migration_sha256,query_hash,
+  result_count,status,empty_db_status,fixture_db_status,evidence_hash,
+  evidence_run_id,verifier_run_id,gate_run_id,run_at,run_at_epoch_ms,
+  NULL
+FROM slo_audits_v12;
+
+DROP TABLE slo_audits_v12;
+
+CREATE TRIGGER slo_audits_validate_pass_evidence_insert
+AFTER INSERT ON slo_audits
+WHEN NEW.status='pass' AND NOT EXISTS (
+  SELECT 1
+  FROM evidence_hashes e
+  JOIN gate_runs g
+    ON g.gate_run_id=e.gate_run_id
+   AND g.evidence_hash=e.evidence_hash
+   AND g.run_id=e.run_id
+   AND g.verifier_run_id=e.verifier_run_id
+  WHERE e.gate_run_id=NEW.gate_run_id
+    AND e.evidence_hash=NEW.evidence_hash
+    AND e.run_id=NEW.evidence_run_id
+    AND e.producer_run_id=NEW.evidence_run_id
+    AND e.verifier_run_id=NEW.verifier_run_id
+    AND g.decision='pass'
+)
+BEGIN
+  SELECT RAISE(ABORT,'passing SLO audit requires pass-gate evidence');
+END;
+
+CREATE TRIGGER slo_audits_validate_pass_evidence_update
+AFTER UPDATE OF status, evidence_hash, evidence_run_id, verifier_run_id, gate_run_id ON slo_audits
+WHEN NEW.status='pass' AND NOT EXISTS (
+  SELECT 1
+  FROM evidence_hashes e
+  JOIN gate_runs g
+    ON g.gate_run_id=e.gate_run_id
+   AND g.evidence_hash=e.evidence_hash
+   AND g.run_id=e.run_id
+   AND g.verifier_run_id=e.verifier_run_id
+  WHERE e.gate_run_id=NEW.gate_run_id
+    AND e.evidence_hash=NEW.evidence_hash
+    AND e.run_id=NEW.evidence_run_id
+    AND e.producer_run_id=NEW.evidence_run_id
+    AND e.verifier_run_id=NEW.verifier_run_id
+    AND g.decision='pass'
+)
+BEGIN
+  SELECT RAISE(ABORT,'passing SLO audit requires pass-gate evidence');
+END;
+
+CREATE TRIGGER slo_audits_preserve_pass_update
+BEFORE UPDATE ON slo_audits
+WHEN OLD.status='pass'
+BEGIN
+  SELECT RAISE(ABORT,'SLO audit row is immutable');
+END;
+
+CREATE TRIGGER slo_audits_preserve_pass_delete
+BEFORE DELETE ON slo_audits
+WHEN OLD.status='pass'
+BEGIN
+  SELECT RAISE(ABORT,'SLO audit row is immutable');
+END;
+
+CREATE TRIGGER slo_queries_reject_pass_audited_update
+BEFORE UPDATE ON slo_queries
+WHEN EXISTS (
+  SELECT 1 FROM slo_audits
+  WHERE query_name=OLD.query_name
+    AND schema_version=OLD.schema_version
+    AND migration_sha256=OLD.migration_sha256
+    AND query_hash=OLD.query_hash
+    AND status='pass'
+)
+BEGIN
+  SELECT RAISE(ABORT,'pass-audited SLO query is immutable');
+END;
+
 ALTER TABLE trust_observations ADD COLUMN run_id TEXT REFERENCES runs(run_id);
 ALTER TABLE trust_observations ADD COLUMN goal_run_id TEXT REFERENCES goal_runs(goal_run_id);
 ALTER TABLE trust_observations ADD COLUMN evidence_hash TEXT;
@@ -490,6 +624,22 @@ WHERE gr.run_id IS NOT NULL
           AND sa.evidence_run_id=e.run_id
           AND sa.verifier_run_id=e.verifier_run_id
           AND sa.gate_run_id=e.gate_run_id
+          AND sa.writer_provenance_hash=agentic_slo_audit_writer_hash(
+            sa.slo_audit_id,
+            sa.query_name,
+            sa.schema_version,
+            sa.migration_sha256,
+            sa.query_hash,
+            sa.result_count,
+            sa.status,
+            sa.empty_db_status,
+            sa.fixture_db_status,
+            sa.evidence_hash,
+            sa.evidence_run_id,
+            sa.verifier_run_id,
+            sa.gate_run_id,
+            sa.run_at_epoch_ms
+          )
           AND sa.run_at_epoch_ms >= c.now_epoch_ms
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(be.created_at_epoch_ms)
@@ -516,7 +666,13 @@ WHERE gr.run_id IS NOT NULL
             SELECT MAX(input_event.event_id)
             FROM slo_evidence_events input_event
             WHERE input_event.event_kind='slo_input'
-              AND input_event.source_table IN ('budget_events','budget_settlements')
+              AND input_event.source_table IN (
+                'budget_events',
+                'budget_settlements',
+                'external_rpc_intents',
+                'run_budgets',
+                'runs'
+              )
           ),-1)
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(
@@ -816,6 +972,27 @@ BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before selected budget changes');
 END;
 
+CREATE TRIGGER run_budgets_log_slo_input_insert
+AFTER INSERT ON run_budgets
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','run_budgets',NEW.run_id);
+END;
+
+CREATE TRIGGER run_budgets_log_slo_input_update
+AFTER UPDATE ON run_budgets
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','run_budgets',NEW.run_id);
+END;
+
+CREATE TRIGGER run_budgets_log_slo_input_delete
+AFTER DELETE ON run_budgets
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','run_budgets',OLD.run_id);
+END;
+
 CREATE TRIGGER budget_settlements_log_slo_input_insert
 AFTER INSERT ON budget_settlements
 BEGIN
@@ -943,6 +1120,27 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before external RPC intent changes');
+END;
+
+CREATE TRIGGER external_rpc_intents_log_slo_input_insert
+AFTER INSERT ON external_rpc_intents
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','external_rpc_intents',NEW.intent_id);
+END;
+
+CREATE TRIGGER external_rpc_intents_log_slo_input_update
+AFTER UPDATE ON external_rpc_intents
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','external_rpc_intents',NEW.intent_id);
+END;
+
+CREATE TRIGGER external_rpc_intents_log_slo_input_delete
+AFTER DELETE ON external_rpc_intents
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','external_rpc_intents',OLD.intent_id);
 END;
 
 CREATE TRIGGER leases_preserve_active_trust_insert
@@ -1215,6 +1413,27 @@ BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before run changes');
 END;
 
+CREATE TRIGGER runs_log_slo_input_insert
+AFTER INSERT ON runs
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','runs',NEW.run_id);
+END;
+
+CREATE TRIGGER runs_log_slo_input_update
+AFTER UPDATE ON runs
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','runs',NEW.run_id);
+END;
+
+CREATE TRIGGER runs_log_slo_input_delete
+AFTER DELETE ON runs
+BEGIN
+  INSERT INTO slo_evidence_events(event_kind,source_table,source_id)
+  VALUES('slo_input','runs',OLD.run_id);
+END;
+
 CREATE TRIGGER model_cost_registry_preserve_active_trust_insert
 BEFORE INSERT ON model_cost_registry
 WHEN EXISTS (SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL)
@@ -1260,13 +1479,30 @@ END;
 CREATE TRIGGER slo_audits_log_slo_evidence_event_insert
 AFTER INSERT ON slo_audits
 WHEN NEW.status='pass'
+ AND NEW.writer_provenance_hash IS NOT NULL
+ AND NEW.writer_provenance_hash<>''
 BEGIN
   INSERT INTO slo_evidence_events(
     event_kind,source_table,source_id,schema_version,migration_sha256,query_name
   )
-  VALUES(
+  SELECT
     'slo_audit','slo_audits',NEW.slo_audit_id,
     NEW.schema_version,NEW.migration_sha256,NEW.query_name
+  WHERE NEW.writer_provenance_hash=agentic_slo_audit_writer_hash(
+    NEW.slo_audit_id,
+    NEW.query_name,
+    NEW.schema_version,
+    NEW.migration_sha256,
+    NEW.query_hash,
+    NEW.result_count,
+    NEW.status,
+    NEW.empty_db_status,
+    NEW.fixture_db_status,
+    NEW.evidence_hash,
+    NEW.evidence_run_id,
+    NEW.verifier_run_id,
+    NEW.gate_run_id,
+    NEW.run_at_epoch_ms
   );
 END;
 
