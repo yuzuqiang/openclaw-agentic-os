@@ -17,6 +17,7 @@ from .privacy import assert_privacy_preflight
 from .predicates import (
     MAX_FILE_EVIDENCE_BYTES,
     PredicateContractError,
+    _assert_predicate_path_allowed,
     _is_credential_path_denied,
     _reject_symlink_evidence_path,
 )
@@ -157,6 +158,10 @@ def _evidence_snapshot_current(
         candidate = repo_root / relative
     if ".." in relative.parts or not relative.parts:
         return 0
+    try:
+        _assert_predicate_path_allowed(relative.as_posix())
+    except PredicateContractError:
+        return 0
     if _is_credential_path_denied(path) or _is_credential_path_denied(
         relative.as_posix()
     ):
@@ -169,7 +174,12 @@ def _evidence_snapshot_current(
         return 0
     except ValueError:
         return 0
-    if _is_credential_path_denied(resolved.relative_to(repo_root).as_posix()):
+    resolved_relative = resolved.relative_to(repo_root).as_posix()
+    try:
+        _assert_predicate_path_allowed(resolved_relative)
+    except PredicateContractError:
+        return 0
+    if _is_credential_path_denied(resolved_relative):
         return 0
     digest = hashlib.sha256()
     fd: int | None = None
@@ -211,6 +221,8 @@ def _current_slos_pass(
     ):
         return 0
     try:
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            return 0
         current = connection.execute(
             "SELECT version,sha256 FROM schema_migrations ORDER BY version DESC LIMIT 1"
         ).fetchone()

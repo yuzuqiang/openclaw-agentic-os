@@ -1628,6 +1628,70 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     connection, "direct-missing-risk-assessment", binding, bundle_hash
                 )
 
+    def test_direct_sql_rejects_fk_broken_runtime_rows(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            _register_migration_functions(connection)
+            binding = self._trust_binding(connection)
+            bundle_hash = self._bundle_hash_from_binding(binding)
+            external_metadata = json.dumps(
+                {
+                    "run_id": "missing-run",
+                    "transition_id": "transition",
+                    "idempotency_key": "fk-broken-idem",
+                    "gateway_lease_id": "external-intent",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,client_request_id,idempotency_key,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_client_request_id,"
+                "external_idempotency_key,state,external_id,requested_at,"
+                "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
+                "'fk-broken-intent','missing-run','transition','allow_lease_release',"
+                "'fk-broken-client','fk-broken-idem','external-rpc-intent-v1',"
+                "'{}',?,'missing-run','transition','fk-broken-client',"
+                "'fk-broken-idem','accepted','external-intent','now',1,'now',1)",
+                (external_metadata,),
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                self._insert_direct_trust(
+                    connection, "direct-fk-broken-runtime", binding, bundle_hash
+                )
+
+    def test_direct_rehash_udf_rejects_raw_database_evidence_path(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            _register_migration_functions(connection)
+            raw_hash = _sha_bytes(self.database.read_bytes())
+            accepted = connection.execute(
+                "SELECT agentic_evidence_snapshot_current(?,?,?,?,?,?)",
+                (
+                    self.database.relative_to(repository_root()).as_posix(),
+                    raw_hash,
+                    self.database.stat().st_size,
+                    "application/vnd.sqlite3",
+                    "none",
+                    "captured-now",
+                ),
+            ).fetchone()[0]
+
+        self.assertEqual(accepted, 0)
+
+    def test_risk_component_above_dominance_fails_without_write(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE risk_assessments SET action_risk='R4' "
+                "WHERE transition_id='transition'"
+            )
+
+        self._assert_promotion_fails_without_write("complete bound evidence")
+
     def test_migration_aborts_on_active_legacy_trust_rows(self) -> None:
         legacy = Path(self.temporary.name) / "legacy-minimal.db"
         with closing(sqlite3.connect(legacy)) as connection:
@@ -2010,6 +2074,18 @@ class TrustPromotionWriterTests(unittest.TestCase):
             schema_version,
             migration_sha256,
             len(SLO_QUERY_CONTRACTS),
+        )
+
+    def _bundle_hash_from_binding(self, binding: dict[str, object]) -> str:
+        return _trust_binding_hash(
+            "run",
+            "goal-run",
+            self.evidence_hash,
+            binding["verifier_run_id"],
+            binding["gate_run_id"],
+            binding["schema_version"],
+            binding["migration_sha256"],
+            binding["current_slo_query_count"],
         )
 
     def _trust_binding(self, connection: sqlite3.Connection) -> dict[str, object]:

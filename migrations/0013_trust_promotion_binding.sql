@@ -163,6 +163,48 @@ WHERE gr.run_id IS NOT NULL
   AND ra.side_effect_risk<>''
   AND ra.permission_risk<>''
   AND ra.irreversibility_risk<>''
+  AND CASE ra.action_risk
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END <= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END
+  AND CASE ra.target_risk
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END <= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END
+  AND CASE ra.data_risk
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END <= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END
+  AND CASE ra.side_effect_risk
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END <= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END
+  AND CASE ra.permission_risk
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END <= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END
+  AND CASE ra.irreversibility_risk
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE 99
+  END <= CASE t.risk_dominance
+    WHEN 'R0' THEN 0 WHEN 'R1' THEN 1 WHEN 'R2' THEN 2
+    WHEN 'R3' THEN 3 WHEN 'R4' THEN 4 ELSE -1
+  END
   AND g.decision='pass'
   AND g.requires_same_run=1
   AND m.version=(SELECT MAX(version) FROM schema_migrations)
