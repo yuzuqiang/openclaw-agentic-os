@@ -87,6 +87,12 @@ Current-vs-proposed truth:
 - Current file artifacts remain operational authority.
 - Current OpenClaw is below the required external runtime metadata contract. Gateway allowLease and session status do not yet prove exact run/idempotency ownership across post-RPC/pre-DB crashes.
 - Current P0 foundation adds ignored migration artifacts and fail-closed probes, but does not create production `control.db`, does not enable DB-authority dispatch, and does not prove runtime adapter behavior.
+- Current Issue 7 implementation adds only a synthetic/local
+  `db_authority_canary` artifact fixture writer. It records one local R1 canary
+  run, proves prepared-DB to artifact-write crash recovery, proves rollback to
+  `rollback_to_file_authority`, and regenerates projection identity from the
+  local artifact. It explicitly rejects real session-control rows and does not
+  call OpenClaw/Gateway/Cron or enable production database authority.
 - Proposed DB authority begins only after privacy preflight, metadata contract probes, schema fixtures, shadow backfill, dual-write parity, one low-risk canary, drain, rollback drill, and per-workflow cutover.
 
 ## Design Principles and Operational Confidence Definition
@@ -3970,6 +3976,35 @@ reactivated. The local writer derives all authority fields under `BEGIN
 IMMEDIATE`, reruns the current blocking SLO contracts under the write lock, and
 rechecks the evidence artifact before commit; it performs no OpenClaw/Gateway/Cron
 or production-authority calls.
+
+Current migration v14 database-authority canary binding:
+
+`0014_db_authority_canary_binding.sql` makes the workflow and authority identity
+of a run immutable once that run owns an `artifact_projections` row whose
+`source_authority` is `db_authority_canary`. The migration aborts when existing
+canary projections have a missing run, a non-canary run authority, an invalid
+prepared/finalized lifecycle, non-R1 risk, malformed digest or deterministic
+projection identity, multiple canary projections for one run, or no active
+canary/rollback workflow binding. Subsequent direct SQL cannot insert a canary
+projection for a non-canary run, mix non-canary projections into a canary run,
+update, delete, or replace the canary projection through a primary/unique
+identity collision, even when replacement data claims non-canary authority; nor
+can it move the run to another workflow, change the run's authority mode, mutate
+its prepared/finalized lifecycle or R1 risk identity, delete the run, duplicate a
+canary artifact path, or mutate the workflow cutover/parity metadata while any
+prepared or finalized canary projection exists. The workflow authority cannot be
+marked `rollback_to_file_authority` by raw SQL; only the local runtime rollback
+writer can insert a `db_authority_canary_rollback_proofs` row by consuming a
+connection-local rollback guard after validating the original cutover/parity
+metadata, scoping projection checks to the requested
+workflow so unrelated prepared canaries remain recoverable, and rehashing
+supplied artifacts immediately before recording rollback proof. The overlay also rebinds
+trust-promotion
+evidence and its insert guard
+to the current v14 schema and migration identity, preserving the complete
+current-SLO proof requirement after the schema advances. This preserves the
+original canary proof boundary across rollback validation; it does not enable
+production database authority or external RPC.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:

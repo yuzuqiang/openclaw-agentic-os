@@ -13,7 +13,12 @@ from unittest import mock
 import agentic_os
 import agentic_os.shadow as shadow_module
 from agentic_os.cli import main as cli_main
-from agentic_os.migrations import MigrationError, apply_migrations, repository_root
+from agentic_os.migrations import (
+    MigrationError,
+    _register_migration_functions,
+    apply_migrations,
+    repository_root,
+)
 from agentic_os.privacy import PrivacyPreflightError
 from agentic_os.shadow import (
     ShadowBackfillError,
@@ -49,6 +54,7 @@ class ShadowTests(unittest.TestCase):
 
     def _checkpoint_and_remove_sidecars(self) -> None:
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         for suffix in ("-wal", "-shm", "-journal"):
             Path(f"{self.database}{suffix}").unlink(missing_ok=True)
@@ -68,6 +74,7 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(result.projections[0].sha256, digest)
 
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -115,6 +122,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM artifact_projections WHERE run_id='shadow-run'"
@@ -160,6 +168,7 @@ class ShadowTests(unittest.TestCase):
         )
 
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT workflow,authority_mode FROM runs WHERE run_id='shadow-run'"
@@ -214,6 +223,7 @@ class ShadowTests(unittest.TestCase):
                 prepare_idempotency_key="prepare-two",
             )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT prepare_idempotency_key FROM runs WHERE run_id='shadow-run'"
@@ -253,6 +263,7 @@ class ShadowTests(unittest.TestCase):
                 self.assertIn("missing_shadow_run", {issue.reason for issue in audit.issues})
 
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE runs SET prepare_idempotency_key='prepare-tampered' "
                 "WHERE run_id='shadow-run'"
@@ -280,6 +291,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE runs SET prepare_idempotency_key='prepare-tampered' "
                 "WHERE run_id='shadow-run'"
@@ -307,6 +319,7 @@ class ShadowTests(unittest.TestCase):
         for finalized_at in ("not-a-date", "1970-01-01T00:00:00+00:00"):
             with self.subTest(finalized_at=finalized_at):
                 with sqlite3.connect(self.database) as connection:
+                    _register_migration_functions(connection)
                     connection.execute(
                         "UPDATE runs SET finalized_at=? WHERE run_id='shadow-run'",
                         (finalized_at,),
@@ -331,6 +344,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE runs SET finalized_at_epoch_ms=1 WHERE run_id='shadow-run'"
             )
@@ -349,6 +363,7 @@ class ShadowTests(unittest.TestCase):
         artifact = self._artifact()
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority_shadow','now')"
@@ -368,6 +383,7 @@ class ShadowTests(unittest.TestCase):
                 run_id="shadow-run",
             )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM artifact_projections").fetchone(),
                 (0,),
@@ -389,6 +405,7 @@ class ShadowTests(unittest.TestCase):
         )
         self.assertEqual(len(result.projections), 1)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM artifact_projections WHERE path=?",
@@ -406,6 +423,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     "INSERT INTO artifact_projections("
@@ -444,6 +462,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE artifact_projections SET projection_id='manual-projection' "
                 "WHERE run_id='shadow-run'"
@@ -564,6 +583,7 @@ class ShadowTests(unittest.TestCase):
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority_shadow','now')"
@@ -624,6 +644,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE workflow_authority SET mode='file_authority' WHERE workflow='heartbeat'"
             )
@@ -660,6 +681,7 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual({projection.path for projection in result.projections}, expected_paths)
         self.assertEqual(len({projection.projection_id for projection in result.projections}), 2)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 {
                     row[0]
@@ -709,6 +731,7 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(result.status, "written")
         self.assertEqual(artifact.read_bytes(), payload)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -755,6 +778,7 @@ class ShadowTests(unittest.TestCase):
         )
         self.assertEqual(replay.status, "replayed")
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM artifact_projections "
@@ -788,6 +812,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM workflow_authority "
@@ -799,6 +824,7 @@ class ShadowTests(unittest.TestCase):
     def test_dual_write_shadow_rejects_prior_run_without_workflow_metadata(self) -> None:
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
                 "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
@@ -825,6 +851,7 @@ class ShadowTests(unittest.TestCase):
         artifact = Path(self.temporary.name) / "reports" / "dual.json"
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority','now')"
@@ -843,6 +870,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -860,6 +888,7 @@ class ShadowTests(unittest.TestCase):
         backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority','now')"
@@ -884,6 +913,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(result.status, "written")
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -897,6 +927,7 @@ class ShadowTests(unittest.TestCase):
         backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority','now')"
@@ -928,6 +959,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -941,6 +973,7 @@ class ShadowTests(unittest.TestCase):
         backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority','now')"
@@ -952,6 +985,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE workflow_authority SET open_file_authority_runs=1 "
                 "WHERE workflow='heartbeat'"
@@ -971,6 +1005,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -984,6 +1019,7 @@ class ShadowTests(unittest.TestCase):
         backfilled = self._artifact("backfilled.json", b'{"shadow": true}\n')
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority','now')"
@@ -1010,6 +1046,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -1033,6 +1070,7 @@ class ShadowTests(unittest.TestCase):
         created_at, finalized_at_epoch_ms = shadow_module._utc_now()
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority_shadow','now')"
@@ -1083,6 +1121,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -1106,6 +1145,7 @@ class ShadowTests(unittest.TestCase):
         created_at, finalized_at_epoch_ms = shadow_module._utc_now()
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO workflow_authority(workflow,mode,updated_at) "
                 "VALUES('heartbeat','file_authority_shadow','now')"
@@ -1170,6 +1210,7 @@ class ShadowTests(unittest.TestCase):
             run_id="shadow-run",
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO artifact_projections("
                 "projection_id,run_id,path,sha256,source_authority,generated_at"
@@ -1213,6 +1254,7 @@ class ShadowTests(unittest.TestCase):
             new_workflow=True,
         )
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "UPDATE workflow_authority SET mode='file_authority_shadow' "
                 "WHERE workflow='heartbeat'"
@@ -1230,6 +1272,7 @@ class ShadowTests(unittest.TestCase):
             )
 
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
@@ -1271,6 +1314,7 @@ class ShadowTests(unittest.TestCase):
             )
 
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM artifact_projections "
@@ -1308,6 +1352,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(artifact.read_bytes(), original)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT sha256 FROM artifact_projections "
@@ -1348,6 +1393,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(changed_path.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM artifact_projections "
@@ -1373,6 +1419,7 @@ class ShadowTests(unittest.TestCase):
         extra_path = "reports/extra.json"
         extra_digest = "e" * 64
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO artifact_projections("
                 "projection_id,run_id,path,sha256,source_authority,generated_at"
@@ -1420,6 +1467,7 @@ class ShadowTests(unittest.TestCase):
         extra_relative = extra_artifact.resolve().relative_to(repository_root()).as_posix()
         extra_digest = hashlib.sha256(extra_artifact.read_bytes()).hexdigest()
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO artifact_projections("
                 "projection_id,run_id,path,sha256,source_authority,generated_at"
@@ -1464,6 +1512,7 @@ class ShadowTests(unittest.TestCase):
         extra_path = "reports/extra-shadow.json"
         extra_digest = "f" * 64
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             connection.execute(
                 "INSERT INTO artifact_projections("
                 "projection_id,run_id,path,sha256,source_authority,generated_at"
@@ -1599,6 +1648,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertFalse(artifact.exists())
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM runs "
@@ -1629,6 +1679,7 @@ class ShadowTests(unittest.TestCase):
         self.assertEqual(recovered.status, "recovered")
         self.assertEqual(artifact.read_bytes(), b'{"partial": true}\n')
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM runs WHERE run_id='write-failed'"
@@ -1662,6 +1713,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(artifact.read_bytes(), payload)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM runs WHERE run_id='finalize-failed'"
@@ -1686,6 +1738,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(recovered.status, "recovered")
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM runs WHERE run_id='finalize-failed'"
@@ -1718,6 +1771,7 @@ class ShadowTests(unittest.TestCase):
 
         self.assertEqual(artifact.read_bytes(), payload)
         with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
             self.assertEqual(
                 connection.execute(
                     "SELECT sha256,source_authority FROM artifact_projections "
