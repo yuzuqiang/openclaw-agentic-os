@@ -77,6 +77,8 @@ def _utc_iso_epoch_ms(value: object) -> int | None:
     text = value.strip()
     if not text:
         return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import stat
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import agentic_os
 from .migrations import (
+    _allow_next_db_authority_canary_rollback,
     _register_migration_functions,
     apply_migrations,
     verify_database_connection,
@@ -229,6 +231,9 @@ def db_authority_canary_artifact(
         else:
             _atomic_create_file(target, content)
         finalized_at, finalized_epoch_ms = _utc_now()
+        finalized_at = datetime.fromtimestamp(
+            finalized_epoch_ms / 1000, tz=timezone.utc
+        ).isoformat()
         connection.execute("BEGIN IMMEDIATE")
         try:
             _assert_no_real_session_control(connection, run_id=run_id)
@@ -434,6 +439,15 @@ def rollback_db_authority_canary(
                         f"canary projection cannot be regenerated for {relative}"
                     )
                 regenerated.append(regenerated_projection)
+            proof_hash = _canary_rollback_proof_hash(workflow, tuple(regenerated))
+            _allow_next_db_authority_canary_rollback(
+                connection, workflow, proof_hash
+            )
+            connection.execute(
+                "INSERT INTO db_authority_canary_rollback_proofs("
+                "workflow,proof_hash,created_at) VALUES(?,?,?)",
+                (workflow, proof_hash, rolled_back_at),
+            )
             updated = connection.execute(
                 "UPDATE workflow_authority SET mode='rollback_to_file_authority',"
                 "updated_at=? WHERE workflow=? AND mode='db_authority_canary'",
@@ -468,6 +482,28 @@ def _sha256_text(name: str, value: str) -> str:
     if len(normalized) != 64 or any(c not in "0123456789abcdef" for c in normalized):
         raise DbAuthorityCanaryError(f"{name} must be a lowercase SHA-256 digest")
     return normalized
+
+
+def _canary_rollback_proof_hash(
+    workflow: str, projections: tuple[ShadowProjection, ...]
+) -> str:
+    payload = json.dumps(
+        {
+            "projections": [
+                {
+                    "path": projection.path,
+                    "projection_id": projection.projection_id,
+                    "sha256": projection.sha256,
+                }
+                for projection in projections
+            ],
+            "source": "db-authority-canary-rollback-proof-v1",
+            "workflow": workflow,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _normalize_deadline(value: str) -> tuple[str, int]:

@@ -23,7 +23,12 @@ SELECT CASE WHEN EXISTS (
         SELECT COUNT(*)
         FROM artifact_projections same_run
         WHERE same_run.run_id=p.run_id
-          AND same_run.source_authority='db_authority_canary'
+      )<>1
+      OR (
+        SELECT COUNT(*)
+        FROM artifact_projections same_path
+        WHERE same_path.source_authority='db_authority_canary'
+          AND same_path.path=p.path
       )<>1
       OR (
         r.state='prepared'
@@ -41,10 +46,52 @@ SELECT CASE WHEN EXISTS (
       )
       OR w.workflow IS NULL
       OR w.mode NOT IN ('db_authority_canary','rollback_to_file_authority')
+      OR w.cutover_approved_by IS NULL
+      OR w.cutover_approved_by=''
+      OR length(w.cutover_evidence_hash)<>64
+      OR w.cutover_evidence_hash GLOB '*[^0-9a-f]*'
+      OR agentic_utc_iso_epoch_ms(w.rollback_deadline) IS NULL
+      OR length(w.last_parity_audit_hash)<>64
+      OR w.last_parity_audit_hash GLOB '*[^0-9a-f]*'
+      OR w.open_file_authority_runs<>0
     )
 ) THEN 0 ELSE 1 END;
 
 DROP TABLE db_authority_canary_binding_migration_guard;
+
+CREATE TABLE db_authority_canary_rollback_proofs (
+  workflow TEXT PRIMARY KEY REFERENCES workflow_authority(workflow)
+    ON UPDATE RESTRICT ON DELETE RESTRICT,
+  proof_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (
+    workflow<>''
+    AND length(proof_hash)=64
+    AND proof_hash NOT GLOB '*[^0-9a-f]*'
+    AND created_at<>''
+  )
+) STRICT;
+
+CREATE TRIGGER db_authority_canary_rollback_proofs_validate_insert
+BEFORE INSERT ON db_authority_canary_rollback_proofs
+WHEN agentic_db_authority_canary_rollback_allowed(
+  NEW.workflow,NEW.proof_hash
+)<>1
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary rollback proof requires local writer');
+END;
+
+CREATE TRIGGER db_authority_canary_rollback_proofs_preserve_update
+BEFORE UPDATE ON db_authority_canary_rollback_proofs
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary rollback proof is immutable');
+END;
+
+CREATE TRIGGER db_authority_canary_rollback_proofs_preserve_delete
+BEFORE DELETE ON db_authority_canary_rollback_proofs
+BEGIN
+  SELECT RAISE(ABORT,'db-authority canary rollback proof is immutable');
+END;
 
 CREATE TRIGGER runs_preserve_db_authority_canary_projection_binding_update
 BEFORE UPDATE ON runs
@@ -69,6 +116,8 @@ AND NOT (
       AND NEW.finalized_at IS NOT NULL
       AND NEW.finalized_at<>''
       AND typeof(NEW.finalized_at_epoch_ms)='integer'
+      AND CAST(ROUND((julianday(NEW.finalized_at) - 2440587.5) * 86400000) AS INTEGER)
+          IS NEW.finalized_at_epoch_ms
     )
     OR (
       OLD.state IS NEW.state
@@ -151,7 +200,7 @@ WHEN EXISTS (
   WHERE existing.source_authority='db_authority_canary'
     AND (
       existing.projection_id=NEW.projection_id
-      OR (existing.path=NEW.path AND existing.sha256=NEW.sha256)
+      OR existing.path=NEW.path
       OR existing.run_id=NEW.run_id
     )
 )
@@ -189,7 +238,7 @@ WHEN EXISTS (
    AND p.source_authority='db_authority_canary'
   WHERE r.workflow=OLD.workflow
     AND r.authority_mode='db_authority_canary'
-    AND r.state='finalized'
+    AND r.state IN ('prepared','finalized')
 )
 AND NOT (
   OLD.workflow IS NEW.workflow
@@ -203,6 +252,11 @@ AND NOT (
     OR (
       OLD.mode='db_authority_canary'
       AND NEW.mode='rollback_to_file_authority'
+      AND EXISTS (
+        SELECT 1
+        FROM db_authority_canary_rollback_proofs proof
+        WHERE proof.workflow=OLD.workflow
+      )
     )
   )
 )

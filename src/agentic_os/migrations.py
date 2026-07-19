@@ -78,8 +78,11 @@ def _shadow_projection_id(run_id: object, relative_path: object, digest: object)
 def _utc_iso_epoch_ms(value: object) -> int | None:
     if not isinstance(value, str) or not value.strip():
         return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
     try:
-        parsed = datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -266,6 +269,7 @@ def _migration_state(connection: sqlite3.Connection) -> dict[str, set[tuple[str,
         id(connection),
         {
             "slo_audit_writes": set(),
+            "db_authority_canary_rollbacks": set(),
         },
     )
 
@@ -276,6 +280,22 @@ def _allow_next_slo_audit_write(
     if not isinstance(slo_audit_id, str) or not slo_audit_id:
         raise MigrationError("SLO audit writer guard requires a non-empty audit id")
     _migration_state(connection)["slo_audit_writes"].add((slo_audit_id,))
+
+
+def _allow_next_db_authority_canary_rollback(
+    connection: sqlite3.Connection, workflow: str, proof_hash: str
+) -> None:
+    if not isinstance(workflow, str) or not workflow:
+        raise MigrationError("canary rollback guard requires a non-empty workflow")
+    if (
+        not isinstance(proof_hash, str)
+        or len(proof_hash) != 64
+        or any(char not in "0123456789abcdef" for char in proof_hash)
+    ):
+        raise MigrationError("canary rollback guard requires a SHA-256 proof hash")
+    _migration_state(connection)["db_authority_canary_rollbacks"].add(
+        (workflow, proof_hash)
+    )
 
 
 def _consume_guard(
@@ -453,6 +473,17 @@ def _register_migration_functions(connection: sqlite3.Connection) -> None:
             state,
             "slo_audit_writes",
             (slo_audit_id,) if isinstance(slo_audit_id, str) else ("",),
+        ),
+    )
+    connection.create_function(
+        "agentic_db_authority_canary_rollback_allowed",
+        2,
+        lambda workflow, proof_hash: _consume_guard(
+            state,
+            "db_authority_canary_rollbacks",
+            (workflow, proof_hash)
+            if isinstance(workflow, str) and isinstance(proof_hash, str)
+            else ("", ""),
         ),
     )
     connection.create_function(

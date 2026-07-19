@@ -10,11 +10,11 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `3433547b079dadcf478e9b312e197ef11450a9334c4b1aac03a8e1f8942927ab`
+- Current design artifact SHA-256: `87ae40dee798c204331de70813ffe7c0b4a3c85278f21f0cd025f8ecbfe79a55`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `de98bc8f835ab6bf79a62129e252c87347b7b581fba1f0b9df2c6c4b97c547de`
-- Current migration manifest SHA-256: `34c4f2ad875f722b72cb98f8d096831788f834897cd11a00ff2b62881f2328f6`
-- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary binding immutability overlay, and 30 executable SLO queries
+- Current latest migration SHA-256: `43ae266521a9ff988356635b523a46447177d038b70cc3a9ebfb66a38f89a67c`
+- Current migration manifest SHA-256: `d0ebe421cebcf01745f25d3bfc893b7a04f342a75cb2ff84c7f90bf8768a85ac`
+- Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
 The current P0 foundation materializes the corrected schema and supplies
@@ -32,7 +32,7 @@ PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/t
 PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --prepare-idempotency-key file-shadow:shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --risk-class R1 --risk-dominance R1 --new-workflow --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json
-PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary --db state/agentic-os/test-control.db --workflow local-artifact-canary --run-id canary-demo --cutover-approved-by local-fixture --cutover-evidence-hash <sha256> --rollback-deadline 2099-01-01T00:00:00Z --last-parity-audit-hash <sha256> --artifact tmp/canary-demo.json --content '{"synthetic":true}'
+PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary --db state/agentic-os/test-control.db --workflow local-artifact-canary --run-id canary-demo --cutover-approved-by local-fixture --cutover-evidence-hash <sha256> --rollback-deadline 2099-01-01T00:00:00+00:00 --last-parity-audit-hash <sha256> --artifact tmp/canary-demo.json --content '{"synthetic":true}'
 PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary-rollback --db state/agentic-os/test-control.db --workflow local-artifact-canary --artifact tmp/canary-demo.json
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v

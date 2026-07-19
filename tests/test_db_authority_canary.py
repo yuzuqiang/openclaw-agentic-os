@@ -134,6 +134,30 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 ).fetchone(),
                 ("prepared",),
             )
+            _register_migration_functions(connection)
+            for statement, parameters in (
+                (
+                    "UPDATE workflow_authority SET cutover_evidence_hash=? "
+                    "WHERE workflow='heartbeat'",
+                    ("f" * 64,),
+                ),
+                (
+                    "UPDATE workflow_authority SET mode='rollback_to_file_authority' "
+                    "WHERE workflow='heartbeat'",
+                    (),
+                ),
+                (
+                    "UPDATE runs SET state='finalized',"
+                    "finalized_at='2099-01-01T00:00:00+00:00',"
+                    "finalized_at_epoch_ms=1 WHERE run_id='canary-run'",
+                    (),
+                ),
+            ):
+                with self.subTest(statement=statement), self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "canary workflow binding|canary projection binding",
+                ):
+                    connection.execute(statement, parameters)
 
         recovered = db_authority_canary_artifact(
             self.database,
@@ -718,6 +742,13 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             ):
                 connection.execute(
                     "UPDATE workflow_authority SET mode='file_authority' "
+                    "WHERE workflow='heartbeat'"
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "canary workflow binding is immutable"
+            ):
+                connection.execute(
+                    "UPDATE workflow_authority SET mode='rollback_to_file_authority' "
                     "WHERE workflow='heartbeat'"
                 )
             with self.assertRaisesRegex(

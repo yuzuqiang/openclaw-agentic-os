@@ -543,7 +543,8 @@ class MigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
-            self.assertEqual(len(tables), 34)
+            self.assertEqual(len(tables), 35)
+            self.assertIn(("db_authority_canary_rollback_proofs",), tables)
             rows = connection.execute(
                 "SELECT version,name,sha256 FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -1605,11 +1606,45 @@ class MigrationTests(unittest.TestCase):
                 "'canary-run','tmp/extra.json',?,'file_authority','now')",
                 ("f" * 64,),
             )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+            "finalized_at_epoch_ms) VALUES('canary-run-duplicate-path',"
+            "'prepare-canary-duplicate-path','canary-a','db_authority_canary',"
+            "'finalized','R1','R1','now','now','2099-01-01T00:00:00+00:00',"
+            "4070908800000)"
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "canary projection identity is immutable"
+        ):
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    _shadow_projection_id(
+                        "canary-run-duplicate-path",
+                        "tmp/canary.json",
+                        "f" * 64,
+                    ),
+                    "canary-run-duplicate-path",
+                    "tmp/canary.json",
+                    "f" * 64,
+                    "db_authority_canary",
+                    "2099-01-01T00:00:00+00:00",
+                ),
+            )
         with self.assertRaisesRegex(
             sqlite3.IntegrityError, "canary workflow binding is immutable"
         ):
             connection.execute(
                 "UPDATE workflow_authority SET mode='file_authority' "
+                "WHERE workflow='canary-a'"
+            )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "canary workflow binding is immutable"
+        ):
+            connection.execute(
+                "UPDATE workflow_authority SET mode='rollback_to_file_authority' "
                 "WHERE workflow='canary-a'"
             )
         with self.assertRaisesRegex(
@@ -1695,6 +1730,124 @@ class MigrationTests(unittest.TestCase):
                 "UPDATE runs SET authority_mode='file_authority' "
                 "WHERE run_id='canary-run'"
             )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
+    def test_canary_binding_migration_rejects_malformed_cutover_metadata(self) -> None:
+        self._apply_migrations_through(13, "through-v13-canary-bad-cutover")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES('canary','db_authority_canary','local-fixture',"
+                "'notsha','not-a-deadline','also-notsha','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+                "finalized_at_epoch_ms) VALUES('canary-run','prepare-canary','canary',"
+                "'db_authority_canary','finalized','R1','R1','now','now',"
+                "'2099-01-01T00:00:00+00:00',4070908800000)"
+            )
+            digest = "d" * 64
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    _shadow_projection_id("canary-run", "tmp/canary.json", digest),
+                    "canary-run",
+                    "tmp/canary.json",
+                    digest,
+                    "db_authority_canary",
+                    "2099-01-01T00:00:00+00:00",
+                ),
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
+    def test_canary_binding_migration_counts_every_projection_for_canary_runs(self) -> None:
+        self._apply_migrations_through(13, "through-v13-canary-extra-projection")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES('canary','db_authority_canary','local-fixture',?,"
+                "'2099-01-01T00:00:00+00:00',?,'now')",
+                ("c" * 64, "e" * 64),
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+                "state,risk_class,risk_dominance,created_at,updated_at,finalized_at,"
+                "finalized_at_epoch_ms) VALUES('canary-run','prepare-canary','canary',"
+                "'db_authority_canary','finalized','R1','R1','now','now',"
+                "'2099-01-01T00:00:00+00:00',4070908800000)"
+            )
+            canary_digest = "d" * 64
+            file_digest = "f" * 64
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    _shadow_projection_id("canary-run", "tmp/canary.json", canary_digest),
+                    "canary-run",
+                    "tmp/canary.json",
+                    canary_digest,
+                    "db_authority_canary",
+                    "2099-01-01T00:00:00+00:00",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    "legacy-file-authority-extra",
+                    "canary-run",
+                    "tmp/extra.json",
+                    file_digest,
+                    "file_authority",
+                    "2099-01-01T00:00:00+00:00",
+                ),
+            )
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            apply_migrations(self.database)
+
+    def test_canary_binding_migration_rejects_duplicate_canary_paths(self) -> None:
+        self._apply_migrations_through(13, "through-v13-canary-duplicate-path")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "updated_at) VALUES('canary','db_authority_canary','local-fixture',?,"
+                "'2099-01-01T00:00:00+00:00',?,'now')",
+                ("c" * 64, "e" * 64),
+            )
+            for run_id, digest in (("canary-run-a", "a" * 64), ("canary-run-b", "b" * 64)):
+                connection.execute(
+                    "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                    "authority_mode,state,risk_class,risk_dominance,created_at,"
+                    "updated_at,finalized_at,finalized_at_epoch_ms) VALUES(?,?,'canary',"
+                    "'db_authority_canary','finalized','R1','R1','now','now',"
+                    "'2099-01-01T00:00:00+00:00',4070908800000)",
+                    (run_id, f"prepare-{run_id}"),
+                )
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,sha256,"
+                    "source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        _shadow_projection_id(run_id, "tmp/canary.json", digest),
+                        run_id,
+                        "tmp/canary.json",
+                        digest,
+                        "db_authority_canary",
+                        "2099-01-01T00:00:00+00:00",
+                    ),
+                )
 
         with self.assertRaises(sqlite3.IntegrityError):
             apply_migrations(self.database)

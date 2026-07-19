@@ -3990,12 +3990,15 @@ projection for a non-canary run, mix non-canary projections into a canary run,
 update, delete, or replace the canary projection through a primary/unique
 identity collision, even when replacement data claims non-canary authority; nor
 can it move the run to another workflow, change the run's authority mode, mutate
-its prepared/finalized lifecycle or R1 risk identity, delete the run, or flip the
-workflow authority away from `db_authority_canary` except through the validated
-`rollback_to_file_authority` transition. Runtime rollback additionally validates
-the original cutover/parity metadata, scopes projection checks to the requested
-workflow so unrelated prepared canaries remain recoverable, and rehashes supplied
-artifacts immediately before recording rollback proof. The overlay also rebinds
+its prepared/finalized lifecycle or R1 risk identity, delete the run, duplicate a
+canary artifact path, or mutate the workflow cutover/parity metadata while any
+prepared or finalized canary projection exists. The workflow authority cannot be
+marked `rollback_to_file_authority` by raw SQL; only the local runtime rollback
+writer can insert a `db_authority_canary_rollback_proofs` row by consuming a
+connection-local rollback guard after validating the original cutover/parity
+metadata, scoping projection checks to the requested
+workflow so unrelated prepared canaries remain recoverable, and rehashing
+supplied artifacts immediately before recording rollback proof. The overlay also rebinds
 trust-promotion
 evidence and its insert guard
 to the current v14 schema and migration identity, preserving the complete
