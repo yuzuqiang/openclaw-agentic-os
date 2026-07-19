@@ -580,9 +580,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
@@ -594,10 +597,15 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run
-    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
@@ -609,9 +617,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before lease changes');
@@ -623,9 +634,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
@@ -637,10 +651,15 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run
-    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
@@ -652,9 +671,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before spawn request changes');
@@ -666,9 +688,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before session changes');
@@ -680,10 +705,15 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run
-    ON changed_run.run_id IN (OLD.run_id,NEW.run_id)
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before session changes');
@@ -695,9 +725,12 @@ WHEN EXISTS (
   SELECT 1
   FROM trust_observations trust
   JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
-  JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
   WHERE trust.invalidated_at IS NULL
-    AND trusted_run.workflow=changed_run.workflow
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before session changes');

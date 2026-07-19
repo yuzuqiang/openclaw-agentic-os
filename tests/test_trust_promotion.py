@@ -367,6 +367,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
 
     def test_post_promotion_slo_schema_and_registry_changes_require_invalidation(self) -> None:
         self._seed_valid_fixture()
+        self._seed_bound_runtime_rows()
         self._promote()
         schema_version, migration_sha256 = self._current_schema_identity()
         contract = SLO_QUERY_CONTRACTS[0]
@@ -433,26 +434,82 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "'post-trust-unbound-idem','{}','pending','later',2000)"
                 )
             connection.execute("PRAGMA foreign_keys=ON")
-            with self.assertRaisesRegex(sqlite3.IntegrityError, "lease changes"):
-                connection.execute(
+            self._assert_integrity_error_without_authority_or_trust_write(
+                connection,
+                "lease changes",
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                "'post-trust-lease','run','phase','transition','agent','requester',"
+                "'acquire_pending','post-trust-lease-client','post-trust-acquire',"
+                "60000,'later',2000)",
+            )
+            connection.execute("PRAGMA foreign_keys=OFF")
+            for label, statement, message in (
+                (
+                    "unbound lease insert",
                     "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
                     "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
                     "ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
-                    "'post-trust-lease','run','phase','transition','agent','requester',"
-                    "'acquire_pending','post-trust-lease-client','post-trust-acquire',"
-                    "60000,'later',2000)"
-                )
-            with self.assertRaisesRegex(sqlite3.IntegrityError, "run changes"):
-                connection.execute(
-                    "UPDATE runs SET state='gate_passed' WHERE run_id='run'"
-                )
-            with self.assertRaisesRegex(sqlite3.IntegrityError, "run changes"):
-                connection.execute(
-                    "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
-                    "authority_mode,state,risk_class,risk_dominance,created_at,"
-                    "updated_at) VALUES('post-trust-run','post-trust-prepare',"
-                    "'workflow','file_authority','finalized','R2','R2','now','now')"
-                )
+                    "'post-trust-unbound-lease','missing-run','phase','transition',"
+                    "'agent','requester','acquire_pending','post-trust-unbound-lease-client',"
+                    "'post-trust-unbound-acquire',60000,'later',2000)",
+                    "lease changes",
+                ),
+                (
+                    "unbound spawn request insert",
+                    "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                    "transition_id,client_request_id,spawn_idempotency_key,task_digest,"
+                    "state,created_at,updated_at) VALUES('post-trust-unbound-spawn',"
+                    "'missing-run','phase','agent','transition','client','spawn-idem',"
+                    "'task','pending','now','now')",
+                    "spawn request changes",
+                ),
+                (
+                    "unbound session insert",
+                    "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+                    "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+                    "task_digest,state,spawned_at,completed_at) VALUES("
+                    "'post-trust-unbound-session','spawn','missing-run','transition',"
+                    "'phase','agent','client','spawn-idem','session-key','task',"
+                    "'completed','spawned-now','completed-now')",
+                    "session changes",
+                ),
+                (
+                    "unbound lease update",
+                    "UPDATE leases SET run_id='missing-run' WHERE lease_id='pretrust-lease'",
+                    "lease changes",
+                ),
+                (
+                    "unbound spawn request update",
+                    "UPDATE spawn_requests SET run_id='missing-run' "
+                    "WHERE spawn_request_id='pretrust-spawn'",
+                    "spawn request changes",
+                ),
+                (
+                    "unbound session update",
+                    "UPDATE sessions SET run_id='missing-run' WHERE session_id='pretrust-session'",
+                    "session changes",
+                ),
+            ):
+                with self.subTest(label=label):
+                    self._assert_integrity_error_without_authority_or_trust_write(
+                        connection, message, statement
+                    )
+            connection.execute("PRAGMA foreign_keys=ON")
+            self._assert_integrity_error_without_authority_or_trust_write(
+                connection,
+                "run changes",
+                "UPDATE runs SET state='gate_passed' WHERE run_id='run'",
+            )
+            self._assert_integrity_error_without_authority_or_trust_write(
+                connection,
+                "run changes",
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at) VALUES('post-trust-run','post-trust-prepare',"
+                "'workflow','file_authority','finalized','R2','R2','now','now')",
+            )
             with self.assertRaisesRegex(
                 sqlite3.IntegrityError, "predicate plugin metadata"
             ):
@@ -1034,6 +1091,35 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 (_sha("sibling-artifact"),),
             )
 
+    def _seed_bound_runtime_rows(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+                "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+                "created_at,updated_at) VALUES('pretrust-spawn','run','phase','agent',"
+                "'transition','client','spawn-idem','task','pending','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "ttl_ms,expires_at,expires_at_epoch_ms) VALUES('pretrust-lease','run',"
+                "'phase','transition','agent','requester','acquire_pending',"
+                "'pretrust-lease-client','pretrust-acquire',60000,'later',2000)"
+            )
+            connection.execute(
+                "UPDATE spawn_requests SET session_key='session-key' "
+                "WHERE spawn_request_id='pretrust-spawn'"
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,spawn_request_id,run_id,transition_id,"
+                "phase,agent_id,client_request_id,spawn_idempotency_key,session_key,"
+                "task_digest,state,spawned_at,completed_at) VALUES('pretrust-session',"
+                "'pretrust-spawn','run','transition','phase','agent','client',"
+                "'spawn-idem','session-key','task','completed','spawned-now',"
+                "'completed-now')"
+            )
+
     def _seed_completed_spawn_and_settlement(
         self, *, usage_confidence: str, cost_confidence: str
     ) -> None:
@@ -1201,6 +1287,34 @@ class TrustPromotionWriterTests(unittest.TestCase):
             self._promote(**overrides)
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(self._trust_count(connection), before)
+
+    def _assert_integrity_error_without_authority_or_trust_write(
+        self, connection: sqlite3.Connection, message: str, statement: str
+    ) -> None:
+        before = self._authority_and_trust_state(connection)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, message):
+            connection.execute(statement)
+        self.assertEqual(self._authority_and_trust_state(connection), before)
+
+    def _authority_and_trust_state(self, connection: sqlite3.Connection) -> tuple[int, int, int]:
+        return (
+            int(connection.execute("SELECT COUNT(*) FROM trust_observations").fetchone()[0]),
+            int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM trust_observations WHERE invalidated_at IS NULL"
+                ).fetchone()[0]
+            ),
+            int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM runs WHERE authority_mode<>'file_authority'"
+                ).fetchone()[0]
+            )
+            + int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_authority WHERE mode<>'file_authority'"
+                ).fetchone()[0]
+            ),
+        )
 
     def _trust_count(self, connection: sqlite3.Connection) -> int:
         return int(connection.execute("SELECT COUNT(*) FROM trust_observations").fetchone()[0])
