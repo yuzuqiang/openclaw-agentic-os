@@ -3953,13 +3953,14 @@ trust contract. Predicate-plugin metadata referenced by a goal run is immutable
 before promotion, and post-promotion budget, settlement, runtime SLO inputs
 (`external_rpc_intents`, `leases`, `spawn_requests`, `sessions`, `runs`), model
 cost registry, zero-reserve policy, SLO audit, schema, SLO registry, and
-predicate-plugin metadata cannot change while trust is active; callers must
-invalidate the trust row first. Active trust rows are immutable except for
-setting `invalidated_at` to retire stale trust, and invalidated rows cannot be
+predicate-plugin metadata, same-workflow settlements, unbound runtime rows, and
+risk assessments cannot change while trust is active; callers must invalidate
+the trust row first. Active trust rows are immutable except for setting
+`invalidated_at` to retire stale trust, and invalidated rows cannot be
 reactivated. The local writer derives all authority fields under `BEGIN
 IMMEDIATE`, reruns the current blocking SLO contracts under the write lock, and
-rechecks the evidence artifact before commit; it performs no
-OpenClaw/Gateway/Cron or production-authority calls.
+rechecks the evidence artifact before commit; it performs no OpenClaw/Gateway/Cron
+or production-authority calls.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:

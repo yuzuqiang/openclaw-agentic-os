@@ -206,8 +206,67 @@ WHERE gr.run_id IS NOT NULL
   )
   AND NOT EXISTS (
     SELECT 1 FROM budget_settlements bs
-    WHERE bs.run_id=r.run_id
+    JOIN runs settlement_run ON settlement_run.run_id=bs.run_id
+    WHERE settlement_run.workflow=r.workflow
       AND (bs.usage_confidence<>'known' OR bs.cost_confidence<>'known')
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM run_budgets current_rb
+    LEFT JOIN (
+      SELECT
+        be.run_id,
+        SUM(CASE WHEN be.event_type='reserve' THEN be.time_seconds
+                 WHEN be.event_type IN ('release','consume') THEN -be.time_seconds
+                 ELSE 0 END) AS net_reserved_time,
+        SUM(CASE WHEN be.event_type='reserve' THEN be.input_tokens
+                 WHEN be.event_type IN ('release','consume') THEN -be.input_tokens
+                 ELSE 0 END) AS net_reserved_input,
+        SUM(CASE WHEN be.event_type='reserve' THEN be.output_tokens
+                 WHEN be.event_type IN ('release','consume') THEN -be.output_tokens
+                 ELSE 0 END) AS net_reserved_output,
+        SUM(CASE WHEN be.event_type='reserve' THEN be.cost_microusd
+                 WHEN be.event_type IN ('release','consume') THEN -be.cost_microusd
+                 ELSE 0 END) AS net_reserved_cost,
+        SUM(CASE WHEN be.event_type='reserve' THEN be.retry_units
+                 WHEN be.event_type IN ('release','retry_decrement') THEN -be.retry_units
+                 WHEN be.event_type='retry_restore' THEN be.retry_units
+                 ELSE 0 END) AS net_reserved_retries,
+        SUM(CASE WHEN be.event_type='reserve' THEN be.human_attention_units
+                 WHEN be.event_type IN ('release','human_attention') THEN -be.human_attention_units
+                 ELSE 0 END) AS net_reserved_human,
+        SUM(CASE WHEN be.event_type='consume' THEN be.time_seconds ELSE 0 END) AS consumed_time,
+        SUM(CASE WHEN be.event_type='consume' THEN be.input_tokens ELSE 0 END) AS consumed_input,
+        SUM(CASE WHEN be.event_type='consume' THEN be.output_tokens ELSE 0 END) AS consumed_output,
+        SUM(CASE WHEN be.event_type='consume' THEN be.cost_microusd ELSE 0 END) AS consumed_cost,
+        SUM(CASE WHEN be.event_type='retry_decrement' THEN be.retry_units
+                 WHEN be.event_type='retry_restore' THEN -be.retry_units
+                 ELSE 0 END) AS consumed_retries,
+        SUM(CASE WHEN be.event_type='human_attention' THEN be.human_attention_units ELSE 0 END) AS consumed_human
+      FROM budget_events be
+      GROUP BY be.run_id
+    ) budget_sums ON budget_sums.run_id=current_rb.run_id
+    WHERE current_rb.workflow=r.workflow
+      AND (
+        COALESCE(budget_sums.net_reserved_time,0)<0
+        OR COALESCE(budget_sums.net_reserved_input,0)<0
+        OR COALESCE(budget_sums.net_reserved_output,0)<0
+        OR COALESCE(budget_sums.net_reserved_cost,0)<0
+        OR COALESCE(budget_sums.net_reserved_retries,0)<0
+        OR COALESCE(budget_sums.net_reserved_human,0)<0
+        OR COALESCE(budget_sums.net_reserved_time,0)<>current_rb.reserved_time_seconds
+        OR COALESCE(budget_sums.net_reserved_input,0)<>current_rb.reserved_input_tokens
+        OR COALESCE(budget_sums.net_reserved_output,0)<>current_rb.reserved_output_tokens
+        OR COALESCE(budget_sums.net_reserved_cost,0)<>current_rb.reserved_cost_microusd
+        OR COALESCE(budget_sums.net_reserved_retries,0)<>current_rb.reserved_retries
+        OR COALESCE(budget_sums.net_reserved_human,0)<>current_rb.reserved_human_attention
+        OR COALESCE(budget_sums.consumed_time,0)<>current_rb.consumed_time_seconds
+        OR COALESCE(budget_sums.consumed_input,0)<>current_rb.consumed_input_tokens
+        OR COALESCE(budget_sums.consumed_output,0)<>current_rb.consumed_output_tokens
+        OR COALESCE(budget_sums.consumed_cost,0)<>current_rb.consumed_cost_microusd
+        OR COALESCE(budget_sums.consumed_retries,0)<>current_rb.consumed_retries
+        OR COALESCE(budget_sums.consumed_human,0)<>current_rb.consumed_human_attention
+      )
   )
   AND NOT EXISTS (
     SELECT 1
@@ -232,12 +291,14 @@ WHERE gr.run_id IS NOT NULL
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(be.created_at_epoch_ms)
             FROM budget_events be
-            WHERE be.run_id=r.run_id
+            JOIN runs be_run ON be_run.run_id=be.run_id
+            WHERE be_run.workflow=r.workflow
           ),0)
           AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(bs.created_at_epoch_ms)
             FROM budget_settlements bs
-            WHERE bs.run_id=r.run_id
+            JOIN runs bs_run ON bs_run.run_id=bs.run_id
+            WHERE bs_run.workflow=r.workflow
           ),0)
           AND sa.slo_audit_id=(
             SELECT latest.slo_audit_id
@@ -490,9 +551,15 @@ END;
 CREATE TRIGGER budget_settlements_preserve_active_trust_insert
 BEFORE INSERT ON budget_settlements
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
-  WHERE trust.run_id=NEW.run_id
-    AND trust.invalidated_at IS NULL
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
@@ -501,9 +568,18 @@ END;
 CREATE TRIGGER budget_settlements_preserve_active_trust_update
 BEFORE UPDATE ON budget_settlements
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
   WHERE trust.invalidated_at IS NULL
-    AND (trust.run_id=OLD.run_id OR trust.run_id=NEW.run_id)
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
@@ -512,9 +588,15 @@ END;
 CREATE TRIGGER budget_settlements_preserve_active_trust_delete
 BEFORE DELETE ON budget_settlements
 WHEN EXISTS (
-  SELECT 1 FROM trust_observations trust
-  WHERE trust.run_id=OLD.run_id
-    AND trust.invalidated_at IS NULL
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before settlement changes');
@@ -991,6 +1073,60 @@ WHEN EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT,'active trust requires invalidation before goal manifest changes');
+END;
+
+CREATE TRIGGER risk_assessments_preserve_active_trust_insert
+BEFORE INSERT ON risk_assessments
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before risk assessment changes');
+END;
+
+CREATE TRIGGER risk_assessments_preserve_active_trust_update
+BEFORE UPDATE ON risk_assessments
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs old_changed_run ON old_changed_run.run_id=OLD.run_id
+  LEFT JOIN runs new_changed_run ON new_changed_run.run_id=NEW.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      old_changed_run.run_id IS NULL
+      OR new_changed_run.run_id IS NULL
+      OR trusted_run.workflow=old_changed_run.workflow
+      OR trusted_run.workflow=new_changed_run.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before risk assessment changes');
+END;
+
+CREATE TRIGGER risk_assessments_preserve_active_trust_delete
+BEFORE DELETE ON risk_assessments
+WHEN EXISTS (
+  SELECT 1
+  FROM trust_observations trust
+  JOIN runs trusted_run ON trusted_run.run_id=trust.run_id
+  LEFT JOIN runs changed_run ON changed_run.run_id=OLD.run_id
+  WHERE trust.invalidated_at IS NULL
+    AND (
+      changed_run.run_id IS NULL
+      OR trusted_run.workflow=changed_run.workflow
+    )
+)
+BEGIN
+  SELECT RAISE(ABORT,'active trust requires invalidation before risk assessment changes');
 END;
 
 CREATE TRIGGER trust_observations_validate_bound_reactivate_update

@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `a154aa44d0ba0b6e258939e8bb29cf973d8039aaf064d333a0a9619e60332f4a`
+- Current design artifact SHA-256: `22571e91bbe40f3532cf03bbf51d7576b3a2c42455460630b6b363cd5a1a46c9`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `30a79653c24e6309eea3f28b68d4b0f6fbc8f40234a7f2529f1da608f3348a6c`
-- Current migration manifest SHA-256: `d5c5ab47d9dc859c81c7ba2ce24ff6a4ed422b62594c7c78314bcf74957fd975`
+- Current latest migration SHA-256: `2904bfb0141f67e9a6cebb8dcc96eafb9814566b3c32a2e928857c6652f5ba9a`
+- Current migration manifest SHA-256: `6902896cfeb299c984f8c075d7055af62288787a61e34b479dc9940c49a71b61`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, and one trust-promotion binding overlay, 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -195,12 +195,12 @@ and the registered SQL function can re-hash the evidence artifact. Unknown or
 estimated usage/cost, self-verifier evidence, wrong-run evidence, stale or
 missing latest SLO audits, database-authority snapshots, changed evidence
 artifacts, malformed binding hashes, post-promotion budget/SLO/schema/SLO
-registry evidence changes before invalidation, runtime SLO input inserts in the
-trusted workflow, unbound external RPC rows, predicate-plugin identity drift,
-goal-manifest identity drift, duplicate active bindings, and active-row rewrites
-fail closed without authoritative trust writes. Active rows can still be
-invalidated by setting `invalidated_at`, but cannot otherwise be changed or
-reactivated.
+registry evidence changes before invalidation, same-workflow budget settlement
+changes, runtime SLO input inserts in the trusted workflow, unbound external RPC
+or session rows, predicate-plugin identity drift, goal-manifest identity drift,
+risk-assessment drift, duplicate active bindings, and active-row rewrites fail
+closed without authoritative trust writes. Active rows can still be invalidated
+by setting `invalidated_at`, but cannot otherwise be changed or reactivated.
 This slice does not call OpenClaw, Gateway, Cron, request external review, or
 enable production database authority.
 

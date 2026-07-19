@@ -433,6 +433,16 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "'allow_lease_release','post-trust-unbound-client',"
                     "'post-trust-unbound-idem','{}','pending','later',2000)"
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "session changes"):
+                connection.execute(
+                    "INSERT INTO sessions(session_id,spawn_request_id,run_id,"
+                    "transition_id,phase,agent_id,client_request_id,"
+                    "spawn_idempotency_key,session_key,task_digest,state,"
+                    "spawned_at) VALUES('post-trust-orphan-session',"
+                    "'missing-spawn','missing-run','transition','phase','agent',"
+                    "'post-trust-orphan-client','post-trust-orphan-idem',"
+                    "'post-trust-orphan-session-key','task','completed','later')"
+                )
             connection.execute("PRAGMA foreign_keys=ON")
             self._assert_integrity_error_without_authority_or_trust_write(
                 connection,
@@ -531,6 +541,12 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "UPDATE goal_manifests SET goal_id='goal-mutated' "
                     "WHERE goal_id='goal'"
                 )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "risk assessment changes"
+            ):
+                connection.execute(
+                    "DELETE FROM risk_assessments WHERE transition_id='transition'"
+                )
             connection.execute(
                 "UPDATE trust_observations SET invalidated_at='invalid-now' "
                 "WHERE observation_id='trust'"
@@ -619,6 +635,28 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     "UPDATE run_budgets SET selected_provider='other-provider' "
                     "WHERE run_id='run'"
                 )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "settlement changes"):
+                connection.execute("PRAGMA foreign_keys=OFF")
+                connection.execute(
+                    "INSERT INTO budget_settlements(settlement_id,"
+                    "settlement_idempotency_key,settlement_dedupe_hash,run_id,"
+                    "transition_id,spawn_request_id,provider,model,"
+                    "endpoint_binding_id,capability_class,cost_registry_id,"
+                    "cost_effective_at,cost_registry_hash,cost_confidence,"
+                    "actual_time_seconds,actual_input_tokens,actual_output_tokens,"
+                    "actual_cost_microusd,actual_retry_units,"
+                    "actual_human_attention_units,released_time_seconds,"
+                    "released_input_tokens,released_output_tokens,"
+                    "released_cost_microusd,released_retry_units,"
+                    "released_human_attention_units,usage_confidence,source,"
+                    "created_at,created_at_epoch_ms,clock_context_id) VALUES("
+                    "'post-trust-sibling-settlement','post-trust-sibling-settlement-idem',"
+                    "'post-trust-sibling-settlement-dedupe','sibling-run',"
+                    "'sibling-transition','missing-spawn','provider','model','endpoint',"
+                    "'capability','cost-row','effective','cost-hash','known',"
+                    "0,0,0,0,0,0,0,0,0,0,0,0,'known','test','now',2000,'clock')"
+                )
+            connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(
                 "UPDATE trust_observations SET invalidated_at='invalid-now' "
                 "WHERE observation_id='trust'"
@@ -896,6 +934,43 @@ class TrustPromotionWriterTests(unittest.TestCase):
                     ),
                 )
             self.assertEqual(self._trust_count(connection), before)
+
+    def test_direct_sql_rejects_stale_budget_audits_after_budget_input_drift(self) -> None:
+        self._seed_valid_fixture()
+        with closing(sqlite3.connect(self.database)) as connection:
+            _register_migration_functions(connection)
+            binding = self._trust_binding(connection)
+            latest_epoch = connection.execute(
+                "SELECT MAX(run_at_epoch_ms) FROM slo_audits"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+                "event_dedupe_hash,event_sequence,run_id,transition_id,provider,"
+                "model,endpoint_binding_id,capability_class,cost_registry_id,"
+                "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+                "input_tokens,cost_microusd,usage_confidence,source,created_at,"
+                "created_at_epoch_ms) VALUES('post-audit-reserve',"
+                "'post-audit-reserve-idem','post-audit-reserve-dedupe',1,'run',"
+                "'transition','provider','model','endpoint','capability','cost-row',"
+                "'effective','cost-hash','known','reserve',1,1,'known','test','now',?)",
+                (int(latest_epoch) + 1000,),
+            )
+            connection.execute(
+                "UPDATE run_budgets SET reserved_input_tokens=1,"
+                "reserved_cost_microusd=1 WHERE run_id='run'"
+            )
+            bundle_hash = _trust_binding_hash(
+                "run",
+                "goal-run",
+                self.evidence_hash,
+                binding["verifier_run_id"],
+                binding["gate_run_id"],
+                binding["schema_version"],
+                binding["migration_sha256"],
+                binding["current_slo_query_count"],
+            )
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "complete bound evidence"):
+                self._insert_direct_trust(connection, "direct-stale-budget", binding, bundle_hash)
 
     def test_migration_aborts_on_active_legacy_trust_rows(self) -> None:
         legacy = Path(self.temporary.name) / "legacy-minimal.db"
@@ -1278,6 +1353,70 @@ class TrustPromotionWriterTests(unittest.TestCase):
             schema_version,
             migration_sha256,
             len(SLO_QUERY_CONTRACTS),
+        )
+
+    def _trust_binding(self, connection: sqlite3.Connection) -> dict[str, object]:
+        row = connection.execute(
+            "SELECT * FROM trust_promotion_bound_evidence WHERE run_id='run'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        columns = [
+            item[0]
+            for item in connection.execute(
+                "SELECT * FROM trust_promotion_bound_evidence WHERE 0"
+            ).description
+        ]
+        return dict(zip(columns, row))
+
+    def _insert_direct_trust(
+        self,
+        connection: sqlite3.Connection,
+        observation_id: str,
+        binding: dict[str, object],
+        bundle_hash: str,
+    ) -> None:
+        connection.execute(
+            "INSERT INTO trust_observations(observation_id,scope,severity,status,"
+            "effective_group_id,verifier_run_id,gate_run_id,usage_confidence,"
+            "bounded_at,created_at,run_id,goal_run_id,evidence_hash,evidence_run_id,"
+            "transition_id,approval_id,approval_hash,schema_version,migration_sha256,"
+            "blocking_slo_query_count,blocking_slo_pass_audit_count,"
+            "blocking_slo_bundle_hash,clock_context_id,gate_clock_epoch_ms,"
+            "trusted_clock_source_hash,run_authority_mode,workflow_authority_mode,"
+            "selected_cost_registry_id,selected_cost_registry_hash,cost_confidence) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                observation_id,
+                "workflow",
+                "R1",
+                "promoted",
+                bundle_hash,
+                binding["verifier_run_id"],
+                binding["gate_run_id"],
+                "known",
+                "now",
+                "now",
+                "run",
+                "goal-run",
+                self.evidence_hash,
+                "run",
+                binding["transition_id"],
+                binding["approval_id"],
+                binding["approval_hash"],
+                binding["schema_version"],
+                binding["migration_sha256"],
+                binding["current_slo_query_count"],
+                binding["current_slo_query_count"],
+                bundle_hash,
+                binding["clock_context_id"],
+                binding["gate_clock_epoch_ms"],
+                binding["trusted_clock_source_hash"],
+                binding["run_authority_mode"],
+                binding["workflow_authority_mode"],
+                binding["selected_cost_registry_id"],
+                binding["selected_cost_registry_hash"],
+                "known",
+            ),
         )
 
     def _assert_promotion_fails_without_write(self, message: str, **overrides: str) -> None:
