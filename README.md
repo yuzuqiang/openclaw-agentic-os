@@ -10,7 +10,7 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `be7a7e26435afc9b0f5cbad3f0baf1ca6a9903fd5dd99dd289c23e205970063d`
+- Current design artifact SHA-256: `ee832ba097ca21d0546f00f7af31ca236a546bb97924b3d986aaec2895baaca4`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `efa7fedf0da5880b91756202a9746cb1d045a83cd5fee593fa73e63f7b098985`
 - Current migration manifest SHA-256: `54a39bd96dd1a88792244e8b0e6ede695b5ed57181ba1c83e63d2bb903564fea`
@@ -32,6 +32,8 @@ PYTHONPATH=src python3 -m agentic_os.cli shadow-backfill --db state/agentic-os/t
 PYTHONPATH=src python3 -m agentic_os.cli shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id shadow-demo --prepare-idempotency-key file-shadow:shadow-demo --artifact README.md
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --risk-class R1 --risk-dominance R1 --new-workflow --artifact tmp/dual-shadow-demo.json --content '{"ok":true}'
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json
+PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary --db state/agentic-os/test-control.db --workflow local-artifact-canary --run-id canary-demo --cutover-approved-by local-fixture --cutover-evidence-hash <sha256> --rollback-deadline 2099-01-01T00:00:00Z --last-parity-audit-hash <sha256> --artifact tmp/canary-demo.json --content '{"synthetic":true}'
+PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary-rollback --db state/agentic-os/test-control.db --workflow local-artifact-canary --artifact tmp/canary-demo.json
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
@@ -75,6 +77,19 @@ must not delete the committed authority file.
 This is parity evidence only: it does not create `db_authority_canary` or
 `db_authority` runs, does not call OpenClaw or Gateway, and does not claim
 canary readiness.
+
+The first Issue 7 canary slice lives in `agentic_os.db_authority_canary`.
+It is still synthetic and local-only: the writer records one R1
+`db_authority_canary` workflow/run plus one local artifact projection, refuses
+to run if `DB_AUTHORITY_ENABLED` is true, and checks that no
+`external_rpc_intents`, `leases`, `spawn_requests`, or `sessions` rows exist for
+the canary run. It proves the local crash boundary by committing a prepared
+SQLite canary before the artifact write, recovering an exact retry after a
+simulated post-prepare crash, and finalizing only after the fsynced artifact
+digest matches the projection. Rollback moves the workflow to
+`rollback_to_file_authority` only after regenerating and matching the projection
+identity from the local artifact. This is artifact-only fixture evidence; it
+does not enable real production session control or steady DB authority.
 
 The first P1.2 predicate slice lives in `agentic_os.predicates`. It implements
 only the read-only `agentic_predicate_inproc_v1` backend: literal booleans,

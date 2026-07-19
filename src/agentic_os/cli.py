@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .db_authority_canary import (
+    db_authority_canary_artifact,
+    rollback_db_authority_canary,
+)
 from .migrations import apply_migrations, repository_root, verify_database
 from .privacy import assert_paths_retrievable, assert_privacy_preflight
 from .shadow import (
@@ -84,6 +88,42 @@ def parser() -> argparse.ArgumentParser:
     dual_audit.add_argument("--prepare-idempotency-key")
     dual_audit.add_argument("--artifact", type=Path, action="append", required=True)
     dual_audit.add_argument("--repo-root", type=Path, default=repository_root())
+
+    canary = commands.add_parser(
+        "db-authority-canary",
+        help="write one synthetic local-only DB-authority canary artifact",
+    )
+    canary.add_argument("--db", type=Path, required=True)
+    canary.add_argument("--workflow", required=True)
+    canary.add_argument("--run-id", required=True)
+    canary.add_argument("--prepare-idempotency-key")
+    canary.add_argument("--cutover-approved-by", required=True)
+    canary.add_argument("--cutover-evidence-hash", required=True)
+    canary.add_argument("--rollback-deadline", required=True)
+    canary.add_argument("--last-parity-audit-hash", required=True)
+    canary.add_argument("--artifact", type=Path, required=True)
+    canary_content = canary.add_mutually_exclusive_group(required=True)
+    canary_content.add_argument("--content")
+    canary_content.add_argument("--content-file", type=Path)
+    canary.add_argument(
+        "--crash-after-prepare",
+        action="store_true",
+        help="simulate the local post-DB/pre-artifact crash boundary",
+    )
+    canary.add_argument("--repo-root", type=Path, default=repository_root())
+
+    canary_rollback = commands.add_parser(
+        "db-authority-canary-rollback",
+        help="rollback the synthetic canary and prove projection regeneration",
+    )
+    canary_rollback.add_argument("--db", type=Path, required=True)
+    canary_rollback.add_argument("--workflow", required=True)
+    canary_rollback.add_argument(
+        "--artifact", type=Path, action="append", required=True
+    )
+    canary_rollback.add_argument(
+        "--repo-root", type=Path, default=repository_root()
+    )
     return result
 
 
@@ -155,6 +195,46 @@ def main(argv: list[str] | None = None) -> int:
             prepare_idempotency_key=args.prepare_idempotency_key,
             repo_root_path=args.repo_root,
         )
+    elif args.command == "db-authority-canary":
+        if args.content_file is not None:
+            content_file = args.content_file.expanduser()
+            assert_paths_retrievable((content_file, content_file.resolve()))
+            content = content_file.read_bytes()
+        else:
+            content = args.content.encode("utf-8")
+        canary = db_authority_canary_artifact(
+            args.db,
+            args.artifact,
+            content,
+            workflow=args.workflow,
+            run_id=args.run_id,
+            cutover_approved_by=args.cutover_approved_by,
+            cutover_evidence_hash=args.cutover_evidence_hash,
+            rollback_deadline=args.rollback_deadline,
+            last_parity_audit_hash=args.last_parity_audit_hash,
+            prepare_idempotency_key=args.prepare_idempotency_key,
+            repo_root_path=args.repo_root,
+            crash_after_prepare=args.crash_after_prepare,
+        )
+        print(
+            "db-authority canary "
+            f"{canary.status}: workflow={canary.workflow} run_id={canary.run_id} "
+            f"path={canary.projection.path} sha256={canary.projection.sha256}"
+        )
+        return 0
+    elif args.command == "db-authority-canary-rollback":
+        rollback = rollback_db_authority_canary(
+            args.db,
+            tuple(args.artifact),
+            workflow=args.workflow,
+            repo_root_path=args.repo_root,
+        )
+        print(
+            "db-authority canary rollback "
+            f"{rollback.status}: workflow={rollback.workflow} "
+            f"projections={len(rollback.regenerated)}"
+        )
+        return 0
     else:
         audit = audit_file_authority_shadow(
             args.db,

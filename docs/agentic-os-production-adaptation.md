@@ -87,6 +87,12 @@ Current-vs-proposed truth:
 - Current file artifacts remain operational authority.
 - Current OpenClaw is below the required external runtime metadata contract. Gateway allowLease and session status do not yet prove exact run/idempotency ownership across post-RPC/pre-DB crashes.
 - Current P0 foundation adds ignored migration artifacts and fail-closed probes, but does not create production `control.db`, does not enable DB-authority dispatch, and does not prove runtime adapter behavior.
+- Current Issue 7 implementation adds only a synthetic/local
+  `db_authority_canary` artifact fixture writer. It records one local R1 canary
+  run, proves prepared-DB to artifact-write crash recovery, proves rollback to
+  `rollback_to_file_authority`, and regenerates projection identity from the
+  local artifact. It explicitly rejects real session-control rows and does not
+  call OpenClaw/Gateway/Cron or enable production database authority.
 - Proposed DB authority begins only after privacy preflight, metadata contract probes, schema fixtures, shadow backfill, dual-write parity, one low-risk canary, drain, rollback drill, and per-workflow cutover.
 
 ## Design Principles and Operational Confidence Definition
