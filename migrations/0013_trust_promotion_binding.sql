@@ -755,12 +755,6 @@ WHERE gr.run_id IS NOT NULL
             WHERE eri_run.workflow=r.workflow
           ),0)
           AND sa.run_at_epoch_ms >= COALESCE((
-            SELECT MAX(l.expires_at_epoch_ms)
-            FROM leases l
-            JOIN runs lease_run ON lease_run.run_id=l.run_id
-            WHERE lease_run.workflow=r.workflow
-          ),0)
-          AND sa.run_at_epoch_ms >= COALESCE((
             SELECT MAX(r2.finalized_at_epoch_ms)
             FROM runs r2
             WHERE r2.workflow=r.workflow

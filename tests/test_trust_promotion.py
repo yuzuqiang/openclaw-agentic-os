@@ -653,6 +653,20 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 )
                 self.assertGreater(count, 0, source_table)
 
+    def test_future_lease_expiry_does_not_block_fresh_audits(self) -> None:
+        self._seed_valid_fixture(seed_slo_audits=False)
+        self._seed_bound_runtime_rows()
+        future_expiry_ms = int(time.time() * 1000) + 3_600_000
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "UPDATE leases SET expires_at='future', expires_at_epoch_ms=? "
+                "WHERE lease_id='pretrust-lease'",
+                (future_expiry_ms,),
+            )
+        self._seed_slo_pass_audits(prefix="slo-after-future-lease")
+
+        self._promote(observation_id="future-lease-expiry")
+
     def test_goal_manifest_identity_is_frozen_before_trust_promotion(self) -> None:
         self._seed_valid_fixture()
         with closing(sqlite3.connect(self.database)) as connection, connection:

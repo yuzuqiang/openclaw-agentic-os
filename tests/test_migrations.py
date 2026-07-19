@@ -561,6 +561,44 @@ class MigrationTests(unittest.TestCase):
                 (SLO_QUERY_COUNT * len(migrations),),
             )
 
+    def test_legacy_slo_fixture_metadata_upgrades_to_v13_contract(self) -> None:
+        self._apply_migrations_through(12, "legacy-slo-fixture-metadata")
+        for version in range(1, 13):
+            meta_contract = next(
+                contract
+                for contract in slo_query_contracts_for_schema_version(version)
+                if contract.query_name == "SLO query fixture status"
+            )
+            self.assertEqual(meta_contract.empty_db_expected_status, "pass")
+        current_meta_contract = next(
+            contract
+            for contract in slo_query_contracts_for_schema_version(13)
+            if contract.query_name == "SLO query fixture status"
+        )
+        self.assertEqual(
+            current_meta_contract.empty_db_expected_status,
+            "self_bootstrap_empty",
+        )
+
+        self.assertEqual(apply_migrations(self.database), (13,))
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT DISTINCT empty_db_expected_status FROM slo_queries "
+                    "WHERE query_name='SLO query fixture status' "
+                    "AND schema_version BETWEEN 1 AND 12"
+                ).fetchall(),
+                [("pass",)],
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT empty_db_expected_status FROM slo_queries "
+                    "WHERE query_name='SLO query fixture status' "
+                    "AND schema_version=13"
+                ).fetchone(),
+                ("self_bootstrap_empty",),
+            )
+
     def test_v10_backfills_exact_v9_dispatches_for_replay_and_reconciliation(self) -> None:
         self._apply_migrations_through(9, "v9-exact")
         with sqlite3.connect(self.database) as connection:
