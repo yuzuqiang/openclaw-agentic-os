@@ -215,6 +215,15 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 ("db_authority_canary",),
             )
 
+        rollback = rollback_synthetic_db_authority_expansion(
+            self.database,
+            (self.artifact,),
+            workflow="local-artifact-canary",
+        )
+        self.assertFalse(rollback.db_authority_enabled)
+        self.assertFalse(rollback.proof["db_authority_enabled"])
+        self.assertEqual(rollback.controller_status, "artifact_only_canary_rolled_back")
+
     def test_canary_recovers_after_local_crash_fixture(self) -> None:
         with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):
             db_authority_canary_artifact(

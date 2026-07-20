@@ -90,6 +90,7 @@ def run_synthetic_db_authority_expansion(
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
     )
+    db_authority_enabled = _assert_db_authority_disabled()
     proof = _controller_proof(
         workflow=workflow,
         run_id=run_id,
@@ -98,13 +99,14 @@ def run_synthetic_db_authority_expansion(
         canary_status=canary.status,
         rollback_status=None,
         projection_count=1,
+        db_authority_enabled=db_authority_enabled,
     )
     return DbAuthorityControllerResult(
         workflow=workflow,
         run_id=run_id,
         canary=canary,
         controller_status="artifact_only_canary_recorded",
-        db_authority_enabled=agentic_os.DB_AUTHORITY_ENABLED,
+        db_authority_enabled=db_authority_enabled,
         proof=proof,
     )
 
@@ -126,6 +128,7 @@ def rollback_synthetic_db_authority_expansion(
         workflow=workflow,
         repo_root_path=repo_root_path,
     )
+    db_authority_enabled = _assert_db_authority_disabled()
     proof = _controller_proof(
         workflow=workflow,
         run_id="",
@@ -134,12 +137,13 @@ def rollback_synthetic_db_authority_expansion(
         canary_status=None,
         rollback_status=rollback.status,
         projection_count=len(rollback.regenerated),
+        db_authority_enabled=db_authority_enabled,
     )
     return DbAuthorityControllerRollbackResult(
         workflow=workflow,
         rollback=rollback,
         controller_status="artifact_only_canary_rolled_back",
-        db_authority_enabled=agentic_os.DB_AUTHORITY_ENABLED,
+        db_authority_enabled=db_authority_enabled,
         proof=proof,
     )
 
@@ -150,9 +154,10 @@ def proof_json(proof: dict[str, object]) -> str:
     return json.dumps(proof, sort_keys=True, separators=(",", ":"))
 
 
-def _assert_db_authority_disabled() -> None:
+def _assert_db_authority_disabled() -> bool:
     if agentic_os.DB_AUTHORITY_ENABLED:
         raise DbAuthorityControllerError("production DB authority must remain disabled")
+    return False
 
 
 def _assert_controller_boundary(
@@ -192,6 +197,7 @@ def _controller_proof(
     canary_status: str | None,
     rollback_status: str | None,
     projection_count: int,
+    db_authority_enabled: bool,
 ) -> dict[str, object]:
     return {
         "controller": "per_workflow_db_authority_expansion_v1",
@@ -208,6 +214,6 @@ def _controller_proof(
         "real_gateway_rpc": False,
         "real_cron_rpc": False,
         "real_session_rpc": False,
-        "db_authority_enabled": agentic_os.DB_AUTHORITY_ENABLED,
+        "db_authority_enabled": db_authority_enabled,
         "r3_r4_human_required": True,
     }
