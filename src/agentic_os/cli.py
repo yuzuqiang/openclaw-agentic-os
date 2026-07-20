@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .db_authority_canary import (
@@ -140,6 +141,11 @@ def parser() -> argparse.ArgumentParser:
     expansion.add_argument("--prepare-idempotency-key")
     expansion.add_argument("--risk-class", required=True)
     expansion.add_argument("--risk-dominance", required=True)
+    expansion.add_argument(
+        "--eligibility-proof-json",
+        required=True,
+        help="exact synthetic gate/canary/rollback/parity/projection proof JSON",
+    )
     expansion.add_argument("--cutover-approved-by", required=True)
     expansion.add_argument("--cutover-evidence-hash", required=True)
     expansion.add_argument("--rollback-deadline", required=True)
@@ -285,6 +291,10 @@ def main(argv: list[str] | None = None) -> int:
             content = content_file.read_bytes()
         else:
             content = args.content.encode("utf-8")
+        eligibility_proof = _json_object(
+            args.eligibility_proof_json,
+            label="eligibility proof",
+        )
         expansion = run_synthetic_db_authority_expansion(
             args.db,
             args.artifact,
@@ -293,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             risk_class=args.risk_class,
             risk_dominance=args.risk_dominance,
+            eligibility_proof=eligibility_proof,
             cutover_approved_by=args.cutover_approved_by,
             cutover_evidence_hash=args.cutover_evidence_hash,
             rollback_deadline=args.rollback_deadline,
@@ -341,6 +352,15 @@ def main(argv: list[str] | None = None) -> int:
     for issue in audit.issues:
         print(f"{issue.reason}: {issue.path}")
     return 0 if audit.status == "pass" else 1
+
+def _json_object(value: str, *, label: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{label} must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{label} must be a JSON object")
+    return parsed
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import shutil
 import sqlite3
@@ -21,6 +22,7 @@ from agentic_os.db_authority_canary import (
 )
 from agentic_os.db_authority_controller import (
     DbAuthorityControllerError,
+    expected_synthetic_expansion_eligibility_proof,
     rollback_synthetic_db_authority_expansion,
     run_synthetic_db_authority_expansion,
 )
@@ -43,6 +45,30 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         self.payload = b'{"workflow":"heartbeat","synthetic":true}\n'
         self.cutover_hash = hashlib.sha256(b"synthetic-cutover").hexdigest()
         self.parity_hash = hashlib.sha256(b"synthetic-parity").hexdigest()
+
+    def _eligibility_proof(
+        self,
+        *,
+        workflow: str = "local-artifact-canary",
+        run_id: str = "canary-run",
+        artifact: Path | None = None,
+        content: bytes | None = None,
+    ) -> dict[str, object]:
+        return expected_synthetic_expansion_eligibility_proof(
+            artifact or self.artifact,
+            content or self.payload,
+            workflow=workflow,
+            run_id=run_id,
+            risk_class="R1",
+            risk_dominance="R1",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+        )
 
     def _cleanup_state_root(self) -> None:
         try:
@@ -128,6 +154,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             run_id="canary-run",
             risk_class="R1",
             risk_dominance="R1",
+            eligibility_proof=self._eligibility_proof(),
             cutover_approved_by="local-fixture",
             cutover_evidence_hash=self.cutover_hash,
             rollback_deadline="2099-01-01T00:00:00+00:00",
@@ -141,6 +168,18 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         self.assertFalse(result.proof["real_gateway_rpc"])
         self.assertFalse(result.proof["real_cron_rpc"])
         self.assertFalse(result.proof["real_session_rpc"])
+        self.assertEqual(
+            result.proof["eligibility_proof"],
+            self._eligibility_proof(),
+        )
+        eligibility = result.proof["eligibility_proof"]
+        self.assertIsInstance(eligibility, dict)
+        self.assertEqual(eligibility["gate_decision"], "not_required")
+        self.assertEqual(eligibility["projection_count"], 1)
+        self.assertEqual(
+            result.proof["rollback_proof_hash"],
+            eligibility["rollback_proof_hash"],
+        )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -160,6 +199,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 run_id="canary-run",
                 risk_class="R1",
                 risk_dominance="R1",
+                eligibility_proof={},
                 cutover_approved_by="local-fixture",
                 cutover_evidence_hash=self.cutover_hash,
                 rollback_deadline="2099-01-01T00:00:00+00:00",
@@ -174,10 +214,77 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 run_id="canary-run",
                 risk_class="R3",
                 risk_dominance="R3",
+                eligibility_proof={},
                 cutover_approved_by="local-fixture",
                 cutover_evidence_hash=self.cutover_hash,
                 rollback_deadline="2099-01-01T00:00:00+00:00",
                 last_parity_audit_hash=self.parity_hash,
+            )
+
+    def test_expansion_controller_requires_exact_eligibility_proof(self) -> None:
+        base = self._eligibility_proof()
+        drifted_projection = dict(base)
+        drifted_projection["projection"] = {
+            **base["projection"],
+            "sha256": hashlib.sha256(b"drifted").hexdigest(),
+        }
+        cases = {
+            "missing": {},
+            "stale-parity": {
+                **base,
+                "parity_audit_hash": hashlib.sha256(b"stale").hexdigest(),
+            },
+            "cross-workflow-proof": {**base, "workflow": "other"},
+            "duplicated-projection": {**base, "projection_count": 2},
+            "malformed-gate": {**base, "gate_decision": "pass"},
+            "drifted-projection": drifted_projection,
+        }
+        for name, proof in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                DbAuthorityControllerError,
+                "eligibility proof|exact synthetic expansion boundary",
+            ):
+                run_synthetic_db_authority_expansion(
+                    self.database,
+                    self.artifact,
+                    self.payload,
+                    workflow="local-artifact-canary",
+                    run_id="canary-run",
+                    risk_class="R1",
+                    risk_dominance="R1",
+                    eligibility_proof=proof,
+                    cutover_approved_by="local-fixture",
+                    cutover_evidence_hash=self.cutover_hash,
+                    rollback_deadline="2099-01-01T00:00:00+00:00",
+                    last_parity_audit_hash=self.parity_hash,
+                )
+            self.assertFalse(self.artifact.exists())
+            with sqlite3.connect(self.database) as connection:
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='runs'"
+                ).fetchone():
+                    self.assertIsNone(
+                        connection.execute(
+                            "SELECT 1 FROM runs WHERE run_id='canary-run'"
+                        ).fetchone()
+                    )
+
+    def test_expansion_controller_rejects_non_independent_gate_proof(self) -> None:
+        with self.assertRaisesRegex(DbAuthorityControllerError, "independent"):
+            expected_synthetic_expansion_eligibility_proof(
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-b-ai-engineer",
+                verifier_run_id="canary-run",
             )
 
     def test_expansion_controller_rollback_requires_disabled_db_authority(self) -> None:
@@ -189,6 +296,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             run_id="canary-run",
             risk_class="R1",
             risk_dominance="R1",
+            eligibility_proof=self._eligibility_proof(),
             cutover_approved_by="local-fixture",
             cutover_evidence_hash=self.cutover_hash,
             rollback_deadline="2099-01-01T00:00:00+00:00",
@@ -1085,6 +1193,8 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                     "R1",
                     "--risk-dominance",
                     "R1",
+                    "--eligibility-proof-json",
+                    json.dumps(self._eligibility_proof(), sort_keys=True),
                     "--cutover-approved-by",
                     "local-fixture",
                     "--cutover-evidence-hash",

@@ -34,7 +34,7 @@ PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow --db state/agentic-os
 PYTHONPATH=src python3 -m agentic_os.cli dual-write-shadow-audit --db state/agentic-os/test-control.db --workflow heartbeat --run-id dual-shadow-demo --artifact tmp/dual-shadow-demo.json
 PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary --db state/agentic-os/test-control.db --workflow local-artifact-canary --run-id canary-demo --cutover-approved-by local-fixture --cutover-evidence-hash <sha256> --rollback-deadline 2099-01-01T00:00:00+00:00 --last-parity-audit-hash <sha256> --artifact tmp/canary-demo.json --content '{"synthetic":true}'
 PYTHONPATH=src python3 -m agentic_os.cli db-authority-canary-rollback --db state/agentic-os/test-control.db --workflow local-artifact-canary --artifact tmp/canary-demo.json
-PYTHONPATH=src python3 -m agentic_os.cli db-authority-expansion --db state/agentic-os/test-control.db --workflow local-artifact-canary --run-id expansion-demo --risk-class R1 --risk-dominance R1 --cutover-approved-by local-fixture --cutover-evidence-hash <sha256> --rollback-deadline 2099-01-01T00:00:00+00:00 --last-parity-audit-hash <sha256> --artifact tmp/expansion-demo.json --content '{"synthetic":true}'
+PYTHONPATH=src python3 -m agentic_os.cli db-authority-expansion --db state/agentic-os/test-control.db --workflow local-artifact-canary --run-id expansion-demo --risk-class R1 --risk-dominance R1 --eligibility-proof-json '<exact-local-eligibility-proof-json>' --cutover-approved-by local-fixture --cutover-evidence-hash <sha256> --rollback-deadline 2099-01-01T00:00:00+00:00 --last-parity-audit-hash <sha256> --artifact tmp/expansion-demo.json --content '{"synthetic":true}'
 PYTHONPATH=src python3 -m agentic_os.cli verify --db state/agentic-os/offline-snapshot.db
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
@@ -96,9 +96,11 @@ The first Issue 29 P2.0 controller slice lives in
 `agentic_os.db_authority_controller`. It narrows DB-authority expansion to one
 explicit low-risk workflow, `local-artifact-canary`, and delegates only to the
 synthetic artifact canary above. It admits only R1/R1, rejects R3/R4 as
-human-required, emits deterministic local proof fields for canary, rollback,
-parity/projection, workflow isolation, and RPC denial, and keeps
-`DB_AUTHORITY_ENABLED` false. This controller does not prove or call any
+human-required, and requires an exact local eligibility proof before the canary
+transition can advance. That proof binds the independent synthetic gate,
+canary evidence hash, rollback-regeneration hash, parity audit hash, deterministic
+projection identity, workflow isolation, RPC denial flags, and
+`DB_AUTHORITY_ENABLED=false`. This controller does not prove or call any
 OpenClaw, Gateway, Cron, or session RPC and must not be treated as production
 cutover authority.
 
