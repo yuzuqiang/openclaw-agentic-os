@@ -53,6 +53,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         run_id: str = "canary-run",
         artifact: Path | None = None,
         content: bytes | None = None,
+        prepare_idempotency_key: str | None = None,
     ) -> dict[str, object]:
         return expected_synthetic_expansion_eligibility_proof(
             artifact or self.artifact,
@@ -68,6 +69,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             worker_agent_id="phase-b-ai-engineer",
             verifier_agent_id="phase-a-security-engineer",
             verifier_run_id="phase-a-boundary-review",
+            prepare_idempotency_key=prepare_idempotency_key,
         )
 
     def _cleanup_state_root(self) -> None:
@@ -314,6 +316,74 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                         ).fetchone()
                     )
 
+    def test_expansion_controller_binds_prepare_idempotency_key(self) -> None:
+        prepare_key = "review-trigger-prepare-key"
+        proof = self._eligibility_proof(prepare_idempotency_key=prepare_key)
+        default_proof = self._eligibility_proof()
+        self.assertEqual(proof["prepare_idempotency_key"], prepare_key)
+        self.assertNotEqual(
+            proof["canary_evidence_hash"],
+            default_proof["canary_evidence_hash"],
+        )
+        self.assertNotEqual(
+            proof["gate_evidence_hash"],
+            default_proof["gate_evidence_hash"],
+        )
+
+        with self.assertRaisesRegex(
+            DbAuthorityControllerError, "exact synthetic expansion boundary"
+        ):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=default_proof,
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+                prepare_idempotency_key=prepare_key,
+            )
+        self.assertFalse(self.artifact.exists())
+
+        result = run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+            eligibility_proof=proof,
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+            prepare_idempotency_key=prepare_key,
+        )
+
+        self.assertEqual(
+            result.proof["eligibility_proof"]["prepare_idempotency_key"],
+            prepare_key,
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT prepare_idempotency_key FROM runs WHERE run_id='canary-run'"
+                ).fetchone(),
+                (prepare_key,),
+            )
+
     def test_expansion_controller_rejects_self_attested_verifier_identity(self) -> None:
         forged = expected_synthetic_expansion_eligibility_proof(
             self.artifact,
@@ -463,6 +533,52 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             )
         self.assertFalse(next_artifact.exists())
 
+    def test_expansion_controller_rejects_unprojected_canary_run(self) -> None:
+        apply_migrations(self.database)
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "open_file_authority_runs,updated_at) VALUES(?,?,?,?,?,?,0,?)",
+                (
+                    "local-artifact-canary",
+                    "db_authority_canary",
+                    "local-fixture",
+                    self.cutover_hash,
+                    "2099-01-01T00:00:00+00:00",
+                    self.parity_hash,
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,updated_at) "
+                "VALUES('orphan-canary','orphan-prepare','local-artifact-canary',"
+                "'db_authority_canary','prepared','R1','R1',"
+                "'2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')"
+            )
+            connection.commit()
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "projection set"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=self._eligibility_proof(),
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+        self.assertFalse(self.artifact.exists())
+
     def test_raw_canary_rejects_controlled_expansion_workflow(self) -> None:
         with self.assertRaisesRegex(DbAuthorityCanaryError, "expansion controller"):
             db_authority_canary_artifact(
@@ -477,6 +593,39 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 last_parity_audit_hash=self.parity_hash,
             )
         self.assertFalse(self.artifact.exists())
+
+    def test_raw_canary_rollback_rejects_controlled_expansion_workflow(self) -> None:
+        run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+            eligibility_proof=self._eligibility_proof(),
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "expansion controller"):
+            rollback_db_authority_canary(
+                self.database,
+                (self.artifact,),
+                workflow="local-artifact-canary",
+            )
+
+        rollback = rollback_synthetic_db_authority_expansion(
+            self.database,
+            (self.artifact,),
+            workflow="local-artifact-canary",
+        )
+        self.assertEqual(rollback.rollback.status, "rolled_back")
 
     def test_expansion_controller_recovers_prepared_projection_set(self) -> None:
         with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):

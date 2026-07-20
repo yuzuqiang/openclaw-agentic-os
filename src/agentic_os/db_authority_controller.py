@@ -108,6 +108,7 @@ def run_synthetic_db_authority_expansion(
         verifier_agent_id=verifier_agent_id,
         verifier_run_id=verifier_run_id,
         eligibility_proof=eligibility_proof,
+        prepare_idempotency_key=prepare_idempotency_key,
         repo_root_path=repo_root_path,
     )
     canary = db_authority_canary_artifact(
@@ -120,7 +121,7 @@ def run_synthetic_db_authority_expansion(
         cutover_evidence_hash=cutover_evidence_hash,
         rollback_deadline=rollback_deadline,
         last_parity_audit_hash=last_parity_audit_hash,
-        prepare_idempotency_key=prepare_idempotency_key,
+        prepare_idempotency_key=str(expected_proof["prepare_idempotency_key"]),
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
         _allow_controlled_workflow=True,
@@ -165,6 +166,7 @@ def rollback_synthetic_db_authority_expansion(
         artifacts,
         workflow=workflow,
         repo_root_path=repo_root_path,
+        _allow_controlled_workflow=True,
     )
     db_authority_enabled = _assert_db_authority_disabled()
     proof = _controller_proof(
@@ -209,6 +211,7 @@ def expected_synthetic_expansion_eligibility_proof(
     verifier_agent_id: str | None = None,
     verifier_run_id: str | None = None,
     eligibility_proof: Mapping[str, object] | None = None,
+    prepare_idempotency_key: str | None = None,
     repo_root_path: Path | None = None,
 ) -> dict[str, object]:
     """Build or validate the exact local proof required before canary authority.
@@ -256,6 +259,11 @@ def expected_synthetic_expansion_eligibility_proof(
         raise DbAuthorityControllerError(
             "synthetic expansion gate proof must be independent"
         )
+    prepare_idempotency_key = (
+        _normalize_required_identity("prepare_idempotency_key", prepare_idempotency_key)
+        if prepare_idempotency_key is not None
+        else f"db-authority-canary:{run_id}"
+    )
 
     projection = _expected_projection(
         artifact, content, run_id=run_id, repo_root_path=repo_root_path
@@ -266,6 +274,7 @@ def expected_synthetic_expansion_eligibility_proof(
         run_id=run_id,
         risk_class=risk_class,
         risk_dominance=risk_dominance,
+        prepare_idempotency_key=prepare_idempotency_key,
         cutover_approved_by=cutover_approved_by,
         cutover_evidence_hash=cutover_evidence_hash,
         rollback_deadline=rollback_deadline,
@@ -280,6 +289,7 @@ def expected_synthetic_expansion_eligibility_proof(
         worker_agent_id=worker_agent_id,
         verifier_agent_id=verifier_agent_id,
         verifier_run_id=verifier_run_id,
+        prepare_idempotency_key=prepare_idempotency_key,
         canary_evidence_hash=canary_evidence_hash,
         rollback_proof_hash=rollback_proof_hash,
     )
@@ -294,6 +304,7 @@ def expected_synthetic_expansion_eligibility_proof(
         "worker_agent_id": worker_agent_id,
         "verifier_agent_id": verifier_agent_id,
         "verifier_run_id": verifier_run_id,
+        "prepare_idempotency_key": prepare_idempotency_key,
         "canary_status": "eligible",
         "canary_evidence_hash": canary_evidence_hash,
         "rollback_status": "regenerable",
@@ -387,6 +398,7 @@ def _synthetic_canary_evidence_hash(
     run_id: str,
     risk_class: str,
     risk_dominance: str,
+    prepare_idempotency_key: str,
     cutover_approved_by: str,
     cutover_evidence_hash: str,
     rollback_deadline: str,
@@ -400,6 +412,7 @@ def _synthetic_canary_evidence_hash(
             "run_id": run_id,
             "risk_class": risk_class,
             "risk_dominance": risk_dominance,
+            "prepare_idempotency_key": prepare_idempotency_key,
             "cutover_approved_by": cutover_approved_by,
             "cutover_evidence_hash": cutover_evidence_hash,
             "rollback_deadline": rollback_deadline,
@@ -423,6 +436,7 @@ def _synthetic_gate_evidence_hash(
     worker_agent_id: str,
     verifier_agent_id: str,
     verifier_run_id: str,
+    prepare_idempotency_key: str,
     canary_evidence_hash: str,
     rollback_proof_hash: str,
 ) -> str:
@@ -437,6 +451,7 @@ def _synthetic_gate_evidence_hash(
             "worker_agent_id": worker_agent_id,
             "verifier_agent_id": verifier_agent_id,
             "verifier_run_id": verifier_run_id,
+            "prepare_idempotency_key": prepare_idempotency_key,
             "canary_evidence_hash": canary_evidence_hash,
             "rollback_proof_hash": rollback_proof_hash,
         }

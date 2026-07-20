@@ -292,10 +292,18 @@ def rollback_db_authority_canary(
     *,
     workflow: str,
     repo_root_path: Path | None = None,
+    _allow_controlled_workflow: bool = False,
 ) -> DbAuthorityRollbackResult:
     """Rollback the synthetic canary workflow and prove projection regeneration."""
 
     workflow = _normalize_required_identity("workflow", workflow)
+    if (
+        workflow in CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS
+        and not _allow_controlled_workflow
+    ):
+        raise DbAuthorityCanaryError(
+            f"workflow {workflow!r} must use the DB-authority expansion controller"
+        )
     if not artifacts:
         raise DbAuthorityCanaryError("at least one artifact is required")
     root = Path(repo_root_path or Path(__file__).resolve().parents[2]).resolve()
@@ -774,27 +782,35 @@ def _assert_single_workflow_projection_set(
     run_id: str,
     projection: ShadowProjection,
 ) -> None:
-    rows = connection.execute(
-        "SELECT p.projection_id,p.run_id,p.path,p.sha256,r.authority_mode,r.state "
-        "FROM artifact_projections p "
-        "JOIN runs r ON r.run_id=p.run_id "
-        "WHERE p.source_authority='db_authority_canary' "
-        "AND r.workflow=?",
+    canary_runs = connection.execute(
+        "SELECT run_id,state FROM runs "
+        "WHERE workflow=? AND authority_mode='db_authority_canary'",
         (workflow,),
     ).fetchall()
-    if not rows:
+    if not canary_runs:
         return
-    expected = (
+    if len(canary_runs) != 1:
+        raise DbAuthorityCanaryError(
+            "synthetic expansion eligibility proof must bind the full workflow "
+            "canary projection set"
+        )
+    existing_run_id, existing_state = canary_runs[0]
+    projection_rows = connection.execute(
+        "SELECT projection_id,path,sha256,source_authority "
+        "FROM artifact_projections WHERE run_id=?",
+        (existing_run_id,),
+    ).fetchall()
+    expected_projection = (
         projection.projection_id,
-        run_id,
         projection.path,
         projection.sha256,
         "db_authority_canary",
     )
-    if len(rows) == 1 and rows[0][:5] == expected and rows[0][5] in {
-        "prepared",
-        "finalized",
-    }:
+    if (
+        existing_run_id == run_id
+        and existing_state in {"prepared", "finalized"}
+        and projection_rows == [expected_projection]
+    ):
         return
     raise DbAuthorityCanaryError(
         "synthetic expansion eligibility proof must bind the full workflow "
