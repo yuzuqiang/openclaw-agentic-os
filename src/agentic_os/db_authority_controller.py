@@ -70,6 +70,7 @@ def run_synthetic_db_authority_expansion(
     R3/R4 remain human-required and are rejected instead of being downcast.
     """
 
+    _assert_db_authority_disabled()
     _assert_controller_boundary(
         workflow=workflow,
         risk_class=risk_class,
@@ -117,6 +118,7 @@ def rollback_synthetic_db_authority_expansion(
 ) -> DbAuthorityControllerRollbackResult:
     """Rollback the one allowed synthetic DB-authority expansion workflow."""
 
+    _assert_db_authority_disabled()
     _assert_supported_workflow(workflow)
     rollback = rollback_db_authority_canary(
         database,
@@ -146,6 +148,11 @@ def proof_json(proof: dict[str, object]) -> str:
     """Return deterministic controller proof for CLI/log artifacts."""
 
     return json.dumps(proof, sort_keys=True, separators=(",", ":"))
+
+
+def _assert_db_authority_disabled() -> None:
+    if agentic_os.DB_AUTHORITY_ENABLED:
+        raise DbAuthorityControllerError("production DB authority must remain disabled")
 
 
 def _assert_controller_boundary(

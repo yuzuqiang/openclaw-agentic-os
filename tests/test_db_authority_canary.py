@@ -21,6 +21,7 @@ from agentic_os.db_authority_canary import (
 )
 from agentic_os.db_authority_controller import (
     DbAuthorityControllerError,
+    rollback_synthetic_db_authority_expansion,
     run_synthetic_db_authority_expansion,
 )
 from agentic_os.migrations import (
@@ -177,6 +178,41 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 cutover_evidence_hash=self.cutover_hash,
                 rollback_deadline="2099-01-01T00:00:00+00:00",
                 last_parity_audit_hash=self.parity_hash,
+            )
+
+    def test_expansion_controller_rollback_requires_disabled_db_authority(self) -> None:
+        run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+
+        with mock.patch.object(
+            agentic_os, "DB_AUTHORITY_ENABLED", True
+        ), self.assertRaisesRegex(
+            DbAuthorityControllerError, "production DB authority must remain disabled"
+        ):
+            rollback_synthetic_db_authority_expansion(
+                self.database,
+                (self.artifact,),
+                workflow="local-artifact-canary",
+            )
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority "
+                    "WHERE workflow='local-artifact-canary'"
+                ).fetchone(),
+                ("db_authority_canary",),
             )
 
     def test_canary_recovers_after_local_crash_fixture(self) -> None:
