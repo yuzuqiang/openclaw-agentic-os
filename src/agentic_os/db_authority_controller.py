@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +15,13 @@ from .db_authority_canary import (
     DbAuthorityCanaryResult,
     DbAuthorityRollbackResult,
     _canary_rollback_proof_hash,
+    _connect_existing_canary_database,
     _controlled_db_authority_canary_artifact,
     _controlled_rollback_db_authority_canary,
     _normalize_deadline,
     _sha256_text,
 )
+from .migrations import apply_migrations, verify_database_connection
 from .shadow import (
     ShadowProjection,
     _normalize_artifact_target,
@@ -113,6 +116,9 @@ def run_synthetic_db_authority_expansion(
         prepare_idempotency_key=prepare_idempotency_key,
         repo_root_path=repo_root_path,
     )
+    _assert_persisted_verifier_evidence(
+        database, expected_proof, repo_root_path=repo_root_path
+    )
     canary = _controlled_db_authority_canary_artifact(
         database,
         artifact,
@@ -127,6 +133,10 @@ def run_synthetic_db_authority_expansion(
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
     )
+    if canary.status == "replayed":
+        raise DbAuthorityControllerError(
+            "controlled canary replay cannot create retroactive controller proof"
+        )
     _assert_canary_matches_eligibility(canary, expected_proof)
     db_authority_enabled = _assert_db_authority_disabled()
     proof = _controller_proof(
@@ -488,6 +498,69 @@ def _assert_canary_matches_eligibility(
         raise DbAuthorityControllerError(
             "canary result drifted from the exact eligibility proof"
         )
+
+
+def _assert_persisted_verifier_evidence(
+    database: Path,
+    proof: Mapping[str, object],
+    *,
+    repo_root_path: Path | None,
+) -> None:
+    root = Path(repo_root_path or Path(__file__).resolve().parents[2]).resolve()
+    database_path = Path(database).expanduser().resolve()
+    apply_migrations(database_path, repo_root=root)
+    connection = _connect_existing_canary_database(database_path, root=root)
+    try:
+        verify_database_connection(connection)
+        verifier_run_id = _required_proof_text(proof, "verifier_run_id")
+        gate_evidence_hash = _sha256_text(
+            "gate_evidence_hash", _required_proof_text(proof, "gate_evidence_hash")
+        )
+        row = connection.execute(
+            "SELECT worker_run_id,worker_agent_id,verifier_agent_id,evidence_hash,"
+            "independence_class,independence_proof_json,same_worker_context "
+            "FROM judge_verifier_runs WHERE verifier_run_id=?",
+            (verifier_run_id,),
+        ).fetchone()
+        if row is None:
+            raise DbAuthorityControllerError(
+                "eligibility proof requires persisted verifier evidence"
+            )
+        (
+            worker_run_id,
+            worker_agent_id,
+            verifier_agent_id,
+            evidence_hash,
+            independence_class,
+            independence_proof_json,
+            same_worker_context,
+        ) = row
+        if (
+            worker_agent_id != proof["worker_agent_id"]
+            or verifier_agent_id != proof["verifier_agent_id"]
+            or evidence_hash != gate_evidence_hash
+            or independence_class != "independent"
+            or same_worker_context != 0
+            or worker_agent_id == verifier_agent_id
+            or worker_run_id == proof["run_id"]
+        ):
+            raise DbAuthorityControllerError(
+                "eligibility proof verifier evidence is not bound to the exact gate"
+            )
+        try:
+            independence_proof = json.loads(independence_proof_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise DbAuthorityControllerError(
+                "eligibility proof verifier evidence must include independence proof"
+            ) from exc
+        if not isinstance(independence_proof, dict) or not independence_proof:
+            raise DbAuthorityControllerError(
+                "eligibility proof verifier evidence must include independence proof"
+            )
+    except sqlite3.IntegrityError as exc:
+        raise DbAuthorityControllerError(str(exc)) from exc
+    finally:
+        connection.close()
 
 
 def _digest(payload: Mapping[str, object]) -> str:

@@ -323,6 +323,16 @@ def _db_authority_canary_artifact_impl(
         ).isoformat()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            if _require_workflow_no_real_session_control:
+                _assert_no_real_session_control_for_workflow(
+                    connection, workflow=workflow
+                )
+                _assert_single_workflow_projection_set(
+                    connection,
+                    workflow=workflow,
+                    run_id=run_id,
+                    projection=projection,
+                )
             _assert_no_real_session_control(connection, run_id=run_id)
             _assert_artifact_matches(target, digest, relative)
             updated = connection.execute(

@@ -97,12 +97,16 @@ The first Issue 29 P2.0 controller slice lives in
 explicit low-risk workflow, `local-artifact-canary`, and delegates only to the
 synthetic artifact canary above. It admits only R1/R1, rejects R3/R4 as
 human-required, and requires an exact local eligibility proof before the canary
-transition can advance. That proof binds the independent synthetic gate,
-canary evidence hash, rollback-regeneration hash, parity audit hash, deterministic
-projection identity, workflow isolation, RPC denial flags, and
-`DB_AUTHORITY_ENABLED=false`. This controller does not prove or call any
-OpenClaw, Gateway, Cron, or session RPC and must not be treated as production
-cutover authority.
+transition can advance. That proof must also have persisted independent
+`judge_verifier_runs` evidence whose evidence hash matches the exact synthetic
+gate hash. The proof binds the verifier evidence, canary evidence hash,
+rollback-regeneration hash, parity audit hash, deterministic projection
+identity, workflow isolation, RPC denial flags, and `DB_AUTHORITY_ENABLED=false`.
+The raw canary and rollback APIs reject `local-artifact-canary`; controlled
+writes recheck workflow-wide no-RPC and projection-set boundaries again under
+the finalization lock and do not count retroactive replay as controller proof.
+This controller does not prove or call any OpenClaw, Gateway, Cron, or session
+RPC and must not be treated as production cutover authority.
 
 The first P1.2 predicate slice lives in `agentic_os.predicates`. It implements
 only the read-only `agentic_predicate_inproc_v1` backend: literal booleans,
