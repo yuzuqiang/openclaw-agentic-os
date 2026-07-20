@@ -439,7 +439,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         next_artifact = Path(self.temporary.name) / "reports" / "canary-2.json"
         next_payload = b'{"workflow":"heartbeat","synthetic":true,"next":true}\n'
 
-        with self.assertRaisesRegex(DbAuthorityControllerError, "projection set"):
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "projection set"):
             run_synthetic_db_authority_expansion(
                 self.database,
                 next_artifact,
@@ -462,6 +462,144 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 last_parity_audit_hash=self.parity_hash,
             )
         self.assertFalse(next_artifact.exists())
+
+    def test_raw_canary_rejects_controlled_expansion_workflow(self) -> None:
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "expansion controller"):
+            db_authority_canary_artifact(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+        self.assertFalse(self.artifact.exists())
+
+    def test_expansion_controller_recovers_prepared_projection_set(self) -> None:
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=self._eligibility_proof(),
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+                crash_after_prepare=True,
+            )
+        self.assertFalse(self.artifact.exists())
+
+        recovered = run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+            eligibility_proof=self._eligibility_proof(),
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+
+        self.assertEqual(recovered.canary.status, "recovered")
+        self.assertEqual(self.artifact.read_bytes(), self.payload)
+
+    def test_expansion_controller_projection_set_guard_handles_uri_database_path(
+        self,
+    ) -> None:
+        self.database = Path(self.temporary.name) / "canary#control?.db"
+        run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+            eligibility_proof=self._eligibility_proof(),
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        next_artifact = Path(self.temporary.name) / "reports" / "canary-2.json"
+        next_payload = b'{"workflow":"heartbeat","synthetic":true,"next":true}\n'
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "projection set"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                next_artifact,
+                next_payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run-2",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=self._eligibility_proof(
+                    run_id="canary-run-2",
+                    artifact=next_artifact,
+                    content=next_payload,
+                ),
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+        self.assertFalse(next_artifact.exists())
+
+    def test_expansion_controller_rollback_proof_uses_normalized_workflow(self) -> None:
+        result = run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+            eligibility_proof=self._eligibility_proof(),
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+
+        rollback = rollback_synthetic_db_authority_expansion(
+            self.database,
+            (self.artifact,),
+            workflow=" local-artifact-canary ",
+        )
+
+        self.assertEqual(rollback.workflow, "local-artifact-canary")
+        self.assertTrue(rollback.proof["workflow_isolation"])
+        self.assertEqual(
+            rollback.proof["rollback_proof_hash"],
+            result.proof["rollback_proof_hash"],
+        )
 
     def test_canary_recovers_after_local_crash_fixture(self) -> None:
         with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):

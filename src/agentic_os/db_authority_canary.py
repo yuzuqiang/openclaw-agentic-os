@@ -80,6 +80,7 @@ def db_authority_canary_artifact(
     repo_root_path: Path | None = None,
     crash_after_prepare: bool = False,
     _allow_controlled_workflow: bool = False,
+    _require_single_workflow_projection_set: bool = False,
 ) -> DbAuthorityCanaryResult:
     """Record one synthetic/local artifact-only ``db_authority_canary`` run.
 
@@ -171,6 +172,13 @@ def db_authority_canary_artifact(
                 run_id=run_id,
                 prepare_idempotency_key=prepare_key,
             )
+            if _require_single_workflow_projection_set:
+                _assert_single_workflow_projection_set(
+                    connection,
+                    workflow=workflow,
+                    run_id=run_id,
+                    projection=projection,
+                )
             if run_state is None and rollback_deadline_epoch_ms <= created_epoch_ms:
                 raise DbAuthorityCanaryError(
                     "rollback_deadline must be later than the canary preparation clock"
@@ -757,6 +765,41 @@ def _assert_projection_matches(
         raise DbAuthorityCanaryError(
             f"canary projection drift for {projection.path}"
         )
+
+
+def _assert_single_workflow_projection_set(
+    connection: sqlite3.Connection,
+    *,
+    workflow: str,
+    run_id: str,
+    projection: ShadowProjection,
+) -> None:
+    rows = connection.execute(
+        "SELECT p.projection_id,p.run_id,p.path,p.sha256,r.authority_mode,r.state "
+        "FROM artifact_projections p "
+        "JOIN runs r ON r.run_id=p.run_id "
+        "WHERE p.source_authority='db_authority_canary' "
+        "AND r.workflow=?",
+        (workflow,),
+    ).fetchall()
+    if not rows:
+        return
+    expected = (
+        projection.projection_id,
+        run_id,
+        projection.path,
+        projection.sha256,
+        "db_authority_canary",
+    )
+    if len(rows) == 1 and rows[0][:5] == expected and rows[0][5] in {
+        "prepared",
+        "finalized",
+    }:
+        return
+    raise DbAuthorityCanaryError(
+        "synthetic expansion eligibility proof must bind the full workflow "
+        "canary projection set"
+    )
 
 
 def _assert_artifact_matches(target: Path, digest: str, relative: str) -> None:

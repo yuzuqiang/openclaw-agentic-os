@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,9 +110,6 @@ def run_synthetic_db_authority_expansion(
         eligibility_proof=eligibility_proof,
         repo_root_path=repo_root_path,
     )
-    _assert_no_existing_canary_projection_set(
-        database, workflow=str(expected_proof["workflow"])
-    )
     canary = db_authority_canary_artifact(
         database,
         artifact,
@@ -128,6 +124,7 @@ def run_synthetic_db_authority_expansion(
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
         _allow_controlled_workflow=True,
+        _require_single_workflow_projection_set=True,
     )
     _assert_canary_matches_eligibility(canary, expected_proof)
     db_authority_enabled = _assert_db_authority_disabled()
@@ -162,7 +159,7 @@ def rollback_synthetic_db_authority_expansion(
     """Rollback the one allowed synthetic DB-authority expansion workflow."""
 
     _assert_db_authority_disabled()
-    _assert_supported_workflow(workflow)
+    workflow = _assert_supported_workflow(workflow)
     rollback = rollback_db_authority_canary(
         database,
         artifacts,
@@ -350,13 +347,14 @@ def _assert_controller_boundary(
         )
 
 
-def _assert_supported_workflow(workflow: str) -> None:
+def _assert_supported_workflow(workflow: str) -> str:
     workflow = _normalize_required_identity("workflow", workflow)
     if workflow != SYNTHETIC_WORKFLOW:
         raise DbAuthorityControllerError(
             f"unsupported DB-authority expansion workflow {workflow!r}; "
             f"only {SYNTHETIC_WORKFLOW!r} is enabled"
         )
+    return workflow
 
 
 def _required_proof_text(proof: Mapping[str, object], key: str) -> str:
@@ -475,39 +473,6 @@ def _assert_canary_matches_eligibility(
     ):
         raise DbAuthorityControllerError(
             "canary result drifted from the exact eligibility proof"
-        )
-
-
-def _assert_no_existing_canary_projection_set(database: Path, *, workflow: str) -> None:
-    database_path = Path(database).expanduser()
-    if not database_path.exists():
-        return
-    try:
-        with sqlite3.connect(f"file:{database_path.resolve()}?mode=ro", uri=True) as connection:
-            has_runs = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
-            ).fetchone()
-            has_projections = connection.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='table' AND name='artifact_projections'"
-            ).fetchone()
-            if not has_runs or not has_projections:
-                return
-            existing = connection.execute(
-                "SELECT COUNT(*) FROM artifact_projections p "
-                "JOIN runs r ON r.run_id=p.run_id "
-                "WHERE p.source_authority='db_authority_canary' "
-                "AND r.workflow=?",
-                (workflow,),
-            ).fetchone()[0]
-    except sqlite3.Error as exc:
-        raise DbAuthorityControllerError(
-            "cannot prove absence of existing canary projections"
-        ) from exc
-    if existing:
-        raise DbAuthorityControllerError(
-            "synthetic expansion eligibility proof must bind the full workflow "
-            "canary projection set"
         )
 
 
