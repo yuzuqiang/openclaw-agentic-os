@@ -141,6 +141,9 @@ def parser() -> argparse.ArgumentParser:
     expansion.add_argument("--prepare-idempotency-key")
     expansion.add_argument("--risk-class", required=True)
     expansion.add_argument("--risk-dominance", required=True)
+    expansion.add_argument("--worker-agent-id", required=True)
+    expansion.add_argument("--verifier-agent-id", required=True)
+    expansion.add_argument("--verifier-run-id", required=True)
     expansion.add_argument(
         "--eligibility-proof-json",
         required=True,
@@ -303,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             risk_class=args.risk_class,
             risk_dominance=args.risk_dominance,
+            worker_agent_id=args.worker_agent_id,
+            verifier_agent_id=args.verifier_agent_id,
+            verifier_run_id=args.verifier_run_id,
             eligibility_proof=eligibility_proof,
             cutover_approved_by=args.cutover_approved_by,
             cutover_evidence_hash=args.cutover_evidence_hash,

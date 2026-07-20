@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +69,9 @@ def run_synthetic_db_authority_expansion(
     run_id: str,
     risk_class: str,
     risk_dominance: str,
+    worker_agent_id: str,
+    verifier_agent_id: str,
+    verifier_run_id: str,
     eligibility_proof: Mapping[str, object],
     cutover_approved_by: str,
     cutover_evidence_hash: str,
@@ -101,15 +105,21 @@ def run_synthetic_db_authority_expansion(
         cutover_evidence_hash=cutover_evidence_hash,
         rollback_deadline=rollback_deadline,
         last_parity_audit_hash=last_parity_audit_hash,
+        worker_agent_id=worker_agent_id,
+        verifier_agent_id=verifier_agent_id,
+        verifier_run_id=verifier_run_id,
         eligibility_proof=eligibility_proof,
         repo_root_path=repo_root_path,
+    )
+    _assert_no_existing_canary_projection_set(
+        database, workflow=str(expected_proof["workflow"])
     )
     canary = db_authority_canary_artifact(
         database,
         artifact,
         content,
-        workflow=workflow,
-        run_id=run_id,
+        workflow=str(expected_proof["workflow"]),
+        run_id=str(expected_proof["run_id"]),
         cutover_approved_by=cutover_approved_by,
         cutover_evidence_hash=cutover_evidence_hash,
         rollback_deadline=rollback_deadline,
@@ -117,14 +127,15 @@ def run_synthetic_db_authority_expansion(
         prepare_idempotency_key=prepare_idempotency_key,
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
+        _allow_controlled_workflow=True,
     )
     _assert_canary_matches_eligibility(canary, expected_proof)
     db_authority_enabled = _assert_db_authority_disabled()
     proof = _controller_proof(
-        workflow=workflow,
-        run_id=run_id,
-        risk_class=risk_class,
-        risk_dominance=risk_dominance,
+        workflow=canary.workflow,
+        run_id=canary.run_id,
+        risk_class=str(expected_proof["risk_class"]),
+        risk_dominance=str(expected_proof["risk_dominance"]),
         canary_status=canary.status,
         rollback_status=None,
         projections=(canary.projection,),
@@ -132,8 +143,8 @@ def run_synthetic_db_authority_expansion(
         db_authority_enabled=db_authority_enabled,
     )
     return DbAuthorityControllerResult(
-        workflow=workflow,
-        run_id=run_id,
+        workflow=canary.workflow,
+        run_id=canary.run_id,
         canary=canary,
         controller_status="artifact_only_canary_recorded",
         db_authority_enabled=db_authority_enabled,
@@ -235,24 +246,15 @@ def expected_synthetic_expansion_eligibility_proof(
         risk_dominance=risk_dominance,
     )
 
-    if eligibility_proof is not None:
-        worker_agent_id = _required_proof_text(
-            eligibility_proof, "worker_agent_id"
-        )
-        verifier_agent_id = _required_proof_text(
-            eligibility_proof, "verifier_agent_id"
-        )
-        verifier_run_id = _required_proof_text(eligibility_proof, "verifier_run_id")
-    else:
-        worker_agent_id = _normalize_required_identity(
-            "worker_agent_id", worker_agent_id
-        )
-        verifier_agent_id = _normalize_required_identity(
-            "verifier_agent_id", verifier_agent_id
-        )
-        verifier_run_id = _normalize_required_identity(
-            "verifier_run_id", verifier_run_id
-        )
+    worker_agent_id = _normalize_required_identity(
+        "worker_agent_id", worker_agent_id
+    )
+    verifier_agent_id = _normalize_required_identity(
+        "verifier_agent_id", verifier_agent_id
+    )
+    verifier_run_id = _normalize_required_identity(
+        "verifier_run_id", verifier_run_id
+    )
     if worker_agent_id == verifier_agent_id or verifier_run_id == run_id:
         raise DbAuthorityControllerError(
             "synthetic expansion gate proof must be independent"
@@ -452,7 +454,7 @@ def _assert_exact_proof(
         raise DbAuthorityControllerError(
             "eligibility proof must contain exactly the required keys"
         )
-    if proof != expected:
+    if _canonical_json(proof) != _canonical_json(expected):
         raise DbAuthorityControllerError(
             "eligibility proof does not match the exact synthetic expansion boundary"
         )
@@ -476,10 +478,52 @@ def _assert_canary_matches_eligibility(
         )
 
 
+def _assert_no_existing_canary_projection_set(database: Path, *, workflow: str) -> None:
+    database_path = Path(database).expanduser()
+    if not database_path.exists():
+        return
+    try:
+        with sqlite3.connect(f"file:{database_path.resolve()}?mode=ro", uri=True) as connection:
+            has_runs = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+            ).fetchone()
+            has_projections = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='artifact_projections'"
+            ).fetchone()
+            if not has_runs or not has_projections:
+                return
+            existing = connection.execute(
+                "SELECT COUNT(*) FROM artifact_projections p "
+                "JOIN runs r ON r.run_id=p.run_id "
+                "WHERE p.source_authority='db_authority_canary' "
+                "AND r.workflow=?",
+                (workflow,),
+            ).fetchone()[0]
+    except sqlite3.Error as exc:
+        raise DbAuthorityControllerError(
+            "cannot prove absence of existing canary projections"
+        ) from exc
+    if existing:
+        raise DbAuthorityControllerError(
+            "synthetic expansion eligibility proof must bind the full workflow "
+            "canary projection set"
+        )
+
+
 def _digest(payload: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _canonical_json(payload: Mapping[str, object]) -> str:
+    try:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise DbAuthorityControllerError(
+            "eligibility proof must be canonical JSON-compatible"
+        ) from exc
 
 
 def _proof_hash(proof: Mapping[str, object]) -> str:

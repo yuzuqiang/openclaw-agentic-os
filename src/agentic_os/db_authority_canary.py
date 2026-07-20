@@ -62,6 +62,7 @@ _REAL_SESSION_TABLES = (
     "spawn_requests",
     "sessions",
 )
+CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS = frozenset(("local-artifact-canary",))
 
 
 def db_authority_canary_artifact(
@@ -78,6 +79,7 @@ def db_authority_canary_artifact(
     prepare_idempotency_key: str | None = None,
     repo_root_path: Path | None = None,
     crash_after_prepare: bool = False,
+    _allow_controlled_workflow: bool = False,
 ) -> DbAuthorityCanaryResult:
     """Record one synthetic/local artifact-only ``db_authority_canary`` run.
 
@@ -90,6 +92,13 @@ def db_authority_canary_artifact(
     if agentic_os.DB_AUTHORITY_ENABLED:
         raise DbAuthorityCanaryError("production DB authority must remain disabled")
     workflow = _normalize_required_identity("workflow", workflow)
+    if (
+        workflow in CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS
+        and not _allow_controlled_workflow
+    ):
+        raise DbAuthorityCanaryError(
+            f"workflow {workflow!r} must use the DB-authority expansion controller"
+        )
     run_id = _normalize_required_identity("run_id", run_id)
     cutover_approved_by = _normalize_required_identity(
         "cutover_approved_by", cutover_approved_by
