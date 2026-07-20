@@ -20,6 +20,7 @@ from .db_authority_canary import (
     _controlled_rollback_db_authority_canary,
     _normalize_deadline,
     _sha256_text,
+    _validate_canary_database_path,
 )
 from .migrations import apply_migrations, verify_database_connection
 from .shadow import (
@@ -132,6 +133,11 @@ def run_synthetic_db_authority_expansion(
         prepare_idempotency_key=str(expected_proof["prepare_idempotency_key"]),
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
+        _finalize_precondition=(
+            lambda connection: _assert_persisted_verifier_evidence_connection(
+                connection, expected_proof
+            )
+        ),
     )
     if canary.status == "replayed":
         raise DbAuthorityControllerError(
@@ -507,60 +513,84 @@ def _assert_persisted_verifier_evidence(
     repo_root_path: Path | None,
 ) -> None:
     root = Path(repo_root_path or Path(__file__).resolve().parents[2]).resolve()
-    database_path = Path(database).expanduser().resolve()
+    database_input = Path(database).expanduser()
+    if database_input.is_symlink():
+        raise DbAuthorityControllerError("canary database cannot be a symlink")
+    database_path = database_input.resolve()
+    pre_migration_identity = _validate_canary_database_path(
+        database_path, root=root, must_exist=False
+    )
     apply_migrations(database_path, repo_root=root)
+    post_migration_identity = _validate_canary_database_path(
+        database_path, root=root, must_exist=True
+    )
+    if (
+        pre_migration_identity is not None
+        and post_migration_identity != pre_migration_identity
+    ):
+        raise DbAuthorityControllerError(
+            "canary database identity changed while applying migrations"
+        )
     connection = _connect_existing_canary_database(database_path, root=root)
     try:
         verify_database_connection(connection)
-        verifier_run_id = _required_proof_text(proof, "verifier_run_id")
-        gate_evidence_hash = _sha256_text(
-            "gate_evidence_hash", _required_proof_text(proof, "gate_evidence_hash")
-        )
-        row = connection.execute(
-            "SELECT worker_run_id,worker_agent_id,verifier_agent_id,evidence_hash,"
-            "independence_class,independence_proof_json,same_worker_context "
-            "FROM judge_verifier_runs WHERE verifier_run_id=?",
-            (verifier_run_id,),
-        ).fetchone()
-        if row is None:
-            raise DbAuthorityControllerError(
-                "eligibility proof requires persisted verifier evidence"
-            )
-        (
-            worker_run_id,
-            worker_agent_id,
-            verifier_agent_id,
-            evidence_hash,
-            independence_class,
-            independence_proof_json,
-            same_worker_context,
-        ) = row
-        if (
-            worker_agent_id != proof["worker_agent_id"]
-            or verifier_agent_id != proof["verifier_agent_id"]
-            or evidence_hash != gate_evidence_hash
-            or independence_class != "independent"
-            or same_worker_context != 0
-            or worker_agent_id == verifier_agent_id
-            or worker_run_id == proof["run_id"]
-        ):
-            raise DbAuthorityControllerError(
-                "eligibility proof verifier evidence is not bound to the exact gate"
-            )
-        try:
-            independence_proof = json.loads(independence_proof_json)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise DbAuthorityControllerError(
-                "eligibility proof verifier evidence must include independence proof"
-            ) from exc
-        if not isinstance(independence_proof, dict) or not independence_proof:
-            raise DbAuthorityControllerError(
-                "eligibility proof verifier evidence must include independence proof"
-            )
+        _assert_persisted_verifier_evidence_connection(connection, proof)
     except sqlite3.IntegrityError as exc:
         raise DbAuthorityControllerError(str(exc)) from exc
     finally:
         connection.close()
+
+
+def _assert_persisted_verifier_evidence_connection(
+    connection: sqlite3.Connection,
+    proof: Mapping[str, object],
+) -> None:
+    verifier_run_id = _required_proof_text(proof, "verifier_run_id")
+    gate_evidence_hash = _sha256_text(
+        "gate_evidence_hash", _required_proof_text(proof, "gate_evidence_hash")
+    )
+    row = connection.execute(
+        "SELECT worker_run_id,worker_agent_id,verifier_agent_id,evidence_hash,"
+        "independence_class,independence_proof_json,same_worker_context "
+        "FROM judge_verifier_runs WHERE verifier_run_id=?",
+        (verifier_run_id,),
+    ).fetchone()
+    if row is None:
+        raise DbAuthorityControllerError(
+            "eligibility proof requires persisted verifier evidence"
+        )
+    (
+        worker_run_id,
+        worker_agent_id,
+        verifier_agent_id,
+        evidence_hash,
+        independence_class,
+        independence_proof_json,
+        same_worker_context,
+    ) = row
+    if (
+        worker_agent_id != proof["worker_agent_id"]
+        or verifier_agent_id != proof["verifier_agent_id"]
+        or evidence_hash != gate_evidence_hash
+        or independence_class != "independent"
+        or same_worker_context != 0
+        or worker_agent_id == verifier_agent_id
+        or worker_run_id == proof["run_id"]
+        or worker_run_id == verifier_run_id
+    ):
+        raise DbAuthorityControllerError(
+            "eligibility proof verifier evidence is not bound to the exact gate"
+        )
+    try:
+        independence_proof = json.loads(independence_proof_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise DbAuthorityControllerError(
+            "eligibility proof verifier evidence must include independence proof"
+        ) from exc
+    if not isinstance(independence_proof, dict) or not independence_proof:
+        raise DbAuthorityControllerError(
+            "eligibility proof verifier evidence must include independence proof"
+        )
 
 
 def _digest(payload: Mapping[str, object]) -> str:

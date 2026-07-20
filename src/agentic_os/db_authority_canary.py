@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,6 +119,7 @@ def _controlled_db_authority_canary_artifact(
     prepare_idempotency_key: str | None = None,
     repo_root_path: Path | None = None,
     crash_after_prepare: bool = False,
+    _finalize_precondition: Callable[[sqlite3.Connection], None] | None = None,
 ) -> DbAuthorityCanaryResult:
     return _db_authority_canary_artifact_impl(
         database,
@@ -135,6 +137,7 @@ def _controlled_db_authority_canary_artifact(
         _allow_controlled_workflow=True,
         _require_single_workflow_projection_set=True,
         _require_workflow_no_real_session_control=True,
+        _finalize_precondition=_finalize_precondition,
     )
 
 
@@ -155,6 +158,7 @@ def _db_authority_canary_artifact_impl(
     _allow_controlled_workflow: bool = False,
     _require_single_workflow_projection_set: bool = False,
     _require_workflow_no_real_session_control: bool = False,
+    _finalize_precondition: Callable[[sqlite3.Connection], None] | None = None,
 ) -> DbAuthorityCanaryResult:
     if agentic_os.DB_AUTHORITY_ENABLED:
         raise DbAuthorityCanaryError("production DB authority must remain disabled")
@@ -333,6 +337,8 @@ def _db_authority_canary_artifact_impl(
                     run_id=run_id,
                     projection=projection,
                 )
+            if _finalize_precondition is not None:
+                _finalize_precondition(connection)
             _assert_no_real_session_control(connection, run_id=run_id)
             _assert_artifact_matches(target, digest, relative)
             updated = connection.execute(
@@ -396,6 +402,8 @@ def _controlled_rollback_db_authority_canary(
         workflow=workflow,
         repo_root_path=repo_root_path,
         _allow_controlled_workflow=True,
+        _require_single_workflow_projection_set=True,
+        _require_workflow_no_real_session_control=True,
     )
 
 
@@ -406,6 +414,8 @@ def _rollback_db_authority_canary_impl(
     workflow: str,
     repo_root_path: Path | None = None,
     _allow_controlled_workflow: bool = False,
+    _require_single_workflow_projection_set: bool = False,
+    _require_workflow_no_real_session_control: bool = False,
 ) -> DbAuthorityRollbackResult:
     workflow = _normalize_required_identity("workflow", workflow)
     if (
@@ -438,6 +448,10 @@ def _rollback_db_authority_canary_impl(
             if row is None or row[0] != "db_authority_canary":
                 raise DbAuthorityCanaryError(
                     "rollback requires an active db_authority_canary workflow"
+                )
+            if _require_workflow_no_real_session_control:
+                _assert_no_real_session_control_for_workflow(
+                    connection, workflow=workflow
                 )
             if (
                 not row[1]
@@ -488,6 +502,11 @@ def _rollback_db_authority_canary_impl(
             ).fetchall()
             if not canary_runs:
                 raise DbAuthorityCanaryError("rollback requires finalized canary runs")
+            if _require_single_workflow_projection_set and len(canary_runs) != 1:
+                raise DbAuthorityCanaryError(
+                    "synthetic expansion eligibility proof must bind the full workflow "
+                    "canary projection set"
+                )
             for run_id, state, finalized_at, finalized_epoch_ms in canary_runs:
                 if (
                     state != "finalized"
@@ -513,6 +532,11 @@ def _rollback_db_authority_canary_impl(
                 and run_authority_mode == "db_authority_canary"
                 and run_state == "finalized"
             ]
+            if _require_single_workflow_projection_set and len(expected_rows) != 1:
+                raise DbAuthorityCanaryError(
+                    "synthetic expansion eligibility proof must bind the full workflow "
+                    "canary projection set"
+                )
             canary_run_ids = {run_id for run_id, *_rest in canary_runs}
             projection_counts = {run_id: 0 for run_id in canary_run_ids}
             all_projection_counts = {

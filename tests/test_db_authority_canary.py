@@ -54,6 +54,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
         artifact: Path | None = None,
         content: bytes | None = None,
         prepare_idempotency_key: str | None = None,
+        verifier_run_id: str = "phase-a-boundary-review",
         persist_verifier_evidence: bool = True,
     ) -> dict[str, object]:
         proof = expected_synthetic_expansion_eligibility_proof(
@@ -69,7 +70,7 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             last_parity_audit_hash=self.parity_hash,
             worker_agent_id="phase-b-ai-engineer",
             verifier_agent_id="phase-a-security-engineer",
-            verifier_run_id="phase-a-boundary-review",
+            verifier_run_id=verifier_run_id,
             prepare_idempotency_key=prepare_idempotency_key,
         )
         if persist_verifier_evidence:
@@ -402,6 +403,66 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 worker_agent_id="phase-b-ai-engineer",
                 verifier_agent_id="phase-a-security-engineer",
                 verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=proof,
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+        self.assertFalse(self.artifact.exists())
+
+    def test_expansion_controller_validates_database_alias_before_migration(
+        self,
+    ) -> None:
+        real_database = Path(self.temporary.name) / "real-control.db"
+        alias_database = Path(self.temporary.name) / "alias-control.db"
+        try:
+            os.symlink(real_database, alias_database)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        self.database = alias_database
+        proof = self._eligibility_proof(persist_verifier_evidence=False)
+
+        with self.assertRaisesRegex(DbAuthorityControllerError, "symlink"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=proof,
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+
+        self.assertFalse(real_database.exists())
+        self.assertFalse(self.artifact.exists())
+
+    def test_expansion_controller_rejects_verifier_reusing_worker_run_id(
+        self,
+    ) -> None:
+        verifier_run_id = "phase-b-worker-evidence"
+        proof = self._eligibility_proof(verifier_run_id=verifier_run_id)
+
+        with self.assertRaisesRegex(DbAuthorityControllerError, "exact gate"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id=verifier_run_id,
                 eligibility_proof=proof,
                 cutover_approved_by="local-fixture",
                 cutover_evidence_hash=self.cutover_hash,
@@ -884,6 +945,53 @@ class DbAuthorityCanaryTests(unittest.TestCase):
                 ("prepared",),
             )
 
+    def test_expansion_controller_revalidates_verifier_evidence_before_finalize(
+        self,
+    ) -> None:
+        proof = self._eligibility_proof()
+        original_create = canary_module._atomic_create_file
+
+        def drift_verifier_evidence(target: Path, content: bytes) -> None:
+            original_create(target, content)
+            with sqlite3.connect(self.database) as connection:
+                connection.execute(
+                    "UPDATE judge_verifier_runs SET evidence_hash=? "
+                    "WHERE verifier_run_id=?",
+                    (
+                        hashlib.sha256(b"drifted-gate").hexdigest(),
+                        proof["verifier_run_id"],
+                    ),
+                )
+
+        with mock.patch.object(
+            canary_module, "_atomic_create_file", side_effect=drift_verifier_evidence
+        ), self.assertRaisesRegex(DbAuthorityControllerError, "exact gate"):
+            run_synthetic_db_authority_expansion(
+                self.database,
+                self.artifact,
+                self.payload,
+                workflow="local-artifact-canary",
+                run_id="canary-run",
+                risk_class="R1",
+                risk_dominance="R1",
+                worker_agent_id="phase-b-ai-engineer",
+                verifier_agent_id="phase-a-security-engineer",
+                verifier_run_id="phase-a-boundary-review",
+                eligibility_proof=proof,
+                cutover_approved_by="local-fixture",
+                cutover_evidence_hash=self.cutover_hash,
+                rollback_deadline="2099-01-01T00:00:00+00:00",
+                last_parity_audit_hash=self.parity_hash,
+            )
+
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM runs WHERE run_id='canary-run'"
+                ).fetchone(),
+                ("prepared",),
+            )
+
     def test_expansion_controller_rejects_workflow_real_session_rows(self) -> None:
         apply_migrations(self.database)
         with sqlite3.connect(self.database) as connection:
@@ -1020,6 +1128,137 @@ class DbAuthorityCanaryTests(unittest.TestCase):
             rollback.proof["rollback_proof_hash"],
             result.proof["rollback_proof_hash"],
         )
+
+    def test_expansion_controller_rollback_rejects_multi_projection_set(self) -> None:
+        apply_migrations(self.database)
+        artifacts = (
+            self.artifact,
+            Path(self.temporary.name) / "reports" / "canary-2.json",
+        )
+        payloads = (
+            self.payload,
+            b'{"workflow":"heartbeat","synthetic":true,"second":true}\n',
+        )
+        with sqlite3.connect(self.database) as connection:
+            _register_migration_functions(connection)
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,cutover_approved_by,"
+                "cutover_evidence_hash,rollback_deadline,last_parity_audit_hash,"
+                "open_file_authority_runs,updated_at) VALUES(?,?,?,?,?,?,0,?)",
+                (
+                    "local-artifact-canary",
+                    "db_authority_canary",
+                    "local-fixture",
+                    self.cutover_hash,
+                    "2099-01-01T00:00:00+00:00",
+                    self.parity_hash,
+                    "2026-01-01T00:00:00+00:00",
+                ),
+            )
+            for index, (artifact, payload) in enumerate(zip(artifacts, payloads), 1):
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_bytes(payload)
+                _target, relative = canary_module._normalize_artifact_target(
+                    artifact,
+                    repo_root_path=repository_root(),
+                )
+                digest = hashlib.sha256(payload).hexdigest()
+                run_id = f"legacy-canary-{index}"
+                connection.execute(
+                    "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                    "authority_mode,state,risk_class,risk_dominance,created_at,"
+                    "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                    "?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        run_id,
+                        f"{run_id}-prepare",
+                        "local-artifact-canary",
+                        "db_authority_canary",
+                        "finalized",
+                        "R1",
+                        "R1",
+                        "2026-01-01T00:00:00+00:00",
+                        "2026-01-01T00:00:00+00:00",
+                        "2026-01-01T00:00:00+00:00",
+                        1767225600000,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO artifact_projections(projection_id,run_id,path,"
+                    "sha256,source_authority,generated_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        canary_module._projection_id(run_id, relative, digest),
+                        run_id,
+                        relative,
+                        digest,
+                        "db_authority_canary",
+                        "2026-01-01T00:00:00+00:00",
+                    ),
+                )
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "projection set"):
+            rollback_synthetic_db_authority_expansion(
+                self.database,
+                artifacts,
+                workflow="local-artifact-canary",
+            )
+
+    def test_expansion_controller_rollback_rechecks_workflow_rpc_rows(self) -> None:
+        run_synthetic_db_authority_expansion(
+            self.database,
+            self.artifact,
+            self.payload,
+            workflow="local-artifact-canary",
+            run_id="canary-run",
+            risk_class="R1",
+            risk_dominance="R1",
+            worker_agent_id="phase-b-ai-engineer",
+            verifier_agent_id="phase-a-security-engineer",
+            verifier_run_id="phase-a-boundary-review",
+            eligibility_proof=self._eligibility_proof(),
+            cutover_approved_by="local-fixture",
+            cutover_evidence_hash=self.cutover_hash,
+            rollback_deadline="2099-01-01T00:00:00+00:00",
+            last_parity_audit_hash=self.parity_hash,
+        )
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,"
+                "updated_at,finalized_at,finalized_at_epoch_ms) VALUES("
+                "'prior-file-run','prior-file-prepare','local-artifact-canary',"
+                "'file_authority','finalized','R1','R1',"
+                "'2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00',"
+                "'2026-01-01T00:00:00+00:00',1767225600000)"
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,"
+                "state_after,transition_type,action_type,target_type,target_id,"
+                "target_hash,target_scope,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES("
+                "'prior-transition','prior-file-run','prepared','spawn_pending',"
+                "'dispatch','spawn','session','prior-session',?,'local','R1',"
+                "'prior-transition-idem',0,'2026-01-01T00:00:00+00:00')",
+                (hashlib.sha256(b"prior-session").hexdigest(),),
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "ttl_ms,expires_at,expires_at_epoch_ms) VALUES("
+                "'prior-lease','prior-file-run','B','prior-transition',"
+                "'ai-engineer','main','release_not_required','prior-client-lease',"
+                "'prior-acquire-idem',1000,'2099-01-01T00:00:00+00:00',"
+                "4070908800000)"
+            )
+
+        with self.assertRaisesRegex(DbAuthorityCanaryError, "whole workflow"):
+            rollback_synthetic_db_authority_expansion(
+                self.database,
+                (self.artifact,),
+                workflow="local-artifact-canary",
+            )
 
     def test_canary_recovers_after_local_crash_fixture(self) -> None:
         with self.assertRaisesRegex(DbAuthorityCanaryError, "simulated crash"):
