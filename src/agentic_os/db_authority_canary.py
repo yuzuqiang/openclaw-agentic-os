@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,7 @@ _REAL_SESSION_TABLES = (
     "spawn_requests",
     "sessions",
 )
+CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS = frozenset(("local-artifact-canary",))
 
 
 def db_authority_canary_artifact(
@@ -87,9 +89,87 @@ def db_authority_canary_artifact(
     this is canary fixture evidence, not production DB authority.
     """
 
+    return _db_authority_canary_artifact_impl(
+        database,
+        artifact,
+        content,
+        workflow=workflow,
+        run_id=run_id,
+        cutover_approved_by=cutover_approved_by,
+        cutover_evidence_hash=cutover_evidence_hash,
+        rollback_deadline=rollback_deadline,
+        last_parity_audit_hash=last_parity_audit_hash,
+        prepare_idempotency_key=prepare_idempotency_key,
+        repo_root_path=repo_root_path,
+        crash_after_prepare=crash_after_prepare,
+    )
+
+
+def _controlled_db_authority_canary_artifact(
+    database: Path,
+    artifact: str | Path,
+    content: bytes,
+    *,
+    workflow: str,
+    run_id: str,
+    cutover_approved_by: str,
+    cutover_evidence_hash: str,
+    rollback_deadline: str,
+    last_parity_audit_hash: str,
+    prepare_idempotency_key: str | None = None,
+    repo_root_path: Path | None = None,
+    crash_after_prepare: bool = False,
+    _finalize_precondition: Callable[[sqlite3.Connection], None] | None = None,
+) -> DbAuthorityCanaryResult:
+    return _db_authority_canary_artifact_impl(
+        database,
+        artifact,
+        content,
+        workflow=workflow,
+        run_id=run_id,
+        cutover_approved_by=cutover_approved_by,
+        cutover_evidence_hash=cutover_evidence_hash,
+        rollback_deadline=rollback_deadline,
+        last_parity_audit_hash=last_parity_audit_hash,
+        prepare_idempotency_key=prepare_idempotency_key,
+        repo_root_path=repo_root_path,
+        crash_after_prepare=crash_after_prepare,
+        _allow_controlled_workflow=True,
+        _require_single_workflow_projection_set=True,
+        _require_workflow_no_real_session_control=True,
+        _finalize_precondition=_finalize_precondition,
+    )
+
+
+def _db_authority_canary_artifact_impl(
+    database: Path,
+    artifact: str | Path,
+    content: bytes,
+    *,
+    workflow: str,
+    run_id: str,
+    cutover_approved_by: str,
+    cutover_evidence_hash: str,
+    rollback_deadline: str,
+    last_parity_audit_hash: str,
+    prepare_idempotency_key: str | None = None,
+    repo_root_path: Path | None = None,
+    crash_after_prepare: bool = False,
+    _allow_controlled_workflow: bool = False,
+    _require_single_workflow_projection_set: bool = False,
+    _require_workflow_no_real_session_control: bool = False,
+    _finalize_precondition: Callable[[sqlite3.Connection], None] | None = None,
+) -> DbAuthorityCanaryResult:
     if agentic_os.DB_AUTHORITY_ENABLED:
         raise DbAuthorityCanaryError("production DB authority must remain disabled")
     workflow = _normalize_required_identity("workflow", workflow)
+    if (
+        workflow in CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS
+        and not _allow_controlled_workflow
+    ):
+        raise DbAuthorityCanaryError(
+            f"workflow {workflow!r} must use the DB-authority expansion controller"
+        )
     run_id = _normalize_required_identity("run_id", run_id)
     cutover_approved_by = _normalize_required_identity(
         "cutover_approved_by", cutover_approved_by
@@ -146,6 +226,10 @@ def db_authority_canary_artifact(
         connection.execute("BEGIN IMMEDIATE")
         try:
             verify_database_connection(connection)
+            if _require_workflow_no_real_session_control:
+                _assert_no_real_session_control_for_workflow(
+                    connection, workflow=workflow
+                )
             _assert_no_real_session_control(connection, run_id=run_id)
             _ensure_canary_workflow(
                 connection,
@@ -162,6 +246,13 @@ def db_authority_canary_artifact(
                 run_id=run_id,
                 prepare_idempotency_key=prepare_key,
             )
+            if _require_single_workflow_projection_set:
+                _assert_single_workflow_projection_set(
+                    connection,
+                    workflow=workflow,
+                    run_id=run_id,
+                    projection=projection,
+                )
             if run_state is None and rollback_deadline_epoch_ms <= created_epoch_ms:
                 raise DbAuthorityCanaryError(
                     "rollback_deadline must be later than the canary preparation clock"
@@ -236,6 +327,18 @@ def db_authority_canary_artifact(
         ).isoformat()
         connection.execute("BEGIN IMMEDIATE")
         try:
+            if _require_workflow_no_real_session_control:
+                _assert_no_real_session_control_for_workflow(
+                    connection, workflow=workflow
+                )
+                _assert_single_workflow_projection_set(
+                    connection,
+                    workflow=workflow,
+                    run_id=run_id,
+                    projection=projection,
+                )
+            if _finalize_precondition is not None:
+                _finalize_precondition(connection)
             _assert_no_real_session_control(connection, run_id=run_id)
             _assert_artifact_matches(target, digest, relative)
             updated = connection.execute(
@@ -278,7 +381,50 @@ def rollback_db_authority_canary(
 ) -> DbAuthorityRollbackResult:
     """Rollback the synthetic canary workflow and prove projection regeneration."""
 
+    return _rollback_db_authority_canary_impl(
+        database,
+        artifacts,
+        workflow=workflow,
+        repo_root_path=repo_root_path,
+    )
+
+
+def _controlled_rollback_db_authority_canary(
+    database: Path,
+    artifacts: tuple[str | Path, ...],
+    *,
+    workflow: str,
+    repo_root_path: Path | None = None,
+) -> DbAuthorityRollbackResult:
+    return _rollback_db_authority_canary_impl(
+        database,
+        artifacts,
+        workflow=workflow,
+        repo_root_path=repo_root_path,
+        _allow_controlled_workflow=True,
+        _require_single_workflow_projection_set=True,
+        _require_workflow_no_real_session_control=True,
+    )
+
+
+def _rollback_db_authority_canary_impl(
+    database: Path,
+    artifacts: tuple[str | Path, ...],
+    *,
+    workflow: str,
+    repo_root_path: Path | None = None,
+    _allow_controlled_workflow: bool = False,
+    _require_single_workflow_projection_set: bool = False,
+    _require_workflow_no_real_session_control: bool = False,
+) -> DbAuthorityRollbackResult:
     workflow = _normalize_required_identity("workflow", workflow)
+    if (
+        workflow in CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS
+        and not _allow_controlled_workflow
+    ):
+        raise DbAuthorityCanaryError(
+            f"workflow {workflow!r} must use the DB-authority expansion controller"
+        )
     if not artifacts:
         raise DbAuthorityCanaryError("at least one artifact is required")
     root = Path(repo_root_path or Path(__file__).resolve().parents[2]).resolve()
@@ -302,6 +448,10 @@ def rollback_db_authority_canary(
             if row is None or row[0] != "db_authority_canary":
                 raise DbAuthorityCanaryError(
                     "rollback requires an active db_authority_canary workflow"
+                )
+            if _require_workflow_no_real_session_control:
+                _assert_no_real_session_control_for_workflow(
+                    connection, workflow=workflow
                 )
             if (
                 not row[1]
@@ -352,6 +502,11 @@ def rollback_db_authority_canary(
             ).fetchall()
             if not canary_runs:
                 raise DbAuthorityCanaryError("rollback requires finalized canary runs")
+            if _require_single_workflow_projection_set and len(canary_runs) != 1:
+                raise DbAuthorityCanaryError(
+                    "synthetic expansion eligibility proof must bind the full workflow "
+                    "canary projection set"
+                )
             for run_id, state, finalized_at, finalized_epoch_ms in canary_runs:
                 if (
                     state != "finalized"
@@ -377,6 +532,11 @@ def rollback_db_authority_canary(
                 and run_authority_mode == "db_authority_canary"
                 and run_state == "finalized"
             ]
+            if _require_single_workflow_projection_set and len(expected_rows) != 1:
+                raise DbAuthorityCanaryError(
+                    "synthetic expansion eligibility proof must bind the full workflow "
+                    "canary projection set"
+                )
             canary_run_ids = {run_id for run_id, *_rest in canary_runs}
             projection_counts = {run_id: 0 for run_id in canary_run_ids}
             all_projection_counts = {
@@ -639,6 +799,22 @@ def _assert_no_real_session_control(
             )
 
 
+def _assert_no_real_session_control_for_workflow(
+    connection: sqlite3.Connection, *, workflow: str
+) -> None:
+    for table in _REAL_SESSION_TABLES:
+        count = connection.execute(
+            f"SELECT COUNT(*) FROM {table} rpc "
+            "JOIN runs r ON r.run_id=rpc.run_id WHERE r.workflow=?",
+            (workflow,),
+        ).fetchone()[0]
+        if count:
+            raise DbAuthorityCanaryError(
+                "synthetic expansion eligibility proof must cover the whole "
+                f"workflow; real session-control rows exist in {table}"
+            )
+
+
 def _ensure_canary_workflow(
     connection: sqlite3.Connection,
     *,
@@ -748,6 +924,49 @@ def _assert_projection_matches(
         raise DbAuthorityCanaryError(
             f"canary projection drift for {projection.path}"
         )
+
+
+def _assert_single_workflow_projection_set(
+    connection: sqlite3.Connection,
+    *,
+    workflow: str,
+    run_id: str,
+    projection: ShadowProjection,
+) -> None:
+    canary_runs = connection.execute(
+        "SELECT run_id,state FROM runs "
+        "WHERE workflow=? AND authority_mode='db_authority_canary'",
+        (workflow,),
+    ).fetchall()
+    if not canary_runs:
+        return
+    if len(canary_runs) != 1:
+        raise DbAuthorityCanaryError(
+            "synthetic expansion eligibility proof must bind the full workflow "
+            "canary projection set"
+        )
+    existing_run_id, existing_state = canary_runs[0]
+    projection_rows = connection.execute(
+        "SELECT projection_id,path,sha256,source_authority "
+        "FROM artifact_projections WHERE run_id=?",
+        (existing_run_id,),
+    ).fetchall()
+    expected_projection = (
+        projection.projection_id,
+        projection.path,
+        projection.sha256,
+        "db_authority_canary",
+    )
+    if (
+        existing_run_id == run_id
+        and existing_state in {"prepared", "finalized"}
+        and projection_rows == [expected_projection]
+    ):
+        return
+    raise DbAuthorityCanaryError(
+        "synthetic expansion eligibility proof must bind the full workflow "
+        "canary projection set"
+    )
 
 
 def _assert_artifact_matches(target: Path, digest: str, relative: str) -> None:

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .db_authority_canary import (
     db_authority_canary_artifact,
     rollback_db_authority_canary,
+)
+from .db_authority_controller import (
+    proof_json,
+    rollback_synthetic_db_authority_expansion,
+    run_synthetic_db_authority_expansion,
 )
 from .migrations import apply_migrations, repository_root, verify_database
 from .privacy import assert_paths_retrievable, assert_privacy_preflight
@@ -124,6 +130,52 @@ def parser() -> argparse.ArgumentParser:
     canary_rollback.add_argument(
         "--repo-root", type=Path, default=repository_root()
     )
+
+    expansion = commands.add_parser(
+        "db-authority-expansion",
+        help="run the one allowed per-workflow synthetic DB-authority expansion",
+    )
+    expansion.add_argument("--db", type=Path, required=True)
+    expansion.add_argument("--workflow", required=True)
+    expansion.add_argument("--run-id", required=True)
+    expansion.add_argument("--prepare-idempotency-key")
+    expansion.add_argument("--risk-class", required=True)
+    expansion.add_argument("--risk-dominance", required=True)
+    expansion.add_argument("--worker-agent-id", required=True)
+    expansion.add_argument("--verifier-agent-id", required=True)
+    expansion.add_argument("--verifier-run-id", required=True)
+    expansion.add_argument(
+        "--eligibility-proof-json",
+        required=True,
+        help="exact synthetic gate/canary/rollback/parity/projection proof JSON",
+    )
+    expansion.add_argument("--cutover-approved-by", required=True)
+    expansion.add_argument("--cutover-evidence-hash", required=True)
+    expansion.add_argument("--rollback-deadline", required=True)
+    expansion.add_argument("--last-parity-audit-hash", required=True)
+    expansion.add_argument("--artifact", type=Path, required=True)
+    expansion_content = expansion.add_mutually_exclusive_group(required=True)
+    expansion_content.add_argument("--content")
+    expansion_content.add_argument("--content-file", type=Path)
+    expansion.add_argument(
+        "--crash-after-prepare",
+        action="store_true",
+        help="simulate the local post-DB/pre-artifact crash boundary",
+    )
+    expansion.add_argument("--repo-root", type=Path, default=repository_root())
+
+    expansion_rollback = commands.add_parser(
+        "db-authority-expansion-rollback",
+        help="rollback the per-workflow synthetic DB-authority expansion",
+    )
+    expansion_rollback.add_argument("--db", type=Path, required=True)
+    expansion_rollback.add_argument("--workflow", required=True)
+    expansion_rollback.add_argument(
+        "--artifact", type=Path, action="append", required=True
+    )
+    expansion_rollback.add_argument(
+        "--repo-root", type=Path, default=repository_root()
+    )
     return result
 
 
@@ -235,6 +287,60 @@ def main(argv: list[str] | None = None) -> int:
             f"projections={len(rollback.regenerated)}"
         )
         return 0
+    elif args.command == "db-authority-expansion":
+        if args.content_file is not None:
+            content_file = args.content_file.expanduser()
+            assert_paths_retrievable((content_file, content_file.resolve()))
+            content = content_file.read_bytes()
+        else:
+            content = args.content.encode("utf-8")
+        eligibility_proof = _json_object(
+            args.eligibility_proof_json,
+            label="eligibility proof",
+        )
+        expansion = run_synthetic_db_authority_expansion(
+            args.db,
+            args.artifact,
+            content,
+            workflow=args.workflow,
+            run_id=args.run_id,
+            risk_class=args.risk_class,
+            risk_dominance=args.risk_dominance,
+            worker_agent_id=args.worker_agent_id,
+            verifier_agent_id=args.verifier_agent_id,
+            verifier_run_id=args.verifier_run_id,
+            eligibility_proof=eligibility_proof,
+            cutover_approved_by=args.cutover_approved_by,
+            cutover_evidence_hash=args.cutover_evidence_hash,
+            rollback_deadline=args.rollback_deadline,
+            last_parity_audit_hash=args.last_parity_audit_hash,
+            prepare_idempotency_key=args.prepare_idempotency_key,
+            repo_root_path=args.repo_root,
+            crash_after_prepare=args.crash_after_prepare,
+        )
+        print(
+            "db-authority expansion "
+            f"{expansion.canary.status}: workflow={expansion.workflow} "
+            f"run_id={expansion.run_id} "
+            f"path={expansion.canary.projection.path} "
+            f"sha256={expansion.canary.projection.sha256} "
+            f"proof={proof_json(expansion.proof)}"
+        )
+        return 0
+    elif args.command == "db-authority-expansion-rollback":
+        rollback = rollback_synthetic_db_authority_expansion(
+            args.db,
+            tuple(args.artifact),
+            workflow=args.workflow,
+            repo_root_path=args.repo_root,
+        )
+        print(
+            "db-authority expansion rollback "
+            f"{rollback.rollback.status}: workflow={rollback.workflow} "
+            f"projections={len(rollback.rollback.regenerated)} "
+            f"proof={proof_json(rollback.proof)}"
+        )
+        return 0
     else:
         audit = audit_file_authority_shadow(
             args.db,
@@ -252,6 +358,15 @@ def main(argv: list[str] | None = None) -> int:
     for issue in audit.issues:
         print(f"{issue.reason}: {issue.path}")
     return 0 if audit.status == "pass" else 1
+
+def _json_object(value: str, *, label: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{label} must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{label} must be a JSON object")
+    return parsed
 
 
 if __name__ == "__main__":
