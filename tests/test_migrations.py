@@ -6579,9 +6579,23 @@ class MigrationTests(unittest.TestCase):
             "budgets/selected_model_registry_binding.sql": {
                 "Run budget selected cost row mismatch": {
                     ("fixture-selected-run-budget-mismatch",),
+                    ("fixture-selected-missing-cost-row",),
+                    ("fixture-selected-unknown-cost-row",),
                 },
                 "Endpoint-bound budget event cost row blocks dispatch": {
                     ("fixture-selected-event-model-mismatch-event",),
+                    ("fixture-selected-event-missing-cost-row-event",),
+                    ("fixture-selected-event-unknown-cost-row-event",),
+                },
+            },
+            "budgets/strict_prior_reserve_binding.sql": {
+                "`sessions_spawn` intent without exact strict prior reserve": {
+                    ("fixture-prior-absent-reserve-intent",),
+                    ("fixture-prior-same-ms-intent",),
+                    ("fixture-prior-wrong-endpoint-intent",),
+                    ("fixture-prior-wrong-hash-intent",),
+                    ("fixture-prior-wrong-transition-intent",),
+                    ("fixture-prior-selected-transition-drift-intent",),
                 },
             },
             "sqlite_type_affinity_h1_h4.sql": {
@@ -6716,6 +6730,32 @@ class MigrationTests(unittest.TestCase):
                         ).fetchall()
                     )
                     self.assertNotIn(("fixture-exact-max-cost",), rows)
+                if fixture == "budgets/selected_model_registry_binding.sql":
+                    selected_rows = set(
+                        connection.execute(
+                            contracts["Run budget selected cost row mismatch"]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-selected-positive",), selected_rows)
+                    endpoint_rows = set(
+                        connection.execute(
+                            contracts[
+                                "Endpoint-bound budget event cost row blocks dispatch"
+                            ]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(
+                        ("fixture-selected-event-positive-event",), endpoint_rows
+                    )
+                if fixture == "budgets/strict_prior_reserve_binding.sql":
+                    prior_rows = set(
+                        connection.execute(
+                            contracts[
+                                "`sessions_spawn` intent without exact strict prior reserve"
+                            ]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-prior-positive-intent",), prior_rows)
 
     def test_unknown_usage_blocks_promoted_run_states(self) -> None:
         apply_migrations(self.database)
