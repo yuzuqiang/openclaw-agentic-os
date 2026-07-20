@@ -14,10 +14,10 @@ from .db_authority_canary import (
     DbAuthorityCanaryResult,
     DbAuthorityRollbackResult,
     _canary_rollback_proof_hash,
+    _controlled_db_authority_canary_artifact,
+    _controlled_rollback_db_authority_canary,
     _normalize_deadline,
     _sha256_text,
-    db_authority_canary_artifact,
-    rollback_db_authority_canary,
 )
 from .shadow import (
     ShadowProjection,
@@ -88,6 +88,8 @@ def run_synthetic_db_authority_expansion(
     """
 
     _assert_db_authority_disabled()
+    if eligibility_proof is None:
+        raise DbAuthorityControllerError("eligibility proof is required")
     _assert_controller_boundary(
         workflow=workflow,
         risk_class=risk_class,
@@ -111,7 +113,7 @@ def run_synthetic_db_authority_expansion(
         prepare_idempotency_key=prepare_idempotency_key,
         repo_root_path=repo_root_path,
     )
-    canary = db_authority_canary_artifact(
+    canary = _controlled_db_authority_canary_artifact(
         database,
         artifact,
         content,
@@ -124,8 +126,6 @@ def run_synthetic_db_authority_expansion(
         prepare_idempotency_key=str(expected_proof["prepare_idempotency_key"]),
         repo_root_path=repo_root_path,
         crash_after_prepare=crash_after_prepare,
-        _allow_controlled_workflow=True,
-        _require_single_workflow_projection_set=True,
     )
     _assert_canary_matches_eligibility(canary, expected_proof)
     db_authority_enabled = _assert_db_authority_disabled()
@@ -161,12 +161,11 @@ def rollback_synthetic_db_authority_expansion(
 
     _assert_db_authority_disabled()
     workflow = _assert_supported_workflow(workflow)
-    rollback = rollback_db_authority_canary(
+    rollback = _controlled_rollback_db_authority_canary(
         database,
         artifacts,
         workflow=workflow,
         repo_root_path=repo_root_path,
-        _allow_controlled_workflow=True,
     )
     db_authority_enabled = _assert_db_authority_disabled()
     proof = _controller_proof(

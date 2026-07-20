@@ -79,8 +79,6 @@ def db_authority_canary_artifact(
     prepare_idempotency_key: str | None = None,
     repo_root_path: Path | None = None,
     crash_after_prepare: bool = False,
-    _allow_controlled_workflow: bool = False,
-    _require_single_workflow_projection_set: bool = False,
 ) -> DbAuthorityCanaryResult:
     """Record one synthetic/local artifact-only ``db_authority_canary`` run.
 
@@ -90,6 +88,74 @@ def db_authority_canary_artifact(
     this is canary fixture evidence, not production DB authority.
     """
 
+    return _db_authority_canary_artifact_impl(
+        database,
+        artifact,
+        content,
+        workflow=workflow,
+        run_id=run_id,
+        cutover_approved_by=cutover_approved_by,
+        cutover_evidence_hash=cutover_evidence_hash,
+        rollback_deadline=rollback_deadline,
+        last_parity_audit_hash=last_parity_audit_hash,
+        prepare_idempotency_key=prepare_idempotency_key,
+        repo_root_path=repo_root_path,
+        crash_after_prepare=crash_after_prepare,
+    )
+
+
+def _controlled_db_authority_canary_artifact(
+    database: Path,
+    artifact: str | Path,
+    content: bytes,
+    *,
+    workflow: str,
+    run_id: str,
+    cutover_approved_by: str,
+    cutover_evidence_hash: str,
+    rollback_deadline: str,
+    last_parity_audit_hash: str,
+    prepare_idempotency_key: str | None = None,
+    repo_root_path: Path | None = None,
+    crash_after_prepare: bool = False,
+) -> DbAuthorityCanaryResult:
+    return _db_authority_canary_artifact_impl(
+        database,
+        artifact,
+        content,
+        workflow=workflow,
+        run_id=run_id,
+        cutover_approved_by=cutover_approved_by,
+        cutover_evidence_hash=cutover_evidence_hash,
+        rollback_deadline=rollback_deadline,
+        last_parity_audit_hash=last_parity_audit_hash,
+        prepare_idempotency_key=prepare_idempotency_key,
+        repo_root_path=repo_root_path,
+        crash_after_prepare=crash_after_prepare,
+        _allow_controlled_workflow=True,
+        _require_single_workflow_projection_set=True,
+        _require_workflow_no_real_session_control=True,
+    )
+
+
+def _db_authority_canary_artifact_impl(
+    database: Path,
+    artifact: str | Path,
+    content: bytes,
+    *,
+    workflow: str,
+    run_id: str,
+    cutover_approved_by: str,
+    cutover_evidence_hash: str,
+    rollback_deadline: str,
+    last_parity_audit_hash: str,
+    prepare_idempotency_key: str | None = None,
+    repo_root_path: Path | None = None,
+    crash_after_prepare: bool = False,
+    _allow_controlled_workflow: bool = False,
+    _require_single_workflow_projection_set: bool = False,
+    _require_workflow_no_real_session_control: bool = False,
+) -> DbAuthorityCanaryResult:
     if agentic_os.DB_AUTHORITY_ENABLED:
         raise DbAuthorityCanaryError("production DB authority must remain disabled")
     workflow = _normalize_required_identity("workflow", workflow)
@@ -156,6 +222,10 @@ def db_authority_canary_artifact(
         connection.execute("BEGIN IMMEDIATE")
         try:
             verify_database_connection(connection)
+            if _require_workflow_no_real_session_control:
+                _assert_no_real_session_control_for_workflow(
+                    connection, workflow=workflow
+                )
             _assert_no_real_session_control(connection, run_id=run_id)
             _ensure_canary_workflow(
                 connection,
@@ -292,10 +362,41 @@ def rollback_db_authority_canary(
     *,
     workflow: str,
     repo_root_path: Path | None = None,
-    _allow_controlled_workflow: bool = False,
 ) -> DbAuthorityRollbackResult:
     """Rollback the synthetic canary workflow and prove projection regeneration."""
 
+    return _rollback_db_authority_canary_impl(
+        database,
+        artifacts,
+        workflow=workflow,
+        repo_root_path=repo_root_path,
+    )
+
+
+def _controlled_rollback_db_authority_canary(
+    database: Path,
+    artifacts: tuple[str | Path, ...],
+    *,
+    workflow: str,
+    repo_root_path: Path | None = None,
+) -> DbAuthorityRollbackResult:
+    return _rollback_db_authority_canary_impl(
+        database,
+        artifacts,
+        workflow=workflow,
+        repo_root_path=repo_root_path,
+        _allow_controlled_workflow=True,
+    )
+
+
+def _rollback_db_authority_canary_impl(
+    database: Path,
+    artifacts: tuple[str | Path, ...],
+    *,
+    workflow: str,
+    repo_root_path: Path | None = None,
+    _allow_controlled_workflow: bool = False,
+) -> DbAuthorityRollbackResult:
     workflow = _normalize_required_identity("workflow", workflow)
     if (
         workflow in CONTROLLED_DB_AUTHORITY_CANARY_WORKFLOWS
@@ -661,6 +762,22 @@ def _assert_no_real_session_control(
             raise DbAuthorityCanaryError(
                 "db_authority_canary is synthetic/local artifact-only; "
                 f"real session-control rows exist in {table}"
+            )
+
+
+def _assert_no_real_session_control_for_workflow(
+    connection: sqlite3.Connection, *, workflow: str
+) -> None:
+    for table in _REAL_SESSION_TABLES:
+        count = connection.execute(
+            f"SELECT COUNT(*) FROM {table} rpc "
+            "JOIN runs r ON r.run_id=rpc.run_id WHERE r.workflow=?",
+            (workflow,),
+        ).fetchone()[0]
+        if count:
+            raise DbAuthorityCanaryError(
+                "synthetic expansion eligibility proof must cover the whole "
+                f"workflow; real session-control rows exist in {table}"
             )
 
 
