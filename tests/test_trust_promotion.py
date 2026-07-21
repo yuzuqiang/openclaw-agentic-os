@@ -1291,7 +1291,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
             ),
             (
                 "external RPC unbound update",
-                "external RPC intent changes",
+                "external RPC intent changes|strict prior reserve",
                 "UPDATE external_rpc_intents SET run_id='missing-run' "
                 "WHERE intent_id='pretrust-intent'",
                 True,

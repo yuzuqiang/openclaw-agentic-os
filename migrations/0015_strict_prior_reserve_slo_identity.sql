@@ -18,9 +18,6 @@ CREATE TRIGGER external_rpc_intents_validate_prior_reserve_insert
 BEFORE INSERT ON external_rpc_intents
 WHEN NEW.rpc_kind='sessions_spawn'
   AND NOT EXISTS (
-    SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL
-  )
-  AND NOT EXISTS (
   SELECT 1
   FROM budget_events b
   JOIN run_budgets rb ON rb.run_id=NEW.run_id
@@ -76,9 +73,6 @@ END;
 CREATE TRIGGER external_rpc_intents_validate_prior_reserve_update
 BEFORE UPDATE OF rpc_kind, reserve_budget_event_id, run_id, transition_id, spawn_request_id, requested_at_epoch_ms ON external_rpc_intents
 WHEN NEW.rpc_kind='sessions_spawn'
-  AND NOT EXISTS (
-    SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL
-  )
   AND NOT EXISTS (
   SELECT 1
   FROM budget_events b

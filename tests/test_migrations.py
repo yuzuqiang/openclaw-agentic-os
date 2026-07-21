@@ -1209,6 +1209,113 @@ class MigrationTests(unittest.TestCase):
         ):
             apply_migrations(self.database)
 
+    def test_strict_prior_reserve_trigger_stays_active_with_cross_workflow_trust(
+        self,
+    ) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        for workflow in ("trusted-workflow", "other-workflow"):
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES(?,'file_authority','now')",
+                (workflow,),
+            )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'trusted-run','trusted-prepare','trusted-workflow','file_authority',"
+            "'finalized','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'r','prepare','other-workflow','file_authority','candidate','R1','R1',"
+            "'now','now')"
+        )
+        for transition_id in ("t", "t-other"):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?, 'r', 'before', 'after',"
+                "'dispatch','spawn','R1', ?, 0,'now')",
+                (transition_id, f"{transition_id}-idem"),
+            )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+            "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+            "created_at,updated_at) VALUES('spawn','r','phase','agent','t','client',"
+            "'spawn-idem','task','pending','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,usage_confidence,updated_at) VALUES('r',"
+            "'other-workflow','capability','provider','model','endpoint','cost-row',"
+            "'effective','cost-hash','known','t-other',10,10,10,10,1,1,1,"
+            "'known','now')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+            "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+            "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
+            "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+            "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+            "VALUES('reserve','reserve-idem','reserve-dedupe',1,'r','t','spawn',"
+            "'provider','model','endpoint','capability','cost-row','effective',"
+            "'cost-hash','known','reserve',1,'known','test','now',1000)"
+        )
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='trust_observations_validate_bound_insert'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER trust_observations_validate_bound_insert")
+        connection.execute(
+            "INSERT INTO trust_observations(observation_id,scope,severity,status,"
+            "effective_group_id,usage_confidence,created_at,run_id) VALUES("
+            "'active-trust','workflow','R1','promoted','group','known','now',"
+            "'trusted-run')"
+        )
+        connection.execute(trigger_sql)
+        external_metadata = json.dumps(
+            {
+                "run_id": "r",
+                "transition_id": "t",
+                "client_request_id": "client",
+                "idempotency_key": "spawn-idem",
+                "phase": "phase",
+                "agent_id": "agent",
+                "task_digest": "task",
+            }
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "strict prior reserve"):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_client_request_id,"
+                "external_idempotency_key,external_phase,external_agent_id,"
+                "external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms) VALUES('intent-cross-workflow','r','t',"
+                "'sessions_spawn','spawn','reserve','client','spawn-idem','phase',"
+                "'agent','task','v1','{}',?,'r','t','client','spawn-idem','phase',"
+                "'agent','task','accepted','bad-session','now',1001)",
+                (external_metadata,),
+            )
+
     def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
         self._apply_v1_migration_only("v1-migrations")
 
