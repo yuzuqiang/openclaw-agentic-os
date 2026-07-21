@@ -352,6 +352,52 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
 
+    def test_live_tools_catalog_failure_evidence_is_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    "print(json.dumps({'status':'error','error':'secret-runtime-path-token'}))\n"
+                    "raise SystemExit(1)\n"
+                )
+            os.chmod(executable, 0o755)
+            evidence = os.path.join(install_root, "evidence.json")
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                    "--write-evidence",
+                    evidence,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                evidence_payload = json.loads(handle.read())
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            serialized = json.dumps(payload, sort_keys=True)
+            self.assertIn("active OpenClaw tool catalog failed", payload["error"])
+            self.assertIn("payload_sha256", payload["error"])
+            self.assertNotIn("secret-runtime-path-token", serialized)
+            self.assertEqual(evidence_payload, payload)
+
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
             dist = os.path.join(install_root, "dist")
@@ -1050,6 +1096,16 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         catalog_names = {tool["name"] for tool in payload["catalog"]["tools"]}
         self.assertNotIn("subagents.allowLease.status", catalog_names)
         self.assertNotIn("sessions_list", catalog_names)
+
+    def test_live_declared_tool_scanner_accepts_quoted_name_properties(self) -> None:
+        module = load_preflight_module()
+
+        names = module._scan_js_declared_tool_names(
+            '{"name": "sessions_spawn"}, {"id": "sessions_list"}'
+        )
+
+        self.assertIn("sessions_spawn", names)
+        self.assertIn("sessions_list", names)
 
     def test_live_catalog_hashes_sources_for_zero_parameter_declarations(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:

@@ -85,6 +85,11 @@ def _path_digest(path: Path) -> str:
     return hashlib.sha256(path.resolve().as_posix().encode("utf-8")).hexdigest()
 
 
+def _stream_digest(value: str) -> dict[str, Any]:
+    encoded = value.encode("utf-8", errors="replace")
+    return {"bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
 def _source_record(root: Path, path: Path) -> dict[str, str]:
     try:
         relative = path.resolve().relative_to(root.resolve()).as_posix()
@@ -231,7 +236,20 @@ def _scan_js_declared_tool_names(text: str) -> set[str]:
             continue
         if char in {"'", '"', "`"}:
             parsed = _parse_js_string_literal(text, index)
-            index = parsed[1] if parsed is not None else index + 1
+            if parsed is None:
+                index += 1
+                continue
+            value, end = parsed
+            cursor = _skip_js_whitespace(text, end)
+            if value in {"id", "name"} and cursor < len(text) and text[cursor] == ":":
+                cursor = _skip_js_whitespace(text, cursor + 1)
+                next_parsed = _parse_js_string_literal(text, cursor)
+                if next_parsed is not None:
+                    tool_name, index = next_parsed
+                    if TOOL_NAME.fullmatch(tool_name) and tool_name in LIVE_TOOL_NAMES:
+                        names.add(tool_name)
+                    continue
+            index = end
             continue
         if char.isalpha() or char in {"_", "$"}:
             start = index
@@ -552,14 +570,28 @@ def _run_gateway_tools_catalog(executable: Path, timeout_ms: int = 10_000) -> di
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AdapterContractError(f"active OpenClaw tool catalog unavailable: {exc}") from exc
+        raise AdapterContractError(
+            f"active OpenClaw tool catalog unavailable: {type(exc).__name__}"
+        ) from exc
     try:
         payload = json.loads((proc.stdout or "").strip() or "{}")
     except json.JSONDecodeError as exc:
-        raise AdapterContractError("active OpenClaw tool catalog returned non-JSON output") from exc
+        raise AdapterContractError(
+            "active OpenClaw tool catalog returned non-JSON output "
+            f"stdout={_stream_digest(proc.stdout or '')} "
+            f"stderr={_stream_digest(proc.stderr or '')}"
+        ) from exc
     if proc.returncode != 0:
-        detail = payload.get("error") if isinstance(payload, Mapping) else None
-        raise AdapterContractError(f"active OpenClaw tool catalog failed: {detail or proc.stderr}")
+        payload_sha = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest() if isinstance(payload, Mapping) else None
+        raise AdapterContractError(
+            "active OpenClaw tool catalog failed "
+            f"returncode={proc.returncode} "
+            f"payload_sha256={payload_sha} "
+            f"stdout={_stream_digest(proc.stdout or '')} "
+            f"stderr={_stream_digest(proc.stderr or '')}"
+        )
     if not isinstance(payload, dict):
         raise AdapterContractError("active OpenClaw tool catalog must be a JSON object")
     return payload

@@ -38,6 +38,22 @@ ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT = ROOT / "scripts" / "openclaw-tool-capability-preflight.py"
 
 
+class LiveRpcError(RuntimeError):
+    """Sanitized external RPC failure safe to persist in live evidence."""
+
+    def __init__(
+        self,
+        method: str,
+        *,
+        error_code: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(f"gateway call {method} failed: {error_code}")
+        self.method = method
+        self.error_code = error_code
+        self.details = details or {}
+
+
 def _json_dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -53,6 +69,39 @@ def _stream_sha256(value: str) -> dict[str, Any]:
     return {"bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
+def _sanitized_exception(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, LiveRpcError):
+        return {
+            "error": f"gateway call {exc.method} failed",
+            "error_code": exc.error_code,
+            "error_class": type(exc).__name__,
+            **exc.details,
+        }
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return {
+            "error": "external command timed out",
+            "error_code": "timeout",
+            "error_class": type(exc).__name__,
+        }
+    if isinstance(exc, OSError):
+        return {
+            "error": "external command unavailable",
+            "error_code": type(exc).__name__,
+            "error_class": type(exc).__name__,
+        }
+    if isinstance(exc, RuntimeError):
+        return {
+            "error": "external runtime operation failed",
+            "error_code": "runtime_error",
+            "error_class": type(exc).__name__,
+            "error_sha256": hashlib.sha256(str(exc).encode("utf-8", errors="replace")).hexdigest(),
+        }
+    return {
+        "error": str(exc),
+        "error_class": type(exc).__name__,
+    }
+
+
 def _run_json(cmd: list[str], *, timeout: int) -> tuple[int, dict[str, Any]]:
     try:
         proc = subprocess.run(
@@ -65,7 +114,14 @@ def _run_json(cmd: list[str], *, timeout: int) -> tuple[int, dict[str, Any]]:
             check=False,
         )
     except OSError as exc:
-        return 127, {"status": "error", "error": str(exc)}
+        return 127, {
+            "status": "error",
+            "error": "command unavailable",
+            "error_class": type(exc).__name__,
+            "error_sha256": hashlib.sha256(
+                str(exc).encode("utf-8", errors="replace")
+            ).hexdigest(),
+        }
     try:
         payload = json.loads((proc.stdout or "").strip() or "{}")
     except json.JSONDecodeError:
@@ -126,7 +182,17 @@ def _gateway_call(
         timeout=max(5, timeout_ms // 1000 + 5),
     )
     if code != 0 or payload.get("status") == "error":
-        raise RuntimeError(f"gateway call {method} failed: {payload.get('error') or payload}")
+        details = {
+            "returncode": code,
+            "payload_status": payload.get("status"),
+            "payload_sha256": _raw_response_sha256(payload),
+        }
+        error = payload.get("error")
+        if isinstance(error, str) and error:
+            details["external_error_sha256"] = hashlib.sha256(
+                error.encode("utf-8", errors="replace")
+            ).hexdigest()
+        raise LiveRpcError(method, error_code="rpc_failed", details=details)
     return payload
 
 
@@ -207,6 +273,17 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
             raise RuntimeError(
                 "preflighted OpenClaw install root does not match PATH openclaw executable"
             )
+    expected_executable_sha = _path_value(
+        preflight_payload, ("catalog", "active_executable_path_sha256")
+    )
+    if (
+        isinstance(expected_executable_sha, str)
+        and expected_executable_sha
+        and expected_executable_sha != _path_sha256(resolved)
+    ):
+        raise RuntimeError(
+            "preflighted OpenClaw executable does not match PATH openclaw executable"
+        )
     return str(resolved)
 
 
@@ -451,7 +528,14 @@ def _validate_status_observes_lease(
 
 
 def _validate_release_succeeded(response: dict[str, Any]) -> None:
-    for path in (("released",), ("lease", "released")):
+    for path in (
+        ("released",),
+        ("lease", "released"),
+        ("result", "released"),
+        ("result", "lease", "released"),
+        ("output", "released"),
+        ("output", "lease", "released"),
+    ):
         value: Any = response
         for key in path:
             if not isinstance(value, dict):
@@ -462,7 +546,15 @@ def _validate_release_succeeded(response: dict[str, Any]) -> None:
             if value is True:
                 return
             raise MetadataContractError("allowLease release did not report success")
-    for path in (("status",), ("result",), ("lease", "status")):
+    for path in (
+        ("status",),
+        ("result",),
+        ("lease", "status"),
+        ("result", "status"),
+        ("result", "lease", "status"),
+        ("output", "status"),
+        ("output", "lease", "status"),
+    ):
         value = response
         for key in path:
             if not isinstance(value, dict):
@@ -562,28 +654,16 @@ def _session_spawn_once(
         spawn_request_session_key=identity["spawn_request_session_key"],
         session_key=identity["session_key"],
     )
-    metadata_echo = _require_expected_metadata_from_paths(
-        response,
-        expected=expected_metadata,
-        label="sessions_spawn response",
-        paths=(
-            ("session", "metadata"),
-            ("session", "metadata_echo"),
-            ("result", "session", "metadata"),
-            ("result", "session", "metadata_echo"),
-            ("output", "session", "metadata"),
-            ("output", "session", "metadata_echo"),
-        ),
-    )
     raw_metadata = _validate_session_raw_metadata(
         response,
         accepted_session_identity=accepted,
         expected_metadata=expected_metadata,
+        label="sessions_spawn response",
     )
     return {
         "accepted_session_identity": accepted,
         "identity": identity,
-        "metadata_echo": metadata_echo,
+        "metadata_echo": raw_metadata["normalized_metadata"],
         "metadata_contract_version": raw_metadata["metadata_contract_version"],
         "normalized_metadata": raw_metadata["normalized_metadata"],
         "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
@@ -597,12 +677,31 @@ def _validate_session_raw_metadata(
     *,
     accepted_session_identity: str,
     expected_metadata: dict[str, Any],
+    label: str,
 ) -> dict[str, Any]:
     candidates: list[Mapping[str, Any]] = []
-    for path in (("session",), ("result", "session"), ("output", "session")):
+    for path in (
+        ("session",),
+        ("result", "session"),
+        ("output", "session"),
+        ("item",),
+        ("result", "item"),
+        ("output", "item"),
+    ):
         item = _mapping_path(response, path)
         if item is not None:
             candidates.append(item)
+    for path in (
+        ("sessions",),
+        ("result", "sessions"),
+        ("output", "sessions"),
+        ("items",),
+        ("result", "items"),
+        ("output", "items"),
+    ):
+        sequence = _sequence_path(response, path)
+        if sequence is not None:
+            candidates.extend(item for item in sequence if isinstance(item, Mapping))
     for item in candidates:
         mapped = dict(item)
         session_identity = _string_path(
@@ -639,7 +738,7 @@ def _validate_session_raw_metadata(
             )
         except MetadataContractError as exc:
             raise MetadataContractError(
-                f"sessions_spawn response raw session metadata contract invalid: {exc}"
+                f"{label} raw session metadata contract invalid: {exc}"
             ) from exc
         return {
             "metadata_contract_version": version,
@@ -649,8 +748,47 @@ def _validate_session_raw_metadata(
             ).hexdigest(),
         }
     raise MetadataContractError(
-        "sessions_spawn response did not expose raw session metadata contract"
+        f"{label} did not expose raw session metadata contract"
     )
+
+
+def _validate_session_api_observes_session(
+    response: dict[str, Any],
+    *,
+    accepted_session_identity: str,
+    expected_metadata: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    raw_metadata = _validate_session_raw_metadata(
+        response,
+        accepted_session_identity=accepted_session_identity,
+        expected_metadata=expected_metadata,
+        label=label,
+    )
+    return {
+        "accepted_session_identity": accepted_session_identity,
+        "metadata_contract_version": raw_metadata["metadata_contract_version"],
+        "normalized_metadata": raw_metadata["normalized_metadata"],
+        "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
+        "raw_response_sha256": _raw_response_sha256(response),
+        "response_top_level_keys": sorted(response),
+    }
+
+
+def _session_status_method(preflight_payload: dict[str, Any]) -> str:
+    tools = _path_value(preflight_payload, ("catalog", "tools"))
+    names: set[str] = set()
+    if isinstance(tools, Sequence) and not isinstance(tools, (str, bytes, bytearray)):
+        for item in tools:
+            if isinstance(item, Mapping):
+                name = item.get("name")
+                if isinstance(name, str):
+                    names.add(name)
+    if "sessions_status" in names:
+        return "sessions_status"
+    if "session_status" in names:
+        return "session_status"
+    return "sessions_status"
 
 
 def _release_lease(
@@ -668,9 +806,14 @@ def _release_lease(
     )
     expected_gateway_lease_id = expected_metadata["gateway_lease_id"]
     proof = response
-    nested_lease = _mapping_path(response, ("lease",))
-    if nested_lease is not None and _lease_id_from_response(dict(nested_lease)) == expected_gateway_lease_id:
-        proof = dict(nested_lease)
+    for path in (("lease",), ("result", "lease"), ("output", "lease")):
+        nested_lease = _mapping_path(response, path)
+        if (
+            nested_lease is not None
+            and _lease_id_from_response(dict(nested_lease)) == expected_gateway_lease_id
+        ):
+            proof = dict(nested_lease)
+            break
     released_gateway_lease_id = _lease_id_from_response(proof)
     validate_accepted_lease_identity(
         gateway_lease_id=released_gateway_lease_id,
@@ -720,7 +863,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "status": "fail_closed",
                 "reason": "capability_preflight_timed_out",
-                "error": str(exc),
+                **_sanitized_exception(exc),
                 "preflight": {"status": "fail", "error": "capability preflight timed out"},
                 "spawn_attempted": False,
                 "lease_acquired": False,
@@ -743,11 +886,14 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     try:
         openclaw_executable = _validated_openclaw_executable(preflight_payload)
     except RuntimeError as exc:
+        sanitized = _sanitized_exception(exc)
+        if str(exc).startswith("preflighted OpenClaw"):
+            sanitized["error"] = str(exc)
         evidence.update(
             {
                 "status": "fail_closed",
                 "reason": "capability_preflight_executable_mismatch",
-                "error": str(exc),
+                **sanitized,
                 "spawn_attempted": False,
                 "lease_acquired": False,
                 "released": "not_required",
@@ -888,6 +1034,48 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             session_key=accepted_one["identity"]["session_key"],
             duplicate_spawn_session_key=accepted_two["accepted_session_identity"],
         )
+        evidence["rpc_attempted"].append("sessions_list")
+        sessions_list = _gateway_call(
+            openclaw_executable,
+            "sessions_list",
+            {},
+            timeout_ms=args.gateway_timeout_ms,
+        )
+        session_read_evidence = {
+            "sessions_list": _validate_session_api_observes_session(
+                sessions_list,
+                accepted_session_identity=session_identity,
+                expected_metadata=spawn_args["metadata"],
+                label="sessions_list response",
+            )
+        }
+        status_method = _session_status_method(preflight_payload)
+        evidence["rpc_attempted"].append(status_method)
+        session_status = _gateway_call(
+            openclaw_executable,
+            status_method,
+            {"session_key": session_identity},
+            timeout_ms=args.gateway_timeout_ms,
+        )
+        session_read_evidence[status_method] = _validate_session_api_observes_session(
+            session_status,
+            accepted_session_identity=session_identity,
+            expected_metadata=spawn_args["metadata"],
+            label=f"{status_method} response",
+        )
+        evidence["rpc_attempted"].append("sessions_history")
+        sessions_history = _gateway_call(
+            openclaw_executable,
+            "sessions_history",
+            {"sessionKey": session_identity, "limit": 10, "includeTools": True},
+            timeout_ms=args.gateway_timeout_ms,
+        )
+        session_read_evidence["sessions_history"] = _validate_session_api_observes_session(
+            sessions_history,
+            accepted_session_identity=session_identity,
+            expected_metadata=spawn_args["metadata"],
+            label="sessions_history response",
+        )
         evidence.update(
             {
                 "status": "pass",
@@ -903,6 +1091,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "first": accepted_one,
                     "duplicate": accepted_two,
                 },
+                "session_read_structured_evidence": session_read_evidence,
             }
         )
         return evidence
@@ -912,11 +1101,12 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         RuntimeError,
         subprocess.TimeoutExpired,
     ) as exc:
+        sanitized = _sanitized_exception(exc)
         evidence.update(
             {
                 "status": "fail_closed",
                 "reason": "live_probe_contract_failed",
-                "error": str(exc),
+                **sanitized,
                 "spawn_attempted": any("sessions_spawn" in item for item in evidence["rpc_attempted"]),
                 "lease_acquired": bool(gateway_lease_id or lease_ids_to_release),
             }
@@ -951,7 +1141,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     if "allow_lease_release" not in evidence:
                         evidence["allow_lease_release"] = release
                 except BaseException as exc:  # pragma: no cover - defensive live cleanup path
-                    release_errors.append(f"{acquired_lease_id}: {exc}")
+                    sanitized = _sanitized_exception(exc)
+                    release_errors.append(
+                        f"{acquired_lease_id}: "
+                        f"{sanitized.get('error_code') or sanitized.get('error_class')}"
+                    )
             if releases:
                 evidence["allow_lease_releases"] = releases
             if release_errors:
