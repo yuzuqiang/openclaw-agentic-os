@@ -88,7 +88,7 @@
       "version": 15,
       "name": "strict_prior_reserve_slo_identity",
       "file": "0015_strict_prior_reserve_slo_identity.sql",
-      "sha256": "de3028ff753d034c6f8f55e91010441ffb997e28a73021a50a04a265e13c01e8"
+      "sha256": "ce48efeaa8e520801ac57a31e517a399a631ca207ea211e94661bb444e53c880"
     }
   ]
 }

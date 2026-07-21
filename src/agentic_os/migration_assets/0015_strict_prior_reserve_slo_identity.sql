@@ -1,11 +1,136 @@
 CREATE TEMP TABLE strict_prior_reserve_slo_identity_migration_guard (
-  valid INTEGER NOT NULL CHECK (valid=1)
+  violation INTEGER NOT NULL
+    CONSTRAINT strict_prior_reserve_active_trust CHECK (violation=0)
 ) STRICT;
 
-INSERT INTO strict_prior_reserve_slo_identity_migration_guard(valid)
-VALUES (1);
+INSERT INTO strict_prior_reserve_slo_identity_migration_guard(violation)
+SELECT 1
+FROM trust_observations
+WHERE invalidated_at IS NULL
+LIMIT 1;
 
 DROP TABLE strict_prior_reserve_slo_identity_migration_guard;
+
+DROP TRIGGER external_rpc_intents_validate_prior_reserve_insert;
+DROP TRIGGER external_rpc_intents_validate_prior_reserve_update;
+
+CREATE TRIGGER external_rpc_intents_validate_prior_reserve_insert
+BEFORE INSERT ON external_rpc_intents
+WHEN NEW.rpc_kind='sessions_spawn'
+  AND NOT EXISTS (
+    SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL
+  )
+  AND NOT EXISTS (
+  SELECT 1
+  FROM budget_events b
+  JOIN run_budgets rb ON rb.run_id=NEW.run_id
+  JOIN model_cost_registry m ON m.cost_registry_id=rb.selected_cost_registry_id
+  WHERE b.budget_event_id=NEW.reserve_budget_event_id
+    AND b.event_type='reserve'
+    AND b.run_id=NEW.run_id
+    AND b.transition_id=NEW.transition_id
+    AND b.transition_id IS rb.selected_reserve_transition_id
+    AND b.spawn_request_id=NEW.spawn_request_id
+    AND b.created_at_epoch_ms < NEW.requested_at_epoch_ms
+    AND rb.selected_provider=m.provider
+    AND rb.selected_model=m.model
+    AND rb.selected_endpoint_binding_id=m.endpoint_binding_id
+    AND rb.capability_class=m.capability_class
+    AND rb.selected_cost_effective_at=m.effective_at
+    AND rb.selected_cost_registry_hash=m.registry_row_hash
+    AND rb.selected_cost_confidence=m.confidence
+    AND m.confidence<>'unknown'
+    AND b.provider=rb.selected_provider
+    AND b.model=rb.selected_model
+    AND b.endpoint_binding_id=rb.selected_endpoint_binding_id
+    AND b.capability_class=rb.capability_class
+    AND b.cost_registry_id=rb.selected_cost_registry_id
+    AND b.cost_effective_at=rb.selected_cost_effective_at
+    AND b.cost_registry_hash=rb.selected_cost_registry_hash
+    AND b.cost_confidence=rb.selected_cost_confidence
+    AND b.provider=m.provider
+    AND b.model=m.model
+    AND b.endpoint_binding_id=m.endpoint_binding_id
+    AND b.capability_class=m.capability_class
+    AND b.cost_registry_id=m.cost_registry_id
+    AND b.cost_effective_at=m.effective_at
+    AND b.cost_registry_hash=m.registry_row_hash
+    AND b.cost_confidence=m.confidence
+    AND b.time_seconds <= rb.time_budget_seconds
+    AND b.input_tokens <= rb.input_token_budget
+    AND b.output_tokens <= rb.output_token_budget
+    AND b.cost_microusd <= rb.cost_budget_microusd
+    AND b.retry_units <= rb.retry_budget
+    AND b.human_attention_units <= rb.human_attention_budget
+    AND rb.reserved_time_seconds >= b.time_seconds
+    AND rb.reserved_input_tokens >= b.input_tokens
+    AND rb.reserved_output_tokens >= b.output_tokens
+    AND rb.reserved_cost_microusd >= b.cost_microusd
+    AND rb.reserved_retries >= b.retry_units
+    AND rb.reserved_human_attention >= b.human_attention_units
+)
+BEGIN
+  SELECT RAISE(ABORT,'sessions_spawn requires strict prior reserve budget event');
+END;
+
+CREATE TRIGGER external_rpc_intents_validate_prior_reserve_update
+BEFORE UPDATE OF rpc_kind, reserve_budget_event_id, run_id, transition_id, spawn_request_id, requested_at_epoch_ms ON external_rpc_intents
+WHEN NEW.rpc_kind='sessions_spawn'
+  AND NOT EXISTS (
+    SELECT 1 FROM trust_observations trust WHERE trust.invalidated_at IS NULL
+  )
+  AND NOT EXISTS (
+  SELECT 1
+  FROM budget_events b
+  JOIN run_budgets rb ON rb.run_id=NEW.run_id
+  JOIN model_cost_registry m ON m.cost_registry_id=rb.selected_cost_registry_id
+  WHERE b.budget_event_id=NEW.reserve_budget_event_id
+    AND b.event_type='reserve'
+    AND b.run_id=NEW.run_id
+    AND b.transition_id=NEW.transition_id
+    AND b.transition_id IS rb.selected_reserve_transition_id
+    AND b.spawn_request_id=NEW.spawn_request_id
+    AND b.created_at_epoch_ms < NEW.requested_at_epoch_ms
+    AND rb.selected_provider=m.provider
+    AND rb.selected_model=m.model
+    AND rb.selected_endpoint_binding_id=m.endpoint_binding_id
+    AND rb.capability_class=m.capability_class
+    AND rb.selected_cost_effective_at=m.effective_at
+    AND rb.selected_cost_registry_hash=m.registry_row_hash
+    AND rb.selected_cost_confidence=m.confidence
+    AND m.confidence<>'unknown'
+    AND b.provider=rb.selected_provider
+    AND b.model=rb.selected_model
+    AND b.endpoint_binding_id=rb.selected_endpoint_binding_id
+    AND b.capability_class=rb.capability_class
+    AND b.cost_registry_id=rb.selected_cost_registry_id
+    AND b.cost_effective_at=rb.selected_cost_effective_at
+    AND b.cost_registry_hash=rb.selected_cost_registry_hash
+    AND b.cost_confidence=rb.selected_cost_confidence
+    AND b.provider=m.provider
+    AND b.model=m.model
+    AND b.endpoint_binding_id=m.endpoint_binding_id
+    AND b.capability_class=m.capability_class
+    AND b.cost_registry_id=m.cost_registry_id
+    AND b.cost_effective_at=m.effective_at
+    AND b.cost_registry_hash=m.registry_row_hash
+    AND b.cost_confidence=m.confidence
+    AND b.time_seconds <= rb.time_budget_seconds
+    AND b.input_tokens <= rb.input_token_budget
+    AND b.output_tokens <= rb.output_token_budget
+    AND b.cost_microusd <= rb.cost_budget_microusd
+    AND b.retry_units <= rb.retry_budget
+    AND b.human_attention_units <= rb.human_attention_budget
+    AND rb.reserved_time_seconds >= b.time_seconds
+    AND rb.reserved_input_tokens >= b.input_tokens
+    AND rb.reserved_output_tokens >= b.output_tokens
+    AND rb.reserved_cost_microusd >= b.cost_microusd
+    AND rb.reserved_retries >= b.retry_units
+    AND rb.reserved_human_attention >= b.human_attention_units
+)
+BEGIN
+  SELECT RAISE(ABORT,'sessions_spawn requires strict prior reserve budget event');
+END;
 
 DROP TRIGGER trust_observations_validate_bound_insert;
 

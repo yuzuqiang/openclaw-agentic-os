@@ -1187,6 +1187,28 @@ class MigrationTests(unittest.TestCase):
                 [(14, v14_hash), (15, current_hash)],
             )
 
+    def test_strict_prior_reserve_migration_aborts_on_active_trust(self) -> None:
+        self._apply_migrations_through(14, "v14-active-trust-migrations")
+        with sqlite3.connect(self.database) as connection:
+            trigger_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='trust_observations_validate_bound_insert'"
+            ).fetchone()[0]
+            connection.execute("DROP TRIGGER trust_observations_validate_bound_insert")
+            connection.execute(
+                "INSERT INTO trust_observations("
+                "observation_id,scope,severity,status,effective_group_id,"
+                "usage_confidence,created_at"
+                ") VALUES('active-trust','workflow','R1','promoted','group',"
+                "'known','now')"
+            )
+            connection.execute(trigger_sql)
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "strict_prior_reserve_active_trust"
+        ):
+            apply_migrations(self.database)
+
     def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
         self._apply_v1_migration_only("v1-migrations")
 
@@ -3048,6 +3070,13 @@ class MigrationTests(unittest.TestCase):
             "guard_version_before,created_at) VALUES("
             "'t','r','before','after','dispatch','spawn','R1','transition-idem',0,'now')"
         )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'t-other','r','before','after','budget','reserve','R1',"
+            "'transition-other-idem',0,'now')"
+        )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "accepted spawn request"):
             connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
@@ -3202,6 +3231,49 @@ class MigrationTests(unittest.TestCase):
         connection.execute(
             "UPDATE run_budgets SET selected_cost_registry_id='cost-row',"
             "selected_cost_registry_hash='cost-hash' WHERE run_id='r'"
+        )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t-other' "
+            "WHERE run_id='r'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "strict prior reserve"):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+                "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_transition_id,"
+                "external_client_request_id,external_idempotency_key,external_phase,"
+                "external_agent_id,external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms) VALUES('intent-selected-drift','r','t',"
+                "'sessions_spawn','spawn','reserve','client','spawn-idem','phase',"
+                "'agent','task','v1','{}',?,'r','t','client','spawn-idem','phase',"
+                "'agent','task','accepted','bad-session','now',1001)",
+                (external_metadata,),
+            )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t' WHERE run_id='r'"
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,metadata_json,state,requested_at,"
+            "requested_at_epoch_ms) "
+            "VALUES('intent-update-selected-drift','r','t','allow_lease_acquire',"
+            "'client-update','spawn-idem-update','{}','pending','now',1001)"
+        )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t-other' "
+            "WHERE run_id='r'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "strict prior reserve"):
+            connection.execute(
+                "UPDATE external_rpc_intents SET rpc_kind='sessions_spawn',"
+                "spawn_request_id='spawn',reserve_budget_event_id='reserve',"
+                "client_request_id='client',idempotency_key='spawn-idem',"
+                "phase='phase',agent_id='agent',task_digest='task' "
+                "WHERE intent_id='intent-update-selected-drift'"
+            )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t' WHERE run_id='r'"
         )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -6390,7 +6462,7 @@ class MigrationTests(unittest.TestCase):
             "cost_budget_microusd,retry_budget,human_attention_budget,"
             "reserved_input_tokens,reserved_cost_microusd,usage_confidence,updated_at) "
             "VALUES('transition-run','w','capability','provider','model','endpoint',"
-            "'cost-row','effective','cost-hash','known','transition-selected',10,10,"
+            "'cost-row','effective','cost-hash','known','transition-event',10,10,"
             "10,10,1,1,1,1,'known','now')"
         )
         connection.execute(
@@ -6423,6 +6495,16 @@ class MigrationTests(unittest.TestCase):
             "'phase','agent','task','accepted','session-key','now',900,'now',1000)",
             (external_metadata, external_metadata),
         )
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='run_budgets_preserve_spawn_prior_reserve_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER run_budgets_preserve_spawn_prior_reserve_update")
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='transition-selected' "
+            "WHERE run_id='transition-run'"
+        )
+        connection.execute(trigger_sql)
         connection.execute(
             "UPDATE spawn_requests SET session_key='session-key' "
             "WHERE spawn_request_id='spawn'"
