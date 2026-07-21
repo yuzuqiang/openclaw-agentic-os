@@ -565,8 +565,49 @@ def _run_gateway_tools_catalog(executable: Path, timeout_ms: int = 10_000) -> di
     return payload
 
 
-def _active_tool_names(catalog: Mapping[str, Any]) -> set[str]:
-    names: set[str] = set()
+def _catalog_parameter_names(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, Mapping):
+        properties = value.get("properties")
+        if isinstance(properties, Mapping):
+            return {str(key) for key in properties}
+        return {str(key) for key in value}
+    if isinstance(value, list):
+        names: set[str] = set()
+        for item in value:
+            if isinstance(item, str):
+                names.add(item)
+            elif isinstance(item, Mapping):
+                name = item.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        return names
+    return set()
+
+
+def _active_entry_parameters(entry: Mapping[str, Any]) -> set[str]:
+    for key in ("parameters", "input_schema", "inputSchema"):
+        if key in entry:
+            return _catalog_parameter_names(entry[key])
+    schema = entry.get("schema")
+    if isinstance(schema, Mapping):
+        for key in ("parameters", "input_schema", "inputSchema"):
+            if key in schema:
+                return _catalog_parameter_names(schema[key])
+    return set()
+
+
+def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
+    entries: dict[str, set[str]] = {}
+
+    def add_entry(name: str, params: set[str]) -> None:
+        if name not in LIVE_TOOL_NAMES:
+            return
+        if name in entries:
+            raise AdapterContractError(f"active OpenClaw tool catalog has duplicate {name} entries")
+        entries[name] = set(params)
+
     groups = catalog.get("groups")
     if isinstance(groups, list):
         for group in groups:
@@ -581,7 +622,8 @@ def _active_tool_names(catalog: Mapping[str, Any]) -> set[str]:
                 for key in ("id", "name", "method"):
                     value = tool.get(key)
                     if isinstance(value, str) and value in LIVE_TOOL_NAMES:
-                        names.add(value)
+                        add_entry(value, _active_entry_parameters(tool))
+                        break
     tools = catalog.get("tools")
     if isinstance(tools, list):
         for tool in tools:
@@ -590,12 +632,14 @@ def _active_tool_names(catalog: Mapping[str, Any]) -> set[str]:
             for key in ("id", "name", "method"):
                 value = tool.get(key)
                 if isinstance(value, str) and value in LIVE_TOOL_NAMES:
-                    names.add(value)
+                    add_entry(value, _active_entry_parameters(tool))
+                    break
     elif isinstance(tools, Mapping):
-        for name in tools:
+        for name, value in tools.items():
             if isinstance(name, str) and name in LIVE_TOOL_NAMES:
-                names.add(name)
-    return names
+                params = _active_entry_parameters(value) if isinstance(value, Mapping) else set()
+                add_entry(name, params)
+    return entries
 
 
 def live_installed_openclaw_catalog() -> dict[str, Any]:
@@ -604,32 +648,35 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
     _require_executable_matches_install_root(root, executable)
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     active_catalog = _run_gateway_tools_catalog(executable)
-    active_names = _active_tool_names(active_catalog)
-    if not active_names:
+    active_params = _active_tool_parameters(active_catalog)
+    active_names = set(active_params)
+    if not active_params:
         raise AdapterContractError("active OpenClaw tool catalog did not expose required tools")
     model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
     gateway_params, gateway_sources = _extract_gateway_method_params(root)
     declared_names, declaration_sources = _declared_core_names(root)
     tools: list[dict[str, Any]] = []
     for name in LIVE_TOOL_NAMES:
-        params = set()
+        source_params = set()
         source_kind = "absent"
         declared = name in declared_names
         active = name in active_names
         if name in gateway_params:
-            params.update(gateway_params[name])
+            source_params.update(gateway_params[name])
             source_kind = "gateway_server_method_params"
         if declared and name in model_tool_params:
-            params.update(model_tool_params[name])
+            source_params.update(model_tool_params[name])
             if source_kind == "absent":
                 source_kind = "model_tool_schema"
         if declared and active and source_kind == "absent":
             source_kind = "declared_tool_name"
         if active and (declared or name in gateway_params):
+            params = sorted(active_params[name] & source_params)
             tools.append(
                 {
                     "name": name,
-                    "parameters": sorted(params),
+                    "parameters": params,
+                    "active_parameters": sorted(active_params[name]),
                     "schema_source": source_kind,
                 }
             )

@@ -301,6 +301,8 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         for acquire_response in (
             {"external_id": "lease-unit", **metadata},
             {"lease": {"lease_id": "lease-unit", **metadata}},
+            {"result": {"gateway_lease_id": "lease-unit", **metadata}},
+            {"output": {"lease": {"gateway_lease_id": "lease-unit", **metadata}}},
         ):
             with self.subTest(acquire_response=acquire_response):
                 released_ids: list[str] = []

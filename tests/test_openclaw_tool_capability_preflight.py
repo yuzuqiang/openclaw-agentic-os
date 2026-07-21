@@ -102,6 +102,14 @@ ACTIVE_TOOL_IDS = [
 ]
 
 
+def active_tool_entry(tool_id):
+    source = next((tool for tool in VALID_CATALOG["tools"] if tool["name"] == tool_id), {})
+    entry = {"id": tool_id, "label": tool_id}
+    if "inputSchema" in source:
+        entry["inputSchema"] = json.loads(json.dumps(source["inputSchema"]))
+    return entry
+
+
 def add_fake_openclaw_to_env(
     env,
     directory,
@@ -114,10 +122,7 @@ def add_fake_openclaw_to_env(
     executable = os.path.join(bin_dir, "openclaw")
     entries = active_tool_entries
     if entries is None:
-        entries = [
-            {"id": tool_id, "label": tool_id}
-            for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)
-        ]
+        entries = [active_tool_entry(tool_id) for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)]
     catalog = {"groups": [{"id": "unit", "tools": entries}]}
     with open(executable, "w", encoding="utf-8") as handle:
         handle.write(
@@ -383,6 +388,74 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("sessions_spawn", payload["error"])
         self.assertIn("client_request_id", payload["error"])
 
+    def test_live_catalog_rejects_active_schema_missing_required_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", '
+                    'name: "sessions_history", name: "sessions_status"'
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.ttl_ms },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.gateway_lease_id },"
+                )
+            active_spawn = active_tool_entry("sessions_spawn")
+            del active_spawn["inputSchema"]["properties"]["metadata"]
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_entries=[
+                    active_spawn,
+                    *[
+                        active_tool_entry(tool_id)
+                        for tool_id in ACTIVE_TOOL_IDS
+                        if tool_id != "sessions_spawn"
+                    ],
+                ],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("sessions_spawn", payload["error"])
+        self.assertIn("metadata", payload["error"])
+        spawn_tool = next(
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
+        )
+        self.assertNotIn("metadata", spawn_tool["parameters"])
+        self.assertNotIn("metadata", spawn_tool["active_parameters"])
+
     def test_live_installed_openclaw_requires_matching_active_executable_root(self) -> None:
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as install_root:
@@ -577,7 +650,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
         )
         self.assertNotIn("client_request_id", spawn_tool["parameters"])
-        self.assertIn("task", spawn_tool["parameters"])
+        self.assertEqual(spawn_tool["parameters"], [])
+        self.assertIn("client_request_id", spawn_tool["active_parameters"])
 
     def test_live_schema_parser_does_not_union_across_tool_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -919,7 +993,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             for tool in payload["catalog"]["tools"]
             if tool["name"] == "subagents.allowLease.acquire"
         )
-        self.assertEqual(acquire_tool["parameters"], ["requesterAgentId"])
+        self.assertEqual(acquire_tool["parameters"], [])
+        self.assertIn("requester_agent_id", acquire_tool["active_parameters"])
         self.assertIn("client_lease_id", payload["error"])
 
     def test_live_declared_zero_param_tools_ignore_comments_and_dead_strings(self) -> None:

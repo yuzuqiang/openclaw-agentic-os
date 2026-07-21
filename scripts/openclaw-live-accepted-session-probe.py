@@ -186,6 +186,18 @@ def _lease_id_from_response(response: dict[str, Any]) -> str | None:
         ("lease", "gateway_lease_id"),
         ("lease", "external_id"),
         ("lease", "lease_id"),
+        ("result", "gateway_lease_id"),
+        ("result", "external_id"),
+        ("result", "lease_id"),
+        ("result", "lease", "gateway_lease_id"),
+        ("result", "lease", "external_id"),
+        ("result", "lease", "lease_id"),
+        ("output", "gateway_lease_id"),
+        ("output", "external_id"),
+        ("output", "lease_id"),
+        ("output", "lease", "gateway_lease_id"),
+        ("output", "lease", "external_id"),
+        ("output", "lease", "lease_id"),
         ("leaseId",),
         ("id",),
         label="gateway lease identity",
@@ -227,16 +239,19 @@ def _validate_allow_lease_raw_metadata(
     label: str,
 ) -> dict[str, Any]:
     payload_map = dict(payload)
-    metadata_container = _mapping_path(payload_map, ("metadata",)) or _mapping_path(
-        payload_map, ("metadata_echo",)
-    )
-    if metadata_container is None:
-        nested_lease = _mapping_path(payload_map, ("lease",))
-        if nested_lease is not None:
-            nested_map = dict(nested_lease)
-            metadata_container = _mapping_path(nested_map, ("metadata",)) or _mapping_path(
-                nested_map, ("metadata_echo",)
-            )
+    candidates: list[Mapping[str, Any]] = [payload_map]
+    for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
+        nested = _mapping_path(payload_map, path)
+        if nested is not None:
+            candidates.append(nested)
+    metadata_container = None
+    for candidate in candidates:
+        candidate_map = dict(candidate)
+        metadata_container = _mapping_path(candidate_map, ("metadata",)) or _mapping_path(
+            candidate_map, ("metadata_echo",)
+        )
+        if metadata_container is not None:
+            break
     if metadata_container is None:
         raise MetadataContractError(f"{label} did not expose raw allowLease metadata")
     normalized = (
