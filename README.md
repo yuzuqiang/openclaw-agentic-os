@@ -13,7 +13,7 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `878dc75180a377ef11a81689dfe14cf73338bf412b5bde2224d2072be7ba62e3`
+- Current design artifact SHA-256: `f5f5f6d607688b168d08e1322b12a8715f5c13c35c526c3e79dd170a759c1726`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
 - Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
@@ -418,6 +418,9 @@ does not satisfy the exact Agentic OS contract: allowLease exposes
 bounded accepted-session probe in
 `docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
 therefore fails closed before any Gateway lease or session RPC is attempted.
+If a future runtime passes preflight, the probe validates duplicate session
+identity from direct structured `sessions_spawn` responses and treats any
+allowLease release failure as a failed probe.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
 ## Version-management policy

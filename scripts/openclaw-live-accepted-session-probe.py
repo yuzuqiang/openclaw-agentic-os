@@ -9,6 +9,7 @@ Agentic OS allowLease/session metadata contract.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -108,56 +109,104 @@ def _string_path(payload: Any, *paths: tuple[str, ...]) -> str | None:
     return None
 
 
-def _agent_tool_prompt(spawn_args: dict[str, Any], probe_id: str) -> str:
-    return (
-        "Call the `sessions_spawn` tool exactly once with this JSON object:\n"
-        f"{json.dumps(spawn_args, sort_keys=True)}\n\n"
-        "After the tool returns, reply with JSON only using keys "
-        '{"status","sessionKey","spawnRequestSessionKey","externalId","probeId"}. '
-        f'Set "probeId" to "{probe_id}". Do not invent identities.'
-    )
+def _raw_response_sha256(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(_json_dump(payload).encode("utf-8")).hexdigest()
 
 
-def _agent_spawn_once(spawn_args: dict[str, Any], probe_id: str, timeout_seconds: int) -> dict[str, Any]:
-    session_key = f"agent:main:issue35-identity-probe-{probe_id}"
-    code, payload = _run_json(
-        [
-            "openclaw",
-            "agent",
-            "--agent",
-            "main",
-            "--session-key",
-            session_key,
-            "--message",
-            _agent_tool_prompt(spawn_args, probe_id),
-            "--json",
-            "--thinking",
-            "low",
-            "--timeout",
-            str(timeout_seconds),
-        ],
-        timeout=timeout_seconds + 20,
+def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str, str | None]:
+    return {
+        "external_id": _string_path(
+            response,
+            ("external_id",),
+            ("externalId",),
+            ("session", "external_id"),
+            ("session", "externalId"),
+            ("output", "external_id"),
+            ("output", "externalId"),
+            ("output", "session", "external_id"),
+            ("output", "session", "externalId"),
+        ),
+        "spawn_request_session_key": _string_path(
+            response,
+            ("spawn_request_session_key",),
+            ("spawnRequestSessionKey",),
+            ("request_session_key",),
+            ("requestSessionKey",),
+            ("session", "spawn_request_session_key"),
+            ("session", "spawnRequestSessionKey"),
+            ("session", "request_session_key"),
+            ("session", "requestSessionKey"),
+            ("output", "spawn_request_session_key"),
+            ("output", "spawnRequestSessionKey"),
+            ("output", "request_session_key"),
+            ("output", "requestSessionKey"),
+            ("output", "session", "spawn_request_session_key"),
+            ("output", "session", "spawnRequestSessionKey"),
+            ("output", "session", "request_session_key"),
+            ("output", "session", "requestSessionKey"),
+        ),
+        "session_key": _string_path(
+            response,
+            ("session_key",),
+            ("sessionKey",),
+            ("session", "session_key"),
+            ("session", "sessionKey"),
+            ("session", "key"),
+            ("output", "session_key"),
+            ("output", "sessionKey"),
+            ("output", "session", "session_key"),
+            ("output", "session", "sessionKey"),
+            ("output", "session", "key"),
+        ),
+    }
+
+
+def _session_spawn_once(
+    spawn_args: dict[str, Any], *, timeout_seconds: int, timeout_ms: int
+) -> dict[str, Any]:
+    response = _gateway_call(
+        "sessions_spawn",
+        spawn_args,
+        timeout_ms=max(timeout_ms, timeout_seconds * 1000),
     )
-    if code != 0:
-        raise RuntimeError(f"agent sessions_spawn bridge failed: {payload.get('error') or payload}")
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-    summary = meta.get("toolSummary") if isinstance(meta.get("toolSummary"), dict) else {}
-    tools = summary.get("tools") if isinstance(summary.get("tools"), list) else []
-    if not (summary.get("calls") == 1 and summary.get("failures") == 0 and tools == ["sessions_spawn"]):
-        raise RuntimeError("sessions_spawn was not called exactly once without tool failure")
-    text = ""
-    for item in result.get("payloads") or []:
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            text = item["text"].strip()
-            break
-    try:
-        accepted = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("agent bridge did not return JSON identity evidence") from exc
-    if not isinstance(accepted, dict) or accepted.get("probeId") != probe_id:
-        raise RuntimeError("agent bridge returned mismatched probe identity")
-    return accepted
+    identity = _session_identity_from_spawn_response(response)
+    accepted = validate_accepted_session_identity(
+        external_id=identity["external_id"],
+        spawn_request_session_key=identity["spawn_request_session_key"],
+        session_key=identity["session_key"],
+    )
+    return {
+        "accepted_session_identity": accepted,
+        "identity": identity,
+        "raw_response_sha256": _raw_response_sha256(response),
+        "response_top_level_keys": sorted(response),
+    }
+
+
+def _release_lease(
+    release_params: dict[str, Any], *, expected_gateway_lease_id: str, timeout_ms: int
+) -> dict[str, Any]:
+    response = _gateway_call(
+        "subagents.allowLease.release",
+        release_params,
+        timeout_ms=timeout_ms,
+    )
+    released_gateway_lease_id = _string_path(
+        response,
+        ("gateway_lease_id",),
+        ("lease", "gateway_lease_id"),
+        ("leaseId",),
+        ("id",),
+    )
+    validate_accepted_lease_identity(
+        gateway_lease_id=released_gateway_lease_id,
+        duplicate_acquire_lease_id=expected_gateway_lease_id,
+    )
+    return {
+        "gateway_lease_id": released_gateway_lease_id,
+        "raw_response_sha256": _raw_response_sha256(response),
+        "response_top_level_keys": sorted(response),
+    }
 
 
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
@@ -261,15 +310,23 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "task_digest": f"issue35-task-{args.probe_id}",
             },
         }
-        accepted_one = _agent_spawn_once(spawn_args, args.probe_id, args.agent_timeout_seconds)
+        accepted_one = _session_spawn_once(
+            spawn_args,
+            timeout_seconds=args.agent_timeout_seconds,
+            timeout_ms=args.gateway_timeout_ms,
+        )
         evidence["rpc_attempted"].append("sessions_spawn")
-        accepted_two = _agent_spawn_once(spawn_args, args.probe_id, args.agent_timeout_seconds)
+        accepted_two = _session_spawn_once(
+            spawn_args,
+            timeout_seconds=args.agent_timeout_seconds,
+            timeout_ms=args.gateway_timeout_ms,
+        )
         evidence["rpc_attempted"].append("sessions_spawn:duplicate")
         session_identity = validate_accepted_session_identity(
-            external_id=accepted_one.get("externalId"),
-            spawn_request_session_key=accepted_one.get("spawnRequestSessionKey"),
-            session_key=accepted_one.get("sessionKey"),
-            duplicate_spawn_session_key=accepted_two.get("sessionKey"),
+            external_id=accepted_one["identity"]["external_id"],
+            spawn_request_session_key=accepted_one["identity"]["spawn_request_session_key"],
+            session_key=accepted_one["identity"]["session_key"],
+            duplicate_spawn_session_key=accepted_two["accepted_session_identity"],
         )
         evidence.update(
             {
@@ -277,6 +334,15 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "spawn_attempted": True,
                 "lease_acquired": True,
                 "accepted_session_identity": session_identity,
+                "accepted_session_identity_parity": {
+                    "external_rpc_intents.external_id": session_identity,
+                    "spawn_requests.session_key": session_identity,
+                    "sessions.session_key": session_identity,
+                },
+                "sessions_spawn_structured_evidence": {
+                    "first": accepted_one,
+                    "duplicate": accepted_two,
+                },
             }
         )
         return evidence
@@ -304,14 +370,19 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "requester_agent_id": args.requester_agent_id,
                     "gateway_lease_id": lease_id,
                 }
-                _gateway_call(
-                    "subagents.allowLease.release",
+                evidence["allow_lease_release"] = _release_lease(
                     release_params,
+                    expected_gateway_lease_id=lease_id,
                     timeout_ms=args.gateway_timeout_ms,
                 )
                 evidence["rpc_attempted"].append("subagents.allowLease.release")
                 evidence["released"] = True
             except BaseException as exc:  # pragma: no cover - defensive live cleanup path
+                prior_reason = evidence.get("reason")
+                evidence["status"] = "fail_closed"
+                evidence["reason"] = "lease_release_failed"
+                if prior_reason is not None:
+                    evidence["prior_reason"] = prior_reason
                 evidence["released"] = False
                 evidence["release_error"] = str(exc)
         elif evidence.get("released") is None:
@@ -325,7 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--requester-agent-id", default="main")
     parser.add_argument("--ttl-ms", type=int, default=60_000)
     parser.add_argument("--gateway-timeout-ms", type=int, default=10_000)
-    parser.add_argument("--agent-timeout-seconds", type=int, default=120)
+    parser.add_argument(
+        "--agent-timeout-seconds",
+        type=int,
+        default=120,
+        help="Upper bound for each direct structured sessions_spawn RPC.",
+    )
     parser.add_argument(
         "--execute-session-spawn",
         action="store_true",
