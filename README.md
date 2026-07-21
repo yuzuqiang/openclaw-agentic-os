@@ -13,7 +13,7 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `fd2ad570225e08e38825c81e1300d3b1d480a543b7ac37cbc07b38e2ca908d08`
+- Current design artifact SHA-256: `7f4075f954853e42274fe9bb7be3904ab6c0e714153728d8c21bcfc3e6b4cad9`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
 - Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
@@ -381,8 +381,9 @@ another dispatch's lease on the same run/transition. Unknown or pending spawn
 reconciliation also requires the bound allowLease acquire intent to be accepted
 or reconciled into the exact acquired local lease with a non-empty Gateway lease
 identity; otherwise the spawn is moved to human review even when `sessions_list`
-contains matching session metadata. Session-tool catalog preflight fails closed
-unless `sessions_spawn` declares the caller `metadata` parameter as well as
+contains matching session metadata. Runtime tool catalog preflight fails closed
+unless allowLease acquire/status/release are present with owner metadata and
+`sessions_spawn` declares the caller `metadata` parameter as well as
 `client_request_id` and `idempotency_key`; history-backed result responses must
 match the requested session at the top level and in any history item identity
 they expose. Live run/phase/agent arbitration occurs in the initial intent

@@ -6,6 +6,7 @@ import unittest
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
     OpenClawAdapter,
+    assert_installed_runtime_tools,
     assert_installed_session_tools,
 )
 
@@ -37,6 +38,46 @@ INSTALLED_SESSION_TOOL_CATALOG = {
                 }
             },
         },
+    ]
+}
+
+INSTALLED_RUNTIME_TOOL_CATALOG = {
+    "tools": [
+        {
+            "name": "subagents.allowLease.acquire",
+            "inputSchema": {
+                "properties": {
+                    "client_lease_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "phase": {"type": "string"},
+                    "transition_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "ttl_ms": {"type": "integer"},
+                }
+            },
+        },
+        {
+            "name": "subagents.allowLease.status",
+            "inputSchema": {"properties": {}},
+        },
+        {
+            "name": "subagents.allowLease.release",
+            "inputSchema": {
+                "properties": {
+                    "client_lease_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "phase": {"type": "string"},
+                    "transition_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "gateway_lease_id": {"type": "string"},
+                }
+            },
+        },
+        *INSTALLED_SESSION_TOOL_CATALOG["tools"],
     ]
 }
 
@@ -219,10 +260,32 @@ class OpenClawAdapterTests(unittest.TestCase):
     def test_preflighted_adapter_requires_installed_session_tool_catalog(self) -> None:
         transport = CannedTransport()
         adapter = OpenClawAdapter.from_preflighted_catalog(
-            transport, INSTALLED_SESSION_TOOL_CATALOG
+            transport, INSTALLED_RUNTIME_TOOL_CATALOG
         )
 
         self.assertEqual(adapter.session_status("session-key").session_key, "session-key")
+
+    def test_runtime_tool_catalog_preflight_rejects_missing_allow_lease_tool(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            AdapterContractError, "subagents\\.allowLease\\.acquire"
+        ):
+            assert_installed_runtime_tools(INSTALLED_SESSION_TOOL_CATALOG)
+
+    def test_runtime_tool_catalog_preflight_rejects_missing_release_owner_parameter(
+        self,
+    ) -> None:
+        catalog = json.loads(json.dumps(INSTALLED_RUNTIME_TOOL_CATALOG))
+        release_tool = next(
+            tool
+            for tool in catalog["tools"]
+            if tool["name"] == "subagents.allowLease.release"
+        )
+        del release_tool["inputSchema"]["properties"]["gateway_lease_id"]
+
+        with self.assertRaisesRegex(AdapterContractError, "gateway_lease_id"):
+            assert_installed_runtime_tools(catalog)
 
     def test_session_tool_catalog_preflight_rejects_missing_history_parameter(self) -> None:
         catalog = {

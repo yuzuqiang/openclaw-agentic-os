@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
-    assert_installed_session_tools,
+    assert_installed_runtime_tools,
 )
 
 
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Fail closed unless an OpenClaw runtime tool catalog exposes the "
-            "session tool surface required by the Agentic OS adapter."
+            "allowLease and session tool surface required by the Agentic OS adapter."
         )
     )
     parser.add_argument(
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
     catalog = _read_catalog(args)
     try:
-        assert_installed_session_tools(catalog)
+        assert_installed_runtime_tools(catalog)
     except AdapterContractError as exc:
         print(json.dumps({"error": str(exc), "status": "fail"}, sort_keys=True))
         return 1

@@ -14,6 +14,40 @@ SCRIPT = repository_root() / "scripts/openclaw-tool-capability-preflight.py"
 VALID_CATALOG = {
     "tools": [
         {
+            "name": "subagents.allowLease.acquire",
+            "inputSchema": {
+                "properties": {
+                    "client_lease_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "phase": {"type": "string"},
+                    "transition_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "ttl_ms": {"type": "integer"},
+                }
+            },
+        },
+        {
+            "name": "subagents.allowLease.status",
+            "inputSchema": {"properties": {}},
+        },
+        {
+            "name": "subagents.allowLease.release",
+            "inputSchema": {
+                "properties": {
+                    "client_lease_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "run_id": {"type": "string"},
+                    "phase": {"type": "string"},
+                    "transition_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "gateway_lease_id": {"type": "string"},
+                }
+            },
+        },
+        {
             "name": "sessions_spawn",
             "inputSchema": {
                 "properties": {
@@ -62,9 +96,39 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"status": "pass"})
 
+    def test_preflight_rejects_session_only_catalog_without_allow_lease_tools(
+        self,
+    ) -> None:
+        catalog = {
+            "tools": [
+                tool
+                for tool in VALID_CATALOG["tools"]
+                if not tool["name"].startswith("subagents.allowLease.")
+            ]
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--catalog-json",
+                json.dumps(catalog),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("subagents.allowLease.acquire", payload["error"])
+
     def test_preflight_rejects_missing_required_parameter(self) -> None:
         catalog = json.loads(json.dumps(VALID_CATALOG))
-        del catalog["tools"][0]["inputSchema"]["properties"]["metadata"]
+        spawn_tool = next(
+            tool for tool in catalog["tools"] if tool["name"] == "sessions_spawn"
+        )
+        del spawn_tool["inputSchema"]["properties"]["metadata"]
         result = subprocess.run(
             [
                 sys.executable,

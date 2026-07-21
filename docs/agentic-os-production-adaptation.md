@@ -189,7 +189,13 @@ External runtime metadata contract is a P0 prerequisite:
 - A local lease row cannot move to `released` or `release_pending` without a non-empty release idempotency key and release request evidence; `release_not_required` is valid only when no external Gateway lease identity exists.
 - `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
 - Session list/status/history-backed result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
-- Runtime session-tool catalog preflight must fail closed unless
+- Runtime tool catalog preflight must fail closed unless allowLease
+  acquire/status/release are present and `subagents.allowLease.acquire`
+  declares `client_lease_id`, `idempotency_key`, `run_id`, `phase`,
+  `transition_id`, `agent_id`, `requester_agent_id`, and `ttl_ms`,
+  `subagents.allowLease.release` declares `client_lease_id`,
+  `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`,
+  `requester_agent_id`, and `gateway_lease_id`, and
   `sessions_spawn` declares `client_request_id`, `idempotency_key`, and
   `metadata`; a spawn surface that cannot carry caller metadata is not valid
   runtime evidence for reconciliation.
@@ -203,11 +209,12 @@ External runtime metadata contract is a P0 prerequisite:
   validate allowLease acquire/status/release and session spawn/status/list/result
   observations. The OpenClaw adapter boundary now includes a runtime catalog
   preflight helper that fails closed unless the installed transport exposes the
-  exact session tools and parameter names it calls, including the
-  `sessions_spawn` caller `metadata` parameter and the history-backed result
-  surface. `sessions_history` responses are accepted only when the top-level
-  accepted identity and any history item identity match the requested session;
-  production integration must run that preflight before treating the adapter as
+  exact allowLease and session tools and parameter names it calls, including the
+  allowLease acquire/release owner metadata, the `sessions_spawn` caller
+  `metadata` parameter, and the history-backed result surface.
+  `sessions_history` responses are accepted only when the top-level accepted
+  identity and any history item identity match the requested session; production
+  integration must run that preflight before treating the adapter as
   runtime evidence. It does not enable
   production database authority. Runtime reconciliation remains bounded to the
   implemented scanner paths.
