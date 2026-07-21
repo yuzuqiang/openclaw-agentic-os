@@ -1,0 +1,63 @@
+{
+  "catalog": {
+    "active_catalog": {
+      "method": "tools.catalog",
+      "raw_response_sha256": "0ccbf20cbfc1e49cb0db0e55bc484c76b8c16e33b755cb5aa17e9d4669fd8598",
+      "required_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ]
+    },
+    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
+    "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
+    "catalog_kind": "sanitized_installed_openclaw_runtime",
+    "install_root_basename": "openclaw",
+    "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.7.1",
+    "sources": [
+      {
+        "path": "dist/core-descriptors-DRUtdasO.js",
+        "sha256": "d46b52766e66bef7995275c55a87a9971c906918bade604baa931bc62b20f419"
+      },
+      {
+        "path": "dist/openclaw-tools-CIBcX9Ku.js",
+        "sha256": "a2b93887aa43e263b978edcad73151092631cea74e977358f69c600c7b2f390c"
+      },
+      {
+        "path": "dist/server-methods-C4KugcqZ.js",
+        "sha256": "d597cfe0f30c5fff5b9be54cff0538bebce19e8729375b8d9a741a922ffc3be5"
+      }
+    ],
+    "tools": [
+      {
+        "active_parameters": [],
+        "name": "sessions_spawn",
+        "parameters": [],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "active_parameters": [],
+        "name": "sessions_list",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      },
+      {
+        "active_parameters": [],
+        "name": "sessions_history",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      },
+      {
+        "active_parameters": [],
+        "name": "session_status",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      }
+    ]
+  },
+  "error": "runtime tool catalog is missing subagents.allowLease.acquire; runtime tool catalog is missing subagents.allowLease.status; runtime tool catalog is missing subagents.allowLease.release; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history is missing parameters: includeTools, limit, sessionKey",
+  "status": "fail"
+}

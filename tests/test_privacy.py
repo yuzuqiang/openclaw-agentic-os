@@ -177,12 +177,20 @@ class PrivacyTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(is_raw_state_denied(path))
         self.assertFalse(is_raw_state_denied("reports/summary.json"))
+        self.assertFalse(
+            is_raw_state_denied(
+                "docs/runtime-evidence/issue35-live-openclaw-20260721.json"
+            )
+        )
         with self.assertRaises(PrivacyPreflightError):
             assert_paths_retrievable(denied)
         with self.assertRaises(PrivacyPreflightError):
             assert_paths_retrievable("control.db")
         with self.assertRaises(PrivacyPreflightError):
             assert_paths_retrievable(Path("control.db"))
+        assert_paths_retrievable(
+            "docs/runtime-evidence/issue35-live-openclaw-20260721.json"
+        )
         assert_paths_retrievable(denied, local_recovery=True)
 
 

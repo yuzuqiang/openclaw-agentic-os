@@ -13,7 +13,7 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `7f4075f954853e42274fe9bb7be3904ab6c0e714153728d8c21bcfc3e6b4cad9`
+- Current design artifact SHA-256: `793267f9ce12a14d506f7cee4426c90ada44cecf3877e82763a76e15b0aef439`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
 - Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
@@ -407,6 +407,22 @@ new SLO identity when active trust rows still exist under the previous bundle.
 Schema versions 1 through 14 keep their historical query hashes so already
 migrated databases can still verify and upgrade instead of failing closed on
 immutable `slo_queries` registry drift.
+
+Issue #35 adds sanitized live runtime evidence for that boundary. The committed
+evidence in `docs/runtime-evidence/issue35-live-openclaw-20260721.json` captures
+OpenClaw 2026.7.1 installed catalog source hashes and proves the current runtime
+does not satisfy the exact Agentic OS contract: the active catalog does not
+expose the required allowLease methods, `sessions_spawn` lacks
+`client_request_id`, `idempotency_key`, and `metadata`, and the live tool name is
+`session_status` rather than the adapter-required `sessions_status`. The
+bounded accepted-session probe in
+`docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
+therefore fails closed before any Gateway lease or session RPC is attempted.
+If a future runtime passes preflight, the probe validates duplicate session
+identity plus session-local normalized/raw metadata contract evidence from
+direct structured `sessions_spawn` responses and treats any allowLease release
+failure as a failed probe.
+`DB_AUTHORITY_ENABLED` remains `False`.
 
 ## Version-management policy
 
