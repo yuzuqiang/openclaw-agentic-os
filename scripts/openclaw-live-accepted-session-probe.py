@@ -69,6 +69,13 @@ def _run_json(cmd: list[str], *, timeout: int) -> tuple[int, dict[str, Any]]:
             "error": "command returned non-JSON output",
             "stdout_prefix": (proc.stdout or "")[:500],
         }
+    if not isinstance(payload, dict):
+        payload = {
+            "status": "error",
+            "error": "command returned non-object JSON output",
+            "json_type": type(payload).__name__,
+            "stdout_prefix": (proc.stdout or "")[:500],
+        }
     if proc.returncode != 0 and "error" not in payload:
         payload["error"] = (proc.stderr or proc.stdout or "command failed").strip()
     return proc.returncode, payload
@@ -104,7 +111,7 @@ def _gateway_call(
         ],
         timeout=max(5, timeout_ms // 1000 + 5),
     )
-    if code != 0:
+    if code != 0 or payload.get("status") == "error":
         raise RuntimeError(f"gateway call {method} failed: {payload.get('error') or payload}")
     return payload
 
@@ -133,6 +140,15 @@ def _string_path(payload: Any, *paths: tuple[str, ...], label: str = "identity")
                     f"{second_path}={value!r}"
                 )
     return selected[1] if selected is not None else None
+
+
+def _string_values_from_paths(payload: Any, *paths: tuple[str, ...]) -> list[str]:
+    values: list[str] = []
+    for path in paths:
+        value = _path_value(payload, path)
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+    return values
 
 
 def _raw_response_sha256(payload: dict[str, Any]) -> str:
@@ -201,6 +217,32 @@ def _lease_id_from_response(response: dict[str, Any]) -> str | None:
         ("leaseId",),
         ("id",),
         label="gateway lease identity",
+    )
+
+
+def _lease_ids_from_response(response: Mapping[str, Any]) -> list[str]:
+    return _string_values_from_paths(
+        response,
+        ("gateway_lease_id",),
+        ("external_id",),
+        ("lease_id",),
+        ("lease", "gateway_lease_id"),
+        ("lease", "external_id"),
+        ("lease", "lease_id"),
+        ("result", "gateway_lease_id"),
+        ("result", "external_id"),
+        ("result", "lease_id"),
+        ("result", "lease", "gateway_lease_id"),
+        ("result", "lease", "external_id"),
+        ("result", "lease", "lease_id"),
+        ("output", "gateway_lease_id"),
+        ("output", "external_id"),
+        ("output", "lease_id"),
+        ("output", "lease", "gateway_lease_id"),
+        ("output", "lease", "external_id"),
+        ("output", "lease", "lease_id"),
+        ("leaseId",),
+        ("id",),
     )
 
 
@@ -286,19 +328,82 @@ def _validate_allow_lease_raw_metadata(
     }
 
 
+def _allow_lease_owner_metadata_matches(
+    payload: Mapping[str, Any], *, expected_metadata: Mapping[str, Any]
+) -> bool:
+    expected_owner = {
+        key: value for key, value in expected_metadata.items() if key != "gateway_lease_id"
+    }
+    payload_map = dict(payload)
+    candidates: list[Mapping[str, Any]] = [payload_map]
+    for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
+        nested = _mapping_path(payload_map, path)
+        if nested is not None:
+            candidates.append(nested)
+    for candidate in candidates:
+        candidate_map = dict(candidate)
+        metadata_container = _mapping_path(candidate_map, ("metadata",)) or _mapping_path(
+            candidate_map, ("metadata_echo",)
+        )
+        if metadata_container is None:
+            continue
+        normalized = (
+            metadata_container.get("normalized")
+            or metadata_container.get("normalized_metadata")
+            or metadata_container.get("external_metadata")
+        )
+        if isinstance(normalized, Mapping) and all(
+            normalized.get(key) == value for key, value in expected_owner.items()
+        ):
+            return True
+        raw_json = metadata_container.get("raw_json") or metadata_container.get(
+            "raw_metadata_json"
+        )
+        if isinstance(raw_json, str):
+            try:
+                raw = json.loads(raw_json)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(raw, Mapping) and all(
+                raw.get(key) == value for key, value in expected_owner.items()
+            ):
+                return True
+    return False
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
+
+
 def _validate_status_observes_lease(
-    status: dict[str, Any], *, expected_metadata: dict[str, Any]
+    status: dict[str, Any],
+    *,
+    expected_metadata: dict[str, Any],
+    lease_ids_to_release: list[str] | None = None,
 ) -> dict[str, Any]:
     expected_gateway_lease_id = expected_metadata["gateway_lease_id"]
     candidates: list[Mapping[str, Any]] = []
-    if _lease_id_from_response(status) == expected_gateway_lease_id:
+    if expected_gateway_lease_id in _lease_ids_from_response(status):
         candidates.append(status)
     for path in (("leases",), ("output", "leases"), ("result", "leases")):
         sequence = _sequence_path(status, path)
         if sequence is not None:
             candidates.extend(item for item in sequence if isinstance(item, Mapping))
+    observed: dict[str, Any] | None = None
+    extra_owner_lease_ids: list[str] = []
     for item in candidates:
         mapped = dict(item)
+        candidate_lease_ids = _lease_ids_from_response(mapped)
+        if (
+            any(candidate != expected_gateway_lease_id for candidate in candidate_lease_ids)
+            and _allow_lease_owner_metadata_matches(mapped, expected_metadata=expected_metadata)
+        ):
+            for candidate in candidate_lease_ids:
+                if candidate != expected_gateway_lease_id:
+                    _append_unique(extra_owner_lease_ids, candidate)
+                    if lease_ids_to_release is not None:
+                        _append_unique(lease_ids_to_release, candidate)
         if _lease_id_from_response(mapped) == expected_gateway_lease_id:
             raw_metadata = _validate_allow_lease_raw_metadata(
                 mapped,
@@ -306,7 +411,7 @@ def _validate_status_observes_lease(
                 label="allowLease status proof",
                 release=False,
             )
-            return {
+            observed = {
                 "gateway_lease_id": expected_gateway_lease_id,
                 "metadata_contract_version": raw_metadata["metadata_contract_version"],
                 "normalized_metadata": raw_metadata["normalized_metadata"],
@@ -314,6 +419,13 @@ def _validate_status_observes_lease(
                 "raw_response_sha256": _raw_response_sha256(status),
                 "response_top_level_keys": sorted(status),
             }
+    if extra_owner_lease_ids:
+        raise MetadataContractError(
+            "allowLease status observed extra lease with duplicate acquire metadata: "
+            + ", ".join(extra_owner_lease_ids)
+        )
+    if observed is not None:
+        return observed
     raise MetadataContractError("allowLease status did not observe acquired lease identity")
 
 
@@ -622,9 +734,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
+        for observed_lease_id in _lease_ids_from_response(first):
+            _append_unique(lease_ids_to_release, observed_lease_id)
         gateway_lease_id = _lease_id_from_response(first)
         lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
-        lease_ids_to_release.append(lease_id)
+        _append_unique(lease_ids_to_release, lease_id)
         acquire_metadata = _validate_allow_lease_raw_metadata(
             first,
             expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
@@ -644,18 +758,34 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
+        for observed_lease_id in _lease_ids_from_response(second):
+            _append_unique(lease_ids_to_release, observed_lease_id)
         duplicate_gateway_lease_id = _lease_id_from_response(second)
         if duplicate_gateway_lease_id is None:
             raise MetadataContractError(
                 "duplicate allowLease acquire did not report lease identity"
             )
-        if duplicate_gateway_lease_id not in lease_ids_to_release:
-            lease_ids_to_release.append(duplicate_gateway_lease_id)
+        _append_unique(lease_ids_to_release, duplicate_gateway_lease_id)
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
         )
+        duplicate_metadata = _validate_allow_lease_raw_metadata(
+            second,
+            expected_metadata={**acquire_params, "gateway_lease_id": duplicate_gateway_lease_id},
+            release=False,
+            label="duplicate allowLease acquire proof",
+        )
         evidence["allow_lease"]["duplicate_gateway_lease_id"] = duplicate_gateway_lease_id
+        evidence["allow_lease"]["duplicate_metadata_contract_version"] = duplicate_metadata[
+            "metadata_contract_version"
+        ]
+        evidence["allow_lease"]["duplicate_normalized_metadata"] = duplicate_metadata[
+            "normalized_metadata"
+        ]
+        evidence["allow_lease"]["duplicate_raw_metadata_json_sha256"] = duplicate_metadata[
+            "raw_metadata_json_sha256"
+        ]
         evidence["allow_lease"]["raw_duplicate_response_sha256"] = _raw_response_sha256(second)
         evidence["rpc_attempted"].append("subagents.allowLease.status")
         status = _gateway_call(
@@ -665,6 +795,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         evidence["allow_lease"]["status_observed_lease"] = _validate_status_observes_lease(
             status,
             expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
+            lease_ids_to_release=lease_ids_to_release,
         )
         if not args.execute_session_spawn:
             evidence.update(
@@ -747,7 +878,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "reason": "live_probe_contract_failed",
                 "error": str(exc),
                 "spawn_attempted": any("sessions_spawn" in item for item in evidence["rpc_attempted"]),
-                "lease_acquired": bool(gateway_lease_id),
+                "lease_acquired": bool(gateway_lease_id or lease_ids_to_release),
             }
         )
         if "subagents.allowLease.acquire" in evidence["rpc_attempted"] and not lease_ids_to_release:

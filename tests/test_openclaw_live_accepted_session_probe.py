@@ -295,6 +295,34 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit"])
         self.assertTrue(payload["released"])
 
+    def test_first_acquire_conflicting_aliases_are_queued_for_cleanup(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {
+                    "gateway_lease_id": "lease-unit",
+                    "leaseId": "lease-alias",
+                    **metadata_contract({**acquire_owner(), "gateway_lease_id": "lease-unit"}),
+                }
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("conflicting gateway lease identity aliases", payload["error"])
+        self.assertTrue(payload["lease_acquired"])
+        self.assertEqual(released_ids, ["lease-unit", "lease-alias"])
+        self.assertEqual(payload["released"], True)
+
     def test_acquired_lease_aliases_are_recorded_for_cleanup(self) -> None:
         module = load_probe_module()
         metadata = metadata_contract({**acquire_owner(), "gateway_lease_id": "lease-unit"})
@@ -359,6 +387,64 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertEqual(payload["released"], True)
 
+    def test_duplicate_acquire_conflicting_aliases_are_queued_for_cleanup(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+        acquire_calls = 0
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            nonlocal acquire_calls
+            if method == "subagents.allowLease.acquire":
+                acquire_calls += 1
+                if acquire_calls == 1:
+                    return lease_acquire_response("lease-unit")
+                return {
+                    "gateway_lease_id": "lease-unit",
+                    "leaseId": "lease-duplicate",
+                    **metadata_contract({**acquire_owner(), "gateway_lease_id": "lease-unit"}),
+                }
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("conflicting gateway lease identity aliases", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
+        self.assertEqual(payload["released"], True)
+
+    def test_duplicate_acquire_must_echo_owner_metadata(self) -> None:
+        module = load_probe_module()
+        acquire_calls = 0
+
+        def sequenced_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            nonlocal acquire_calls
+            if method == "subagents.allowLease.acquire":
+                acquire_calls += 1
+                return lease_acquire_response(
+                    "lease-unit",
+                    run_id="issue35-run-unit" if acquire_calls == 1 else "other-run",
+                )
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=sequenced_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("duplicate allowLease acquire proof", payload["error"])
+        self.assertEqual(payload["released"], True)
+
     def test_duplicate_acquire_cleanup_attempts_every_observed_lease(self) -> None:
         module = load_probe_module()
         released_ids: list[str] = []
@@ -409,6 +495,31 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("status did not observe", payload["error"])
+        self.assertEqual(payload["released"], True)
+
+    def test_status_rejects_and_releases_extra_lease_with_duplicate_owner_metadata(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return lease_acquire_response()
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease(), status_lease("lease-extra")]}
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("extra lease with duplicate acquire metadata", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit", "lease-extra"])
         self.assertEqual(payload["released"], True)
 
     def test_status_must_echo_owner_metadata_for_acquired_lease(self) -> None:
@@ -888,6 +999,33 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["released"], False)
         self.assertIn("no lease identity available", payload["release_error"])
         self.assertIn("openclaw missing", payload["error"])
+
+    def test_run_json_wraps_non_object_json_without_type_error(self) -> None:
+        module = load_probe_module()
+        completed = subprocess.CompletedProcess(
+            args=["openclaw"], returncode=1, stdout='["bad"]', stderr=""
+        )
+        with mock.patch.object(module.subprocess, "run", return_value=completed):
+            code, payload = module._run_json(["openclaw"], timeout=1)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error"], "command returned non-object JSON output")
+        self.assertEqual(payload["json_type"], "list")
+
+    def test_gateway_call_rejects_non_object_json_success_output(self) -> None:
+        module = load_probe_module()
+        completed = subprocess.CompletedProcess(
+            args=["openclaw"], returncode=0, stdout='"ok"', stderr=""
+        )
+        with mock.patch.object(module.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(RuntimeError, "non-object JSON"):
+                module._gateway_call(
+                    "openclaw",
+                    "subagents.allowLease.status",
+                    {},
+                    timeout_ms=1000,
+                )
 
 
 if __name__ == "__main__":
