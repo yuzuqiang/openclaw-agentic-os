@@ -9,6 +9,10 @@
       "openclaw_version": "2026.7.1",
       "sources": [
         {
+          "path": "dist/core-descriptors-DRUtdasO.js",
+          "sha256": "d46b52766e66bef7995275c55a87a9971c906918bade604baa931bc62b20f419"
+        },
+        {
           "path": "dist/openclaw-tools-CIBcX9Ku.js",
           "sha256": "a2b93887aa43e263b978edcad73151092631cea74e977358f69c600c7b2f390c"
         },
@@ -48,20 +52,14 @@
             "attachAs",
             "attachments",
             "cleanup",
-            "content",
             "context",
             "cwd",
-            "encoding",
             "label",
             "lightContext",
-            "mimeType",
             "mode",
             "model",
-            "name",
-            "resumeSessionId",
             "runtime",
             "sandbox",
-            "streamTo",
             "task",
             "taskName",
             "thinking"
@@ -93,6 +91,6 @@
   "released": "not_required",
   "rpc_attempted": [],
   "spawn_attempted": false,
-  "started_epoch_ms": 1784638576832,
+  "started_epoch_ms": 1784640242201,
   "status": "fail_closed"
 }

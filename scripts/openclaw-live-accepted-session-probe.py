@@ -20,6 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import agentic_os  # noqa: E402
 from agentic_os.metadata import (  # noqa: E402
     MetadataContractError,
     validate_accepted_lease_identity,
@@ -97,17 +98,30 @@ def _gateway_call(method: str, params: dict[str, Any], *, timeout_ms: int) -> di
     return payload
 
 
-def _string_path(payload: Any, *paths: tuple[str, ...]) -> str | None:
+def _path_value(payload: Any, path: tuple[str, ...]) -> Any:
+    value = payload
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _string_path(payload: Any, *paths: tuple[str, ...], label: str = "identity") -> str | None:
+    selected: tuple[tuple[str, ...], str] | None = None
     for path in paths:
-        value = payload
-        for key in path:
-            if not isinstance(value, dict):
-                value = None
-                break
-            value = value.get(key)
+        value = _path_value(payload, path)
         if isinstance(value, str) and value:
-            return value
-    return None
+            if selected is None:
+                selected = (path, value)
+            elif value != selected[1]:
+                first_path = ".".join(selected[0])
+                second_path = ".".join(path)
+                raise MetadataContractError(
+                    f"conflicting {label} aliases: {first_path}={selected[1]!r}, "
+                    f"{second_path}={value!r}"
+                )
+    return selected[1] if selected is not None else None
 
 
 def _raw_response_sha256(payload: dict[str, Any]) -> str:
@@ -121,6 +135,7 @@ def _lease_id_from_response(response: dict[str, Any]) -> str | None:
         ("lease", "gateway_lease_id"),
         ("leaseId",),
         ("id",),
+        label="gateway lease identity",
     )
 
 
@@ -137,11 +152,21 @@ def _iter_mappings(value: Any) -> tuple[Mapping[str, Any], ...]:
     return tuple(found)
 
 
-def _require_expected_metadata(
-    payload: dict[str, Any], *, expected: dict[str, Any], label: str
+def _mapping_path(payload: dict[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
+    value = _path_value(payload, path)
+    return value if isinstance(value, Mapping) else None
+
+
+def _require_expected_metadata_from_paths(
+    payload: dict[str, Any],
+    *,
+    expected: dict[str, Any],
+    label: str,
+    paths: tuple[tuple[str, ...], ...],
 ) -> dict[str, Any]:
-    for item in _iter_mappings(payload):
-        if all(item.get(key) == value for key, value in expected.items()):
+    for path in paths:
+        item = payload if not path else _mapping_path(payload, path)
+        if item is not None and all(item.get(key) == value for key, value in expected.items()):
             return {key: item[key] for key in expected}
     missing = ", ".join(sorted(expected))
     raise MetadataContractError(f"{label} did not echo expected metadata: {missing}")
@@ -154,10 +179,11 @@ def _validate_status_observes_lease(
     for item in _iter_mappings(status):
         mapped = dict(item)
         if _lease_id_from_response(mapped) == expected_gateway_lease_id:
-            owner_metadata = _require_expected_metadata(
+            owner_metadata = _require_expected_metadata_from_paths(
                 mapped,
                 expected=expected_metadata,
                 label="allowLease status proof",
+                paths=((), ("owner_metadata",), ("metadata",), ("lease", "owner_metadata"), ("lease", "metadata")),
             )
             return {
                 "gateway_lease_id": expected_gateway_lease_id,
@@ -204,6 +230,7 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
             ("output", "externalId"),
             ("output", "session", "external_id"),
             ("output", "session", "externalId"),
+            label="session external identity",
         ),
         "spawn_request_session_key": _string_path(
             response,
@@ -223,6 +250,7 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
             ("output", "session", "spawnRequestSessionKey"),
             ("output", "session", "request_session_key"),
             ("output", "session", "requestSessionKey"),
+            label="spawn request session identity",
         ),
         "session_key": _string_path(
             response,
@@ -236,6 +264,7 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
             ("output", "session", "session_key"),
             ("output", "session", "sessionKey"),
             ("output", "session", "key"),
+            label="session identity",
         ),
     }
 
@@ -258,10 +287,20 @@ def _session_spawn_once(
         spawn_request_session_key=identity["spawn_request_session_key"],
         session_key=identity["session_key"],
     )
-    metadata_echo = _require_expected_metadata(
+    metadata_echo = _require_expected_metadata_from_paths(
         response,
         expected=expected_metadata,
         label="sessions_spawn response",
+        paths=(
+            ("session", "metadata"),
+            ("session", "metadata_echo"),
+            ("metadata_echo",),
+            ("metadata",),
+            ("output", "session", "metadata"),
+            ("output", "session", "metadata_echo"),
+            ("output", "metadata_echo"),
+            ("output", "metadata"),
+        ),
     )
     return {
         "accepted_session_identity": accepted,
@@ -290,10 +329,11 @@ def _release_lease(
         duplicate_acquire_lease_id=expected_gateway_lease_id,
     )
     _validate_release_succeeded(response)
-    owner_metadata = _require_expected_metadata(
+    owner_metadata = _require_expected_metadata_from_paths(
         response,
         expected=expected_metadata,
         label="allowLease release proof",
+        paths=((), ("owner_metadata",), ("metadata",), ("lease", "owner_metadata"), ("lease", "metadata")),
     )
     return {
         "gateway_lease_id": released_gateway_lease_id,
@@ -305,15 +345,40 @@ def _release_lease(
 
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     started = int(time.time() * 1000)
-    preflight_ok, preflight_payload = _preflight()
     evidence: dict[str, Any] = {
         "probe": "openclaw-live-accepted-session-identity",
         "started_epoch_ms": started,
-        "db_authority_enabled": False,
-        "preflight": preflight_payload,
+        "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         "rpc_attempted": [],
         "released": None,
     }
+    if evidence["db_authority_enabled"]:
+        evidence.update(
+            {
+                "status": "fail_closed",
+                "reason": "db_authority_enabled",
+                "spawn_attempted": False,
+                "lease_acquired": False,
+                "released": "not_required",
+            }
+        )
+        return evidence
+    try:
+        preflight_ok, preflight_payload = _preflight()
+    except subprocess.TimeoutExpired as exc:
+        evidence.update(
+            {
+                "status": "fail_closed",
+                "reason": "capability_preflight_timed_out",
+                "error": str(exc),
+                "preflight": {"status": "fail", "error": "capability preflight timed out"},
+                "spawn_attempted": False,
+                "lease_acquired": False,
+                "released": "not_required",
+            }
+        )
+        return evidence
+    evidence["preflight"] = preflight_payload
     if not preflight_ok:
         evidence.update(
             {
@@ -328,6 +393,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
 
     lease_id: str | None = None
     gateway_lease_id: str | None = None
+    lease_ids_to_release: list[str] = []
     try:
         acquire_params = {
             "client_lease_id": f"issue35-{args.probe_id}",
@@ -345,6 +411,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         gateway_lease_id = _lease_id_from_response(first)
         lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
+        lease_ids_to_release.append(lease_id)
         evidence["allow_lease"] = {
             "gateway_lease_id": gateway_lease_id,
             "raw_acquire_response_sha256": _raw_response_sha256(first),
@@ -359,6 +426,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise MetadataContractError(
                 "duplicate allowLease acquire did not report lease identity"
             )
+        if duplicate_gateway_lease_id not in lease_ids_to_release:
+            lease_ids_to_release.append(duplicate_gateway_lease_id)
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
@@ -452,33 +521,44 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         return evidence
     finally:
-        if lease_id:
-            try:
+        if lease_ids_to_release:
+            release_errors: list[str] = []
+            releases: list[dict[str, Any]] = []
+            for index, acquired_lease_id in enumerate(lease_ids_to_release):
                 release_params = {
                     "client_lease_id": f"issue35-{args.probe_id}",
-                    "idempotency_key": f"issue35-release-{args.probe_id}",
+                    "idempotency_key": f"issue35-release-{args.probe_id}-{index}",
                     "run_id": f"issue35-run-{args.probe_id}",
                     "phase": "B",
                     "transition_id": f"issue35-transition-{args.probe_id}",
                     "agent_id": args.agent_id,
                     "requester_agent_id": args.requester_agent_id,
-                    "gateway_lease_id": lease_id,
+                    "gateway_lease_id": acquired_lease_id,
                 }
                 evidence["rpc_attempted"].append("subagents.allowLease.release")
-                evidence["allow_lease_release"] = _release_lease(
-                    release_params,
-                    expected_metadata=release_params,
-                    timeout_ms=args.gateway_timeout_ms,
-                )
-                evidence["released"] = True
-            except BaseException as exc:  # pragma: no cover - defensive live cleanup path
+                try:
+                    release = _release_lease(
+                        release_params,
+                        expected_metadata=release_params,
+                        timeout_ms=args.gateway_timeout_ms,
+                    )
+                    releases.append(release)
+                    if "allow_lease_release" not in evidence:
+                        evidence["allow_lease_release"] = release
+                except BaseException as exc:  # pragma: no cover - defensive live cleanup path
+                    release_errors.append(f"{acquired_lease_id}: {exc}")
+            if releases:
+                evidence["allow_lease_releases"] = releases
+            if release_errors:
                 prior_reason = evidence.get("reason")
                 evidence["status"] = "fail_closed"
                 evidence["reason"] = "lease_release_failed"
                 if prior_reason is not None:
                     evidence["prior_reason"] = prior_reason
                 evidence["released"] = False
-                evidence["release_error"] = str(exc)
+                evidence["release_error"] = "; ".join(release_errors)
+            else:
+                evidence["released"] = True
         elif evidence.get("released") is None:
             evidence["released"] = "not_required"
 

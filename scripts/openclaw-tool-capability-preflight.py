@@ -28,6 +28,7 @@ OBJECT_SCHEMA_FIELD = re.compile(
     r"^\s*(?P<key>[A-Za-z][A-Za-z0-9_]*)\s*:\s*(?:Type\.|optionalStringEnum)",
     re.MULTILINE,
 )
+IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
 LIVE_TOOL_NAMES = (
     "subagents.allowLease.acquire",
@@ -94,17 +95,137 @@ def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
     ]
 
 
+def _balanced_slice(text: str, start: int, opener: str, closer: str) -> str | None:
+    if start < 0 or start >= len(text) or text[start] != opener:
+        return None
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _function_block(text: str, marker: str) -> str | None:
+    start = text.find(marker)
+    if start < 0:
+        return None
+    brace = text.find("{", start)
+    if brace < 0:
+        return None
+    return _balanced_slice(text, brace, "{", "}")
+
+
+def _type_object_argument(block: str) -> str | None:
+    return_index = block.find("return")
+    search_start = return_index if return_index >= 0 else 0
+    call = block.find("Type.Object(", search_start)
+    if call < 0:
+        return None
+    paren = block.find("(", call)
+    wrapped = _balanced_slice(block, paren, "(", ")")
+    if wrapped is None:
+        return None
+    return wrapped[1:-1].strip()
+
+
+def _assigned_object_literal(block: str, name: str) -> str | None:
+    pattern = re.compile(rf"\b(?:const|let|var)\s+{re.escape(name)}\s*=\s*{{")
+    matches = list(pattern.finditer(block))
+    for match in reversed(matches):
+        literal = _balanced_slice(block, match.end() - 1, "{", "}")
+        if literal is not None:
+            return literal
+    return None
+
+
+def _top_level_schema_keys(object_text: str) -> set[str]:
+    if not object_text.startswith("{"):
+        return set()
+    keys: set[str] = set()
+    index = 1
+    depth = 1
+    quote: str | None = None
+    escaped = False
+    while index < len(object_text) - 1:
+        char = object_text[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char in "{([":
+            depth += 1
+            index += 1
+            continue
+        if char in "})]":
+            depth -= 1
+            index += 1
+            continue
+        if depth == 1 and (char.isalpha() or char == "_"):
+            start = index
+            index += 1
+            while index < len(object_text) and (
+                object_text[index].isalnum() or object_text[index] == "_"
+            ):
+                index += 1
+            name = object_text[start:index]
+            cursor = index
+            while cursor < len(object_text) and object_text[cursor].isspace():
+                cursor += 1
+            if cursor < len(object_text) and object_text[cursor] == ":":
+                keys.add(name)
+            continue
+        index += 1
+    return keys
+
+
+def _extract_returned_schema_fields(block: str) -> set[str]:
+    argument = _type_object_argument(block)
+    if argument is None:
+        return set()
+    if argument.startswith("{"):
+        literal = _balanced_slice(argument, 0, "{", "}")
+    elif IDENTIFIER.fullmatch(argument):
+        literal = _assigned_object_literal(block, argument)
+    else:
+        literal = None
+    return _top_level_schema_keys(literal) if literal is not None else set()
+
+
 def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     discovered: dict[str, set[str]] = {}
     sources: list[Path] = []
     for path, text in _read_dist_files(root, "openclaw-tools-*.js"):
         for name, marker in MODEL_TOOL_SCHEMA_MARKERS.items():
-            start = text.find(marker)
-            if start < 0:
+            block = _function_block(text, marker)
+            if block is None:
                 continue
-            next_function = text.find("\nfunction ", start + len(marker))
-            block = text[start : next_function if next_function > start else start + 12000]
-            names = set(OBJECT_SCHEMA_FIELD.findall(block))
+            names = _extract_returned_schema_fields(block)
             if names:
                 discovered.setdefault(name, set()).update(names)
                 sources.append(path)
@@ -135,17 +256,24 @@ def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], lis
     return methods, sources
 
 
-def _declared_core_names(root: Path) -> set[str]:
+def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
     names: set[str] = set()
+    sources: list[Path] = []
     for pattern, matcher in (
-        ("tool-catalog-*.js", JS_TOOL_NAME),
         ("openclaw-tools-*.js", JS_TOOL_NAME),
         ("core-descriptors-*.js", JS_TOOL_NAME),
         ("server-methods-*.js", JS_METHOD_NAME),
     ):
-        for _, text in _read_dist_files(root, pattern):
-            names.update(name for name in matcher.findall(text) if TOOL_NAME.fullmatch(name))
-    return names
+        for path, text in _read_dist_files(root, pattern):
+            matched = {
+                name
+                for name in matcher.findall(text)
+                if TOOL_NAME.fullmatch(name) and name in LIVE_TOOL_NAMES
+            }
+            if matched:
+                names.update(matched)
+                sources.append(path)
+    return names, sources
 
 
 def live_installed_openclaw_catalog() -> dict[str, Any]:
@@ -153,7 +281,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
     gateway_params, gateway_sources = _extract_gateway_method_params(root)
-    declared_names = _declared_core_names(root)
+    declared_names, declaration_sources = _declared_core_names(root)
     tools: list[dict[str, Any]] = []
     for name in LIVE_TOOL_NAMES:
         params = set()
@@ -172,7 +300,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
                     "schema_source": source_kind,
                 }
             )
-    source_paths = sorted({*model_tool_sources, *gateway_sources})
+    source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
     return {
         "catalog_kind": "sanitized_installed_openclaw_runtime",
         "openclaw_version": package.get("version"),
