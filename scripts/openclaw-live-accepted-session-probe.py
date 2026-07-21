@@ -43,15 +43,18 @@ def _write_evidence(path: str | None, payload: dict[str, Any]) -> None:
 
 
 def _run_json(cmd: list[str], *, timeout: int) -> tuple[int, dict[str, Any]]:
-    proc = subprocess.run(
-        cmd,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except OSError as exc:
+        return 127, {"status": "error", "error": str(exc)}
     try:
         payload = json.loads((proc.stdout or "").strip() or "{}")
     except json.JSONDecodeError:
@@ -139,22 +142,16 @@ def _lease_id_from_response(response: dict[str, Any]) -> str | None:
     )
 
 
-def _iter_mappings(value: Any) -> tuple[Mapping[str, Any], ...]:
-    found: list[Mapping[str, Any]] = []
-    stack = [value]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, Mapping):
-            found.append(item)
-            stack.extend(item.values())
-        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
-            stack.extend(item)
-    return tuple(found)
-
-
 def _mapping_path(payload: dict[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
     value = _path_value(payload, path)
     return value if isinstance(value, Mapping) else None
+
+
+def _sequence_path(payload: dict[str, Any], path: tuple[str, ...]) -> Sequence[Any] | None:
+    value = _path_value(payload, path)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return value
+    return None
 
 
 def _require_expected_metadata_from_paths(
@@ -176,7 +173,14 @@ def _validate_status_observes_lease(
     status: dict[str, Any], *, expected_metadata: dict[str, Any]
 ) -> dict[str, Any]:
     expected_gateway_lease_id = expected_metadata["gateway_lease_id"]
-    for item in _iter_mappings(status):
+    candidates: list[Mapping[str, Any]] = []
+    if _lease_id_from_response(status) == expected_gateway_lease_id:
+        candidates.append(status)
+    for path in (("leases",), ("output", "leases"), ("result", "leases")):
+        sequence = _sequence_path(status, path)
+        if sequence is not None:
+            candidates.extend(item for item in sequence if isinstance(item, Mapping))
+    for item in candidates:
         mapped = dict(item)
         if _lease_id_from_response(mapped) == expected_gateway_lease_id:
             owner_metadata = _require_expected_metadata_from_paths(
@@ -294,12 +298,8 @@ def _session_spawn_once(
         paths=(
             ("session", "metadata"),
             ("session", "metadata_echo"),
-            ("metadata_echo",),
-            ("metadata",),
             ("output", "session", "metadata"),
             ("output", "session", "metadata_echo"),
-            ("output", "metadata_echo"),
-            ("output", "metadata"),
         ),
     )
     return {
@@ -323,14 +323,18 @@ def _release_lease(
         timeout_ms=timeout_ms,
     )
     expected_gateway_lease_id = expected_metadata["gateway_lease_id"]
-    released_gateway_lease_id = _lease_id_from_response(response)
+    proof = response
+    nested_lease = _mapping_path(response, ("lease",))
+    if nested_lease is not None and _lease_id_from_response(dict(nested_lease)) == expected_gateway_lease_id:
+        proof = dict(nested_lease)
+    released_gateway_lease_id = _lease_id_from_response(proof)
     validate_accepted_lease_identity(
         gateway_lease_id=released_gateway_lease_id,
         duplicate_acquire_lease_id=expected_gateway_lease_id,
     )
-    _validate_release_succeeded(response)
+    _validate_release_succeeded(proof)
     owner_metadata = _require_expected_metadata_from_paths(
-        response,
+        proof,
         expected=expected_metadata,
         label="allowLease release proof",
         paths=((), ("owner_metadata",), ("metadata",), ("lease", "owner_metadata"), ("lease", "metadata")),

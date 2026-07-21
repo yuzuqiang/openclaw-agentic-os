@@ -401,6 +401,121 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertNotIn("client_request_id", spawn_tool["parameters"])
         self.assertIn("task", spawn_tool["parameters"])
 
+    def test_live_schema_parser_does_not_union_across_tool_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-current.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String()});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", '
+                    'name: "sessions_history", name: "sessions_status"'
+                )
+            with open(os.path.join(dist, "openclaw-tools-stale.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.ttl_ms },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.gateway_lease_id },"
+                )
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("sessions_spawn", payload["error"])
+        spawn_tool = next(
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
+        )
+        self.assertEqual(spawn_tool["parameters"], [])
+        source_paths = {item["path"] for item in payload["catalog"]["sources"]}
+        self.assertIn("dist/openclaw-tools-current.js", source_paths)
+        self.assertIn("dist/openclaw-tools-stale.js", source_paths)
+
+    def test_live_gateway_param_parser_ignores_comments_and_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", '
+                    'name: "sessions_history", name: "sessions_status"'
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "// params?.client_lease_id params?.idempotency_key params?.run_id\n"
+                    "const dead = 'params?.phase params?.transition_id params?.agent_id';"
+                    "const template = `params?.requester_agent_id params?.ttl_ms`;"
+                    "return params?.requesterAgentId },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "/* params?.client_lease_id params?.idempotency_key params?.run_id "
+                    "params?.phase params?.transition_id params?.agent_id "
+                    "params?.requester_agent_id params?.gateway_lease_id */"
+                    "return params?.leaseId },"
+                )
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        acquire_tool = next(
+            tool
+            for tool in payload["catalog"]["tools"]
+            if tool["name"] == "subagents.allowLease.acquire"
+        )
+        self.assertEqual(acquire_tool["parameters"], ["requesterAgentId"])
+        self.assertIn("client_lease_id", payload["error"])
+
     def test_live_catalog_hashes_sources_for_zero_parameter_declarations(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
             dist = os.path.join(install_root, "dist")

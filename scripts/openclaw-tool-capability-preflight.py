@@ -95,6 +95,63 @@ def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
     ]
 
 
+def _strip_js_comments_and_strings(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    quote: str | None = None
+    escaped = False
+    in_line_comment = False
+    in_block_comment = False
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+                output.append(char)
+            else:
+                output.append(" ")
+            index += 1
+            continue
+        if in_block_comment:
+            if char == "*" and nxt == "/":
+                output.extend((" ", " "))
+                in_block_comment = False
+                index += 2
+            else:
+                output.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            output.append("\n" if char == "\n" else " ")
+            index += 1
+            continue
+        if char == "/" and nxt == "/":
+            in_line_comment = True
+            output.extend((" ", " "))
+            index += 2
+            continue
+        if char == "/" and nxt == "*":
+            in_block_comment = True
+            output.extend((" ", " "))
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            output.append(" ")
+            index += 1
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
 def _balanced_slice(text: str, start: int, opener: str, closer: str) -> str | None:
     if start < 0 or start >= len(text) or text[start] != opener:
         return None
@@ -220,6 +277,7 @@ def _extract_returned_schema_fields(block: str) -> set[str]:
 def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     discovered: dict[str, set[str]] = {}
     sources: list[Path] = []
+    candidates: dict[str, list[tuple[Path, set[str]]]] = {}
     for path, text in _read_dist_files(root, "openclaw-tools-*.js"):
         for name, marker in MODEL_TOOL_SCHEMA_MARKERS.items():
             block = _function_block(text, marker)
@@ -227,8 +285,14 @@ def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[P
                 continue
             names = _extract_returned_schema_fields(block)
             if names:
-                discovered.setdefault(name, set()).update(names)
-                sources.append(path)
+                candidates.setdefault(name, []).append((path, names))
+    for name, items in candidates.items():
+        if len(items) == 1:
+            path, names = items[0]
+            discovered[name] = set(names)
+            sources.append(path)
+        else:
+            sources.extend(path for path, _ in items)
     return discovered, sources
 
 
@@ -248,7 +312,7 @@ def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], lis
             next_group = text.find("const coreGatewayHandlers", start)
             candidates = [value for value in (next_method, next_group) if value > start]
             end = min(candidates) if candidates else start + 2000
-            block = text[start:end]
+            block = _strip_js_comments_and_strings(text[start:end])
             keys = re.findall(r"params\?\.([A-Za-z][A-Za-z0-9_]*)", block)
             if keys:
                 methods.setdefault(method, set()).update(keys)
