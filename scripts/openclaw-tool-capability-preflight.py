@@ -80,6 +80,10 @@ def _file_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _path_digest(path: Path) -> str:
+    return hashlib.sha256(path.resolve().as_posix().encode("utf-8")).hexdigest()
+
+
 def _source_record(root: Path, path: Path) -> dict[str, str]:
     try:
         relative = path.resolve().relative_to(root.resolve()).as_posix()
@@ -279,8 +283,9 @@ def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[P
     sources: list[Path] = []
     candidates: dict[str, list[tuple[Path, set[str]]]] = {}
     for path, text in _read_dist_files(root, "openclaw-tools-*.js"):
+        code_text = _strip_js_comments_and_strings(text)
         for name, marker in MODEL_TOOL_SCHEMA_MARKERS.items():
-            block = _function_block(text, marker)
+            block = _function_block(code_text, marker)
             if block is None:
                 continue
             names = _extract_returned_schema_fields(block)
@@ -299,6 +304,7 @@ def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[P
 def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     methods: dict[str, set[str]] = {}
     sources: list[Path] = []
+    candidates: dict[str, list[tuple[Path, set[str]]]] = {}
     for path, text in _read_dist_files(root, "server-methods-*.js"):
         for method in (
             "subagents.allowLease.status",
@@ -310,13 +316,19 @@ def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], lis
                 continue
             next_method = text.find('"subagents.allowLease.', start + len(method))
             next_group = text.find("const coreGatewayHandlers", start)
-            candidates = [value for value in (next_method, next_group) if value > start]
-            end = min(candidates) if candidates else start + 2000
+            block_boundaries = [value for value in (next_method, next_group) if value > start]
+            end = min(block_boundaries) if block_boundaries else start + 2000
             block = _strip_js_comments_and_strings(text[start:end])
             keys = re.findall(r"params\?\.([A-Za-z][A-Za-z0-9_]*)", block)
             if keys:
-                methods.setdefault(method, set()).update(keys)
-                sources.append(path)
+                candidates.setdefault(method, []).append((path, set(keys)))
+    for method, items in candidates.items():
+        if len(items) == 1:
+            path, keys = items[0]
+            methods[method] = set(keys)
+            sources.append(path)
+        else:
+            sources.extend(path for path, _ in items)
     return methods, sources
 
 
@@ -370,6 +382,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         "openclaw_version": package.get("version"),
         "openclaw_package_name": package.get("name"),
         "install_root_basename": root.name,
+        "install_root_path_sha256": _path_digest(root),
         "sources": [_source_record(root, path) for path in source_paths],
         "tools": tools,
     }

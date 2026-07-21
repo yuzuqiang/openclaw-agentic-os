@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -21,10 +23,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import agentic_os  # noqa: E402
+from agentic_os.openclaw_adapter import AdapterContractError  # noqa: E402
 from agentic_os.metadata import (  # noqa: E402
     MetadataContractError,
     validate_accepted_lease_identity,
     validate_accepted_session_identity,
+    validate_session_observation,
 )
 
 
@@ -81,10 +85,12 @@ def _preflight() -> tuple[bool, dict[str, Any]]:
     return code == 0 and payload.get("status") == "pass", payload
 
 
-def _gateway_call(method: str, params: dict[str, Any], *, timeout_ms: int) -> dict[str, Any]:
+def _gateway_call(
+    openclaw_executable: str, method: str, params: dict[str, Any], *, timeout_ms: int
+) -> dict[str, Any]:
     code, payload = _run_json(
         [
-            "openclaw",
+            openclaw_executable,
             "gateway",
             "call",
             method,
@@ -129,6 +135,44 @@ def _string_path(payload: Any, *paths: tuple[str, ...], label: str = "identity")
 
 def _raw_response_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_json_dump(payload).encode("utf-8")).hexdigest()
+
+
+def _path_sha256(path: Path) -> str:
+    return hashlib.sha256(path.resolve().as_posix().encode("utf-8")).hexdigest()
+
+
+def _candidate_roots_for_executable(executable: Path) -> list[Path]:
+    resolved = executable.resolve()
+    return [
+        candidate
+        for parent in (resolved.parent, *resolved.parents)
+        for candidate in (
+            parent / "lib" / "node_modules" / "openclaw",
+            parent / "node_modules" / "openclaw",
+        )
+    ]
+
+
+def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
+    executable = shutil.which("openclaw")
+    if not executable:
+        raise RuntimeError("openclaw executable was not found on PATH")
+    resolved = Path(executable).resolve()
+    if not os.access(resolved, os.X_OK):
+        raise RuntimeError(f"openclaw executable is not executable: {resolved.name}")
+
+    expected_root_sha = _path_value(preflight_payload, ("catalog", "install_root_path_sha256"))
+    if isinstance(expected_root_sha, str) and expected_root_sha:
+        candidate_shas = {
+            _path_sha256(candidate)
+            for candidate in _candidate_roots_for_executable(resolved)
+            if candidate.exists()
+        }
+        if expected_root_sha not in candidate_shas:
+            raise RuntimeError(
+                "preflighted OpenClaw install root does not match PATH openclaw executable"
+            )
+    return str(resolved)
 
 
 def _lease_id_from_response(response: dict[str, Any]) -> str | None:
@@ -274,6 +318,7 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
 
 
 def _session_spawn_once(
+    openclaw_executable: str,
     spawn_args: dict[str, Any],
     *,
     expected_metadata: dict[str, Any],
@@ -281,6 +326,7 @@ def _session_spawn_once(
     timeout_ms: int,
 ) -> dict[str, Any]:
     response = _gateway_call(
+        openclaw_executable,
         "sessions_spawn",
         spawn_args,
         timeout_ms=max(timeout_ms, timeout_seconds * 1000),
@@ -302,22 +348,93 @@ def _session_spawn_once(
             ("output", "session", "metadata_echo"),
         ),
     )
+    raw_metadata = _validate_session_raw_metadata(
+        response,
+        accepted_session_identity=accepted,
+        expected_metadata=expected_metadata,
+    )
     return {
         "accepted_session_identity": accepted,
         "identity": identity,
         "metadata_echo": metadata_echo,
+        "metadata_contract_version": raw_metadata["metadata_contract_version"],
+        "normalized_metadata": raw_metadata["normalized_metadata"],
+        "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
         "raw_response_sha256": _raw_response_sha256(response),
         "response_top_level_keys": sorted(response),
     }
 
 
+def _validate_session_raw_metadata(
+    response: dict[str, Any],
+    *,
+    accepted_session_identity: str,
+    expected_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    candidates: list[Mapping[str, Any]] = []
+    for path in (("session",), ("output", "session")):
+        item = _mapping_path(response, path)
+        if item is not None:
+            candidates.append(item)
+    for item in candidates:
+        mapped = dict(item)
+        session_identity = _string_path(
+            mapped,
+            ("session_key",),
+            ("sessionKey",),
+            ("key",),
+            label="session metadata identity",
+        )
+        if session_identity != accepted_session_identity:
+            continue
+        metadata_container = _mapping_path(mapped, ("metadata",)) or _mapping_path(
+            mapped, ("metadata_echo",)
+        )
+        if metadata_container is None:
+            continue
+        normalized = (
+            metadata_container.get("normalized")
+            or metadata_container.get("normalized_metadata")
+            or metadata_container.get("external_metadata")
+        )
+        raw_json = metadata_container.get("raw_json") or metadata_container.get(
+            "raw_metadata_json"
+        )
+        version = metadata_container.get("metadata_contract_version") or metadata_container.get(
+            "contract_version"
+        )
+        try:
+            observed = validate_session_observation(
+                local=expected_metadata,
+                normalized=normalized if isinstance(normalized, Mapping) else None,
+                raw_json=raw_json if isinstance(raw_json, str) else None,
+                metadata_contract_version=version if isinstance(version, str) else None,
+            )
+        except MetadataContractError as exc:
+            raise MetadataContractError(
+                f"sessions_spawn response raw session metadata contract invalid: {exc}"
+            ) from exc
+        return {
+            "metadata_contract_version": version,
+            "normalized_metadata": observed,
+            "raw_metadata_json_sha256": hashlib.sha256(
+                raw_json.encode("utf-8")
+            ).hexdigest(),
+        }
+    raise MetadataContractError(
+        "sessions_spawn response did not expose raw session metadata contract"
+    )
+
+
 def _release_lease(
+    openclaw_executable: str,
     release_params: dict[str, Any],
     *,
     expected_metadata: dict[str, Any],
     timeout_ms: int,
 ) -> dict[str, Any]:
     response = _gateway_call(
+        openclaw_executable,
         "subagents.allowLease.release",
         release_params,
         timeout_ms=timeout_ms,
@@ -394,6 +511,20 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
         return evidence
+    try:
+        openclaw_executable = _validated_openclaw_executable(preflight_payload)
+    except RuntimeError as exc:
+        evidence.update(
+            {
+                "status": "fail_closed",
+                "reason": "capability_preflight_executable_mismatch",
+                "error": str(exc),
+                "spawn_attempted": False,
+                "lease_acquired": False,
+                "released": "not_required",
+            }
+        )
+        return evidence
 
     lease_id: str | None = None
     gateway_lease_id: str | None = None
@@ -411,6 +542,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }
         evidence["rpc_attempted"].append("subagents.allowLease.acquire")
         first = _gateway_call(
+            openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
         gateway_lease_id = _lease_id_from_response(first)
@@ -423,6 +555,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         evidence["lease_acquired"] = True
         evidence["rpc_attempted"].append("subagents.allowLease.acquire:duplicate")
         second = _gateway_call(
+            openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
         duplicate_gateway_lease_id = _lease_id_from_response(second)
@@ -440,6 +573,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         evidence["allow_lease"]["raw_duplicate_response_sha256"] = _raw_response_sha256(second)
         evidence["rpc_attempted"].append("subagents.allowLease.status")
         status = _gateway_call(
+            openclaw_executable,
             "subagents.allowLease.status", {}, timeout_ms=args.gateway_timeout_ms
         )
         evidence["allow_lease"]["status_observed_lease"] = _validate_status_observes_lease(
@@ -477,6 +611,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         }
         evidence["rpc_attempted"].append("sessions_spawn")
         accepted_one = _session_spawn_once(
+            openclaw_executable,
             spawn_args,
             expected_metadata=spawn_args["metadata"],
             timeout_seconds=args.agent_timeout_seconds,
@@ -484,6 +619,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         evidence["rpc_attempted"].append("sessions_spawn:duplicate")
         accepted_two = _session_spawn_once(
+            openclaw_executable,
             spawn_args,
             expected_metadata=spawn_args["metadata"],
             timeout_seconds=args.agent_timeout_seconds,
@@ -513,7 +649,12 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
         return evidence
-    except (MetadataContractError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except (
+        AdapterContractError,
+        MetadataContractError,
+        RuntimeError,
+        subprocess.TimeoutExpired,
+    ) as exc:
         evidence.update(
             {
                 "status": "fail_closed",
@@ -542,6 +683,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 evidence["rpc_attempted"].append("subagents.allowLease.release")
                 try:
                     release = _release_lease(
+                        openclaw_executable,
                         release_params,
                         expected_metadata=release_params,
                         timeout_ms=args.gateway_timeout_ms,

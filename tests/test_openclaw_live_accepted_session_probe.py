@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -37,6 +40,11 @@ def args(**overrides):
     return argparse.Namespace(**values)
 
 
+def run_probe(module, probe_args):
+    with mock.patch.object(module, "_validated_openclaw_executable", return_value="openclaw"):
+        return module.run_probe(probe_args)
+
+
 def acquire_owner(**overrides):
     values = {
         "client_lease_id": "issue35-unit",
@@ -61,11 +69,19 @@ def release_response(params, *, released=True, **overrides):
 
 
 def spawn_response(params, *, session_key="session-unit"):
+    metadata = dict(params["metadata"])
     return {
         "session": {
             "session_key": session_key,
             "spawn_request_session_key": session_key,
-            "metadata_echo": dict(params["metadata"]),
+            "metadata_echo": metadata,
+            "metadata": {
+                "metadata_contract_version": "v1",
+                "external_metadata": metadata,
+                "raw_metadata_json": json.dumps(
+                    metadata, sort_keys=True, separators=(",", ":")
+                ),
+            },
         },
         "external_id": session_key,
     }
@@ -79,7 +95,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             "_preflight",
             return_value=(False, {"status": "fail", "error": "missing metadata"}),
         ), mock.patch.object(module, "_gateway_call") as gateway:
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "capability_preflight_failed")
@@ -96,7 +112,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         ), mock.patch.object(module, "_preflight") as preflight, mock.patch.object(
             module, "_gateway_call"
         ) as gateway:
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "db_authority_enabled")
@@ -112,7 +128,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             "_preflight",
             side_effect=subprocess.TimeoutExpired(cmd=["preflight"], timeout=30),
         ), mock.patch.object(module, "_gateway_call") as gateway:
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "capability_preflight_timed_out")
@@ -122,11 +138,37 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["released"], "not_required")
         gateway.assert_not_called()
 
+    def test_preflighted_install_root_must_match_path_openclaw_executable(self) -> None:
+        module = load_probe_module()
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = os.path.join(directory, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+            os.chmod(executable, 0o755)
+            payload = {
+                "status": "pass",
+                "catalog": {"install_root_path_sha256": "not-the-path-openclaw-root"},
+            }
+            with mock.patch.object(
+                module, "_preflight", return_value=(True, payload)
+            ), mock.patch.object(
+                module.shutil, "which", return_value=executable
+            ), mock.patch.object(module, "_gateway_call") as gateway:
+                result = module.run_probe(args())
+
+        self.assertEqual(result["status"], "fail_closed")
+        self.assertEqual(result["reason"], "capability_preflight_executable_mismatch")
+        self.assertIn("does not match PATH openclaw executable", result["error"])
+        self.assertEqual(result["released"], "not_required")
+        gateway.assert_not_called()
+
     def test_acquired_lease_is_released_when_session_execution_is_disabled(self) -> None:
         module = load_probe_module()
         calls: list[tuple[str, dict[str, object]]] = []
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
@@ -139,7 +181,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "session_spawn_execution_disabled")
@@ -160,7 +202,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         calls: list[tuple[str, dict[str, object]]] = []
         acquire_calls = 0
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             nonlocal acquire_calls
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
@@ -175,7 +217,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -196,7 +238,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         released_ids: list[str] = []
         acquire_calls = 0
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             nonlocal acquire_calls
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
@@ -213,7 +255,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -226,7 +268,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         released_ids: list[str] = []
         acquire_calls = 0
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             nonlocal acquire_calls
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
@@ -245,7 +287,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "lease_release_failed")
@@ -256,7 +298,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_status_must_observe_acquired_lease_before_probe_can_pass(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -268,7 +310,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -278,7 +320,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_status_must_echo_owner_metadata_for_acquired_lease(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -290,7 +332,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -300,7 +342,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_status_metadata_must_belong_to_observed_lease_object(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -315,7 +357,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -326,7 +368,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         module = load_probe_module()
         acquire_calls = 0
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             nonlocal acquire_calls
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
@@ -340,7 +382,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -350,7 +392,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_release_false_fails_closed_even_when_identity_matches(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -362,7 +404,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "lease_release_failed")
@@ -372,7 +414,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_release_must_echo_owner_metadata(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -384,7 +426,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "lease_release_failed")
@@ -397,7 +439,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_release_metadata_must_belong_to_released_lease_object(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -415,7 +457,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "lease_release_failed")
@@ -428,7 +470,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_spawn_timeout_is_recorded_as_attempted_and_releases_lease(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -442,7 +484,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -455,7 +497,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         calls: list[tuple[str, dict[str, object]]] = []
         spawn_calls = 0
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             nonlocal spawn_calls
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
@@ -473,7 +515,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -499,7 +541,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         module = load_probe_module()
         calls: list[tuple[str, dict[str, object]]] = []
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
@@ -514,7 +556,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "pass")
         self.assertEqual(payload["accepted_session_identity"], "session-unit")
@@ -547,7 +589,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_release_failure_downgrades_otherwise_passing_probe(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -561,7 +603,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "lease_release_failed")
@@ -572,7 +614,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_spawn_response_must_echo_request_metadata(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -593,7 +635,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -603,10 +645,41 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         )
         self.assertEqual(payload["released"], True)
 
+    def test_spawn_response_must_expose_raw_session_metadata_contract(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {"gateway_lease_id": "lease-unit"}
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease()]}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            if method == "sessions_spawn":
+                return {
+                    "session": {
+                        "session_key": "session-unit",
+                        "spawn_request_session_key": "session-unit",
+                        "metadata_echo": dict(params["metadata"]),
+                    },
+                    "external_id": "session-unit",
+                }
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args(execute_session_spawn=True))
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("raw session metadata contract", payload["error"])
+        self.assertEqual(payload["released"], True)
+
     def test_spawn_response_rejects_conflicting_session_identity_aliases(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -628,7 +701,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -638,7 +711,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_spawn_metadata_echo_must_be_bound_to_created_session(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -659,7 +732,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -672,7 +745,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_top_level_spawn_metadata_echo_is_not_session_proof(self) -> None:
         module = load_probe_module()
 
-        def fake_gateway(method, params, *, timeout_ms):
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
@@ -693,7 +766,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         with mock.patch.object(
             module, "_preflight", return_value=(True, {"status": "pass"})
         ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
-            payload = module.run_probe(args(execute_session_spawn=True))
+            payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
@@ -712,7 +785,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             "run",
             side_effect=FileNotFoundError("openclaw missing"),
         ):
-            payload = module.run_probe(args())
+            payload = run_probe(module, args())
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")

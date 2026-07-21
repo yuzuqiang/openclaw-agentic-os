@@ -5,6 +5,7 @@
     "catalog": {
       "catalog_kind": "sanitized_installed_openclaw_runtime",
       "install_root_basename": "openclaw",
+      "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
       "openclaw_package_name": "openclaw",
       "openclaw_version": "2026.7.1",
       "sources": [
@@ -91,6 +92,6 @@
   "released": "not_required",
   "rpc_attempted": [],
   "spawn_attempted": false,
-  "started_epoch_ms": 1784641932324,
+  "started_epoch_ms": 1784643868211,
   "status": "fail_closed"
 }

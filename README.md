@@ -419,8 +419,9 @@ bounded accepted-session probe in
 `docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
 therefore fails closed before any Gateway lease or session RPC is attempted.
 If a future runtime passes preflight, the probe validates duplicate session
-identity from direct structured `sessions_spawn` responses and treats any
-allowLease release failure as a failed probe.
+identity plus session-local normalized/raw metadata contract evidence from
+direct structured `sessions_spawn` responses and treats any allowLease release
+failure as a failed probe.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
 ## Version-management policy
