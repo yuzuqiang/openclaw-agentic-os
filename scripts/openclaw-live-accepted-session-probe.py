@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,66 @@ def _raw_response_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_json_dump(payload).encode("utf-8")).hexdigest()
 
 
+def _lease_id_from_response(response: dict[str, Any]) -> str | None:
+    return _string_path(
+        response,
+        ("gateway_lease_id",),
+        ("lease", "gateway_lease_id"),
+        ("leaseId",),
+        ("id",),
+    )
+
+
+def _iter_mappings(value: Any) -> tuple[Mapping[str, Any], ...]:
+    found: list[Mapping[str, Any]] = []
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, Mapping):
+            found.append(item)
+            stack.extend(item.values())
+        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            stack.extend(item)
+    return tuple(found)
+
+
+def _validate_status_observes_lease(
+    status: dict[str, Any], *, expected_gateway_lease_id: str
+) -> dict[str, Any]:
+    for item in _iter_mappings(status):
+        if _lease_id_from_response(dict(item)) == expected_gateway_lease_id:
+            return {
+                "gateway_lease_id": expected_gateway_lease_id,
+                "raw_response_sha256": _raw_response_sha256(status),
+                "response_top_level_keys": sorted(status),
+            }
+    raise MetadataContractError("allowLease status did not observe acquired lease identity")
+
+
+def _validate_release_succeeded(response: dict[str, Any]) -> None:
+    for path in (("released",), ("lease", "released")):
+        value: Any = response
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if value is not None:
+            if value is True:
+                return
+            raise MetadataContractError("allowLease release did not report success")
+    for path in (("status",), ("result",), ("lease", "status")):
+        value = response
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        if isinstance(value, str) and value.lower() in {"released", "success", "ok", "pass"}:
+            return
+    raise MetadataContractError("allowLease release response lacks success confirmation")
+
+
 def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str, str | None]:
     return {
         "external_id": _string_path(
@@ -191,17 +252,12 @@ def _release_lease(
         release_params,
         timeout_ms=timeout_ms,
     )
-    released_gateway_lease_id = _string_path(
-        response,
-        ("gateway_lease_id",),
-        ("lease", "gateway_lease_id"),
-        ("leaseId",),
-        ("id",),
-    )
+    released_gateway_lease_id = _lease_id_from_response(response)
     validate_accepted_lease_identity(
         gateway_lease_id=released_gateway_lease_id,
         duplicate_acquire_lease_id=expected_gateway_lease_id,
     )
+    _validate_release_succeeded(response)
     return {
         "gateway_lease_id": released_gateway_lease_id,
         "raw_response_sha256": _raw_response_sha256(response),
@@ -245,42 +301,36 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "requester_agent_id": args.requester_agent_id,
             "ttl_ms": args.ttl_ms,
         }
+        evidence["rpc_attempted"].append("subagents.allowLease.acquire")
         first = _gateway_call(
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        evidence["rpc_attempted"].append("subagents.allowLease.acquire")
+        gateway_lease_id = _lease_id_from_response(first)
+        lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
+        evidence["allow_lease"] = {
+            "gateway_lease_id": gateway_lease_id,
+            "raw_acquire_response_sha256": _raw_response_sha256(first),
+        }
+        evidence["lease_acquired"] = True
+        evidence["rpc_attempted"].append("subagents.allowLease.acquire:duplicate")
         second = _gateway_call(
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        evidence["rpc_attempted"].append("subagents.allowLease.acquire:duplicate")
-        status = _gateway_call(
-            "subagents.allowLease.status", {}, timeout_ms=args.gateway_timeout_ms
-        )
-        evidence["rpc_attempted"].append("subagents.allowLease.status")
-        gateway_lease_id = _string_path(
-            first,
-            ("gateway_lease_id",),
-            ("lease", "gateway_lease_id"),
-            ("leaseId",),
-            ("id",),
-        )
-        duplicate_gateway_lease_id = _string_path(
-            second,
-            ("gateway_lease_id",),
-            ("lease", "gateway_lease_id"),
-            ("leaseId",),
-            ("id",),
-        )
-        lease_id = gateway_lease_id
+        duplicate_gateway_lease_id = _lease_id_from_response(second)
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
         )
-        evidence["allow_lease"] = {
-            "gateway_lease_id": gateway_lease_id,
-            "duplicate_gateway_lease_id": duplicate_gateway_lease_id,
-            "status_observed": bool(status),
-        }
+        evidence["allow_lease"]["duplicate_gateway_lease_id"] = duplicate_gateway_lease_id
+        evidence["allow_lease"]["raw_duplicate_response_sha256"] = _raw_response_sha256(second)
+        evidence["rpc_attempted"].append("subagents.allowLease.status")
+        status = _gateway_call(
+            "subagents.allowLease.status", {}, timeout_ms=args.gateway_timeout_ms
+        )
+        evidence["allow_lease"]["status_observed_lease"] = _validate_status_observes_lease(
+            status,
+            expected_gateway_lease_id=gateway_lease_id,
+        )
         if not args.execute_session_spawn:
             evidence.update(
                 {
@@ -310,18 +360,18 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "task_digest": f"issue35-task-{args.probe_id}",
             },
         }
+        evidence["rpc_attempted"].append("sessions_spawn")
         accepted_one = _session_spawn_once(
             spawn_args,
             timeout_seconds=args.agent_timeout_seconds,
             timeout_ms=args.gateway_timeout_ms,
         )
-        evidence["rpc_attempted"].append("sessions_spawn")
+        evidence["rpc_attempted"].append("sessions_spawn:duplicate")
         accepted_two = _session_spawn_once(
             spawn_args,
             timeout_seconds=args.agent_timeout_seconds,
             timeout_ms=args.gateway_timeout_ms,
         )
-        evidence["rpc_attempted"].append("sessions_spawn:duplicate")
         session_identity = validate_accepted_session_identity(
             external_id=accepted_one["identity"]["external_id"],
             spawn_request_session_key=accepted_one["identity"]["spawn_request_session_key"],
@@ -370,12 +420,12 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "requester_agent_id": args.requester_agent_id,
                     "gateway_lease_id": lease_id,
                 }
+                evidence["rpc_attempted"].append("subagents.allowLease.release")
                 evidence["allow_lease_release"] = _release_lease(
                     release_params,
                     expected_gateway_lease_id=lease_id,
                     timeout_ms=args.gateway_timeout_ms,
                 )
-                evidence["rpc_attempted"].append("subagents.allowLease.release")
                 evidence["released"] = True
             except BaseException as exc:  # pragma: no cover - defensive live cleanup path
                 prior_reason = evidence.get("reason")

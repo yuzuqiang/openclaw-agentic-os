@@ -24,11 +24,6 @@ from agentic_os.openclaw_adapter import (
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 JS_TOOL_NAME = re.compile(r"\b(?:id|name):\s*[\"']([A-Za-z][A-Za-z0-9_.-]*)[\"']")
 JS_METHOD_NAME = re.compile(r"[\"']([A-Za-z][A-Za-z0-9_.-]*)[\"']\s*:")
-DETAIL_KEYS = re.compile(
-    r"(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*:\s*\{[^{}]*?detailKeys:\s*\[(?P<keys>[^\]]*)\]",
-    re.DOTALL,
-)
-QUOTED = re.compile(r"[\"']([A-Za-z][A-Za-z0-9_.-]*)[\"']")
 OBJECT_SCHEMA_FIELD = re.compile(
     r"^\s*(?P<key>[A-Za-z][A-Za-z0-9_]*)\s*:\s*(?:Type\.|optionalStringEnum)",
     re.MULTILINE,
@@ -44,6 +39,14 @@ LIVE_TOOL_NAMES = (
     "session_status",
     "sessions_status",
 )
+
+MODEL_TOOL_SCHEMA_MARKERS = {
+    "sessions_spawn": "function createSessionsSpawnToolSchema",
+    "sessions_list": "function createSessionsListToolSchema",
+    "sessions_history": "function createSessionsHistoryToolSchema",
+    "session_status": "function createSessionStatusToolSchema",
+    "sessions_status": "function createSessionsStatusToolSchema",
+}
 
 
 def _candidate_install_roots() -> Iterable[Path]:
@@ -91,33 +94,21 @@ def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
     ]
 
 
-def _extract_detail_key_catalog(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
+def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     discovered: dict[str, set[str]] = {}
     sources: list[Path] = []
-    for path, text in _read_dist_files(root, "tool-display-*.js"):
-        for match in DETAIL_KEYS.finditer(text):
-            name = match.group("name")
-            if name not in LIVE_TOOL_NAMES:
-                continue
-            discovered.setdefault(name, set()).update(QUOTED.findall(match.group("keys")))
-            sources.append(path)
-    return discovered, sources
-
-
-def _extract_sessions_spawn_schema(root: Path) -> tuple[set[str], list[Path]]:
-    sources: list[Path] = []
     for path, text in _read_dist_files(root, "openclaw-tools-*.js"):
-        marker = "function createSessionsSpawnToolSchema"
-        start = text.find(marker)
-        if start < 0:
-            continue
-        end = text.find("function resolveAcpUnavailableMessage", start)
-        block = text[start : end if end > start else start + 12000]
-        names = set(OBJECT_SCHEMA_FIELD.findall(block))
-        if names:
-            sources.append(path)
-            return names, sources
-    return set(), sources
+        for name, marker in MODEL_TOOL_SCHEMA_MARKERS.items():
+            start = text.find(marker)
+            if start < 0:
+                continue
+            next_function = text.find("\nfunction ", start + len(marker))
+            block = text[start : next_function if next_function > start else start + 12000]
+            names = set(OBJECT_SCHEMA_FIELD.findall(block))
+            if names:
+                discovered.setdefault(name, set()).update(names)
+                sources.append(path)
+    return discovered, sources
 
 
 def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
@@ -160,8 +151,7 @@ def _declared_core_names(root: Path) -> set[str]:
 def live_installed_openclaw_catalog() -> dict[str, Any]:
     root = _resolve_install_root()
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    detail_keys, detail_sources = _extract_detail_key_catalog(root)
-    sessions_spawn_params, spawn_sources = _extract_sessions_spawn_schema(root)
+    model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
     gateway_params, gateway_sources = _extract_gateway_method_params(root)
     declared_names = _declared_core_names(root)
     tools: list[dict[str, Any]] = []
@@ -171,13 +161,9 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         if name in gateway_params:
             params.update(gateway_params[name])
             source_kind = "gateway_server_method_params"
-        if name == "sessions_spawn" and sessions_spawn_params:
-            params.update(sessions_spawn_params)
+        if name in model_tool_params:
+            params.update(model_tool_params[name])
             source_kind = "model_tool_schema"
-        if name in detail_keys:
-            params.update(detail_keys[name])
-            if source_kind == "absent":
-                source_kind = "display_detail_keys"
         if name in declared_names or params:
             tools.append(
                 {
@@ -186,7 +172,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
                     "schema_source": source_kind,
                 }
             )
-    source_paths = sorted({*detail_sources, *spawn_sources, *gateway_sources})
+    source_paths = sorted({*model_tool_sources, *gateway_sources})
     return {
         "catalog_kind": "sanitized_installed_openclaw_runtime",
         "openclaw_version": package.get("version"),

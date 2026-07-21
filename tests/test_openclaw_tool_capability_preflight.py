@@ -254,10 +254,50 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
             self.assertEqual(payload["catalog"]["install_root_basename"], os.path.basename(install_root))
             self.assertIn("client_lease_id", payload["error"])
+            self.assertIn("sessions_history", payload["error"])
+            spawn_tool = next(
+                tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
+            )
+            self.assertNotIn("label", spawn_tool["parameters"])
             source_paths = [item["path"] for item in payload["catalog"]["sources"]]
             self.assertTrue(all(not path.startswith("/") for path in source_paths))
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "tool-display-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "sessions_spawn:{detailKeys:[`client_request_id`,`idempotency_key`,`metadata`]},"
+                    "sessions_history:{detailKeys:[`sessionKey`,`limit`,`includeTools`]}"
+                )
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write('name: "sessions_spawn", name: "sessions_history"')
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("sessions_spawn", payload["error"])
+        self.assertIn("client_request_id", payload["error"])
 
 
 if __name__ == "__main__":
