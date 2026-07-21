@@ -581,7 +581,7 @@ class MigrationTests(unittest.TestCase):
             "self_bootstrap_empty",
         )
 
-        self.assertEqual(apply_migrations(self.database), (13, 14))
+        self.assertEqual(apply_migrations(self.database), (13, 14, 15))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -617,7 +617,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14))
+        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14, 15))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -986,7 +986,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
         )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
@@ -1086,7 +1086,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
         )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -1110,7 +1110,210 @@ class MigrationTests(unittest.TestCase):
                     (12, current_hash),
                     (13, current_hash),
                     (14, current_hash),
+                    (15, current_hash),
                 ],
+            )
+
+    def test_strict_prior_reserve_slo_hash_is_versioned_for_existing_v14_databases(
+        self,
+    ) -> None:
+        migration_dir = Path(self.temporary.name) / "v14-migrations"
+        migration_dir.mkdir()
+        manifest = json.loads(
+            (repository_root() / "migrations/manifest.json").read_text(encoding="utf-8")
+        )
+        v14_migrations = manifest["migrations"][:14]
+        for row in v14_migrations:
+            shutil.copy(
+                repository_root() / "migrations" / row["file"],
+                migration_dir / row["file"],
+            )
+        (migration_dir / "manifest.json").write_text(
+            json.dumps({"migrations": v14_migrations}),
+            encoding="utf-8",
+        )
+
+        query_name = "`sessions_spawn` intent without exact strict prior reserve"
+        v14_contract = next(
+            contract
+            for contract in slo_query_contracts_for_schema_version(14)
+            if contract.query_name == query_name
+        )
+        current_contract = next(
+            contract for contract in SLO_QUERY_CONTRACTS if contract.query_name == query_name
+        )
+        v14_hash = slo_query_hash(v14_contract.sql_text)
+        current_hash = slo_query_hash(current_contract.sql_text)
+        self.assertNotEqual(v14_hash, current_hash)
+        self.assertNotIn(
+            "be.transition_id IS NOT rb.selected_reserve_transition_id",
+            v14_contract.sql_text,
+        )
+        self.assertIn(
+            "be.transition_id IS NOT rb.selected_reserve_transition_id",
+            current_contract.sql_text,
+        )
+
+        self.assertEqual(
+            apply_migrations(self.database, migration_dir=migration_dir),
+            tuple(range(1, 15)),
+        )
+        snapshot = Path(self.temporary.name) / "control-v14-snapshot.db"
+        with sqlite3.connect(self.database) as source:
+            with sqlite3.connect(snapshot) as target:
+                source.backup(target)
+        self.assertEqual(
+            verify_database(snapshot, migration_dir=migration_dir),
+            tuple(range(1, 15)),
+        )
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT schema_version,query_hash FROM slo_queries "
+                    "WHERE query_name=? ORDER BY schema_version DESC LIMIT 1",
+                    (query_name,),
+                ).fetchone(),
+                (14, v14_hash),
+            )
+
+        self.assertEqual(apply_migrations(self.database), (15,))
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT schema_version,query_hash FROM slo_queries "
+                    "WHERE query_name=? ORDER BY schema_version",
+                    (query_name,),
+                ).fetchall()[-2:],
+                [(14, v14_hash), (15, current_hash)],
+            )
+
+    def test_strict_prior_reserve_migration_aborts_on_active_trust(self) -> None:
+        self._apply_migrations_through(14, "v14-active-trust-migrations")
+        with sqlite3.connect(self.database) as connection:
+            trigger_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                "AND name='trust_observations_validate_bound_insert'"
+            ).fetchone()[0]
+            connection.execute("DROP TRIGGER trust_observations_validate_bound_insert")
+            connection.execute(
+                "INSERT INTO trust_observations("
+                "observation_id,scope,severity,status,effective_group_id,"
+                "usage_confidence,created_at"
+                ") VALUES('active-trust','workflow','R1','promoted','group',"
+                "'known','now')"
+            )
+            connection.execute(trigger_sql)
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "strict_prior_reserve_active_trust"
+        ):
+            apply_migrations(self.database)
+
+    def test_strict_prior_reserve_trigger_stays_active_with_cross_workflow_trust(
+        self,
+    ) -> None:
+        apply_migrations(self.database)
+        connection = sqlite3.connect(self.database)
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        for workflow in ("trusted-workflow", "other-workflow"):
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES(?,'file_authority','now')",
+                (workflow,),
+            )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'trusted-run','trusted-prepare','trusted-workflow','file_authority',"
+            "'finalized','R1','R1','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,authority_mode,"
+            "state,risk_class,risk_dominance,created_at,updated_at) VALUES("
+            "'r','prepare','other-workflow','file_authority','candidate','R1','R1',"
+            "'now','now')"
+        )
+        for transition_id in ("t", "t-other"):
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?, 'r', 'before', 'after',"
+                "'dispatch','spawn','R1', ?, 0,'now')",
+                (transition_id, f"{transition_id}-idem"),
+            )
+        connection.execute(
+            "INSERT INTO model_cost_registry(cost_registry_id,provider,model,"
+            "endpoint_binding_id,capability_class,input_cost_microusd_per_million,"
+            "output_cost_microusd_per_million,confidence,effective_at,registry_row_hash) "
+            "VALUES('cost-row','provider','model','endpoint','capability',1,1,'known',"
+            "'effective','cost-hash')"
+        )
+        connection.execute(
+            "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
+            "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
+            "created_at,updated_at) VALUES('spawn','r','phase','agent','t','client',"
+            "'spawn-idem','task','pending','now','now')"
+        )
+        connection.execute(
+            "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
+            "selected_model,selected_endpoint_binding_id,selected_cost_registry_id,"
+            "selected_cost_effective_at,selected_cost_registry_hash,"
+            "selected_cost_confidence,selected_reserve_transition_id,"
+            "time_budget_seconds,input_token_budget,output_token_budget,"
+            "cost_budget_microusd,retry_budget,human_attention_budget,"
+            "reserved_input_tokens,usage_confidence,updated_at) VALUES('r',"
+            "'other-workflow','capability','provider','model','endpoint','cost-row',"
+            "'effective','cost-hash','known','t-other',10,10,10,10,1,1,1,"
+            "'known','now')"
+        )
+        connection.execute(
+            "INSERT INTO budget_events(budget_event_id,event_idempotency_key,"
+            "event_dedupe_hash,event_sequence,run_id,transition_id,spawn_request_id,"
+            "provider,model,endpoint_binding_id,capability_class,cost_registry_id,"
+            "cost_effective_at,cost_registry_hash,cost_confidence,event_type,"
+            "input_tokens,usage_confidence,source,created_at,created_at_epoch_ms) "
+            "VALUES('reserve','reserve-idem','reserve-dedupe',1,'r','t','spawn',"
+            "'provider','model','endpoint','capability','cost-row','effective',"
+            "'cost-hash','known','reserve',1,'known','test','now',1000)"
+        )
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='trust_observations_validate_bound_insert'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER trust_observations_validate_bound_insert")
+        connection.execute(
+            "INSERT INTO trust_observations(observation_id,scope,severity,status,"
+            "effective_group_id,usage_confidence,created_at,run_id) VALUES("
+            "'active-trust','workflow','R1','promoted','group','known','now',"
+            "'trusted-run')"
+        )
+        connection.execute(trigger_sql)
+        external_metadata = json.dumps(
+            {
+                "run_id": "r",
+                "transition_id": "t",
+                "client_request_id": "client",
+                "idempotency_key": "spawn-idem",
+                "phase": "phase",
+                "agent_id": "agent",
+                "task_digest": "task",
+            }
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "strict prior reserve"):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,spawn_request_id,reserve_budget_event_id,client_request_id,"
+                "idempotency_key,phase,agent_id,task_digest,metadata_contract_version,"
+                "metadata_json,external_metadata_json,external_run_id,"
+                "external_transition_id,external_client_request_id,"
+                "external_idempotency_key,external_phase,external_agent_id,"
+                "external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms) VALUES('intent-cross-workflow','r','t',"
+                "'sessions_spawn','spawn','reserve','client','spawn-idem','phase',"
+                "'agent','task','v1','{}',?,'r','t','client','spawn-idem','phase',"
+                "'agent','task','accepted','bad-session','now',1001)",
+                (external_metadata,),
             )
 
     def test_v1_projection_identity_upgrade_rejects_ambiguous_timestamps(self) -> None:
@@ -1278,6 +1481,7 @@ class MigrationTests(unittest.TestCase):
                 "goal_run_evidence_binding",
                 "trust_promotion_binding",
                 "db_authority_canary_binding",
+                "strict_prior_reserve_slo_identity",
             ],
         )
         for migration in migrations:
@@ -1302,7 +1506,7 @@ class MigrationTests(unittest.TestCase):
         before_mtime = verify_target.stat().st_mtime_ns
         self.assertEqual(
             verify_database(verify_target),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
         )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
@@ -1941,7 +2145,7 @@ class MigrationTests(unittest.TestCase):
                     ),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (14,))
+        self.assertEqual(apply_migrations(self.database), (14, 15))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -2973,6 +3177,13 @@ class MigrationTests(unittest.TestCase):
             "guard_version_before,created_at) VALUES("
             "'t','r','before','after','dispatch','spawn','R1','transition-idem',0,'now')"
         )
+        connection.execute(
+            "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+            "transition_type,action_type,risk_dominance,idempotency_key,"
+            "guard_version_before,created_at) VALUES("
+            "'t-other','r','before','after','budget','reserve','R1',"
+            "'transition-other-idem',0,'now')"
+        )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "accepted spawn request"):
             connection.execute(
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
@@ -3127,6 +3338,49 @@ class MigrationTests(unittest.TestCase):
         connection.execute(
             "UPDATE run_budgets SET selected_cost_registry_id='cost-row',"
             "selected_cost_registry_hash='cost-hash' WHERE run_id='r'"
+        )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t-other' "
+            "WHERE run_id='r'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "strict prior reserve"):
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+                "spawn_request_id,reserve_budget_event_id,client_request_id,idempotency_key,"
+                "phase,agent_id,task_digest,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_transition_id,"
+                "external_client_request_id,external_idempotency_key,external_phase,"
+                "external_agent_id,external_task_digest,state,external_id,requested_at,"
+                "requested_at_epoch_ms) VALUES('intent-selected-drift','r','t',"
+                "'sessions_spawn','spawn','reserve','client','spawn-idem','phase',"
+                "'agent','task','v1','{}',?,'r','t','client','spawn-idem','phase',"
+                "'agent','task','accepted','bad-session','now',1001)",
+                (external_metadata,),
+            )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t' WHERE run_id='r'"
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "client_request_id,idempotency_key,metadata_json,state,requested_at,"
+            "requested_at_epoch_ms) "
+            "VALUES('intent-update-selected-drift','r','t','allow_lease_acquire',"
+            "'client-update','spawn-idem-update','{}','pending','now',1001)"
+        )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t-other' "
+            "WHERE run_id='r'"
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "strict prior reserve"):
+            connection.execute(
+                "UPDATE external_rpc_intents SET rpc_kind='sessions_spawn',"
+                "spawn_request_id='spawn',reserve_budget_event_id='reserve',"
+                "client_request_id='client',idempotency_key='spawn-idem',"
+                "phase='phase',agent_id='agent',task_digest='task' "
+                "WHERE intent_id='intent-update-selected-drift'"
+            )
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='t' WHERE run_id='r'"
         )
         connection.execute(
             "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -6315,7 +6569,7 @@ class MigrationTests(unittest.TestCase):
             "cost_budget_microusd,retry_budget,human_attention_budget,"
             "reserved_input_tokens,reserved_cost_microusd,usage_confidence,updated_at) "
             "VALUES('transition-run','w','capability','provider','model','endpoint',"
-            "'cost-row','effective','cost-hash','known','transition-selected',10,10,"
+            "'cost-row','effective','cost-hash','known','transition-event',10,10,"
             "10,10,1,1,1,1,'known','now')"
         )
         connection.execute(
@@ -6348,6 +6602,16 @@ class MigrationTests(unittest.TestCase):
             "'phase','agent','task','accepted','session-key','now',900,'now',1000)",
             (external_metadata, external_metadata),
         )
+        trigger_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name='run_budgets_preserve_spawn_prior_reserve_update'"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER run_budgets_preserve_spawn_prior_reserve_update")
+        connection.execute(
+            "UPDATE run_budgets SET selected_reserve_transition_id='transition-selected' "
+            "WHERE run_id='transition-run'"
+        )
+        connection.execute(trigger_sql)
         connection.execute(
             "UPDATE spawn_requests SET session_key='session-key' "
             "WHERE spawn_request_id='spawn'"
@@ -6579,9 +6843,23 @@ class MigrationTests(unittest.TestCase):
             "budgets/selected_model_registry_binding.sql": {
                 "Run budget selected cost row mismatch": {
                     ("fixture-selected-run-budget-mismatch",),
+                    ("fixture-selected-missing-cost-row",),
+                    ("fixture-selected-unknown-cost-row",),
                 },
                 "Endpoint-bound budget event cost row blocks dispatch": {
                     ("fixture-selected-event-model-mismatch-event",),
+                    ("fixture-selected-event-missing-cost-row-event",),
+                    ("fixture-selected-event-unknown-cost-row-event",),
+                },
+            },
+            "budgets/strict_prior_reserve_binding.sql": {
+                "`sessions_spawn` intent without exact strict prior reserve": {
+                    ("fixture-prior-absent-reserve-intent",),
+                    ("fixture-prior-same-ms-intent",),
+                    ("fixture-prior-wrong-endpoint-intent",),
+                    ("fixture-prior-wrong-hash-intent",),
+                    ("fixture-prior-wrong-transition-intent",),
+                    ("fixture-prior-selected-transition-drift-intent",),
                 },
             },
             "sqlite_type_affinity_h1_h4.sql": {
@@ -6716,6 +6994,32 @@ class MigrationTests(unittest.TestCase):
                         ).fetchall()
                     )
                     self.assertNotIn(("fixture-exact-max-cost",), rows)
+                if fixture == "budgets/selected_model_registry_binding.sql":
+                    selected_rows = set(
+                        connection.execute(
+                            contracts["Run budget selected cost row mismatch"]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-selected-positive",), selected_rows)
+                    endpoint_rows = set(
+                        connection.execute(
+                            contracts[
+                                "Endpoint-bound budget event cost row blocks dispatch"
+                            ]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(
+                        ("fixture-selected-event-positive-event",), endpoint_rows
+                    )
+                if fixture == "budgets/strict_prior_reserve_binding.sql":
+                    prior_rows = set(
+                        connection.execute(
+                            contracts[
+                                "`sessions_spawn` intent without exact strict prior reserve"
+                            ]
+                        ).fetchall()
+                    )
+                    self.assertNotIn(("fixture-prior-positive-intent",), prior_rows)
 
     def test_unknown_usage_blocks_promoted_run_states(self) -> None:
         apply_migrations(self.database)
@@ -7187,7 +7491,7 @@ class MigrationTests(unittest.TestCase):
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(15,'future_contract',?,'now')",
+            "VALUES(16,'future_contract',?,'now')",
             (migration_sha,),
         )
         connection.execute(
@@ -7196,7 +7500,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                15,
+                16,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -7210,7 +7514,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (15,),
+            (16,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -7421,6 +7725,7 @@ class MigrationTests(unittest.TestCase):
                 (12, "goal_run_evidence_binding"),
                 (13, "trust_promotion_binding"),
                 (14, "db_authority_canary_binding"),
+                (15, "strict_prior_reserve_slo_identity"),
             ],
         )
 

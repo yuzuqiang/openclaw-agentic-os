@@ -20,6 +20,9 @@ def slo_query_hash(sql_text: str) -> str:
 
 _BUDGET_LEDGER_RECONCILES_NAME = "Budget ledger reconciles to counters and budgets"
 _BUDGET_PREFIX_NAME = "Budget prefix over-release or over-restore"
+_STRICT_PRIOR_RESERVE_NAME = (
+    "`sessions_spawn` intent without exact strict prior reserve"
+)
 _BUDGET_LEDGER_RECONCILES_LEGACY_V1_V2_HASH = (
     "229ffe243ba24944c0da458e2d0986ea46de1471025cf95f9604bbe6a4dd9f7b"
 )
@@ -37,7 +40,7 @@ SLO_QUERY_CONTRACTS: tuple[SloQueryContract, ...] = (
     SloQueryContract('Model cost registry numeric bounds', "SELECT cost_registry_id FROM model_cost_registry WHERE typeof(input_cost_microusd_per_million)<>'integer' OR input_cost_microusd_per_million<0 OR input_cost_microusd_per_million>100000000000 OR typeof(output_cost_microusd_per_million)<>'integer' OR output_cost_microusd_per_million<0 OR output_cost_microusd_per_million>100000000000 OR provider='' OR model='' OR endpoint_binding_id='' OR capability_class='' OR confidence='unknown';"),
     SloQueryContract('Endpoint-bound budget event cost row blocks dispatch', "SELECT be.budget_event_id FROM budget_events be LEFT JOIN model_cost_registry m ON m.cost_registry_id=be.cost_registry_id AND m.provider=be.provider AND m.model=be.model AND m.endpoint_binding_id=be.endpoint_binding_id AND m.capability_class=be.capability_class AND m.effective_at=be.cost_effective_at AND m.registry_row_hash=be.cost_registry_hash WHERE be.event_type<>'human_attention' AND (be.provider IS NULL OR be.provider='' OR be.model IS NULL OR be.model='' OR be.endpoint_binding_id IS NULL OR be.endpoint_binding_id='' OR be.cost_registry_id IS NULL OR be.cost_registry_id='' OR be.cost_effective_at IS NULL OR be.cost_effective_at='' OR be.cost_registry_hash IS NULL OR be.cost_registry_hash='' OR m.cost_registry_id IS NULL OR m.confidence='unknown' OR be.cost_confidence IS NULL OR be.cost_confidence='unknown' OR be.cost_confidence<>m.confidence);"),
     SloQueryContract('Run budget selected cost row mismatch', "SELECT rb.run_id FROM run_budgets rb LEFT JOIN model_cost_registry m ON m.cost_registry_id=rb.selected_cost_registry_id WHERE m.cost_registry_id IS NULL OR rb.selected_provider<>m.provider OR rb.selected_model<>m.model OR rb.selected_endpoint_binding_id<>m.endpoint_binding_id OR rb.capability_class<>m.capability_class OR rb.selected_cost_effective_at<>m.effective_at OR rb.selected_cost_registry_hash<>m.registry_row_hash OR rb.selected_cost_confidence<>m.confidence OR m.confidence='unknown' OR typeof(m.input_cost_microusd_per_million)<>'integer' OR typeof(m.output_cost_microusd_per_million)<>'integer';"),
-    SloQueryContract('`sessions_spawn` intent without exact strict prior reserve', "SELECT eri.intent_id FROM external_rpc_intents eri LEFT JOIN run_budgets rb ON rb.run_id=eri.run_id LEFT JOIN budget_events be ON be.budget_event_id=eri.reserve_budget_event_id LEFT JOIN model_cost_registry m ON m.cost_registry_id=be.cost_registry_id AND m.provider=be.provider AND m.model=be.model AND m.endpoint_binding_id=be.endpoint_binding_id AND m.capability_class=be.capability_class AND m.effective_at=be.cost_effective_at AND m.registry_row_hash=be.cost_registry_hash WHERE eri.rpc_kind='sessions_spawn' AND (rb.run_id IS NULL OR eri.reserve_budget_event_id IS NULL OR be.budget_event_id IS NULL OR be.run_id IS NOT eri.run_id OR be.transition_id IS NOT eri.transition_id OR be.spawn_request_id IS NOT eri.spawn_request_id OR be.event_type<>'reserve' OR be.provider IS NOT rb.selected_provider OR be.model IS NOT rb.selected_model OR be.endpoint_binding_id IS NOT rb.selected_endpoint_binding_id OR be.capability_class IS NOT rb.capability_class OR be.cost_registry_id IS NOT rb.selected_cost_registry_id OR be.cost_effective_at IS NOT rb.selected_cost_effective_at OR be.cost_registry_hash IS NOT rb.selected_cost_registry_hash OR be.cost_confidence IS NOT rb.selected_cost_confidence OR typeof(be.created_at_epoch_ms)<>'integer' OR be.created_at_epoch_ms<1 OR be.created_at_epoch_ms>253402300799999 OR typeof(eri.requested_at_epoch_ms)<>'integer' OR eri.requested_at_epoch_ms<1 OR eri.requested_at_epoch_ms>253402300799999 OR be.created_at_epoch_ms>=eri.requested_at_epoch_ms OR m.cost_registry_id IS NULL OR m.confidence='unknown' OR be.cost_confidence IS NULL OR be.cost_confidence='unknown' OR be.cost_confidence<>m.confidence);"),
+    SloQueryContract('`sessions_spawn` intent without exact strict prior reserve', "SELECT eri.intent_id FROM external_rpc_intents eri LEFT JOIN run_budgets rb ON rb.run_id=eri.run_id LEFT JOIN budget_events be ON be.budget_event_id=eri.reserve_budget_event_id LEFT JOIN model_cost_registry m ON m.cost_registry_id=be.cost_registry_id AND m.provider=be.provider AND m.model=be.model AND m.endpoint_binding_id=be.endpoint_binding_id AND m.capability_class=be.capability_class AND m.effective_at=be.cost_effective_at AND m.registry_row_hash=be.cost_registry_hash WHERE eri.rpc_kind='sessions_spawn' AND (rb.run_id IS NULL OR eri.reserve_budget_event_id IS NULL OR be.budget_event_id IS NULL OR be.run_id IS NOT eri.run_id OR be.transition_id IS NOT eri.transition_id OR be.transition_id IS NOT rb.selected_reserve_transition_id OR be.spawn_request_id IS NOT eri.spawn_request_id OR be.event_type<>'reserve' OR be.provider IS NOT rb.selected_provider OR be.model IS NOT rb.selected_model OR be.endpoint_binding_id IS NOT rb.selected_endpoint_binding_id OR be.capability_class IS NOT rb.capability_class OR be.cost_registry_id IS NOT rb.selected_cost_registry_id OR be.cost_effective_at IS NOT rb.selected_cost_effective_at OR be.cost_registry_hash IS NOT rb.selected_cost_registry_hash OR be.cost_confidence IS NOT rb.selected_cost_confidence OR typeof(be.created_at_epoch_ms)<>'integer' OR be.created_at_epoch_ms<1 OR be.created_at_epoch_ms>253402300799999 OR typeof(eri.requested_at_epoch_ms)<>'integer' OR eri.requested_at_epoch_ms<1 OR eri.requested_at_epoch_ms>253402300799999 OR be.created_at_epoch_ms>=eri.requested_at_epoch_ms OR m.cost_registry_id IS NULL OR m.confidence='unknown' OR be.cost_confidence IS NULL OR be.cost_confidence='unknown' OR be.cost_confidence<>m.confidence);"),
     SloQueryContract('Invalid zero-reserve policy', "SELECT zero_reserve_policy_id FROM endpoint_zero_reserve_policies WHERE typeof(enabled)<>'integer' OR enabled NOT IN (0,1) OR typeof(min_retry_units)<>'integer' OR min_retry_units<0 OR min_retry_units>1000000 OR typeof(min_time_seconds)<>'integer' OR min_time_seconds<0 OR min_time_seconds>31536000 OR typeof(min_human_attention_units)<>'integer' OR min_human_attention_units<0 OR min_human_attention_units>1000000 OR typeof(effective_from_epoch_ms)<>'integer' OR effective_from_epoch_ms<1 OR effective_from_epoch_ms>253402300799999 OR (effective_until_epoch_ms IS NOT NULL AND (typeof(effective_until_epoch_ms)<>'integer' OR effective_until_epoch_ms<=effective_from_epoch_ms OR effective_until_epoch_ms>253402300799999)) OR (enabled=1 AND min_retry_units<=0 AND min_time_seconds<=0 AND min_human_attention_units<=0);"),
     SloQueryContract('Meaningless `sessions_spawn` reserve', "SELECT eri.intent_id FROM external_rpc_intents eri JOIN budget_events be ON be.budget_event_id=eri.reserve_budget_event_id LEFT JOIN endpoint_zero_reserve_policies zp ON zp.zero_reserve_policy_id=be.zero_reserve_policy_id WHERE eri.rpc_kind='sessions_spawn' AND be.event_type='reserve' AND ((be.input_tokens=0 AND be.output_tokens=0 AND be.cost_microusd=0 AND be.zero_reserve_policy_id IS NULL) OR (be.input_tokens=0 AND be.output_tokens=0 AND be.cost_microusd=0 AND be.time_seconds=0 AND be.human_attention_units=0 AND be.retry_units=0) OR (be.zero_reserve_policy_id IS NOT NULL AND (zp.zero_reserve_policy_id IS NULL OR zp.enabled<>1 OR zp.endpoint_binding_id<>be.endpoint_binding_id OR zp.capability_class<>be.capability_class OR zp.policy_hash<>be.zero_reserve_policy_hash OR be.created_at_epoch_ms<zp.effective_from_epoch_ms OR (zp.effective_until_epoch_ms IS NOT NULL AND be.created_at_epoch_ms>=zp.effective_until_epoch_ms) OR (zp.min_retry_units<=0 AND zp.min_time_seconds<=0 AND zp.min_human_attention_units<=0) OR (zp.min_retry_units>0 AND be.retry_units<zp.min_retry_units) OR (zp.min_time_seconds>0 AND be.time_seconds<zp.min_time_seconds) OR (zp.min_human_attention_units>0 AND be.human_attention_units<zp.min_human_attention_units))));"),
     SloQueryContract('Budget event amount malformed or out of range', "SELECT budget_event_id FROM budget_events WHERE typeof(event_sequence)<>'integer' OR event_sequence<1 OR event_sequence>1000000 OR typeof(created_at_epoch_ms)<>'integer' OR created_at_epoch_ms<1 OR created_at_epoch_ms>253402300799999 OR typeof(time_seconds)<>'integer' OR time_seconds<0 OR time_seconds>31536000 OR typeof(input_tokens)<>'integer' OR input_tokens<0 OR input_tokens>1000000000 OR typeof(output_tokens)<>'integer' OR output_tokens<0 OR output_tokens>1000000000 OR typeof(cost_microusd)<>'integer' OR cost_microusd<0 OR cost_microusd>100000000000 OR typeof(human_attention_units)<>'integer' OR human_attention_units<0 OR human_attention_units>1000000 OR typeof(retry_units)<>'integer' OR retry_units<0 OR retry_units>1000000 OR (event_type='consume' AND (retry_units<>0 OR human_attention_units<>0)) OR (event_type='human_attention' AND (time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 OR cost_microusd<>0 OR retry_units<>0 OR human_attention_units<=0)) OR (event_type='retry_decrement' AND (retry_units=0 OR time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 OR cost_microusd<>0 OR human_attention_units<>0)) OR (event_type='retry_restore' AND (retry_units=0 OR time_seconds<>0 OR input_tokens<>0 OR output_tokens<>0 OR cost_microusd<>0 OR human_attention_units<>0));"),
@@ -513,6 +516,28 @@ def _runtime_dispatch_binding_contract() -> SloQueryContract:
     )
 
 
+def _legacy_strict_prior_reserve_contracts(
+    contracts: tuple[SloQueryContract, ...],
+) -> tuple[SloQueryContract, ...]:
+    contract = next(
+        item for item in contracts if item.query_name == _STRICT_PRIOR_RESERVE_NAME
+    )
+    selected_transition_clause = (
+        " OR be.transition_id IS NOT rb.selected_reserve_transition_id"
+    )
+    if contract.sql_text.count(selected_transition_clause) != 1:
+        raise RuntimeError("strict prior reserve legacy SLO replacement count changed")
+    return _replace_contract(
+        contracts,
+        SloQueryContract(
+            contract.query_name,
+            contract.sql_text.replace(selected_transition_clause, ""),
+            contract.empty_db_expected_status,
+            contract.fixture_db_expected_status,
+        ),
+    )
+
+
 _SLO_QUERY_CONTRACTS_V3 = _replace_contract(
     _replace_contract(
         SLO_QUERY_CONTRACTS,
@@ -578,6 +603,34 @@ SLO_QUERY_CONTRACTS = _replace_contract(
     SLO_QUERY_CONTRACTS,
     _self_bootstrap_meta_slo_contract(),
 )
+_SLO_QUERY_CONTRACTS_V1_V2 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V1_V2
+)
+_SLO_QUERY_CONTRACTS_V3 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V3
+)
+_SLO_QUERY_CONTRACTS_V4 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V4
+)
+_SLO_QUERY_CONTRACTS_V5 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V5
+)
+_SLO_QUERY_CONTRACTS_V6 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V6
+)
+_SLO_QUERY_CONTRACTS_V7 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V7
+)
+_SLO_QUERY_CONTRACTS_V8_V9 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V8_V9
+)
+_SLO_QUERY_CONTRACTS_V10_V12 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V10_V12
+)
+_SLO_QUERY_CONTRACTS_V13_V14 = _legacy_strict_prior_reserve_contracts(
+    SLO_QUERY_CONTRACTS
+)
+_SLO_QUERY_CONTRACTS_V15 = SLO_QUERY_CONTRACTS
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
@@ -592,6 +645,9 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     10: _SLO_QUERY_CONTRACTS_V10_V12,
     11: _SLO_QUERY_CONTRACTS_V10_V12,
     12: _SLO_QUERY_CONTRACTS_V10_V12,
+    13: _SLO_QUERY_CONTRACTS_V13_V14,
+    14: _SLO_QUERY_CONTRACTS_V13_V14,
+    15: _SLO_QUERY_CONTRACTS_V15,
 }
 
 

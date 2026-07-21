@@ -83,6 +83,12 @@
       "name": "db_authority_canary_binding",
       "file": "0014_db_authority_canary_binding.sql",
       "sha256": "43ae266521a9ff988356635b523a46447177d038b70cc3a9ebfb66a38f89a67c"
+    },
+    {
+      "version": 15,
+      "name": "strict_prior_reserve_slo_identity",
+      "file": "0015_strict_prior_reserve_slo_identity.sql",
+      "sha256": "b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce"
     }
   ]
 }

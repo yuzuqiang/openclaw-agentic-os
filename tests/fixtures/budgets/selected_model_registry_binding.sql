@@ -1,4 +1,4 @@
-PRAGMA foreign_keys=ON;
+PRAGMA foreign_keys=OFF;
 
 INSERT INTO workflow_authority(workflow,mode,updated_at)
 VALUES('fixture-budget-selected-model','file_authority','fixture');
@@ -17,6 +17,16 @@ INSERT INTO model_cost_registry(
   'fixture-selected-cost-b','fixture-provider','fixture-model-b',
   'fixture-endpoint','fixture-capability',1,1,'known',
   'fixture-effective','fixture-selected-cost-b-hash'
+),
+(
+  'fixture-selected-cost-unknown','fixture-provider','fixture-model-unknown',
+  'fixture-endpoint','fixture-capability',1,1,'unknown',
+  'fixture-effective','fixture-selected-cost-unknown-hash'
+),
+(
+  'fixture-selected-cost-positive','fixture-provider','fixture-model-positive',
+  'fixture-endpoint','fixture-capability',1,1,'known',
+  'fixture-effective','fixture-selected-cost-positive-hash'
 );
 
 INSERT INTO runs(
@@ -34,6 +44,42 @@ INSERT INTO runs(
   'fixture-selected-event-model-mismatch-prepare',
   'fixture-budget-selected-model','file_authority','candidate','R1','R1',
   'fixture','fixture'
+),
+(
+  'fixture-selected-missing-cost-row',
+  'fixture-selected-missing-cost-row-prepare',
+  'fixture-budget-selected-model','file_authority','candidate','R1','R1',
+  'fixture','fixture'
+),
+(
+  'fixture-selected-unknown-cost-row',
+  'fixture-selected-unknown-cost-row-prepare',
+  'fixture-budget-selected-model','file_authority','candidate','R1','R1',
+  'fixture','fixture'
+),
+(
+  'fixture-selected-positive',
+  'fixture-selected-positive-prepare',
+  'fixture-budget-selected-model','file_authority','candidate','R1','R1',
+  'fixture','fixture'
+),
+(
+  'fixture-selected-event-missing-cost-row',
+  'fixture-selected-event-missing-cost-row-prepare',
+  'fixture-budget-selected-model','file_authority','candidate','R1','R1',
+  'fixture','fixture'
+),
+(
+  'fixture-selected-event-unknown-cost-row',
+  'fixture-selected-event-unknown-cost-row-prepare',
+  'fixture-budget-selected-model','file_authority','candidate','R1','R1',
+  'fixture','fixture'
+),
+(
+  'fixture-selected-event-positive',
+  'fixture-selected-event-positive-prepare',
+  'fixture-budget-selected-model','file_authority','candidate','R1','R1',
+  'fixture','fixture'
 );
 
 INSERT INTO transitions(
@@ -49,6 +95,36 @@ INSERT INTO transitions(
   'fixture-selected-event-transition',
   'fixture-selected-event-model-mismatch','before','after','budget',
   'reserve','R1','fixture-selected-event-transition-idem',0,'fixture'
+),
+(
+  'fixture-selected-missing-cost-row-transition',
+  'fixture-selected-missing-cost-row','before','after','budget',
+  'reserve','R1','fixture-selected-missing-cost-row-transition-idem',0,'fixture'
+),
+(
+  'fixture-selected-unknown-cost-row-transition',
+  'fixture-selected-unknown-cost-row','before','after','budget',
+  'reserve','R1','fixture-selected-unknown-cost-row-transition-idem',0,'fixture'
+),
+(
+  'fixture-selected-positive-transition',
+  'fixture-selected-positive','before','after','budget',
+  'reserve','R1','fixture-selected-positive-transition-idem',0,'fixture'
+),
+(
+  'fixture-selected-event-missing-cost-row-transition',
+  'fixture-selected-event-missing-cost-row','before','after','budget',
+  'reserve','R1','fixture-selected-event-missing-cost-row-transition-idem',0,'fixture'
+),
+(
+  'fixture-selected-event-unknown-cost-row-transition',
+  'fixture-selected-event-unknown-cost-row','before','after','budget',
+  'reserve','R1','fixture-selected-event-unknown-cost-row-transition-idem',0,'fixture'
+),
+(
+  'fixture-selected-event-positive-transition',
+  'fixture-selected-event-positive','before','after','budget',
+  'reserve','R1','fixture-selected-event-positive-transition-idem',0,'fixture'
 );
 
 INSERT INTO run_budgets(
@@ -81,6 +157,52 @@ INSERT INTO run_budgets(
   'fixture-selected-cost-a','fixture-effective','fixture-selected-cost-a-hash',
   'known','fixture-selected-event-transition',10,10,10,10,1,1,1,
   'known','fixture'
+),
+(
+  'fixture-selected-missing-cost-row','fixture-budget-selected-model',
+  'fixture-capability','fixture-provider','fixture-model-a','fixture-endpoint',
+  'fixture-selected-missing-cost','fixture-effective','fixture-selected-missing-cost-hash',
+  'known','fixture-selected-missing-cost-row-transition',10,10,10,10,1,1,0,
+  'known','fixture'
+),
+(
+  'fixture-selected-unknown-cost-row','fixture-budget-selected-model',
+  'fixture-capability','fixture-provider','fixture-model-unknown','fixture-endpoint',
+  'fixture-selected-cost-unknown','fixture-effective','fixture-selected-cost-unknown-hash',
+  'unknown','fixture-selected-unknown-cost-row-transition',10,10,10,10,1,1,0,
+  'known','fixture'
+),
+(
+  'fixture-selected-positive','fixture-budget-selected-model',
+  'fixture-capability','fixture-provider','fixture-model-positive','fixture-endpoint',
+  'fixture-selected-cost-positive','fixture-effective',
+  'fixture-selected-cost-positive-hash','known',
+  'fixture-selected-positive-transition',10,10,10,10,1,1,0,
+  'known','fixture'
+),
+(
+  'fixture-selected-event-missing-cost-row','fixture-budget-selected-model',
+  'fixture-capability','fixture-provider','fixture-model-positive','fixture-endpoint',
+  'fixture-selected-cost-positive','fixture-effective',
+  'fixture-selected-cost-positive-hash','known',
+  'fixture-selected-event-missing-cost-row-transition',10,10,10,10,1,1,1,
+  'known','fixture'
+),
+(
+  'fixture-selected-event-unknown-cost-row','fixture-budget-selected-model',
+  'fixture-capability','fixture-provider','fixture-model-positive','fixture-endpoint',
+  'fixture-selected-cost-positive','fixture-effective',
+  'fixture-selected-cost-positive-hash','known',
+  'fixture-selected-event-unknown-cost-row-transition',10,10,10,10,1,1,1,
+  'known','fixture'
+),
+(
+  'fixture-selected-event-positive','fixture-budget-selected-model',
+  'fixture-capability','fixture-provider','fixture-model-positive','fixture-endpoint',
+  'fixture-selected-cost-positive','fixture-effective',
+  'fixture-selected-cost-positive-hash','known',
+  'fixture-selected-event-positive-transition',10,10,10,10,1,1,1,
+  'known','fixture'
 );
 
 INSERT INTO budget_events(
@@ -95,5 +217,37 @@ INSERT INTO budget_events(
   'fixture-selected-event-model-mismatch','fixture-selected-event-transition',
   'fixture-provider','fixture-model-b','fixture-endpoint','fixture-capability',
   'fixture-selected-cost-a','fixture-effective','fixture-selected-cost-a-hash',
+  'known','reserve',1,'known','fixture','fixture',1000
+),
+(
+  'fixture-selected-event-missing-cost-row-event',
+  'fixture-selected-event-missing-cost-row-idem',
+  'fixture-selected-event-missing-cost-row-dedupe',1,
+  'fixture-selected-event-missing-cost-row',
+  'fixture-selected-event-missing-cost-row-transition',
+  'fixture-provider','fixture-model-positive','fixture-endpoint','fixture-capability',
+  'fixture-selected-event-missing-cost','fixture-effective',
+  'fixture-selected-event-missing-cost-hash',
+  'known','reserve',1,'known','fixture','fixture',1000
+),
+(
+  'fixture-selected-event-unknown-cost-row-event',
+  'fixture-selected-event-unknown-cost-row-idem',
+  'fixture-selected-event-unknown-cost-row-dedupe',1,
+  'fixture-selected-event-unknown-cost-row',
+  'fixture-selected-event-unknown-cost-row-transition',
+  'fixture-provider','fixture-model-unknown','fixture-endpoint','fixture-capability',
+  'fixture-selected-cost-unknown','fixture-effective',
+  'fixture-selected-cost-unknown-hash',
+  'known','reserve',1,'known','fixture','fixture',1000
+),
+(
+  'fixture-selected-event-positive-event',
+  'fixture-selected-event-positive-idem',
+  'fixture-selected-event-positive-dedupe',1,
+  'fixture-selected-event-positive','fixture-selected-event-positive-transition',
+  'fixture-provider','fixture-model-positive','fixture-endpoint','fixture-capability',
+  'fixture-selected-cost-positive','fixture-effective',
+  'fixture-selected-cost-positive-hash',
   'known','reserve',1,'known','fixture','fixture',1000
 );

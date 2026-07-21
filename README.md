@@ -10,10 +10,10 @@ revalidation, and neither artifact proves production runtime behavior.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `87ae40dee798c204331de70813ffe7c0b4a3c85278f21f0cd025f8ecbfe79a55`
+- Current design artifact SHA-256: `369ba6b4d75ca5b4bce035112f46e2fafe1c0d399b59078efb2c757c303bd267`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `43ae266521a9ff988356635b523a46447177d038b70cc3a9ebfb66a38f89a67c`
-- Current migration manifest SHA-256: `d0ebe421cebcf01745f25d3bfc893b7a04f342a75cb2ff84c7f90bf8768a85ac`
+- Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
+- Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
 
@@ -384,6 +384,14 @@ accepted/reconciled replay requires matching local `spawn_requests` plus
 `sessions` proof instead of trusting the external intent row alone.
 Unknown or pending `sessions_spawn` outcomes are never retried; zero, ambiguous,
 mismatched, or incomplete session-identity observations move to human review.
+Migration v15 versions the strict-prior-reserve SLO identity and recreates the
+prior-reserve insert/update triggers so `sessions_spawn` intents fail closed
+unless the reserve event also matches
+`run_budgets.selected_reserve_transition_id`. It aborts before installing the
+new SLO identity when active trust rows still exist under the previous bundle.
+Schema versions 1 through 14 keep their historical query hashes so already
+migrated databases can still verify and upgrade instead of failing closed on
+immutable `slo_queries` registry drift.
 
 ## Version-management policy
 
