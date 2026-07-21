@@ -619,15 +619,25 @@ def _catalog_parameter_names(value: Any) -> set[str]:
 
 
 def _active_entry_parameters(entry: Mapping[str, Any]) -> set[str]:
+    candidates: list[tuple[str, set[str]]] = []
     for key in ("parameters", "input_schema", "inputSchema"):
         if key in entry:
-            return _catalog_parameter_names(entry[key])
+            candidates.append((key, _catalog_parameter_names(entry[key])))
     schema = entry.get("schema")
     if isinstance(schema, Mapping):
         for key in ("parameters", "input_schema", "inputSchema"):
             if key in schema:
-                return _catalog_parameter_names(schema[key])
-    return set()
+                candidates.append((f"schema.{key}", _catalog_parameter_names(schema[key])))
+    if not candidates:
+        return set()
+    first_label, first_params = candidates[0]
+    for label, params in candidates[1:]:
+        if params != first_params:
+            raise AdapterContractError(
+                "active OpenClaw tool catalog has conflicting schema forms: "
+                f"{first_label}={sorted(first_params)} {label}={sorted(params)}"
+            )
+    return set(first_params)
 
 
 def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
@@ -720,6 +730,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         "install_root_basename": root.name,
         "install_root_path_sha256": _path_digest(root),
         "active_executable_path_sha256": _path_digest(executable),
+        "active_executable_sha256": _file_digest(executable),
         "active_catalog": {
             "method": "tools.catalog",
             "raw_response_sha256": hashlib.sha256(

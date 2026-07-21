@@ -160,6 +160,27 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"status": "pass"})
 
+    def test_active_tool_entry_rejects_conflicting_schema_forms(self) -> None:
+        module = load_preflight_module()
+        entry = {
+            "parameters": {
+                "properties": {
+                    "client_request_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "metadata": {"type": "object"},
+                }
+            },
+            "inputSchema": {
+                "properties": {
+                    "client_request_id": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(module.AdapterContractError, "conflicting schema forms"):
+            module._active_entry_parameters(entry)
+
     def test_preflight_rejects_session_only_catalog_without_allow_lease_tools(
         self,
     ) -> None:

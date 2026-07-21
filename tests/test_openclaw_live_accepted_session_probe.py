@@ -45,6 +45,16 @@ def run_probe(module, probe_args):
         return module.run_probe(probe_args)
 
 
+def contains_value(value, target):
+    if value == target:
+        return True
+    if isinstance(value, dict):
+        return any(contains_value(item, target) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_value(item, target) for item in value)
+    return False
+
+
 def acquire_owner(**overrides):
     values = {
         "client_lease_id": "issue35-unit",
@@ -256,6 +266,88 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(result["released"], "not_required")
         gateway.assert_not_called()
 
+    def test_preflighted_executable_content_hash_must_match_before_rpc(self) -> None:
+        module = load_probe_module()
+        with tempfile.TemporaryDirectory() as directory:
+            package_root = Path(directory) / "openclaw"
+            executable = package_root / "bin" / "openclaw"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            payload = {
+                "status": "pass",
+                "catalog": {
+                    "install_root_path_sha256": module._path_sha256(package_root),
+                    "active_executable_path_sha256": module._path_sha256(executable),
+                    "active_executable_sha256": "not-the-active-executable-content",
+                },
+            }
+            with mock.patch.object(
+                module, "_preflight", return_value=(True, payload)
+            ), mock.patch.object(
+                module.shutil, "which", return_value=str(executable)
+            ), mock.patch.object(module, "_gateway_call") as gateway:
+                result = module.run_probe(args())
+
+        self.assertEqual(result["status"], "fail_closed")
+        self.assertEqual(result["reason"], "capability_preflight_executable_mismatch")
+        self.assertIn("executable content does not match", result["error"])
+        self.assertEqual(result["released"], "not_required")
+        gateway.assert_not_called()
+
+    def test_preflighted_source_hashes_must_match_before_rpc(self) -> None:
+        module = load_probe_module()
+        with tempfile.TemporaryDirectory() as directory:
+            package_root = Path(directory) / "openclaw"
+            executable = package_root / "bin" / "openclaw"
+            source = package_root / "dist" / "openclaw-tools-test.js"
+            executable.parent.mkdir(parents=True)
+            source.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            source.write_text("old catalog source\n", encoding="utf-8")
+            payload = {
+                "status": "pass",
+                "catalog": {
+                    "install_root_path_sha256": module._path_sha256(package_root),
+                    "active_executable_path_sha256": module._path_sha256(executable),
+                    "active_executable_sha256": module._file_sha256(executable),
+                    "sources": [
+                        {
+                            "path": "dist/openclaw-tools-test.js",
+                            "sha256": module._file_sha256(source),
+                        }
+                    ],
+                },
+            }
+            source.write_text("new catalog source\n", encoding="utf-8")
+            with mock.patch.object(
+                module, "_preflight", return_value=(True, payload)
+            ), mock.patch.object(
+                module.shutil, "which", return_value=str(executable)
+            ), mock.patch.object(module, "_gateway_call") as gateway:
+                result = module.run_probe(args())
+
+        self.assertEqual(result["status"], "fail_closed")
+        self.assertEqual(result["reason"], "capability_preflight_executable_mismatch")
+        self.assertIn("source content does not match", result["error"])
+        self.assertEqual(result["released"], "not_required")
+        gateway.assert_not_called()
+
+    def test_invalid_probe_metadata_fails_before_acquire_rpc(self) -> None:
+        module = load_probe_module()
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call") as gateway:
+            payload = run_probe(module, args(agent_id="", ttl_ms=0))
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertFalse(payload["spawn_attempted"])
+        self.assertFalse(payload["lease_acquired"])
+        self.assertEqual(payload["rpc_attempted"], [])
+        gateway.assert_not_called()
+
     def test_acquired_lease_is_released_when_session_execution_is_disabled(self) -> None:
         module = load_probe_module()
         calls: list[tuple[str, dict[str, object]]] = []
@@ -314,7 +406,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertTrue(payload["lease_acquired"])
-        self.assertEqual(payload["allow_lease"]["gateway_lease_id"], "lease-unit")
+        self.assertEqual(
+            payload["allow_lease"]["gateway_lease_id_sha256"],
+            module._identity_sha256("lease-unit"),
+        )
         self.assertEqual(payload["released"], True)
         self.assertEqual(
             [method for method, _ in calls],
@@ -367,6 +462,31 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertIn("acquire proof did not expose raw allowLease metadata", payload["error"])
         self.assertEqual(released_ids, ["lease-unit"])
         self.assertTrue(payload["released"])
+
+    def test_allow_lease_metadata_rejects_conflicting_normalized_aliases(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                response = lease_acquire_response()
+                response["metadata"]["normalized"] = {}
+                return response
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("conflicting allowLease acquire proof normalized metadata", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit"])
+        self.assertEqual(payload["released"], True)
 
     def test_first_acquire_conflicting_aliases_are_queued_for_cleanup(self) -> None:
         module = load_probe_module()
@@ -428,7 +548,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
                 self.assertEqual(payload["status"], "fail_closed")
                 self.assertEqual(payload["reason"], "live_probe_contract_failed")
-                self.assertEqual(payload["allow_lease"]["gateway_lease_id"], "lease-unit")
+                self.assertEqual(
+                    payload["allow_lease"]["gateway_lease_id_sha256"],
+                    module._identity_sha256("lease-unit"),
+                )
                 self.assertEqual(released_ids, ["lease-unit"])
                 self.assertEqual(payload["released"], True)
 
@@ -763,8 +886,8 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "session_spawn_execution_disabled")
         self.assertTrue(payload["released"])
         self.assertEqual(
-            payload["allow_lease_release"]["gateway_lease_id"],
-            "lease-unit",
+            payload["allow_lease_release"]["gateway_lease_id_sha256"],
+            module._identity_sha256("lease-unit"),
         )
 
     def test_release_metadata_must_belong_to_released_lease_object(self) -> None:
@@ -899,21 +1022,33 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "pass")
-        self.assertEqual(payload["accepted_session_identity"], "session-unit")
+        self.assertEqual(
+            payload["accepted_session_identity_sha256"],
+            module._identity_sha256("session-unit"),
+        )
         self.assertEqual(payload["released"], True)
         self.assertEqual(
             set(payload["accepted_session_identity_parity"].values()),
-            {"session-unit"},
+            {module._identity_sha256("session-unit")},
         )
         structured = payload["sessions_spawn_structured_evidence"]
         self.assertEqual(
-            structured["first"]["identity"]["session_key"], "session-unit"
+            structured["first"]["identity"]["session_key"]["sha256"],
+            module._identity_sha256("session-unit"),
         )
         self.assertEqual(
             structured["first"]["metadata_echo"]["run_id"],
             "issue35-run-unit",
         )
         self.assertIn("raw_response_sha256", structured["first"])
+        spawn_params = [params for method, params in calls if method == "sessions_spawn"]
+        self.assertTrue(spawn_params)
+        self.assertTrue(all(params["gateway_lease_id"] == "lease-unit" for params in spawn_params))
+        self.assertTrue(
+            all("gateway_lease_id" not in params["metadata"] for params in spawn_params)
+        )
+        self.assertFalse(contains_value(payload, "lease-unit"))
+        self.assertFalse(contains_value(payload, "session-unit"))
         self.assertEqual(
             [method for method, _ in calls],
             [
@@ -958,7 +1093,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "pass")
-        self.assertEqual(payload["accepted_session_identity"], "session-unit")
+        self.assertEqual(
+            payload["accepted_session_identity_sha256"],
+            module._identity_sha256("session-unit"),
+        )
         self.assertEqual(payload["released"], True)
         self.assertEqual(
             payload["sessions_spawn_structured_evidence"]["first"]["metadata_echo"][
@@ -998,7 +1136,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             payload = run_probe(module, args(execute_session_spawn=True))
 
         self.assertEqual(payload["status"], "pass")
-        self.assertEqual(payload["accepted_session_identity"], "session-unit")
+        self.assertEqual(
+            payload["accepted_session_identity_sha256"],
+            module._identity_sha256("session-unit"),
+        )
         self.assertEqual(
             payload["sessions_spawn_structured_evidence"]["first"]["metadata_echo"][
                 "run_id"
@@ -1071,7 +1212,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "lease_release_failed")
         self.assertFalse(payload["released"])
         self.assertIn("runtime_error", payload["release_error"])
-        self.assertEqual(payload["accepted_session_identity"], "session-unit")
+        self.assertEqual(
+            payload["accepted_session_identity_sha256"],
+            module._identity_sha256("session-unit"),
+        )
 
     def test_spawn_response_must_echo_request_metadata(self) -> None:
         module = load_probe_module()
@@ -1136,6 +1280,32 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("raw session metadata contract", payload["error"])
+        self.assertEqual(payload["released"], True)
+
+    def test_session_metadata_rejects_conflicting_normalized_aliases(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return lease_acquire_response()
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease()]}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            if method == "sessions_spawn":
+                response = spawn_response(params)
+                response["session"]["metadata"]["normalized"] = {}
+                return response
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args(execute_session_spawn=True))
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("conflicting sessions_spawn response normalized metadata", payload["error"])
         self.assertEqual(payload["released"], True)
 
     def test_spawn_response_rejects_conflicting_session_identity_aliases(self) -> None:

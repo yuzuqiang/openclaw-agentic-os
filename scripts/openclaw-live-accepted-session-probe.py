@@ -26,6 +26,7 @@ import agentic_os  # noqa: E402
 from agentic_os.openclaw_adapter import AdapterContractError  # noqa: E402
 from agentic_os.metadata import (  # noqa: E402
     MetadataContractError,
+    MAX_LEASE_TTL_MS,
     validate_allow_lease_observation,
     validate_allow_lease_release_observation,
     validate_accepted_lease_identity,
@@ -216,8 +217,7 @@ def _string_path(payload: Any, *paths: tuple[str, ...], label: str = "identity")
                 first_path = ".".join(selected[0])
                 second_path = ".".join(path)
                 raise MetadataContractError(
-                    f"conflicting {label} aliases: {first_path}={selected[1]!r}, "
-                    f"{second_path}={value!r}"
+                    f"conflicting {label} aliases: {first_path} and {second_path}"
                 )
     return selected[1] if selected is not None else None
 
@@ -237,6 +237,55 @@ def _raw_response_sha256(payload: dict[str, Any]) -> str:
 
 def _path_sha256(path: Path) -> str:
     return hashlib.sha256(path.resolve().as_posix().encode("utf-8")).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _identity_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _identity_proof(value: str) -> dict[str, Any]:
+    return {"sha256": _identity_sha256(value), "bytes": len(value.encode("utf-8"))}
+
+
+def _redact_live_identity_fields(value: Mapping[str, Any]) -> dict[str, Any]:
+    redacted = dict(value)
+    for field in (
+        "gateway_lease_id",
+        "external_id",
+        "session_key",
+        "spawn_request_session_key",
+    ):
+        item = redacted.pop(field, None)
+        if isinstance(item, str) and item:
+            redacted[f"{field}_sha256"] = _identity_sha256(item)
+    return redacted
+
+
+def _metadata_alias(
+    container: Mapping[str, Any],
+    aliases: tuple[str, ...],
+    *,
+    label: str,
+    expected_type: type,
+) -> Any:
+    selected: tuple[str, Any] | None = None
+    for alias in aliases:
+        if alias not in container:
+            continue
+        value = container[alias]
+        if not isinstance(value, expected_type):
+            raise MetadataContractError(f"{label}.{alias} has invalid type")
+        if selected is None:
+            selected = (alias, value)
+        elif value != selected[1]:
+            raise MetadataContractError(
+                f"conflicting {label} aliases: {selected[0]} and {alias}"
+            )
+    return selected[1] if selected is not None else None
 
 
 def _candidate_roots_for_executable(executable: Path) -> list[Path]:
@@ -263,13 +312,14 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
         raise RuntimeError(f"openclaw executable is not executable: {resolved.name}")
 
     expected_root_sha = _path_value(preflight_payload, ("catalog", "install_root_path_sha256"))
+    matching_roots: list[Path] = []
     if isinstance(expected_root_sha, str) and expected_root_sha:
-        candidate_shas = {
-            _path_sha256(candidate)
+        matching_roots = [
+            candidate
             for candidate in _candidate_roots_for_executable(resolved)
-            if candidate.exists()
-        }
-        if expected_root_sha not in candidate_shas:
+            if candidate.exists() and _path_sha256(candidate) == expected_root_sha
+        ]
+        if not matching_roots:
             raise RuntimeError(
                 "preflighted OpenClaw install root does not match PATH openclaw executable"
             )
@@ -284,6 +334,43 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
         raise RuntimeError(
             "preflighted OpenClaw executable does not match PATH openclaw executable"
         )
+    expected_executable_file_sha = _path_value(
+        preflight_payload, ("catalog", "active_executable_sha256")
+    )
+    if (
+        isinstance(expected_executable_file_sha, str)
+        and expected_executable_file_sha
+        and expected_executable_file_sha != _file_sha256(resolved)
+    ):
+        raise RuntimeError(
+            "preflighted OpenClaw executable content does not match PATH openclaw executable"
+        )
+    sources = _path_value(preflight_payload, ("catalog", "sources"))
+    if matching_roots and isinstance(sources, Sequence) and not isinstance(
+        sources, (str, bytes, bytearray)
+    ):
+        root = matching_roots[0].resolve()
+        for source in sources:
+            if not isinstance(source, Mapping):
+                raise RuntimeError("preflighted OpenClaw source record is invalid")
+            relative = source.get("path")
+            expected_sha = source.get("sha256")
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or relative.startswith("/")
+                or ".." in Path(relative).parts
+                or not isinstance(expected_sha, str)
+                or not expected_sha
+            ):
+                raise RuntimeError("preflighted OpenClaw source record is invalid")
+            source_path = (root / relative).resolve()
+            if root not in (source_path, *source_path.parents):
+                raise RuntimeError("preflighted OpenClaw source path escapes install root")
+            if not source_path.exists() or _file_sha256(source_path) != expected_sha:
+                raise RuntimeError(
+                    "preflighted OpenClaw source content does not match active install root"
+                )
     return str(resolved)
 
 
@@ -388,16 +475,23 @@ def _validate_allow_lease_raw_metadata(
             break
     if metadata_container is None:
         raise MetadataContractError(f"{label} did not expose raw allowLease metadata")
-    normalized = (
-        metadata_container.get("normalized")
-        or metadata_container.get("normalized_metadata")
-        or metadata_container.get("external_metadata")
+    normalized = _metadata_alias(
+        metadata_container,
+        ("normalized", "normalized_metadata", "external_metadata"),
+        label=f"{label} normalized metadata",
+        expected_type=Mapping,
     )
-    raw_json = metadata_container.get("raw_json") or metadata_container.get(
-        "raw_metadata_json"
+    raw_json = _metadata_alias(
+        metadata_container,
+        ("raw_json", "raw_metadata_json"),
+        label=f"{label} raw metadata JSON",
+        expected_type=str,
     )
-    version = metadata_container.get("metadata_contract_version") or metadata_container.get(
-        "contract_version"
+    version = _metadata_alias(
+        metadata_container,
+        ("metadata_contract_version", "contract_version"),
+        label=f"{label} metadata contract version",
+        expected_type=str,
     )
     validator = (
         validate_allow_lease_release_observation
@@ -415,7 +509,7 @@ def _validate_allow_lease_raw_metadata(
         raise MetadataContractError(f"{label} raw allowLease metadata contract invalid: {exc}") from exc
     return {
         "metadata_contract_version": version,
-        "normalized_metadata": observed,
+        "normalized_metadata": _redact_live_identity_fields(observed),
         "raw_metadata_json_sha256": hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
     }
 
@@ -439,17 +533,21 @@ def _allow_lease_owner_metadata_matches(
         )
         if metadata_container is None:
             continue
-        normalized = (
-            metadata_container.get("normalized")
-            or metadata_container.get("normalized_metadata")
-            or metadata_container.get("external_metadata")
+        normalized = _metadata_alias(
+            metadata_container,
+            ("normalized", "normalized_metadata", "external_metadata"),
+            label="allowLease status normalized metadata",
+            expected_type=Mapping,
         )
         if isinstance(normalized, Mapping) and all(
             normalized.get(key) == value for key, value in expected_owner.items()
         ):
             return True
-        raw_json = metadata_container.get("raw_json") or metadata_container.get(
-            "raw_metadata_json"
+        raw_json = _metadata_alias(
+            metadata_container,
+            ("raw_json", "raw_metadata_json"),
+            label="allowLease status raw metadata JSON",
+            expected_type=str,
         )
         if isinstance(raw_json, str):
             try:
@@ -466,6 +564,30 @@ def _allow_lease_owner_metadata_matches(
 def _append_unique(values: list[str], value: str) -> None:
     if value not in values:
         values.append(value)
+
+
+def _validate_probe_acquire_params(params: Mapping[str, Any]) -> None:
+    for field in (
+        "client_lease_id",
+        "idempotency_key",
+        "run_id",
+        "phase",
+        "transition_id",
+        "agent_id",
+        "requester_agent_id",
+    ):
+        value = params.get(field)
+        if not isinstance(value, str) or not value:
+            raise MetadataContractError(f"probe allowLease {field} must be a non-empty string")
+    ttl_ms = params.get("ttl_ms")
+    if type(ttl_ms) is not int or not 1 <= ttl_ms <= MAX_LEASE_TTL_MS:
+        raise MetadataContractError(
+            f"probe allowLease ttl_ms must be an integer in [1,{MAX_LEASE_TTL_MS}]"
+        )
+
+
+def _public_session_spawn_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if not key.startswith("_")}
 
 
 def _validate_status_observes_lease(
@@ -510,7 +632,7 @@ def _validate_status_observes_lease(
                 release=False,
             )
             observed = {
-                "gateway_lease_id": expected_gateway_lease_id,
+                "gateway_lease_id_sha256": _identity_sha256(expected_gateway_lease_id),
                 "metadata_contract_version": raw_metadata["metadata_contract_version"],
                 "normalized_metadata": raw_metadata["normalized_metadata"],
                 "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
@@ -520,7 +642,7 @@ def _validate_status_observes_lease(
     if extra_owner_lease_ids:
         raise MetadataContractError(
             "allowLease status observed extra lease with duplicate acquire metadata: "
-            + ", ".join(extra_owner_lease_ids)
+            + ", ".join(_identity_sha256(value) for value in extra_owner_lease_ids)
         )
     if observed is not None:
         return observed
@@ -661,8 +783,14 @@ def _session_spawn_once(
         label="sessions_spawn response",
     )
     return {
-        "accepted_session_identity": accepted,
-        "identity": identity,
+        "_accepted_session_identity": accepted,
+        "_identity": identity,
+        "accepted_session_identity_sha256": _identity_sha256(accepted),
+        "identity": {
+            key: _identity_proof(value)
+            for key, value in identity.items()
+            if isinstance(value, str) and value
+        },
         "metadata_echo": raw_metadata["normalized_metadata"],
         "metadata_contract_version": raw_metadata["metadata_contract_version"],
         "normalized_metadata": raw_metadata["normalized_metadata"],
@@ -718,16 +846,23 @@ def _validate_session_raw_metadata(
         )
         if metadata_container is None:
             continue
-        normalized = (
-            metadata_container.get("normalized")
-            or metadata_container.get("normalized_metadata")
-            or metadata_container.get("external_metadata")
+        normalized = _metadata_alias(
+            metadata_container,
+            ("normalized", "normalized_metadata", "external_metadata"),
+            label=f"{label} normalized metadata",
+            expected_type=Mapping,
         )
-        raw_json = metadata_container.get("raw_json") or metadata_container.get(
-            "raw_metadata_json"
+        raw_json = _metadata_alias(
+            metadata_container,
+            ("raw_json", "raw_metadata_json"),
+            label=f"{label} raw metadata JSON",
+            expected_type=str,
         )
-        version = metadata_container.get("metadata_contract_version") or metadata_container.get(
-            "contract_version"
+        version = _metadata_alias(
+            metadata_container,
+            ("metadata_contract_version", "contract_version"),
+            label=f"{label} metadata contract version",
+            expected_type=str,
         )
         try:
             observed = validate_session_observation(
@@ -766,7 +901,7 @@ def _validate_session_api_observes_session(
         label=label,
     )
     return {
-        "accepted_session_identity": accepted_session_identity,
+        "accepted_session_identity_sha256": _identity_sha256(accepted_session_identity),
         "metadata_contract_version": raw_metadata["metadata_contract_version"],
         "normalized_metadata": raw_metadata["normalized_metadata"],
         "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
@@ -827,7 +962,7 @@ def _release_lease(
         release=True,
     )
     return {
-        "gateway_lease_id": released_gateway_lease_id,
+        "gateway_lease_id_sha256": _identity_sha256(released_gateway_lease_id),
         "metadata_contract_version": raw_metadata["metadata_contract_version"],
         "normalized_metadata": raw_metadata["normalized_metadata"],
         "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
@@ -915,6 +1050,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "requester_agent_id": args.requester_agent_id,
             "ttl_ms": args.ttl_ms,
         }
+        _validate_probe_acquire_params(acquire_params)
         evidence["rpc_attempted"].append("subagents.allowLease.acquire")
         first = _gateway_call(
             openclaw_executable,
@@ -932,7 +1068,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             label="allowLease acquire proof",
         )
         evidence["allow_lease"] = {
-            "gateway_lease_id": gateway_lease_id,
+            "gateway_lease_id_sha256": _identity_sha256(gateway_lease_id),
             "metadata_contract_version": acquire_metadata["metadata_contract_version"],
             "normalized_metadata": acquire_metadata["normalized_metadata"],
             "raw_metadata_json_sha256": acquire_metadata["raw_metadata_json_sha256"],
@@ -962,7 +1098,9 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             release=False,
             label="duplicate allowLease acquire proof",
         )
-        evidence["allow_lease"]["duplicate_gateway_lease_id"] = duplicate_gateway_lease_id
+        evidence["allow_lease"]["duplicate_gateway_lease_id_sha256"] = _identity_sha256(
+            duplicate_gateway_lease_id
+        )
         evidence["allow_lease"]["duplicate_metadata_contract_version"] = duplicate_metadata[
             "metadata_contract_version"
         ]
@@ -1000,6 +1138,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "runtime": "subagent",
             "mode": "run",
             "agentId": args.agent_id,
+            "gateway_lease_id": gateway_lease_id,
             "client_request_id": f"issue35-client-{args.probe_id}",
             "idempotency_key": f"issue35-spawn-{args.probe_id}",
             "metadata": {
@@ -1029,10 +1168,10 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             timeout_ms=args.gateway_timeout_ms,
         )
         session_identity = validate_accepted_session_identity(
-            external_id=accepted_one["identity"]["external_id"],
-            spawn_request_session_key=accepted_one["identity"]["spawn_request_session_key"],
-            session_key=accepted_one["identity"]["session_key"],
-            duplicate_spawn_session_key=accepted_two["accepted_session_identity"],
+            external_id=accepted_one["_identity"]["external_id"],
+            spawn_request_session_key=accepted_one["_identity"]["spawn_request_session_key"],
+            session_key=accepted_one["_identity"]["session_key"],
+            duplicate_spawn_session_key=accepted_two["_accepted_session_identity"],
         )
         evidence["rpc_attempted"].append("sessions_list")
         sessions_list = _gateway_call(
@@ -1081,15 +1220,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "pass",
                 "spawn_attempted": True,
                 "lease_acquired": True,
-                "accepted_session_identity": session_identity,
+                "accepted_session_identity_sha256": _identity_sha256(session_identity),
                 "accepted_session_identity_parity": {
-                    "external_rpc_intents.external_id": session_identity,
-                    "spawn_requests.session_key": session_identity,
-                    "sessions.session_key": session_identity,
+                    "external_rpc_intents.external_id_sha256": _identity_sha256(
+                        session_identity
+                    ),
+                    "spawn_requests.session_key_sha256": _identity_sha256(session_identity),
+                    "sessions.session_key_sha256": _identity_sha256(session_identity),
                 },
                 "sessions_spawn_structured_evidence": {
-                    "first": accepted_one,
-                    "duplicate": accepted_two,
+                    "first": _public_session_spawn_evidence(accepted_one),
+                    "duplicate": _public_session_spawn_evidence(accepted_two),
                 },
                 "session_read_structured_evidence": session_read_evidence,
             }
@@ -1143,7 +1284,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 except BaseException as exc:  # pragma: no cover - defensive live cleanup path
                     sanitized = _sanitized_exception(exc)
                     release_errors.append(
-                        f"{acquired_lease_id}: "
+                        f"{_identity_sha256(acquired_lease_id)}: "
                         f"{sanitized.get('error_code') or sanitized.get('error_class')}"
                     )
             if releases:

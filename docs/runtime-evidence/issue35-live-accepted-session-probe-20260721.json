@@ -14,6 +14,7 @@
         ]
       },
       "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
+      "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
       "catalog_kind": "sanitized_installed_openclaw_runtime",
       "install_root_basename": "openclaw",
       "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
@@ -68,6 +69,6 @@
   "released": "not_required",
   "rpc_attempted": [],
   "spawn_attempted": false,
-  "started_epoch_ms": 1784654499538,
+  "started_epoch_ms": 1784659707411,
   "status": "fail_closed"
 }
