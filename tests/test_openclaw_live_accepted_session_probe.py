@@ -233,6 +233,39 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             ],
         )
 
+    def test_acquired_lease_aliases_are_recorded_for_cleanup(self) -> None:
+        module = load_probe_module()
+        for acquire_response in (
+            {"external_id": "lease-unit"},
+            {"lease": {"lease_id": "lease-unit"}},
+        ):
+            with self.subTest(acquire_response=acquire_response):
+                released_ids: list[str] = []
+                acquire_calls = 0
+
+                def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+                    nonlocal acquire_calls
+                    if method == "subagents.allowLease.acquire":
+                        acquire_calls += 1
+                        if acquire_calls == 1:
+                            return acquire_response
+                        raise RuntimeError("duplicate acquire timed out")
+                    if method == "subagents.allowLease.release":
+                        released_ids.append(params["gateway_lease_id"])
+                        return release_response(params)
+                    raise AssertionError(method)
+
+                with mock.patch.object(
+                    module, "_preflight", return_value=(True, {"status": "pass"})
+                ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+                    payload = run_probe(module, args())
+
+                self.assertEqual(payload["status"], "fail_closed")
+                self.assertEqual(payload["reason"], "live_probe_contract_failed")
+                self.assertEqual(payload["allow_lease"]["gateway_lease_id"], "lease-unit")
+                self.assertEqual(released_ids, ["lease-unit"])
+                self.assertEqual(payload["released"], True)
+
     def test_non_idempotent_duplicate_acquire_releases_both_observed_leases(self) -> None:
         module = load_probe_module()
         released_ids: list[str] = []

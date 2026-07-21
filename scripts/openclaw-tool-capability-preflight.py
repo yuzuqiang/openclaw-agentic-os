@@ -156,6 +156,139 @@ def _strip_js_comments_and_strings(text: str) -> str:
     return "".join(output)
 
 
+def _parse_js_string_literal(text: str, start: int) -> tuple[str, int] | None:
+    if start >= len(text) or text[start] not in {"'", '"', "`"}:
+        return None
+    quote = text[start]
+    escaped = False
+    value: list[str] = []
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            value.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            return "".join(value), index + 1
+        else:
+            value.append(char)
+        index += 1
+    return None
+
+
+def _skip_js_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
+
+
+def _scan_js_declared_tool_names(text: str) -> set[str]:
+    names: set[str] = set()
+    index = 0
+    in_line_comment = False
+    in_block_comment = False
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+        if in_block_comment:
+            if char == "*" and nxt == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if char == "/" and nxt == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if char == "/" and nxt == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            parsed = _parse_js_string_literal(text, index)
+            index = parsed[1] if parsed is not None else index + 1
+            continue
+        if char.isalpha() or char in {"_", "$"}:
+            start = index
+            index += 1
+            while index < len(text) and (
+                text[index].isalnum() or text[index] in {"_", "$"}
+            ):
+                index += 1
+            key = text[start:index]
+            if key not in {"id", "name"}:
+                continue
+            cursor = _skip_js_whitespace(text, index)
+            if cursor >= len(text) or text[cursor] != ":":
+                continue
+            cursor = _skip_js_whitespace(text, cursor + 1)
+            parsed = _parse_js_string_literal(text, cursor)
+            if parsed is None:
+                continue
+            value, index = parsed
+            if TOOL_NAME.fullmatch(value) and value in LIVE_TOOL_NAMES:
+                names.add(value)
+            continue
+        index += 1
+    return names
+
+
+def _scan_js_string_key_names(text: str) -> set[str]:
+    names: set[str] = set()
+    index = 0
+    in_line_comment = False
+    in_block_comment = False
+    while index < len(text):
+        char = text[index]
+        nxt = text[index + 1] if index + 1 < len(text) else ""
+        if in_line_comment:
+            if char == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+        if in_block_comment:
+            if char == "*" and nxt == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if char == "/" and nxt == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if char == "/" and nxt == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if char in {"'", '"', "`"}:
+            parsed = _parse_js_string_literal(text, index)
+            if parsed is None:
+                index += 1
+                continue
+            value, end = parsed
+            cursor = _skip_js_whitespace(text, end)
+            if (
+                cursor < len(text)
+                and text[cursor] == ":"
+                and TOOL_NAME.fullmatch(value)
+                and value in LIVE_TOOL_NAMES
+            ):
+                names.add(value)
+            index = end
+            continue
+        index += 1
+    return names
+
+
 def _balanced_slice(text: str, start: int, opener: str, closer: str) -> str | None:
     if start < 0 or start >= len(text) or text[start] != opener:
         return None
@@ -335,17 +468,13 @@ def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], lis
 def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
     names: set[str] = set()
     sources: list[Path] = []
-    for pattern, matcher in (
-        ("openclaw-tools-*.js", JS_TOOL_NAME),
-        ("core-descriptors-*.js", JS_TOOL_NAME),
-        ("server-methods-*.js", JS_METHOD_NAME),
+    for pattern, scanner in (
+        ("openclaw-tools-*.js", _scan_js_declared_tool_names),
+        ("core-descriptors-*.js", _scan_js_declared_tool_names),
+        ("server-methods-*.js", _scan_js_string_key_names),
     ):
         for path, text in _read_dist_files(root, pattern):
-            matched = {
-                name
-                for name in matcher.findall(text)
-                if TOOL_NAME.fullmatch(name) and name in LIVE_TOOL_NAMES
-            }
+            matched = scanner(text)
             if matched:
                 names.update(matched)
                 sources.append(path)
@@ -362,13 +491,17 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
     for name in LIVE_TOOL_NAMES:
         params = set()
         source_kind = "absent"
+        declared = name in declared_names
         if name in gateway_params:
             params.update(gateway_params[name])
             source_kind = "gateway_server_method_params"
-        if name in model_tool_params:
+        if declared and name in model_tool_params:
             params.update(model_tool_params[name])
-            source_kind = "model_tool_schema"
-        if name in declared_names or params:
+            if source_kind == "absent":
+                source_kind = "model_tool_schema"
+        if declared and source_kind == "absent":
+            source_kind = "declared_tool_name"
+        if declared or name in gateway_params:
             tools.append(
                 {
                     "name": name,

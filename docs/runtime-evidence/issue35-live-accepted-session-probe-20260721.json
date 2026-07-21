@@ -70,17 +70,17 @@
         {
           "name": "sessions_list",
           "parameters": [],
-          "schema_source": "absent"
+          "schema_source": "declared_tool_name"
         },
         {
           "name": "sessions_history",
           "parameters": [],
-          "schema_source": "absent"
+          "schema_source": "declared_tool_name"
         },
         {
           "name": "session_status",
           "parameters": [],
-          "schema_source": "absent"
+          "schema_source": "declared_tool_name"
         }
       ]
     },
@@ -92,6 +92,6 @@
   "released": "not_required",
   "rpc_attempted": [],
   "spawn_attempted": false,
-  "started_epoch_ms": 1784643868211,
+  "started_epoch_ms": 1784645394121,
   "status": "fail_closed"
 }

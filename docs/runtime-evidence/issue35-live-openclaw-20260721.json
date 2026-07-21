@@ -67,17 +67,17 @@
       {
         "name": "sessions_list",
         "parameters": [],
-        "schema_source": "absent"
+        "schema_source": "declared_tool_name"
       },
       {
         "name": "sessions_history",
         "parameters": [],
-        "schema_source": "absent"
+        "schema_source": "declared_tool_name"
       },
       {
         "name": "session_status",
         "parameters": [],
-        "schema_source": "absent"
+        "schema_source": "declared_tool_name"
       }
     ]
   },

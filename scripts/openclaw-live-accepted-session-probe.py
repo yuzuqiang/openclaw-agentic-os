@@ -179,7 +179,11 @@ def _lease_id_from_response(response: dict[str, Any]) -> str | None:
     return _string_path(
         response,
         ("gateway_lease_id",),
+        ("external_id",),
+        ("lease_id",),
         ("lease", "gateway_lease_id"),
+        ("lease", "external_id"),
+        ("lease", "lease_id"),
         ("leaseId",),
         ("id",),
         label="gateway lease identity",
