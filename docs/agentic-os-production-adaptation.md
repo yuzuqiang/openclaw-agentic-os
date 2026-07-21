@@ -4,7 +4,7 @@
 
 Decision: adapt the nine Agentic OS workflows as an OpenClaw control-plane layer through a compatibility migration. Current OpenClaw file artifacts remain operational authority until each workflow is cut over. The target end state is repo-local SQLite at `/Users/zuqiangyu/clawd/state/agentic-os/control.db` as the single desired-state authority, with JSON, JSONL, Markdown, and run bundles becoming projections and evidence only after the cutover for that workflow.
 
-The previous big-bang authority claim is withdrawn. This document is a corrected production design, not a production implementation receipt. No P0/P1 runtime implementation is claimed complete. Round 10 independent review found unresolved High design gaps; this Round 11 single-writer correction requires fresh independent revalidation before any design PASS claim.
+The previous big-bang authority claim is withdrawn. This document is a corrected production design, not a production runtime receipt. Bounded local/synthetic P0/P1/P2 slices now exist in the repository and are called out below, but they prove only local control-plane contracts and fixture behavior. They do not prove production OpenClaw/Gateway/Cron/session RPC behavior, production `control.db` authority, or steady DB-authority operation. Round 10 independent review found unresolved High design gaps; this Round 11 single-writer correction still requires fresh independent revalidation before any design PASS claim.
 
 Scope:
 
@@ -25,6 +25,8 @@ Non-goals:
 
 - 2026-07-18: Added the local fail-closed trust promotion writer and migration v13 binding overlay:
   - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete local-writer SLO PASS audit rows at or after the bound gate clock, append-only SLO evidence events after all runtime SLO inputs, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence with immutable approval hashes, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
+- 2026-07-21: Synced the project truth boundary and added a non-vacuous CI contract:
+  - Corrections: README and this document now distinguish completed bounded local/synthetic P0/P1/P2 slices from unproven production behavior. GitHub Actions check identity `agentic-os-ci` is pinned in `.github/agentic-os-ci-contract.json` and tested by `tests/test_ci_contract.py`; the workflow runs privacy preflight, full unittest discovery, compileall with an external cache, migration/package parity coverage, `git diff --check`, and post-test tracked cleanliness. Database authority remains disabled, and no Gateway/Cron/session RPC or production authority change is made.
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
   - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; accepted acquire-pending leases with Gateway ownership cannot be deleted or hidden before release proof; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive; pass gates and their referenced transitions are immutable; verifier independence proof evidence must be a non-empty JSON object; R2+ completion gates must bind to the finalizing transition.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
@@ -87,6 +89,16 @@ Current-vs-proposed truth:
 - Current file artifacts remain operational authority.
 - Current OpenClaw is below the required external runtime metadata contract. Gateway allowLease and session status do not yet prove exact run/idempotency ownership across post-RPC/pre-DB crashes.
 - Current P0 foundation adds ignored migration artifacts and fail-closed probes, but does not create production `control.db`, does not enable DB-authority dispatch, and does not prove runtime adapter behavior.
+- Current bounded local/synthetic implementation slices include privacy preflight,
+  package/retrieval denylist, migration/package parity, file-authority shadow,
+  dual-write shadow, synthetic DB-authority canary and rollback, one controlled
+  synthetic expansion path, read-only predicate evaluation, approval/pass-gate/SLO
+  audit/goal-run/trust binding writers, budget fixture/runtime slices, and
+  injectable metadata dispatch/reconciliation probes.
+- These slices do not establish a production Agentic OS daemon, production
+  Agentic OS control database, production session authority, live
+  OpenClaw/Gateway/Cron/session RPC metadata conformance, workflow cutover, or
+  steady DB authority. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - Current Issue 7 implementation adds only a synthetic/local
   `db_authority_canary` artifact fixture writer. It records one local R1 canary
   run, proves prepared-DB to artifact-write crash recovery, proves rollback to
@@ -4331,7 +4343,7 @@ Current document-only verification:
 | Document non-empty | `test -s docs/agentic-os-production-adaptation.md` | pass |
 | Required remediation tokens | `rg -n "external_rpc_intents|spawn_request_id|external_run_id|external_transition_id|external_client_request_id|external_idempotency_key|external_phase|external_agent_id|external_task_digest|json_extract|external_id|session_key|spawn_idempotency_key|workflow_authority|run_budgets|budget_events|model_cost_registry|endpoint_binding_id|expires_at_epoch_ms|created_at_epoch_ms|requested_at_epoch_ms|reserve_budget_event_id|gate_clock_context|clock_context_id|gate_nonce|bound_at_epoch_ms|trusted_clock_source_hash|cost_microusd|endpoint_zero_reserve_policies|agentic_predicate_inproc_v1|file_authority_shadow|dual_write_shadow|db_authority_canary|human_review_required|git check-ignore|gate_without_verifier|selected_model_registry_binding|selected_model_endpoint_binding|exact_approval_binding|exact_approval_expiry_timestamp|STRICT|ANY|numeric text|integral REAL|Round 15" docs/agentic-os-production-adaptation.md` | every token appears |
 | Confidence questions | `rg -o "对这个策略有100%的把握吗？" docs/agentic-os-production-adaptation.md | wc -l` | at least 12 |
-| Current-vs-proposed truth | `rg -n "No P0/P1 runtime implementation is claimed complete|Runtime production behavior remains unproven|Current OpenClaw is below|fresh independent revalidation" docs/agentic-os-production-adaptation.md` | all appear |
+| Current-vs-proposed truth | `rg -n "bounded local/synthetic P0/P1/P2 slices|Runtime production behavior remains unproven|Current OpenClaw is below|fresh independent revalidation|DB_AUTHORITY_ENABLED.*False" docs/agentic-os-production-adaptation.md` | all appear |
 | SQL compile and adversarial fixture suite | Extract the complete DDL and every documented SLO `SELECT`, compile in `sqlite3 :memory:`, then run Round 5 plus reopened H1-H4 fixtures, Round 6 regression fixtures, Round 9 corrective fixtures, and Round 11 corrective fixtures for per-gate clock, model-cost registry, run budgets, budget events, external-intent epoch ordering, approval expiry, exact approval run/gate/transition binding, ledger reconciliation, zero-reserve policy validity, fixed-point numeric bounds, retry-ledger cross-dimensional payloads, raw-JSON/normalized/local metadata equality, accepted session identity, sessions same-row binding, gate-clock freshness, human-attention dimensional closure, `consume` human-attention contamination, metadata version spoofing, NULL/mismatched external metadata, orphan spawn intents, and mismatched spawn-request identity. | DDL compiles, every SLO compiles, valid controls return zero blocking rows, exact integer maxima pass, and numeric text, integral `REAL`, `NULL`, negative, max+1, `Inf`, `NaN`, `1e999`, retry `consume` bypass, `consume` with `human_attention_units`, cross-dimensional retry decrement/restore, raw JSON mismatch, missing accepted `external_id`/`session_key`/session row, sessions same-row mismatch, stale/future gate clock values, human-attention token/cost/time/retry payloads, version-only metadata, NULL/mismatched external metadata, orphan spawn intent, mismatched spawn-request binding, wrong/null approval run, and wrong approval gate/transition fixtures return blocking rows or fail DDL before gates can rely on them. |
 
 Future fixture groups:
@@ -4522,33 +4534,46 @@ Reassessment: Round 1-10 closures are preserved at design level after this corre
 
 P0.0 - privacy and external contract preflight:
 
-- Add future `.gitignore` rules for `state/agentic-os/` DB/WAL/SHM/backups.
-- Add migration startup `git check-ignore` checks and packaging/retrieval denylist.
-- Add allowLease metadata contract probe.
-- Add sessions metadata/idempotency contract probe that proves exact external `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest` in both normalized fields and raw `external_metadata_json` paths; a version string alone is not proof.
-- Add accepted session identity probe that proves duplicate spawn returns the same non-empty accepted session identity and can be persisted consistently as `external_rpc_intents.external_id`, `spawn_requests.session_key`, and `sessions.session_key`.
+- Done locally: `.gitignore` rules for `state/agentic-os/` DB/WAL/SHM/backups,
+  migration startup `git check-ignore` checks, and packaging/retrieval denylist.
+- Done as bounded probes: injectable allowLease and sessions metadata/idempotency
+  contract checks prove exact local/normalized/raw metadata shape against fake or
+  injected adapters.
+- Not production-proven: live OpenClaw/Gateway/session tool capability and
+  metadata conformance. Before any real RPC is relied on, the exact tool surface
+  must be proven with `scripts/openclaw-tool-capability-preflight.py`.
+- Remaining: production accepted-session identity proof that duplicate spawn
+  returns the same non-empty accepted session identity and can be persisted
+  consistently as `external_rpc_intents.external_id`, `spawn_requests.session_key`,
+  and `sessions.session_key`.
 - Define fail-closed behavior for absent metadata.
 
 P0.1 - minimum schema:
 
-- Implement migrations for `workflow_authority`, `runs`, `transitions`, `external_rpc_intents`, `leases`, `spawn_requests`, `sessions`, `reconciliation_jobs`, `evidence_hashes`, and `outbox_events`.
-- Implement `gate_clock_context` as a per-gate one-use context keyed to `clock_context_id`, `gate_run_id`, `run_id`, `transition_id`, and `gate_nonce`; bind trusted fixtureable `now_epoch_ms` once per gate transaction for both approval selection and gate commit with executable snapshot equality across `bound_at_epoch_ms`, `now_epoch_ms`, `consumed_at_epoch_ms`, and `gate_runs.completed_at_epoch_ms`.
-- Implement every table that stores bounded gate-critical numeric authority as `STRICT`, and represent money/token/time/retry/human-attention/epoch authority columns as `ANY` plus `typeof(...)='integer'` range checks so SQLite cannot coerce numeric text before validation.
-- Implement `run_budgets`, authoritative `budget_events`, `endpoint_zero_reserve_policies`, and endpoint-bound `model_cost_registry` with bounded type-preserved integer microusd prices, selected provider/model/endpoint/effective cost-row binding, and row hash over endpoint id, price, and confidence inputs.
-- Implement `approvals`, `risk_assessments`, `judge_verifier_runs`, `gate_runs`, `predicate_plugins`, `goal_manifests`, `goal_runs`, `trust_observations`, `artifact_projections`, `slo_queries`, and `slo_audits`.
-- Enforce `gate_runs` PASS verifier invariant, per-gate clock/run/transition/completion binding with snapshot equality, approval run/gate/transition and target non-null fields, approval `expires_at_epoch_ms` type-preserved integer authority, model-backed budget-event non-null fields, pure-dimension `human_attention`, `external_rpc_intents.spawn_request_id` plus `reserve_budget_event_id` for `sessions_spawn`, strict type-preserved integer `created_at_epoch_ms/requested_at_epoch_ms` ordering, exact normalized and raw-JSON external metadata fields, accepted session identity, exact sessions same-row binding, bounded non-negative budget limits/counters/events, retry and human-attention event-type dimensional closure, zero-reserve positive minima, and gate-bound evidence producer/verifier binding.
-- Add migration hash checks and `PRAGMA foreign_key_check`.
+- Done locally: migrations implement the listed schema, gate clock context,
+  bounded `STRICT`/`ANY` numeric authority, budget tables, approval/risk/verifier/gate
+  tables, predicate/goal/trust/SLO tables, migration hashes, integrity checks,
+  and `PRAGMA foreign_key_check`.
+- Done locally: executable DDL, SLO identity, and unittest coverage enforce the
+  gate/verifier, exact approval, accepted session identity, exact sessions
+  same-row binding, strict prior-reserve ordering, endpoint-bound budget,
+  ledger, numeric, retry, human-attention, zero-reserve, and evidence-binding
+  contracts as local SQLite behavior.
+- Not production-proven: production `control.db` creation or daemon operation.
 
 P0.2 - file-authority shadow and fixture foundations:
 
-- Backfill from existing artifacts as `file_authority_shadow`.
-- Add semantic parity audit.
-- Add VCS/privacy, schema compile, and SLO fixture harnesses.
+- Done locally: explicit-artifact `file_authority_shadow` backfill, semantic
+  parity audit, VCS/privacy preflight, schema compile, and SLO fixture harnesses.
+- Not production-proven: broad migration of live OpenClaw workflow artifacts.
 
 P1.0 - dual-write and enforceable budgets:
 
-- Dual-write new runs as `dual_write_shadow` while files remain authority.
-- Enforce exact selected provider/model/endpoint/effective cost-row reservation and retry decrement before external RPC.
+- Done locally: dual-write new runs as `dual_write_shadow` while files remain
+  authority.
+- Done locally: exact selected provider/model/endpoint/effective cost-row
+  reservation and retry decrement before external RPC are enforced in local
+  writers/tests.
 - Enforce that every `sessions_spawn` external RPC intent has one concrete matching `spawn_requests` row by `spawn_request_id`, client request id, idempotency key, phase, agent id, and task digest; accepted/reconciled intent rows also require exact raw-JSON/normalized/local metadata equality, non-empty accepted session identity, and one exact `sessions` row bound by the full composite spawn tuple. Also require a prior same-run/same-transition reserve event bound by `reserve_budget_event_id` to the exact selected provider/model/endpoint/capability/cost registry row with `reserve.created_at_epoch_ms < intent.requested_at_epoch_ms`; equal-millisecond ambiguity fails closed until a persisted sequence authority exists.
 - Enforce non-negative bounded budget amounts and counters, `[0,budget]` invariants, authoritative ledger/counter reconciliation, guarded `BEGIN IMMEDIATE` counter updates with rowcount=1, `consume retry_units=0`, `consume human_attention_units=0`, retry decrement/restore non-retry dimensions equal zero, `human_attention` as the only human-attention consumption authority, over-release/restore prefix checks, meaningful reserves, and explicit zero-cost/no-token endpoint policy rules.
 - Enforce fixed-scale microusd conversion for any legacy money source with deterministic rounding, source-type validation, range validation, and fail-closed quarantine before insertion into `STRICT`/`ANY` authority columns.
@@ -4556,39 +4581,52 @@ P1.0 - dual-write and enforceable budgets:
 - Add `budgets/selected_model_registry_binding.sql` for missing rows, unknown confidence, capability-only false matches, NULL provider/model events, concurrent reservation oversubscription, and negative budget values.
 - Add `budgets/selected_model_endpoint_binding.sql` for mismatched endpoint/hash, exact endpoint/hash match, same-second-after reserve, same-ms ambiguity, wrong transition/endpoint/hash, missing reserve, and prior exact reserve controls.
 - Initial executable fixtures now exist under `tests/fixtures/budgets/` and `tests/fixtures/sqlite_type_affinity_h1_h4.sql`; `MigrationTests.test_p1_budget_sql_fixture_pack_exercises_blocking_slos` applies them to fresh migrated databases and proves the targeted blocking SLOs fire for ledger/counter drift, invalid zero-reserve policies, negative net reserve/over-release, numeric text, integral `REAL`, exact integer maximum positive control, post-dispatch consume over budget, consume carrying retry units, `consume` carrying human-attention units, cross-dimensional retry decrement/restore payloads, duplicate/replayed budget events, selected model/cost-row binding mismatches, and max+1 fixed-point cost values. Concurrent reserve oversubscription remains an explicit runtime concurrency test, and non-finite legacy conversion remains pinned by the runtime legacy-import quarantine test rather than a fake static SQL fixture.
+- Not production-proven: real end-to-end `sessions_spawn` settlement against live
+  OpenClaw sessions.
 
 P1.1 - metadata-based dispatch and reconciliation:
 
-- Implement metadata-capable allowLease acquire/status/release or keep dispatch workflows fail-closed.
-- Implement metadata-capable session spawn/status/list/result with exact normalized field exposure, valid raw external metadata JSON whose seven identity paths match normalized/local fields, and stable accepted session identity exposure, or keep spawn workflows fail-closed.
-- Add reconciliation scanner only after metadata fixtures exist.
+- Done locally: an injectable metadata-capable adapter contract, DB-persisted
+  pending-intent dispatcher, and fail-closed reconciliation probes exist.
+- Not production-proven: live allowLease/session tool capability and metadata
+  conformance; dispatch workflows must remain fail-closed until exact capability
+  preflight proves the production tool names and parameters.
+- Remaining: production reconciliation scanner rollout after live metadata
+  fixtures pass.
 
 P1.2 - predicate runner, approvals, gates, and trust:
 
-- Implement `agentic_predicate_inproc_v1` and malicious fixture suite.
-- Add exact approval run/gate/transition binding checks, per-gate clock-context-backed epoch-millisecond approval expiry checks, stale/future `bound_at_epoch_ms`, stale/future `now_epoch_ms`, reused/wrong-run/wrong-gate/wrong-transition/mismatched-completion fixtures, pass-gate verifier checks, and independence fixtures.
+- Done locally: `agentic_predicate_inproc_v1`, malicious fixture suite, exact
+  approval run/gate/transition binding checks, per-gate clock-context-backed
+  epoch-millisecond approval expiry checks, pass-gate verifier checks,
+  SLO-audit writer, goal-run evidence writer, and trust-promotion binding writer.
 - Add `approvals_independence/gate_without_verifier.sql` and `approvals_independence/exact_approval_binding.sql`.
 - Add `approvals_independence/exact_approval_expiry_timestamp.sql` for expired-by-1ms, equal-to-now, future-by-1ms, malformed, NULL, non-integer authority cases, and malformed display text projection-only cases.
-- Add SLO SQL fixture suite and gate writers.
-- Add trust promotion only for known usage and independent verifier evidence.
+- Done locally: SLO SQL fixture suite and gate writers exist.
+- Done locally: trust promotion is bounded to known usage and independent
+  verifier evidence.
+- Not production-proven: live trust promotion from production workflow outcomes.
 
 P1.3 - canary DB authority:
 
-- Enable one low-risk workflow in `db_authority_canary`.
-- Crash-test every external boundary.
-- Run rollback drill and projection regeneration.
+- Done locally/synthetically: one low-risk synthetic `db_authority_canary`
+  artifact writer, rollback drill, crash-after-prepare fixture, and projection
+  regeneration checks.
+- Not production-proven: no live external boundary or production workflow canary
+  has been cut over.
 
 P2 - per-workflow expansion:
 
-- Drain file-authority runs per workflow.
-- Cut over workflow by workflow.
-- Keep R3/R4 human-required.
-- Move to steady DB authority only after every cutover and rollback fixture passes.
+- Done locally/synthetically: one controlled low-risk expansion path for
+  `local-artifact-canary`, with R3/R4 kept human-required.
+- Remaining production work: drain file-authority runs per workflow, cut over
+  workflow by workflow, and move to steady DB authority only after every real
+  cutover and rollback fixture passes.
 
 ## Factual Conclusion
 
-This document is a corrected design artifact. It applies the two mandatory Round 1 remediation proposals, the two mandatory Round 2 review closures, the mandatory Round 3 AI review remediation, the mandatory Round 4 High closures, the mandatory Round 5 High closures reopened to fix SQLite type-affinity coercion, the Round 6 Critical/High failure closures, the Round 8 Critical/High corrective closures, and the Round 10 High corrective closures. The hidden prerequisites are explicit: external runtime metadata with exact raw-JSON/normalized/local `sessions_spawn` proof, concrete spawn-request binding, accepted session identity and sessions same-row binding, endpoint-bound selected provider/model budget binding, exact strict reserve-before-`sessions_spawn` authority, authoritative bounded budget ledger with guarded counter caches and retry plus human-attention event-type dimensional closure, valid zero-reserve policy minima, type-preserving `STRICT`/`ANY` numeric storage, fixed-scale microusd money, safe predicate substrate, compatibility migration, concrete DDL/SLO contracts, exact approvals with non-NULL run/gate/transition binding and per-gate trusted epoch-millisecond snapshot equality, bound independent verifier gates, and VCS/privacy preflight.
+This document is a corrected design artifact. It applies the two mandatory Round 1 remediation proposals, the two mandatory Round 2 review closures, the mandatory Round 3 AI review remediation, the mandatory Round 4 High closures, the mandatory Round 5 High closures reopened to fix SQLite type-affinity coercion, the Round 6 Critical/High failure closures, the Round 8 Critical/High corrective closures, and the Round 10 High corrective closures. The repository now also contains bounded local/synthetic implementations and tests for privacy preflight, packaging denylist, migration/package parity, file-authority shadow, dual-write shadow, synthetic canary and controlled expansion, metadata dispatch/reconciliation probes, budgets, predicates, approvals, gates, SLO audits, goal runs, and trust binding.
 
-No P0/P1 runtime implementation is claimed complete. Current OpenClaw is below the external metadata contract. DB creation and canary authority must remain blocked until `git check-ignore`, packaging denylist, schema, SLO, raw-JSON/normalized/local metadata exact-match, accepted session identity, sessions same-row binding, strict prior-reserve spawn ordering, endpoint-bound selected-model budget, ledger reconciliation including retry, `consume` human-attention, and pure human-attention fixtures, zero-reserve policy, fixed-point numeric and SQLite type-preservation H1-H4 fixtures, predicate, exact approval run/gate/transition plus per-gate clock approval-expiry and snapshot-freshness fixtures, bound verifier independence, crash, parity, and rollback fixtures exist and pass.
+Those implementations do not prove production behavior. Current OpenClaw is below the external metadata contract until exact live tool capability and metadata preflights pass. There is no production Agentic OS daemon, no production Agentic OS control database, and no production session authority. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`; DB-authority canary and steady authority must stay blocked for production until live metadata proof, workflow drain, crash fixtures, parity, rollback, and production smoke tests pass.
 
-Production behavior proven: not yet. Design status: Round 11 corrective revision applied; fresh independent revalidation required.
+Production behavior proven: not yet. Local/synthetic fixture behavior proven: bounded slices only. Design status: Round 11 corrective revision applied; fresh independent revalidation required.
