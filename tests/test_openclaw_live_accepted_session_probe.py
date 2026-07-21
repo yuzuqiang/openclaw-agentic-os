@@ -61,11 +61,30 @@ def acquire_owner(**overrides):
 
 
 def status_lease(gateway_lease_id="lease-unit", **overrides):
-    return {**acquire_owner(), "gateway_lease_id": gateway_lease_id, **overrides}
+    values = {**acquire_owner(), "gateway_lease_id": gateway_lease_id, **overrides}
+    return {**values, **metadata_contract(values)}
 
 
 def release_response(params, *, released=True, **overrides):
-    return {"released": released, **dict(params), **overrides}
+    values = {**dict(params), **overrides}
+    return {"released": released, **values, **metadata_contract(values)}
+
+
+def metadata_contract(values):
+    return {
+        "metadata": {
+            "metadata_contract_version": "v1",
+            "external_metadata": dict(values),
+            "raw_metadata_json": json.dumps(
+                dict(values), sort_keys=True, separators=(",", ":")
+            ),
+        }
+    }
+
+
+def lease_acquire_response(gateway_lease_id="lease-unit", **overrides):
+    values = {**acquire_owner(), "gateway_lease_id": gateway_lease_id, **overrides}
+    return {"gateway_lease_id": gateway_lease_id, **metadata_contract(values)}
 
 
 def spawn_response(params, *, session_key="session-unit"):
@@ -171,7 +190,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -208,7 +227,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
                 if acquire_calls == 1:
-                    return {"gateway_lease_id": "lease-unit"}
+                    return lease_acquire_response()
                 raise RuntimeError("duplicate acquire timed out")
             if method == "subagents.allowLease.release":
                 return release_response(params)
@@ -233,11 +252,55 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             ],
         )
 
+    def test_first_acquire_timeout_is_not_reported_as_cleanup_not_required(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                raise RuntimeError("first acquire timed out")
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertFalse(payload["lease_acquired"])
+        self.assertTrue(payload["allow_lease_acquire_outcome_unknown"])
+        self.assertFalse(payload["released"])
+        self.assertIn("no lease identity available", payload["release_error"])
+
+    def test_first_acquire_must_expose_raw_allow_lease_metadata(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {"gateway_lease_id": "lease-unit"}
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("acquire proof did not expose raw allowLease metadata", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit"])
+        self.assertTrue(payload["released"])
+
     def test_acquired_lease_aliases_are_recorded_for_cleanup(self) -> None:
         module = load_probe_module()
+        metadata = metadata_contract({**acquire_owner(), "gateway_lease_id": "lease-unit"})
         for acquire_response in (
-            {"external_id": "lease-unit"},
-            {"lease": {"lease_id": "lease-unit"}},
+            {"external_id": "lease-unit", **metadata},
+            {"lease": {"lease_id": "lease-unit", **metadata}},
         ):
             with self.subTest(acquire_response=acquire_response):
                 released_ids: list[str] = []
@@ -275,11 +338,9 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             nonlocal acquire_calls
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
-                return {
-                    "gateway_lease_id": "lease-unit"
-                    if acquire_calls == 1
-                    else "lease-duplicate"
-                }
+                return lease_acquire_response(
+                    "lease-unit" if acquire_calls == 1 else "lease-duplicate"
+                )
             if method == "subagents.allowLease.release":
                 released_ids.append(params["gateway_lease_id"])
                 return release_response(params)
@@ -305,11 +366,9 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             nonlocal acquire_calls
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
-                return {
-                    "gateway_lease_id": "lease-unit"
-                    if acquire_calls == 1
-                    else "lease-duplicate"
-                }
+                return lease_acquire_response(
+                    "lease-unit" if acquire_calls == 1 else "lease-duplicate"
+                )
             if method == "subagents.allowLease.release":
                 released_ids.append(params["gateway_lease_id"])
                 if params["gateway_lease_id"] == "lease-unit":
@@ -333,7 +392,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [{"gateway_lease_id": "other-lease"}]}
             if method == "subagents.allowLease.release":
@@ -355,7 +414,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease(run_id="other-run")]}
             if method == "subagents.allowLease.release":
@@ -369,7 +428,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
-        self.assertIn("status proof did not echo expected metadata", payload["error"])
+        self.assertIn("raw allowLease metadata contract invalid", payload["error"])
         self.assertEqual(payload["released"], True)
 
     def test_status_metadata_must_belong_to_observed_lease_object(self) -> None:
@@ -377,7 +436,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {
                     "request_echo": status_lease(),
@@ -394,7 +453,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
-        self.assertIn("status proof did not echo expected metadata", payload["error"])
+        self.assertIn("did not expose raw allowLease metadata", payload["error"])
         self.assertEqual(payload["released"], True)
 
     def test_duplicate_acquire_must_report_lease_identity(self) -> None:
@@ -406,7 +465,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 acquire_calls += 1
                 if acquire_calls == 1:
-                    return {"gateway_lease_id": "lease-unit"}
+                    return lease_acquire_response()
                 return {"status": "already_acquired"}
             if method == "subagents.allowLease.release":
                 return release_response(params)
@@ -427,7 +486,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -449,7 +508,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -465,7 +524,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "lease_release_failed")
         self.assertFalse(payload["released"])
         self.assertIn(
-            "release proof did not echo expected metadata",
+            "raw allowLease metadata contract invalid",
             payload["release_error"],
         )
 
@@ -474,7 +533,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -496,7 +555,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "lease_release_failed")
         self.assertFalse(payload["released"])
         self.assertIn(
-            "release proof did not echo expected metadata",
+            "did not expose raw allowLease metadata",
             payload["release_error"],
         )
 
@@ -505,7 +564,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -534,7 +593,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             nonlocal spawn_calls
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -577,7 +636,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             calls.append((method, dict(params)))
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -624,7 +683,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -649,7 +708,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -683,7 +742,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -714,7 +773,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -746,7 +805,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -780,7 +839,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
             if method == "subagents.allowLease.acquire":
-                return {"gateway_lease_id": "lease-unit"}
+                return lease_acquire_response()
             if method == "subagents.allowLease.status":
                 return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
@@ -824,7 +883,8 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertFalse(payload["spawn_attempted"])
         self.assertFalse(payload["lease_acquired"])
-        self.assertEqual(payload["released"], "not_required")
+        self.assertEqual(payload["released"], False)
+        self.assertIn("no lease identity available", payload["release_error"])
         self.assertIn("openclaw missing", payload["error"])
 
 

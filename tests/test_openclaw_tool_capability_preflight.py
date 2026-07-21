@@ -91,6 +91,48 @@ VALID_CATALOG = {
 }
 
 
+ACTIVE_TOOL_IDS = [
+    "subagents.allowLease.acquire",
+    "subagents.allowLease.status",
+    "subagents.allowLease.release",
+    "sessions_spawn",
+    "sessions_list",
+    "sessions_history",
+    "sessions_status",
+]
+
+
+def add_fake_openclaw_to_env(env, directory, *, active_tool_ids=None):
+    bin_dir = os.path.join(directory, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    executable = os.path.join(bin_dir, "openclaw")
+    catalog = {
+        "groups": [
+            {
+                "id": "unit",
+                "tools": [
+                    {"id": tool_id, "label": tool_id}
+                    for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)
+                ],
+            }
+        ]
+    }
+    with open(executable, "w", encoding="utf-8") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import sys\n"
+            "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+            f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+            "    raise SystemExit(0)\n"
+            "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
+            "raise SystemExit(1)\n"
+        )
+    os.chmod(executable, 0o755)
+    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+    return executable
+
+
 class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
@@ -246,6 +288,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             evidence = os.path.join(directory, "evidence.json")
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, directory)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -318,6 +361,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -377,6 +421,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -435,6 +480,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -492,6 +538,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -543,6 +590,65 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("sessions_spawn", payload["error"])
+        self.assertNotIn(
+            "sessions_spawn", {tool["name"] for tool in payload["catalog"]["tools"]}
+        )
+
+    def test_live_catalog_requires_active_registered_tool_name(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", '
+                    'name: "sessions_history", name: "sessions_status"'
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.ttl_ms },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.gateway_lease_id },"
+                )
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_ids=[
+                    tool_id for tool_id in ACTIVE_TOOL_IDS if tool_id != "sessions_spawn"
+                ],
+            )
             result = subprocess.run(
                 [
                     sys.executable,
@@ -599,6 +705,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -657,6 +764,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -712,6 +820,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -764,6 +873,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             env = dict(os.environ)
             env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
             result = subprocess.run(
                 [
                     sys.executable,

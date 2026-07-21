@@ -9,9 +9,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -481,9 +482,83 @@ def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
     return names, sources
 
 
+def _run_gateway_tools_catalog(timeout_ms: int = 10_000) -> dict[str, Any]:
+    executable = shutil.which("openclaw")
+    if not executable:
+        raise AdapterContractError("openclaw executable was not found on PATH")
+    try:
+        proc = subprocess.run(
+            [
+                executable,
+                "gateway",
+                "call",
+                "tools.catalog",
+                "--json",
+                "--timeout",
+                str(timeout_ms),
+                "--params",
+                "{}",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(5, timeout_ms // 1000 + 5),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AdapterContractError(f"active OpenClaw tool catalog unavailable: {exc}") from exc
+    try:
+        payload = json.loads((proc.stdout or "").strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise AdapterContractError("active OpenClaw tool catalog returned non-JSON output") from exc
+    if proc.returncode != 0:
+        detail = payload.get("error") if isinstance(payload, Mapping) else None
+        raise AdapterContractError(f"active OpenClaw tool catalog failed: {detail or proc.stderr}")
+    if not isinstance(payload, dict):
+        raise AdapterContractError("active OpenClaw tool catalog must be a JSON object")
+    return payload
+
+
+def _active_tool_names(catalog: Mapping[str, Any]) -> set[str]:
+    names: set[str] = set()
+    groups = catalog.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            tools = group.get("tools")
+            if not isinstance(tools, list):
+                continue
+            for tool in tools:
+                if not isinstance(tool, Mapping):
+                    continue
+                for key in ("id", "name", "label"):
+                    value = tool.get(key)
+                    if isinstance(value, str) and value in LIVE_TOOL_NAMES:
+                        names.add(value)
+    tools = catalog.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, Mapping):
+                continue
+            for key in ("id", "name", "method"):
+                value = tool.get(key)
+                if isinstance(value, str) and value in LIVE_TOOL_NAMES:
+                    names.add(value)
+    elif isinstance(tools, Mapping):
+        for name in tools:
+            if isinstance(name, str) and name in LIVE_TOOL_NAMES:
+                names.add(name)
+    return names
+
+
 def live_installed_openclaw_catalog() -> dict[str, Any]:
     root = _resolve_install_root()
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    active_catalog = _run_gateway_tools_catalog()
+    active_names = _active_tool_names(active_catalog)
+    if not active_names:
+        raise AdapterContractError("active OpenClaw tool catalog did not expose required tools")
     model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
     gateway_params, gateway_sources = _extract_gateway_method_params(root)
     declared_names, declaration_sources = _declared_core_names(root)
@@ -492,6 +567,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         params = set()
         source_kind = "absent"
         declared = name in declared_names
+        active = name in active_names
         if name in gateway_params:
             params.update(gateway_params[name])
             source_kind = "gateway_server_method_params"
@@ -499,9 +575,9 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
             params.update(model_tool_params[name])
             if source_kind == "absent":
                 source_kind = "model_tool_schema"
-        if declared and source_kind == "absent":
+        if declared and active and source_kind == "absent":
             source_kind = "declared_tool_name"
-        if declared or name in gateway_params:
+        if active and (declared or name in gateway_params):
             tools.append(
                 {
                     "name": name,
@@ -516,6 +592,13 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         "openclaw_package_name": package.get("name"),
         "install_root_basename": root.name,
         "install_root_path_sha256": _path_digest(root),
+        "active_catalog": {
+            "method": "tools.catalog",
+            "raw_response_sha256": hashlib.sha256(
+                json.dumps(active_catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "required_tool_names": sorted(active_names),
+        },
         "sources": [_source_record(root, path) for path in source_paths],
         "tools": tools,
     }

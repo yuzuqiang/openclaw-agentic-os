@@ -26,6 +26,8 @@ import agentic_os  # noqa: E402
 from agentic_os.openclaw_adapter import AdapterContractError  # noqa: E402
 from agentic_os.metadata import (  # noqa: E402
     MetadataContractError,
+    validate_allow_lease_observation,
+    validate_allow_lease_release_observation,
     validate_accepted_lease_identity,
     validate_accepted_session_identity,
     validate_session_observation,
@@ -217,6 +219,58 @@ def _require_expected_metadata_from_paths(
     raise MetadataContractError(f"{label} did not echo expected metadata: {missing}")
 
 
+def _validate_allow_lease_raw_metadata(
+    payload: Mapping[str, Any],
+    *,
+    expected_metadata: Mapping[str, Any],
+    release: bool,
+    label: str,
+) -> dict[str, Any]:
+    payload_map = dict(payload)
+    metadata_container = _mapping_path(payload_map, ("metadata",)) or _mapping_path(
+        payload_map, ("metadata_echo",)
+    )
+    if metadata_container is None:
+        nested_lease = _mapping_path(payload_map, ("lease",))
+        if nested_lease is not None:
+            nested_map = dict(nested_lease)
+            metadata_container = _mapping_path(nested_map, ("metadata",)) or _mapping_path(
+                nested_map, ("metadata_echo",)
+            )
+    if metadata_container is None:
+        raise MetadataContractError(f"{label} did not expose raw allowLease metadata")
+    normalized = (
+        metadata_container.get("normalized")
+        or metadata_container.get("normalized_metadata")
+        or metadata_container.get("external_metadata")
+    )
+    raw_json = metadata_container.get("raw_json") or metadata_container.get(
+        "raw_metadata_json"
+    )
+    version = metadata_container.get("metadata_contract_version") or metadata_container.get(
+        "contract_version"
+    )
+    validator = (
+        validate_allow_lease_release_observation
+        if release
+        else validate_allow_lease_observation
+    )
+    try:
+        observed = validator(
+            local=expected_metadata,
+            normalized=normalized if isinstance(normalized, Mapping) else None,
+            raw_json=raw_json if isinstance(raw_json, str) else None,
+            metadata_contract_version=version if isinstance(version, str) else None,
+        )
+    except MetadataContractError as exc:
+        raise MetadataContractError(f"{label} raw allowLease metadata contract invalid: {exc}") from exc
+    return {
+        "metadata_contract_version": version,
+        "normalized_metadata": observed,
+        "raw_metadata_json_sha256": hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
+    }
+
+
 def _validate_status_observes_lease(
     status: dict[str, Any], *, expected_metadata: dict[str, Any]
 ) -> dict[str, Any]:
@@ -231,15 +285,17 @@ def _validate_status_observes_lease(
     for item in candidates:
         mapped = dict(item)
         if _lease_id_from_response(mapped) == expected_gateway_lease_id:
-            owner_metadata = _require_expected_metadata_from_paths(
+            raw_metadata = _validate_allow_lease_raw_metadata(
                 mapped,
-                expected=expected_metadata,
+                expected_metadata=expected_metadata,
                 label="allowLease status proof",
-                paths=((), ("owner_metadata",), ("metadata",), ("lease", "owner_metadata"), ("lease", "metadata")),
+                release=False,
             )
             return {
                 "gateway_lease_id": expected_gateway_lease_id,
-                "owner_metadata": owner_metadata,
+                "metadata_contract_version": raw_metadata["metadata_contract_version"],
+                "normalized_metadata": raw_metadata["normalized_metadata"],
+                "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
                 "raw_response_sha256": _raw_response_sha256(status),
                 "response_top_level_keys": sorted(status),
             }
@@ -454,15 +510,17 @@ def _release_lease(
         duplicate_acquire_lease_id=expected_gateway_lease_id,
     )
     _validate_release_succeeded(proof)
-    owner_metadata = _require_expected_metadata_from_paths(
+    raw_metadata = _validate_allow_lease_raw_metadata(
         proof,
-        expected=expected_metadata,
+        expected_metadata=expected_metadata,
         label="allowLease release proof",
-        paths=((), ("owner_metadata",), ("metadata",), ("lease", "owner_metadata"), ("lease", "metadata")),
+        release=True,
     )
     return {
         "gateway_lease_id": released_gateway_lease_id,
-        "owner_metadata": owner_metadata,
+        "metadata_contract_version": raw_metadata["metadata_contract_version"],
+        "normalized_metadata": raw_metadata["normalized_metadata"],
+        "raw_metadata_json_sha256": raw_metadata["raw_metadata_json_sha256"],
         "raw_response_sha256": _raw_response_sha256(response),
         "response_top_level_keys": sorted(response),
     }
@@ -552,8 +610,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         gateway_lease_id = _lease_id_from_response(first)
         lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
         lease_ids_to_release.append(lease_id)
+        acquire_metadata = _validate_allow_lease_raw_metadata(
+            first,
+            expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
+            release=False,
+            label="allowLease acquire proof",
+        )
         evidence["allow_lease"] = {
             "gateway_lease_id": gateway_lease_id,
+            "metadata_contract_version": acquire_metadata["metadata_contract_version"],
+            "normalized_metadata": acquire_metadata["normalized_metadata"],
+            "raw_metadata_json_sha256": acquire_metadata["raw_metadata_json_sha256"],
             "raw_acquire_response_sha256": _raw_response_sha256(first),
         }
         evidence["lease_acquired"] = True
@@ -668,6 +735,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "lease_acquired": bool(gateway_lease_id),
             }
         )
+        if "subagents.allowLease.acquire" in evidence["rpc_attempted"] and not lease_ids_to_release:
+            evidence["allow_lease_acquire_outcome_unknown"] = True
         return evidence
     finally:
         if lease_ids_to_release:
@@ -710,7 +779,13 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 evidence["released"] = True
         elif evidence.get("released") is None:
-            evidence["released"] = "not_required"
+            if evidence.get("allow_lease_acquire_outcome_unknown"):
+                evidence["released"] = False
+                evidence["release_error"] = (
+                    "allowLease acquire outcome unknown; no lease identity available for cleanup"
+                )
+            else:
+                evidence["released"] = "not_required"
 
 
 def main(argv: list[str] | None = None) -> int:
