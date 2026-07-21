@@ -20,6 +20,9 @@ def slo_query_hash(sql_text: str) -> str:
 
 _BUDGET_LEDGER_RECONCILES_NAME = "Budget ledger reconciles to counters and budgets"
 _BUDGET_PREFIX_NAME = "Budget prefix over-release or over-restore"
+_STRICT_PRIOR_RESERVE_NAME = (
+    "`sessions_spawn` intent without exact strict prior reserve"
+)
 _BUDGET_LEDGER_RECONCILES_LEGACY_V1_V2_HASH = (
     "229ffe243ba24944c0da458e2d0986ea46de1471025cf95f9604bbe6a4dd9f7b"
 )
@@ -513,6 +516,28 @@ def _runtime_dispatch_binding_contract() -> SloQueryContract:
     )
 
 
+def _legacy_strict_prior_reserve_contracts(
+    contracts: tuple[SloQueryContract, ...],
+) -> tuple[SloQueryContract, ...]:
+    contract = next(
+        item for item in contracts if item.query_name == _STRICT_PRIOR_RESERVE_NAME
+    )
+    selected_transition_clause = (
+        " OR be.transition_id IS NOT rb.selected_reserve_transition_id"
+    )
+    if contract.sql_text.count(selected_transition_clause) != 1:
+        raise RuntimeError("strict prior reserve legacy SLO replacement count changed")
+    return _replace_contract(
+        contracts,
+        SloQueryContract(
+            contract.query_name,
+            contract.sql_text.replace(selected_transition_clause, ""),
+            contract.empty_db_expected_status,
+            contract.fixture_db_expected_status,
+        ),
+    )
+
+
 _SLO_QUERY_CONTRACTS_V3 = _replace_contract(
     _replace_contract(
         SLO_QUERY_CONTRACTS,
@@ -578,6 +603,33 @@ SLO_QUERY_CONTRACTS = _replace_contract(
     SLO_QUERY_CONTRACTS,
     _self_bootstrap_meta_slo_contract(),
 )
+_SLO_QUERY_CONTRACTS_V1_V2 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V1_V2
+)
+_SLO_QUERY_CONTRACTS_V3 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V3
+)
+_SLO_QUERY_CONTRACTS_V4 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V4
+)
+_SLO_QUERY_CONTRACTS_V5 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V5
+)
+_SLO_QUERY_CONTRACTS_V6 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V6
+)
+_SLO_QUERY_CONTRACTS_V7 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V7
+)
+_SLO_QUERY_CONTRACTS_V8_V9 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V8_V9
+)
+_SLO_QUERY_CONTRACTS_V10_V12 = _legacy_strict_prior_reserve_contracts(
+    _SLO_QUERY_CONTRACTS_V10_V12
+)
+_SLO_QUERY_CONTRACTS_V13_V14 = _legacy_strict_prior_reserve_contracts(
+    SLO_QUERY_CONTRACTS
+)
 
 _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     1: _SLO_QUERY_CONTRACTS_V1_V2,
@@ -592,6 +644,8 @@ _SLO_QUERY_CONTRACTS_BY_SCHEMA_VERSION = {
     10: _SLO_QUERY_CONTRACTS_V10_V12,
     11: _SLO_QUERY_CONTRACTS_V10_V12,
     12: _SLO_QUERY_CONTRACTS_V10_V12,
+    13: _SLO_QUERY_CONTRACTS_V13_V14,
+    14: _SLO_QUERY_CONTRACTS_V13_V14,
 }
 
 
