@@ -6,20 +6,34 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 
 The initial design artifact passed dual independent design acceptance. The
 current corrected design artifact has **not** yet passed fresh independent
-revalidation, and neither artifact proves production runtime behavior.
+revalidation, and neither artifact proves production runtime behavior. Since
+that design pass, the repository has accumulated bounded local/synthetic
+P0/P1/P2 implementation slices with executable tests; those slices are evidence
+of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `369ba6b4d75ca5b4bce035112f46e2fafe1c0d399b59078efb2c757c303bd267`
+- Current design artifact SHA-256: `7f4075f954853e42274fe9bb7be3904ab6c0e714153728d8c21bcfc3e6b4cad9`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
 - Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
-- Remaining implementation scope: P0/P1 adapters, reconciler, predicate runner integrations, crash fixtures, rollback drills, and production smoke tests
+- Completed bounded slices: privacy preflight, package/retrieval denylist,
+  migration/package parity, file-authority shadow, dual-write shadow, synthetic
+  DB-authority canary and rollback, one controlled synthetic expansion path,
+  read-only predicate evaluation, approval/pass-gate/SLO audit/goal-run/trust
+  binding writers, budget fixture/runtime slices, and injectable metadata
+  dispatch/reconciliation probes.
+- Remaining unproven production scope: live OpenClaw/Gateway/Cron/session RPC
+  metadata contracts, production `control.db` or daemon operation, real
+  end-to-end session authority, workflow cutover drills, production smoke tests,
+  and steady DB-authority operation.
 
 The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
 disabled (`agentic_os.DB_AUTHORITY_ENABLED is False`).
+There is no production Agentic OS daemon, no production Agentic OS control
+database, and no production session authority in this repository state.
 
 ## Foundation commands
 
@@ -367,8 +381,9 @@ another dispatch's lease on the same run/transition. Unknown or pending spawn
 reconciliation also requires the bound allowLease acquire intent to be accepted
 or reconciled into the exact acquired local lease with a non-empty Gateway lease
 identity; otherwise the spawn is moved to human review even when `sessions_list`
-contains matching session metadata. Session-tool catalog preflight fails closed
-unless `sessions_spawn` declares the caller `metadata` parameter as well as
+contains matching session metadata. Runtime tool catalog preflight fails closed
+unless allowLease acquire/status/release are present with owner metadata and
+`sessions_spawn` declares the caller `metadata` parameter as well as
 `client_request_id` and `idempotency_key`; history-backed result responses must
 match the requested session at the top level and in any history item identity
 they expose. Live run/phase/agent arbitration occurs in the initial intent
@@ -398,6 +413,9 @@ immutable `slo_queries` registry drift.
 - `main` contains reviewed project state.
 - Implementation work should use focused branches and pull requests.
 - Every PR must wait for a completed GitHub Codex review; any P0/P1 finding blocks merge.
+- The required non-vacuous GitHub Actions check identity is `agentic-os-ci`,
+  pinned in `.github/agentic-os-ci-contract.json` and covered by
+  `tests/test_ci_contract.py`.
 - After Codex is clean for the exact current head, the watcher may auto-merge
   only after CAS-checking the reviewed SHA, required checks, and merge state;
   head changes, missing checks, or ambiguous review state fail closed.

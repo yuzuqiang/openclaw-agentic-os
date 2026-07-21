@@ -59,6 +59,39 @@ _REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
 }
 
+_REQUIRED_ALLOW_LEASE_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
+    "subagents.allowLease.acquire": frozenset(
+        (
+            "client_lease_id",
+            "idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "ttl_ms",
+        )
+    ),
+    "subagents.allowLease.status": frozenset(),
+    "subagents.allowLease.release": frozenset(
+        (
+            "client_lease_id",
+            "idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "gateway_lease_id",
+        )
+    ),
+}
+
+_REQUIRED_RUNTIME_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
+    **_REQUIRED_ALLOW_LEASE_TOOL_PARAMS,
+    **_REQUIRED_SESSION_TOOL_PARAMS,
+}
+
 
 def _json_object(value: Mapping[str, Any]) -> str:
     try:
@@ -131,7 +164,7 @@ def _tool_entries(catalog: Mapping[str, Any]) -> Mapping[str, frozenset[str]]:
             entry = _mapping(item, "runtime tool catalog entry")
             name = _tool_name(entry)
             if name is not None:
-                if name in entries and name in _REQUIRED_SESSION_TOOL_PARAMS:
+                if name in entries and name in _REQUIRED_RUNTIME_TOOL_PARAMS:
                     raise AdapterContractError(
                         f"runtime tool catalog has duplicate {name} entries"
                     )
@@ -143,8 +176,20 @@ def _tool_entries(catalog: Mapping[str, Any]) -> Mapping[str, frozenset[str]]:
 def assert_installed_session_tools(catalog: Mapping[str, Any]) -> None:
     """Fail closed unless the runtime exposes the session tools this adapter calls."""
 
+    _assert_installed_tools(catalog, _REQUIRED_SESSION_TOOL_PARAMS)
+
+
+def assert_installed_runtime_tools(catalog: Mapping[str, Any]) -> None:
+    """Fail closed unless the runtime exposes all dispatch tools this adapter calls."""
+
+    _assert_installed_tools(catalog, _REQUIRED_RUNTIME_TOOL_PARAMS)
+
+
+def _assert_installed_tools(
+    catalog: Mapping[str, Any], required_tools: Mapping[str, frozenset[str]]
+) -> None:
     entries = _tool_entries(catalog)
-    for method, required_params in _REQUIRED_SESSION_TOOL_PARAMS.items():
+    for method, required_params in required_tools.items():
         if method not in entries:
             raise AdapterContractError(f"runtime tool catalog is missing {method}")
         missing_params = sorted(required_params - entries[method])
@@ -465,7 +510,7 @@ class OpenClawAdapter:
     def from_preflighted_catalog(
         cls, transport: OpenClawTransport, catalog: Mapping[str, Any]
     ) -> "OpenClawAdapter":
-        assert_installed_session_tools(catalog)
+        assert_installed_runtime_tools(catalog)
         return cls(transport)
 
     def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:

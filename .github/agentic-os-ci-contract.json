@@ -1,0 +1,39 @@
+{
+  "required_check": {
+    "workflow_name": "agentic-os-ci",
+    "job_id": "agentic-os-ci",
+    "job_name": "agentic-os-ci"
+  },
+  "triggers": {
+    "pull_request": true,
+    "push_branches": [
+      "main"
+    ]
+  },
+  "required_steps": [
+    {
+      "name": "Privacy preflight",
+      "command": "PYTHONPATH=src python -m agentic_os.cli preflight"
+    },
+    {
+      "name": "Full unittest discovery",
+      "command": "PYTHONPATH=src python -m unittest discover -s tests -v"
+    },
+    {
+      "name": "Compile Python sources",
+      "command": "PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q src tests"
+    },
+    {
+      "name": "Migration/package parity",
+      "command": "PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v"
+    },
+    {
+      "name": "Whitespace diff check",
+      "command": "git diff --check \"${{ github.event_name == 'pull_request' && format('origin/{0}...HEAD', github.base_ref) || format('{0}..{1}', github.event.before, github.sha) }}\""
+    },
+    {
+      "name": "Post-test tracked cleanliness",
+      "command": "test -z \"$(git status --short)\""
+    }
+  ]
+}
