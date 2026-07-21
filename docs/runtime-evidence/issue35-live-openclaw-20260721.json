@@ -32,37 +32,25 @@
     ],
     "tools": [
       {
+        "active_parameters": [],
         "name": "sessions_spawn",
-        "parameters": [
-          "agentId",
-          "attachAs",
-          "attachments",
-          "cleanup",
-          "context",
-          "cwd",
-          "label",
-          "lightContext",
-          "mode",
-          "model",
-          "runtime",
-          "sandbox",
-          "task",
-          "taskName",
-          "thinking"
-        ],
+        "parameters": [],
         "schema_source": "model_tool_schema"
       },
       {
+        "active_parameters": [],
         "name": "sessions_list",
         "parameters": [],
         "schema_source": "declared_tool_name"
       },
       {
+        "active_parameters": [],
         "name": "sessions_history",
         "parameters": [],
         "schema_source": "declared_tool_name"
       },
       {
+        "active_parameters": [],
         "name": "session_status",
         "parameters": [],
         "schema_source": "declared_tool_name"

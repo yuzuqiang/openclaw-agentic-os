@@ -48,6 +48,11 @@ def _write_evidence(path: str | None, payload: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _stream_sha256(value: str) -> dict[str, Any]:
+    encoded = value.encode("utf-8", errors="replace")
+    return {"bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
 def _run_json(cmd: list[str], *, timeout: int) -> tuple[int, dict[str, Any]]:
     try:
         proc = subprocess.run(
@@ -67,17 +72,26 @@ def _run_json(cmd: list[str], *, timeout: int) -> tuple[int, dict[str, Any]]:
         payload = {
             "status": "error",
             "error": "command returned non-JSON output",
-            "stdout_prefix": (proc.stdout or "")[:500],
+            "stdout_sha256": _stream_sha256(proc.stdout or ""),
         }
     if not isinstance(payload, dict):
         payload = {
             "status": "error",
             "error": "command returned non-object JSON output",
             "json_type": type(payload).__name__,
-            "stdout_prefix": (proc.stdout or "")[:500],
+            "stdout_sha256": _stream_sha256(proc.stdout or ""),
         }
     if proc.returncode != 0 and "error" not in payload:
-        payload["error"] = (proc.stderr or proc.stdout or "command failed").strip()
+        reported_status = payload.get("status")
+        payload = {
+            "status": "error",
+            "error": "command failed without structured error",
+            "returncode": proc.returncode,
+            "stdout_sha256": _stream_sha256(proc.stdout or ""),
+            "stderr_sha256": _stream_sha256(proc.stderr or ""),
+        }
+        if isinstance(reported_status, str):
+            payload["reported_status"] = reported_status
     return proc.returncode, payload
 
 
@@ -161,14 +175,17 @@ def _path_sha256(path: Path) -> str:
 
 def _candidate_roots_for_executable(executable: Path) -> list[Path]:
     resolved = executable.resolve()
-    return [
-        candidate
-        for parent in (resolved.parent, *resolved.parents)
-        for candidate in (
-            parent / "lib" / "node_modules" / "openclaw",
-            parent / "node_modules" / "openclaw",
+    candidates: list[Path] = []
+    for parent in (resolved.parent, *resolved.parents):
+        candidates.extend(
+            (
+                parent / "lib" / "node_modules" / "openclaw",
+                parent / "node_modules" / "openclaw",
+            )
         )
-    ]
+        if parent.name == "openclaw":
+            candidates.append(parent)
+    return candidates
 
 
 def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
@@ -215,7 +232,6 @@ def _lease_id_from_response(response: dict[str, Any]) -> str | None:
         ("output", "lease", "external_id"),
         ("output", "lease", "lease_id"),
         ("leaseId",),
-        ("id",),
         label="gateway lease identity",
     )
 
@@ -242,7 +258,6 @@ def _lease_ids_from_response(response: Mapping[str, Any]) -> list[str]:
         ("output", "lease", "external_id"),
         ("output", "lease", "lease_id"),
         ("leaseId",),
-        ("id",),
     )
 
 
@@ -395,9 +410,15 @@ def _validate_status_observes_lease(
     for item in candidates:
         mapped = dict(item)
         candidate_lease_ids = _lease_ids_from_response(mapped)
-        if (
-            any(candidate != expected_gateway_lease_id for candidate in candidate_lease_ids)
-            and _allow_lease_owner_metadata_matches(mapped, expected_metadata=expected_metadata)
+        owner_metadata_matches = _allow_lease_owner_metadata_matches(
+            mapped, expected_metadata=expected_metadata
+        )
+        if owner_metadata_matches and not candidate_lease_ids:
+            raise MetadataContractError(
+                "allowLease status observed duplicate owner metadata without lease identity"
+            )
+        if owner_metadata_matches and any(
+            candidate != expected_gateway_lease_id for candidate in candidate_lease_ids
         ):
             for candidate in candidate_lease_ids:
                 if candidate != expected_gateway_lease_id:
@@ -461,6 +482,10 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
             ("externalId",),
             ("session", "external_id"),
             ("session", "externalId"),
+            ("result", "external_id"),
+            ("result", "externalId"),
+            ("result", "session", "external_id"),
+            ("result", "session", "externalId"),
             ("output", "external_id"),
             ("output", "externalId"),
             ("output", "session", "external_id"),
@@ -477,6 +502,14 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
             ("session", "spawnRequestSessionKey"),
             ("session", "request_session_key"),
             ("session", "requestSessionKey"),
+            ("result", "spawn_request_session_key"),
+            ("result", "spawnRequestSessionKey"),
+            ("result", "request_session_key"),
+            ("result", "requestSessionKey"),
+            ("result", "session", "spawn_request_session_key"),
+            ("result", "session", "spawnRequestSessionKey"),
+            ("result", "session", "request_session_key"),
+            ("result", "session", "requestSessionKey"),
             ("output", "spawn_request_session_key"),
             ("output", "spawnRequestSessionKey"),
             ("output", "request_session_key"),
@@ -494,6 +527,11 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
             ("session", "session_key"),
             ("session", "sessionKey"),
             ("session", "key"),
+            ("result", "session_key"),
+            ("result", "sessionKey"),
+            ("result", "session", "session_key"),
+            ("result", "session", "sessionKey"),
+            ("result", "session", "key"),
             ("output", "session_key"),
             ("output", "sessionKey"),
             ("output", "session", "session_key"),
@@ -531,6 +569,8 @@ def _session_spawn_once(
         paths=(
             ("session", "metadata"),
             ("session", "metadata_echo"),
+            ("result", "session", "metadata"),
+            ("result", "session", "metadata_echo"),
             ("output", "session", "metadata"),
             ("output", "session", "metadata_echo"),
         ),
@@ -559,7 +599,7 @@ def _validate_session_raw_metadata(
     expected_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     candidates: list[Mapping[str, Any]] = []
-    for path in (("session",), ("output", "session")):
+    for path in (("session",), ("result", "session"), ("output", "session")):
         item = _mapping_path(response, path)
         if item is not None:
             candidates.append(item)

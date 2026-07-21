@@ -107,6 +107,33 @@ def spawn_response(params, *, session_key="session-unit"):
 
 
 class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
+    def test_package_root_executable_matches_preflight_install_root(self) -> None:
+        module = load_probe_module()
+        with tempfile.TemporaryDirectory() as directory:
+            package_root = Path(directory) / "openclaw"
+            executable = package_root / "bin" / "openclaw"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+
+            candidate_shas = {
+                module._path_sha256(candidate)
+                for candidate in module._candidate_roots_for_executable(executable)
+                if candidate.exists()
+            }
+
+        self.assertIn(module._path_sha256(package_root), candidate_shas)
+
+    def test_top_level_response_id_is_not_a_gateway_lease_alias(self) -> None:
+        module = load_probe_module()
+        response = {
+            "gateway_lease_id": "lease-unit",
+            "id": "transport-correlation-id",
+        }
+
+        self.assertEqual(module._lease_id_from_response(response), "lease-unit")
+        self.assertEqual(module._lease_ids_from_response(response), ["lease-unit"])
+
     def test_preflight_failure_fails_closed_before_any_rpc(self) -> None:
         module = load_probe_module()
         with mock.patch.object(
@@ -522,6 +549,34 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-extra"])
         self.assertEqual(payload["released"], True)
 
+    def test_status_rejects_duplicate_owner_metadata_without_lease_identity(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return lease_acquire_response()
+            if method == "subagents.allowLease.status":
+                duplicate_owner_without_identity = {
+                    **metadata_contract(acquire_owner()),
+                }
+                return {"leases": [status_lease(), duplicate_owner_without_identity]}
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("duplicate owner metadata without lease identity", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit"])
+        self.assertEqual(payload["released"], True)
+
     def test_status_must_echo_owner_metadata_for_acquired_lease(self) -> None:
         module = load_probe_module()
 
@@ -791,6 +846,35 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             ],
         )
 
+    def test_result_wrapped_session_spawn_response_is_accepted(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return lease_acquire_response()
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease()]}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            if method == "sessions_spawn":
+                return {"result": spawn_response(params)}
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args(execute_session_spawn=True))
+
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["accepted_session_identity"], "session-unit")
+        self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["sessions_spawn_structured_evidence"]["first"]["metadata_echo"][
+                "run_id"
+            ],
+            "issue35-run-unit",
+        )
+
     def test_release_failure_downgrades_otherwise_passing_probe(self) -> None:
         module = load_probe_module()
 
@@ -1003,7 +1087,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_run_json_wraps_non_object_json_without_type_error(self) -> None:
         module = load_probe_module()
         completed = subprocess.CompletedProcess(
-            args=["openclaw"], returncode=1, stdout='["bad"]', stderr=""
+            args=["openclaw"], returncode=1, stdout='["bad-secret"]', stderr=""
         )
         with mock.patch.object(module.subprocess, "run", return_value=completed):
             code, payload = module._run_json(["openclaw"], timeout=1)
@@ -1012,6 +1096,28 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["error"], "command returned non-object JSON output")
         self.assertEqual(payload["json_type"], "list")
+        self.assertIn("stdout_sha256", payload)
+        self.assertNotIn("bad-secret", json.dumps(payload))
+        self.assertNotIn("stdout_prefix", payload)
+
+    def test_run_json_uses_hash_only_error_when_command_lacks_structured_error(self) -> None:
+        module = load_probe_module()
+        completed = subprocess.CompletedProcess(
+            args=["openclaw"],
+            returncode=2,
+            stdout='{"status":"fail","details":"bounded"}',
+            stderr="private-token-like-stderr",
+        )
+        with mock.patch.object(module.subprocess, "run", return_value=completed):
+            code, payload = module._run_json(["openclaw"], timeout=1)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"], "command failed without structured error")
+        self.assertIn("stdout_sha256", payload)
+        self.assertIn("stderr_sha256", payload)
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("private-token-like-stderr", serialized)
+        self.assertNotIn("bounded", serialized)
 
     def test_gateway_call_rejects_non_object_json_success_output(self) -> None:
         module = load_probe_module()
