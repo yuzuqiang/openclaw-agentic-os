@@ -189,15 +189,19 @@ def _assert_installed_tools(
     catalog: Mapping[str, Any], required_tools: Mapping[str, frozenset[str]]
 ) -> None:
     entries = _tool_entries(catalog)
+    errors: list[str] = []
     for method, required_params in required_tools.items():
         if method not in entries:
-            raise AdapterContractError(f"runtime tool catalog is missing {method}")
+            errors.append(f"runtime tool catalog is missing {method}")
+            continue
         missing_params = sorted(required_params - entries[method])
         if missing_params:
             missing = ", ".join(missing_params)
-            raise AdapterContractError(
+            errors.append(
                 f"runtime tool catalog {method} is missing parameters: {missing}"
             )
+    if errors:
+        raise AdapterContractError("; ".join(errors))
 
 
 def _identity_alias(value: Any, label: str) -> str | None:

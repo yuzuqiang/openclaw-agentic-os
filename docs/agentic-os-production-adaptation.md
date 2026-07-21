@@ -27,6 +27,8 @@ Non-goals:
   - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete local-writer SLO PASS audit rows at or after the bound gate clock, append-only SLO evidence events after all runtime SLO inputs, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence with immutable approval hashes, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
 - 2026-07-21: Synced the project truth boundary and added a non-vacuous CI contract:
   - Corrections: README and this document now distinguish completed bounded local/synthetic P0/P1/P2 slices from unproven production behavior. GitHub Actions check identity `agentic-os-ci` is pinned in `.github/agentic-os-ci-contract.json` and tested by `tests/test_ci_contract.py`; the workflow runs privacy preflight, full unittest discovery, compileall with an external cache, migration/package parity coverage, `git diff --check`, and post-test tracked cleanliness. Database authority remains disabled, and no Gateway/Cron/session RPC or production authority change is made.
+- 2026-07-21: Added Issue #35 live runtime evidence and a bounded accepted-session identity probe:
+  - Corrections: `scripts/openclaw-tool-capability-preflight.py` can now build a sanitized installed OpenClaw catalog evidence payload from source-file hashes and fail closed on the exact allowLease/session metadata contract. `scripts/openclaw-live-accepted-session-probe.py` refuses all live Gateway/session calls unless that exact preflight passes, releases any acquired lease in a bounded cleanup path, and validates duplicate accepted lease/session identities when a future compatible runtime is available. The committed 2026.7.1 evidence proves the current runtime still lacks the required owner/idempotency/session metadata, so the live probe stopped before any RPC and `DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-07-12: Applied GitHub Codex review hardening to the P0 foundation:
   - Corrections: privacy preflight now checks the rollback journal sentinel and rejects actual database paths outside the checked worktree; packaging/retrieval denylist rejects SQLite3 and compressed SQLite snapshots; accepted/completed `spawn_requests` require matching accepted external intent identity plus an exact `sessions` row; active DB-authority workflow bindings cannot be rolled back while matching DB-authority runs are open; live Gateway leases cannot be deleted before release proof; `release_not_required` cannot hide an accepted acquire intent with a Gateway lease identity; approval IDs must be non-empty; live lease terminal states require release proof or no external gateway lease; accepted acquire-pending leases with Gateway ownership cannot be deleted or hidden before release proof; zero input/output/cost reserves require enabled zero-reserve policy proof even when retry/time/human-attention units are positive; pass gates and their referenced transitions are immutable; verifier independence proof evidence must be a non-empty JSON object; R2+ completion gates must bind to the finalizing transition.
   - DDL, migration manifest, README evidence status, and adversarial unit tests are updated. Runtime production behavior remains unproven.
@@ -99,6 +101,16 @@ Current-vs-proposed truth:
   Agentic OS control database, production session authority, live
   OpenClaw/Gateway/Cron/session RPC metadata conformance, workflow cutover, or
   steady DB authority. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
+- Issue #35 live evidence narrows that statement: the installed OpenClaw
+  2026.7.1 catalog was captured in sanitized form under
+  `docs/runtime-evidence/issue35-live-openclaw-20260721.json`, and the exact
+  Agentic OS preflight rejected it because allowLease and `sessions_spawn`
+  expose the current OpenClaw names/parameters rather than the required
+  run/idempotency/metadata contract. The accepted-session probe evidence in
+  `docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
+  records `rpc_attempted=[]`, `spawn_attempted=false`, and
+  `released=not_required`; this is fail-closed runtime evidence, not production
+  session authority.
 - Current Issue 7 implementation adds only a synthetic/local
   `db_authority_canary` artifact fixture writer. It records one local R1 canary
   run, proves prepared-DB to artifact-write crash recovery, proves rollback to

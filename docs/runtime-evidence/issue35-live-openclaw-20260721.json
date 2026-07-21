@@ -1,0 +1,109 @@
+{
+  "catalog": {
+    "catalog_kind": "sanitized_installed_openclaw_runtime",
+    "install_root_basename": "openclaw",
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.7.1",
+    "sources": [
+      {
+        "path": "dist/openclaw-tools-CIBcX9Ku.js",
+        "sha256": "a2b93887aa43e263b978edcad73151092631cea74e977358f69c600c7b2f390c"
+      },
+      {
+        "path": "dist/server-methods-C4KugcqZ.js",
+        "sha256": "d597cfe0f30c5fff5b9be54cff0538bebce19e8729375b8d9a741a922ffc3be5"
+      },
+      {
+        "path": "dist/tool-display-DwKu4KFe.js",
+        "sha256": "20dbc10fd42d99f2921e6ce996a3b7f5c536619fa8ac209a3b4282cca2a7a6fb"
+      }
+    ],
+    "tools": [
+      {
+        "name": "subagents.allowLease.acquire",
+        "parameters": [
+          "agentId",
+          "requesterAgentId",
+          "ttlMs"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "name": "subagents.allowLease.status",
+        "parameters": [
+          "requesterAgentId"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "name": "subagents.allowLease.release",
+        "parameters": [
+          "leaseId"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "name": "sessions_spawn",
+        "parameters": [
+          "agentId",
+          "attachAs",
+          "attachments",
+          "cleanup",
+          "content",
+          "context",
+          "cwd",
+          "encoding",
+          "label",
+          "lightContext",
+          "mimeType",
+          "mode",
+          "model",
+          "name",
+          "resumeSessionId",
+          "runTimeoutSeconds",
+          "runtime",
+          "sandbox",
+          "streamTo",
+          "task",
+          "taskName",
+          "thinking"
+        ],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "name": "sessions_list",
+        "parameters": [
+          "activeMinutes",
+          "agentId",
+          "includeDerivedTitles",
+          "includeLastMessage",
+          "kinds",
+          "label",
+          "limit",
+          "messageLimit",
+          "search"
+        ],
+        "schema_source": "display_detail_keys"
+      },
+      {
+        "name": "sessions_history",
+        "parameters": [
+          "includeTools",
+          "limit",
+          "sessionKey"
+        ],
+        "schema_source": "display_detail_keys"
+      },
+      {
+        "name": "session_status",
+        "parameters": [
+          "model",
+          "sessionKey"
+        ],
+        "schema_source": "display_detail_keys"
+      }
+    ]
+  },
+  "error": "runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status",
+  "status": "fail"
+}

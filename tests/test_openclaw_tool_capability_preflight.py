@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from agentic_os.migrations import repository_root
@@ -145,6 +147,117 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("metadata", payload["error"])
+
+    def test_preflight_reports_all_live_contract_gaps(self) -> None:
+        catalog = {
+            "tools": [
+                {
+                    "name": "subagents.allowLease.acquire",
+                    "parameters": ["agentId", "requesterAgentId", "ttlMs"],
+                },
+                {"name": "subagents.allowLease.status", "parameters": ["requesterAgentId"]},
+                {"name": "subagents.allowLease.release", "parameters": ["leaseId"]},
+                {
+                    "name": "sessions_spawn",
+                    "parameters": ["task", "taskName", "agentId", "runtime"],
+                },
+                {"name": "sessions_list", "parameters": []},
+                {"name": "session_status", "parameters": ["sessionKey"]},
+                {
+                    "name": "sessions_history",
+                    "parameters": ["sessionKey", "limit", "includeTools"],
+                },
+            ]
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--catalog-json",
+                json.dumps(catalog),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("client_lease_id", payload["error"])
+        self.assertIn("idempotency_key", payload["error"])
+        self.assertIn("sessions_status", payload["error"])
+        self.assertIn("metadata", payload["error"])
+
+    def test_live_installed_openclaw_catalog_is_sanitized_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            install = tempfile.TemporaryDirectory()
+            self.addCleanup(install.cleanup)
+            install_root = install.name
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "tool-display-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "sessions_spawn:{detailKeys:[`label`,`task`,`agentId`]},"
+                    "sessions_history:{detailKeys:[`sessionKey`,`limit`,`includeTools`]},"
+                    "session_status:{detailKeys:[`sessionKey`,`model`]},"
+                    "sessions_list:{detailKeys:[`limit`]}"
+                )
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(params){\n"
+                    " const schema = {\n"
+                    "  task: Type.String(),\n"
+                    "  taskName: Type.Optional(Type.String()),\n"
+                    "  agentId: Type.Optional(Type.String()),\n"
+                    "  runtime: optionalStringEnum([\"subagent\"]),\n"
+                    " };\n"
+                    " return Type.Object(schema);\n"
+                    "}\n"
+                    "function resolveAcpUnavailableMessage(opts){}\n"
+                    "name: \"sessions_spawn\""
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => { params?.requesterAgentId },'
+                    '"subagents.allowLease.acquire": ({ params }) => { params?.agentId; params?.requesterAgentId; params?.ttlMs },'
+                    '"subagents.allowLease.release": ({ params }) => { params?.leaseId },'
+                )
+            with open(os.path.join(dist, "core-descriptors-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    'name: "subagents.allowLease.status", name: "subagents.allowLease.acquire", '
+                    'name: "subagents.allowLease.release"'
+                )
+            evidence = os.path.join(directory, "evidence.json")
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                    "--write-evidence",
+                    evidence,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
+            self.assertEqual(payload["catalog"]["install_root_basename"], os.path.basename(install_root))
+            self.assertIn("client_lease_id", payload["error"])
+            source_paths = [item["path"] for item in payload["catalog"]["sources"]]
+            self.assertTrue(all(not path.startswith("/") for path in source_paths))
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
 
 
 if __name__ == "__main__":
