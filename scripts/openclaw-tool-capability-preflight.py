@@ -100,7 +100,9 @@ def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
     ]
 
 
-def _strip_js_comments_and_strings(text: str) -> str:
+def _strip_js_comments_and_strings(
+    text: str, *, preserve_property_string_keys: bool = False
+) -> str:
     output: list[str] = []
     index = 0
     quote: str | None = None
@@ -148,6 +150,20 @@ def _strip_js_comments_and_strings(text: str) -> str:
             index += 2
             continue
         if char in {"'", '"', "`"}:
+            parsed = _parse_js_string_literal(text, index)
+            if parsed is not None:
+                _, end = parsed
+                cursor = _skip_js_whitespace(text, end)
+                if (
+                    preserve_property_string_keys
+                    and cursor < len(text)
+                    and text[cursor] == ":"
+                ):
+                    output.append(text[index:end])
+                else:
+                    output.append(" " * (end - index))
+                index = end
+                continue
             quote = char
             output.append(" ")
             index += 1
@@ -370,6 +386,19 @@ def _top_level_schema_keys(object_text: str) -> set[str]:
             index += 1
             continue
         if char in {"'", '"', "`"}:
+            if depth == 1:
+                parsed = _parse_js_string_literal(object_text, index)
+                if parsed is not None:
+                    name, end = parsed
+                    cursor = _skip_js_whitespace(object_text, end)
+                    if (
+                        cursor < len(object_text)
+                        and object_text[cursor] == ":"
+                        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name)
+                    ):
+                        keys.add(name)
+                    index = end
+                    continue
             quote = char
             index += 1
             continue
@@ -417,7 +446,10 @@ def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[P
     sources: list[Path] = []
     candidates: dict[str, list[tuple[Path, set[str]]]] = {}
     for path, text in _read_dist_files(root, "openclaw-tools-*.js"):
-        code_text = _strip_js_comments_and_strings(text)
+        code_text = _strip_js_comments_and_strings(
+            text,
+            preserve_property_string_keys=True,
+        )
         for name, marker in MODEL_TOOL_SCHEMA_MARKERS.items():
             block = _function_block(code_text, marker)
             if block is None:
@@ -482,14 +514,28 @@ def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
     return names, sources
 
 
-def _run_gateway_tools_catalog(timeout_ms: int = 10_000) -> dict[str, Any]:
+def _resolve_openclaw_executable() -> Path:
     executable = shutil.which("openclaw")
     if not executable:
         raise AdapterContractError("openclaw executable was not found on PATH")
+    return Path(executable).resolve()
+
+
+def _require_executable_matches_install_root(root: Path, executable: Path) -> None:
+    resolved_root = root.resolve()
+    try:
+        executable.relative_to(resolved_root)
+    except ValueError as exc:
+        raise AdapterContractError(
+            "OPENCLAW_INSTALL_ROOT does not match the active openclaw executable"
+        ) from exc
+
+
+def _run_gateway_tools_catalog(executable: Path, timeout_ms: int = 10_000) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             [
-                executable,
+                str(executable),
                 "gateway",
                 "call",
                 "tools.catalog",
@@ -532,7 +578,7 @@ def _active_tool_names(catalog: Mapping[str, Any]) -> set[str]:
             for tool in tools:
                 if not isinstance(tool, Mapping):
                     continue
-                for key in ("id", "name", "label"):
+                for key in ("id", "name", "method"):
                     value = tool.get(key)
                     if isinstance(value, str) and value in LIVE_TOOL_NAMES:
                         names.add(value)
@@ -554,8 +600,10 @@ def _active_tool_names(catalog: Mapping[str, Any]) -> set[str]:
 
 def live_installed_openclaw_catalog() -> dict[str, Any]:
     root = _resolve_install_root()
+    executable = _resolve_openclaw_executable()
+    _require_executable_matches_install_root(root, executable)
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    active_catalog = _run_gateway_tools_catalog()
+    active_catalog = _run_gateway_tools_catalog(executable)
     active_names = _active_tool_names(active_catalog)
     if not active_names:
         raise AdapterContractError("active OpenClaw tool catalog did not expose required tools")
@@ -592,6 +640,7 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         "openclaw_package_name": package.get("name"),
         "install_root_basename": root.name,
         "install_root_path_sha256": _path_digest(root),
+        "active_executable_path_sha256": _path_digest(executable),
         "active_catalog": {
             "method": "tools.catalog",
             "raw_response_sha256": hashlib.sha256(

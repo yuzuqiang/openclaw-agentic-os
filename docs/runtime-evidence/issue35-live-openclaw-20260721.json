@@ -10,6 +10,7 @@
         "sessions_spawn"
       ]
     },
+    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
     "catalog_kind": "sanitized_installed_openclaw_runtime",
     "install_root_basename": "openclaw",
     "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
