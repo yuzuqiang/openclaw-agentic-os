@@ -204,6 +204,15 @@ def _read_catalog(args: argparse.Namespace) -> dict[str, Any]:
     return catalog
 
 
+def _write_evidence(path: str | None, payload: dict[str, Any]) -> None:
+    if path is None:
+        return
+    Path(path).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -245,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
             catalog = live_installed_openclaw_catalog()
         except AdapterContractError as exc:
             payload = {"error": str(exc), "status": "fail"}
+            _write_evidence(args.write_evidence, payload)
             print(json.dumps(payload, sort_keys=True))
             return 1
     else:
@@ -257,22 +267,14 @@ def main(argv: list[str] | None = None) -> int:
         payload = {"error": str(exc), "status": "fail"}
         if args.live_installed_openclaw or args.json or args.write_evidence:
             payload["catalog"] = catalog
-        if args.write_evidence:
-            Path(args.write_evidence).write_text(
-                json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+        _write_evidence(args.write_evidence, payload)
         print(json.dumps(payload, sort_keys=True))
         return 1
 
     payload = {"status": "pass"}
     if args.live_installed_openclaw or args.json or args.write_evidence:
         payload["catalog"] = catalog
-    if args.write_evidence:
-        Path(args.write_evidence).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+    _write_evidence(args.write_evidence, payload)
     if args.json:
         print(json.dumps(payload, sort_keys=True))
     else:

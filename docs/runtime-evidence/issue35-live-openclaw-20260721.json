@@ -12,10 +12,6 @@
       {
         "path": "dist/server-methods-C4KugcqZ.js",
         "sha256": "d597cfe0f30c5fff5b9be54cff0538bebce19e8729375b8d9a741a922ffc3be5"
-      },
-      {
-        "path": "dist/tool-display-DwKu4KFe.js",
-        "sha256": "20dbc10fd42d99f2921e6ce996a3b7f5c536619fa8ac209a3b4282cca2a7a6fb"
       }
     ],
     "tools": [
@@ -60,7 +56,6 @@
           "model",
           "name",
           "resumeSessionId",
-          "runTimeoutSeconds",
           "runtime",
           "sandbox",
           "streamTo",
@@ -72,38 +67,21 @@
       },
       {
         "name": "sessions_list",
-        "parameters": [
-          "activeMinutes",
-          "agentId",
-          "includeDerivedTitles",
-          "includeLastMessage",
-          "kinds",
-          "label",
-          "limit",
-          "messageLimit",
-          "search"
-        ],
-        "schema_source": "display_detail_keys"
+        "parameters": [],
+        "schema_source": "absent"
       },
       {
         "name": "sessions_history",
-        "parameters": [
-          "includeTools",
-          "limit",
-          "sessionKey"
-        ],
-        "schema_source": "display_detail_keys"
+        "parameters": [],
+        "schema_source": "absent"
       },
       {
         "name": "session_status",
-        "parameters": [
-          "model",
-          "sessionKey"
-        ],
-        "schema_source": "display_detail_keys"
+        "parameters": [],
+        "schema_source": "absent"
       }
     ]
   },
-  "error": "runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status",
+  "error": "runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history is missing parameters: includeTools, limit, sessionKey",
   "status": "fail"
 }

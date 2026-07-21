@@ -36,6 +36,40 @@ def args(**overrides):
     return argparse.Namespace(**values)
 
 
+def acquire_owner(**overrides):
+    values = {
+        "client_lease_id": "issue35-unit",
+        "idempotency_key": "issue35-acquire-unit",
+        "run_id": "issue35-run-unit",
+        "phase": "B",
+        "transition_id": "issue35-transition-unit",
+        "agent_id": "technical-writer",
+        "requester_agent_id": "main",
+        "ttl_ms": 60_000,
+    }
+    values.update(overrides)
+    return values
+
+
+def status_lease(gateway_lease_id="lease-unit", **overrides):
+    return {**acquire_owner(), "gateway_lease_id": gateway_lease_id, **overrides}
+
+
+def release_response(params, *, released=True, **overrides):
+    return {"released": released, **dict(params), **overrides}
+
+
+def spawn_response(params, *, session_key="session-unit"):
+    return {
+        "session": {
+            "session_key": session_key,
+            "spawn_request_session_key": session_key,
+        },
+        "external_id": session_key,
+        "metadata_echo": dict(params["metadata"]),
+    }
+
+
 class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
     def test_preflight_failure_fails_closed_before_any_rpc(self) -> None:
         module = load_probe_module()
@@ -63,12 +97,9 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
-                return {"leases": [{"gateway_lease_id": "lease-unit"}]}
+                return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
-                return {
-                    "released": True,
-                    "gateway_lease_id": params["gateway_lease_id"],
-                }
+                return release_response(params)
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -104,7 +135,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
                     return {"gateway_lease_id": "lease-unit"}
                 raise RuntimeError("duplicate acquire timed out")
             if method == "subagents.allowLease.release":
-                return {"released": True, "gateway_lease_id": params["gateway_lease_id"]}
+                return release_response(params)
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -135,7 +166,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.status":
                 return {"leases": [{"gateway_lease_id": "other-lease"}]}
             if method == "subagents.allowLease.release":
-                return {"released": True, "gateway_lease_id": params["gateway_lease_id"]}
+                return release_response(params)
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -148,6 +179,53 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertIn("status did not observe", payload["error"])
         self.assertEqual(payload["released"], True)
 
+    def test_status_must_echo_owner_metadata_for_acquired_lease(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {"gateway_lease_id": "lease-unit"}
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease(run_id="other-run")]}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = module.run_probe(args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("status proof did not echo expected metadata", payload["error"])
+        self.assertEqual(payload["released"], True)
+
+    def test_duplicate_acquire_must_report_lease_identity(self) -> None:
+        module = load_probe_module()
+        acquire_calls = 0
+
+        def fake_gateway(method, params, *, timeout_ms):
+            nonlocal acquire_calls
+            if method == "subagents.allowLease.acquire":
+                acquire_calls += 1
+                if acquire_calls == 1:
+                    return {"gateway_lease_id": "lease-unit"}
+                return {"status": "already_acquired"}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = module.run_probe(args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("duplicate allowLease acquire did not report", payload["error"])
+        self.assertEqual(payload["released"], True)
+
     def test_release_false_fails_closed_even_when_identity_matches(self) -> None:
         module = load_probe_module()
 
@@ -155,9 +233,9 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
-                return {"leases": [{"gateway_lease_id": "lease-unit"}]}
+                return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
-                return {"released": False, "gateway_lease_id": params["gateway_lease_id"]}
+                return release_response(params, released=False)
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -170,6 +248,31 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertFalse(payload["released"])
         self.assertIn("release did not report success", payload["release_error"])
 
+    def test_release_must_echo_owner_metadata(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {"gateway_lease_id": "lease-unit"}
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease()]}
+            if method == "subagents.allowLease.release":
+                return release_response(params, run_id="other-run")
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = module.run_probe(args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "lease_release_failed")
+        self.assertFalse(payload["released"])
+        self.assertIn(
+            "release proof did not echo expected metadata",
+            payload["release_error"],
+        )
+
     def test_spawn_timeout_is_recorded_as_attempted_and_releases_lease(self) -> None:
         module = load_probe_module()
 
@@ -177,9 +280,9 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
-                return {"leases": [{"gateway_lease_id": "lease-unit"}]}
+                return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
-                return {"released": True, "gateway_lease_id": params["gateway_lease_id"]}
+                return release_response(params)
             if method == "sessions_spawn":
                 raise RuntimeError("spawn timed out")
             raise AssertionError(method)
@@ -206,19 +309,13 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
-                return {"leases": [{"gateway_lease_id": "lease-unit"}]}
+                return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
-                return {"released": True, "gateway_lease_id": params["gateway_lease_id"]}
+                return release_response(params)
             if method == "sessions_spawn":
                 session = "session-a" if spawn_calls == 0 else "session-b"
                 spawn_calls += 1
-                return {
-                    "session": {
-                        "session_key": session,
-                        "spawn_request_session_key": session,
-                    },
-                    "external_id": session,
-                }
+                return spawn_response(params, session_key=session)
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -255,18 +352,11 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
-                return {"leases": [{"gateway_lease_id": "lease-unit"}]}
+                return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
-                return {"released": True, "gateway_lease_id": params["gateway_lease_id"]}
+                return release_response(params)
             if method == "sessions_spawn":
-                return {
-                    "session": {
-                        "session_key": "session-unit",
-                        "spawn_request_session_key": "session-unit",
-                    },
-                    "external_id": "session-unit",
-                    "accepted": True,
-                }
+                return {**spawn_response(params), "accepted": True}
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -284,6 +374,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         structured = payload["sessions_spawn_structured_evidence"]
         self.assertEqual(
             structured["first"]["identity"]["session_key"], "session-unit"
+        )
+        self.assertEqual(
+            structured["first"]["metadata_echo"]["run_id"],
+            "issue35-run-unit",
         )
         self.assertIn("raw_response_sha256", structured["first"])
         self.assertEqual(
@@ -305,17 +399,11 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             if method == "subagents.allowLease.acquire":
                 return {"gateway_lease_id": "lease-unit"}
             if method == "subagents.allowLease.status":
-                return {"leases": [{"gateway_lease_id": "lease-unit"}]}
+                return {"leases": [status_lease()]}
             if method == "subagents.allowLease.release":
                 raise RuntimeError("release refused")
             if method == "sessions_spawn":
-                return {
-                    "session": {
-                        "session_key": "session-unit",
-                        "spawn_request_session_key": "session-unit",
-                    },
-                    "external_id": "session-unit",
-                }
+                return spawn_response(params)
             raise AssertionError(method)
 
         with mock.patch.object(
@@ -328,6 +416,40 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertFalse(payload["released"])
         self.assertIn("release refused", payload["release_error"])
         self.assertEqual(payload["accepted_session_identity"], "session-unit")
+
+    def test_spawn_response_must_echo_request_metadata(self) -> None:
+        module = load_probe_module()
+
+        def fake_gateway(method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {"gateway_lease_id": "lease-unit"}
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease()]}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            if method == "sessions_spawn":
+                return {
+                    "session": {
+                        "session_key": "session-unit",
+                        "spawn_request_session_key": "session-unit",
+                    },
+                    "external_id": "session-unit",
+                    "metadata_echo": {**params["metadata"], "run_id": "other-run"},
+                }
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, {"status": "pass"})
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = module.run_probe(args(execute_session_spawn=True))
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn(
+            "sessions_spawn response did not echo expected metadata",
+            payload["error"],
+        )
+        self.assertEqual(payload["released"], True)
 
 
 if __name__ == "__main__":

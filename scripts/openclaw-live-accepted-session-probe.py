@@ -137,13 +137,31 @@ def _iter_mappings(value: Any) -> tuple[Mapping[str, Any], ...]:
     return tuple(found)
 
 
-def _validate_status_observes_lease(
-    status: dict[str, Any], *, expected_gateway_lease_id: str
+def _require_expected_metadata(
+    payload: dict[str, Any], *, expected: dict[str, Any], label: str
 ) -> dict[str, Any]:
+    for item in _iter_mappings(payload):
+        if all(item.get(key) == value for key, value in expected.items()):
+            return {key: item[key] for key in expected}
+    missing = ", ".join(sorted(expected))
+    raise MetadataContractError(f"{label} did not echo expected metadata: {missing}")
+
+
+def _validate_status_observes_lease(
+    status: dict[str, Any], *, expected_metadata: dict[str, Any]
+) -> dict[str, Any]:
+    expected_gateway_lease_id = expected_metadata["gateway_lease_id"]
     for item in _iter_mappings(status):
-        if _lease_id_from_response(dict(item)) == expected_gateway_lease_id:
+        mapped = dict(item)
+        if _lease_id_from_response(mapped) == expected_gateway_lease_id:
+            owner_metadata = _require_expected_metadata(
+                mapped,
+                expected=expected_metadata,
+                label="allowLease status proof",
+            )
             return {
                 "gateway_lease_id": expected_gateway_lease_id,
+                "owner_metadata": owner_metadata,
                 "raw_response_sha256": _raw_response_sha256(status),
                 "response_top_level_keys": sorted(status),
             }
@@ -223,7 +241,11 @@ def _session_identity_from_spawn_response(response: dict[str, Any]) -> dict[str,
 
 
 def _session_spawn_once(
-    spawn_args: dict[str, Any], *, timeout_seconds: int, timeout_ms: int
+    spawn_args: dict[str, Any],
+    *,
+    expected_metadata: dict[str, Any],
+    timeout_seconds: int,
+    timeout_ms: int,
 ) -> dict[str, Any]:
     response = _gateway_call(
         "sessions_spawn",
@@ -236,30 +258,46 @@ def _session_spawn_once(
         spawn_request_session_key=identity["spawn_request_session_key"],
         session_key=identity["session_key"],
     )
+    metadata_echo = _require_expected_metadata(
+        response,
+        expected=expected_metadata,
+        label="sessions_spawn response",
+    )
     return {
         "accepted_session_identity": accepted,
         "identity": identity,
+        "metadata_echo": metadata_echo,
         "raw_response_sha256": _raw_response_sha256(response),
         "response_top_level_keys": sorted(response),
     }
 
 
 def _release_lease(
-    release_params: dict[str, Any], *, expected_gateway_lease_id: str, timeout_ms: int
+    release_params: dict[str, Any],
+    *,
+    expected_metadata: dict[str, Any],
+    timeout_ms: int,
 ) -> dict[str, Any]:
     response = _gateway_call(
         "subagents.allowLease.release",
         release_params,
         timeout_ms=timeout_ms,
     )
+    expected_gateway_lease_id = expected_metadata["gateway_lease_id"]
     released_gateway_lease_id = _lease_id_from_response(response)
     validate_accepted_lease_identity(
         gateway_lease_id=released_gateway_lease_id,
         duplicate_acquire_lease_id=expected_gateway_lease_id,
     )
     _validate_release_succeeded(response)
+    owner_metadata = _require_expected_metadata(
+        response,
+        expected=expected_metadata,
+        label="allowLease release proof",
+    )
     return {
         "gateway_lease_id": released_gateway_lease_id,
+        "owner_metadata": owner_metadata,
         "raw_response_sha256": _raw_response_sha256(response),
         "response_top_level_keys": sorted(response),
     }
@@ -317,6 +355,10 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
         duplicate_gateway_lease_id = _lease_id_from_response(second)
+        if duplicate_gateway_lease_id is None:
+            raise MetadataContractError(
+                "duplicate allowLease acquire did not report lease identity"
+            )
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
@@ -329,7 +371,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         evidence["allow_lease"]["status_observed_lease"] = _validate_status_observes_lease(
             status,
-            expected_gateway_lease_id=gateway_lease_id,
+            expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
         )
         if not args.execute_session_spawn:
             evidence.update(
@@ -363,12 +405,14 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         evidence["rpc_attempted"].append("sessions_spawn")
         accepted_one = _session_spawn_once(
             spawn_args,
+            expected_metadata=spawn_args["metadata"],
             timeout_seconds=args.agent_timeout_seconds,
             timeout_ms=args.gateway_timeout_ms,
         )
         evidence["rpc_attempted"].append("sessions_spawn:duplicate")
         accepted_two = _session_spawn_once(
             spawn_args,
+            expected_metadata=spawn_args["metadata"],
             timeout_seconds=args.agent_timeout_seconds,
             timeout_ms=args.gateway_timeout_ms,
         )
@@ -423,7 +467,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 evidence["rpc_attempted"].append("subagents.allowLease.release")
                 evidence["allow_lease_release"] = _release_lease(
                     release_params,
-                    expected_gateway_lease_id=lease_id,
+                    expected_metadata=release_params,
                     timeout_ms=args.gateway_timeout_ms,
                 )
                 evidence["released"] = True

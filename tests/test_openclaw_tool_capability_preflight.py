@@ -1,16 +1,29 @@
 from __future__ import annotations
 
-import os
+import contextlib
+import importlib.util
+import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from agentic_os.migrations import repository_root
 
 
 SCRIPT = repository_root() / "scripts/openclaw-tool-capability-preflight.py"
+
+
+def load_preflight_module():
+    spec = importlib.util.spec_from_file_location("openclaw_tool_preflight", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise AssertionError("cannot load preflight script")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 VALID_CATALOG = {
@@ -261,6 +274,31 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertNotIn("label", spawn_tool["parameters"])
             source_paths = [item["path"] for item in payload["catalog"]["sources"]]
             self.assertTrue(all(not path.startswith("/") for path in source_paths))
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_live_installed_openclaw_missing_runtime_writes_failure_evidence(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = os.path.join(directory, "missing-runtime.json")
+            output = io.StringIO()
+            with mock.patch.object(
+                module,
+                "live_installed_openclaw_catalog",
+                side_effect=module.AdapterContractError("runtime missing"),
+            ), contextlib.redirect_stdout(output):
+                status = module.main(
+                    [
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ]
+                )
+
+            self.assertEqual(status, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload, {"error": "runtime missing", "status": "fail"})
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
 
