@@ -27,6 +27,7 @@ class CIContractTests(unittest.TestCase):
         self.assertRegex(workflow, r"(?m)^      - main$")
         self.assertRegex(workflow, r"(?m)^  agentic-os-ci:\s*$")
         self.assertRegex(workflow, r"(?m)^    name: agentic-os-ci$")
+        self.assertRegex(workflow, r"(?m)^          fetch-depth: 0$")
 
         for step in contract["required_steps"]:
             with self.subTest(step=step["name"]):
@@ -48,7 +49,13 @@ class CIContractTests(unittest.TestCase):
         self.assertEqual(len(commands), len(set(commands)))
         self.assertTrue(any("unittest discover -s tests" in command for command in commands))
         self.assertTrue(any("compileall" in command for command in commands))
-        self.assertTrue(any("git diff --check" == command for command in commands))
+        whitespace_commands = [
+            command for command in commands if command.startswith("git diff --check")
+        ]
+        self.assertEqual(len(whitespace_commands), 1)
+        self.assertNotEqual(whitespace_commands[0], "git diff --check")
+        self.assertIn("github.base_ref", whitespace_commands[0])
+        self.assertIn("github.event.before", whitespace_commands[0])
 
 
 if __name__ == "__main__":

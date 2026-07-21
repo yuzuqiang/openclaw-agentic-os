@@ -4542,6 +4542,8 @@ P0.0 - privacy and external contract preflight:
 - Not production-proven: live OpenClaw/Gateway/session tool capability and
   metadata conformance. Before any real RPC is relied on, the exact tool surface
   must be proven with `scripts/openclaw-tool-capability-preflight.py`.
+  Run it against the captured live runtime catalog with
+  `python scripts/openclaw-tool-capability-preflight.py --catalog-json-file <catalog.json>`.
 - Remaining: production accepted-session identity proof that duplicate spawn
   returns the same non-empty accepted session identity and can be persisted
   consistently as `external_rpc_intents.external_id`, `spawn_requests.session_key`,
