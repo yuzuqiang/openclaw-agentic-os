@@ -13,10 +13,10 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `793267f9ce12a14d506f7cee4426c90ada44cecf3877e82763a76e15b0aef439`
+- Current design artifact SHA-256: `6733bcef10fdd95b95767645a0c57e88fd24a814748e26dc9d70193816b6cd26`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
-- Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
+- Current latest migration SHA-256: `1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163`
+- Current migration manifest SHA-256: `c5e193b83c7d57969297bf4f7933a97a9e5a55cdba65a6a0ebd4292ab1bd6185`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Completed bounded slices: privacy preflight, package/retrieval denylist,
   migration/package parity, file-authority shadow, dual-write shadow, synthetic
@@ -407,6 +407,15 @@ new SLO identity when active trust rows still exist under the previous bundle.
 Schema versions 1 through 14 keep their historical query hashes so already
 migrated databases can still verify and upgrade instead of failing closed on
 immutable `slo_queries` registry drift.
+The same v15 migration preserves the historical v1 DDL hash while adding
+forward-only release-owner binding: accepted or reconciled `allow_lease_release`
+evidence must echo `client_lease_id`, `release_idempotency_key`, `run_id`,
+`phase`, `transition_id`, `agent_id`, `requester_agent_id`, and
+`gateway_lease_id`, and release-proof triggers join on that full owner identity
+rather than only run/transition/key/gateway. Upgrading v14 databases must also
+pass the same full-owner proof for existing `released` leases and terminal
+Gateway-owned `expired` / `human_review_required` leases before v15 installs
+the forward-only triggers.
 
 Issue #35 adds sanitized live runtime evidence for that boundary. The committed
 evidence in `docs/runtime-evidence/issue35-live-openclaw-20260721.json` captures
@@ -423,6 +432,34 @@ identity plus session-local normalized/raw metadata contract evidence from
 direct structured `sessions_spawn` responses and treats any allowLease release
 failure as a failed probe.
 `DB_AUTHORITY_ENABLED` remains `False`.
+
+The authoritative candidate proof is now the isolated real-Gateway probe. It
+refuses dirty candidate worktrees, starts the candidate's token-authenticated
+Gateway with isolated test state and a loopback OpenAI Responses fixture, and
+requires an actual child result before writing hash-only evidence:
+
+```bash
+python3 scripts/openclaw-real-gateway-contract-probe.py \
+  --openclaw-root /path/to/openclaw-candidate \
+  --evidence-file docs/runtime-evidence/openclaw-real-gateway-contract.json
+```
+
+The committed JSON at that path is only a sanitized last-run snapshot. It is
+not authoritative for a later PR head unless this command is rerun from that
+exact clean Agentic OS head and the probe validates the embedded
+`agentic_os_head_sha`, source hashes, and hash-only child-result proof before
+writing the file.
+
+The probe exercises the runtime-discovered `tools.catalog` RPC methods,
+principal-bound allowLease acquire/duplicate/status/release, concurrent spawn
+deduplication, canonical session reads, canonical child lifecycle transitions,
+fail-closed authorization, and the real `spawnSubagentDirect` child runner. It
+also executes the exact committed merged `OpenClawAdapter` against that live
+catalog and authenticated Gateway, requiring canonical
+`release_idempotency_key` metadata, identical duplicate-release observations,
+and post-release lease disappearance. Direct handler imports, hand-written
+catalogs, mocked Gateway calls, and dirty exact-head evidence are rejected as
+non-authoritative.
 
 ## Version-management policy
 

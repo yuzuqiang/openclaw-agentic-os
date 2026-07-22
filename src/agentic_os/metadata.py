@@ -37,7 +37,16 @@ ALLOW_LEASE_IDENTITY_FIELDS = (
 
 ALLOW_LEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("ttl_ms",)
 ALLOW_LEASE_OBSERVED_FIELDS = ALLOW_LEASE_FIELDS + ("gateway_lease_id",)
-ALLOW_LEASE_RELEASE_FIELDS = ALLOW_LEASE_IDENTITY_FIELDS + ("gateway_lease_id",)
+ALLOW_LEASE_RELEASE_FIELDS = (
+    "client_lease_id",
+    "release_idempotency_key",
+    "run_id",
+    "phase",
+    "transition_id",
+    "agent_id",
+    "requester_agent_id",
+    "gateway_lease_id",
+)
 MAX_LEASE_TTL_MS = 31_536_000_000
 
 
@@ -173,8 +182,53 @@ def validate_allow_lease_observation(**kwargs: Any) -> dict[str, Any]:
     return observed_values
 
 
+def _release_values(value: Mapping[str, Any], label: str, *, exact: bool) -> dict[str, str]:
+    if exact and set(value) != set(ALLOW_LEASE_RELEASE_FIELDS):
+        raise MetadataContractError(
+            f"{label} must contain exactly {list(ALLOW_LEASE_RELEASE_FIELDS)}"
+        )
+    missing = [field for field in ALLOW_LEASE_RELEASE_FIELDS if field not in value]
+    if missing:
+        raise MetadataContractError(f"{label} is missing required fields: {missing}")
+    external = _exact_nonempty_fields(
+        {field: value[field] for field in ALLOW_LEASE_RELEASE_FIELDS},
+        ALLOW_LEASE_RELEASE_FIELDS,
+        label,
+    )
+    release_idem = external.pop("release_idempotency_key")
+    legacy_idem = value.get("idempotency_key")
+    if legacy_idem is not None:
+        if not isinstance(legacy_idem, str) or not legacy_idem:
+            raise MetadataContractError(
+                f"{label}.idempotency_key must be a non-empty string"
+            )
+        if legacy_idem != release_idem:
+            raise MetadataContractError(
+                f"{label}.idempotency_key conflicts with release_idempotency_key"
+            )
+    external["idempotency_key"] = release_idem
+    return external
+
+
 def validate_allow_lease_release_observation(**kwargs: Any) -> dict[str, str]:
-    return validate_metadata_observation(fields=ALLOW_LEASE_RELEASE_FIELDS, **kwargs)
+    local = kwargs.get("local")
+    normalized = kwargs.get("normalized")
+    raw_json = kwargs.get("raw_json")
+    version = kwargs.get("metadata_contract_version")
+    if not isinstance(version, str) or not version:
+        raise MetadataContractError("metadata contract version is absent")
+    if not isinstance(local, Mapping) or not isinstance(normalized, Mapping):
+        raise MetadataContractError("normalized and raw external metadata are required")
+    if raw_json is None:
+        raise MetadataContractError("normalized and raw external metadata are required")
+    local_values = _release_values(local, "local intent", exact=True)
+    observed_values = _release_values(normalized, "normalized metadata", exact=True)
+    raw_values = _release_values(
+        _raw_json_object(raw_json), "raw external metadata", exact=False
+    )
+    if not (local_values == observed_values == raw_values):
+        raise MetadataContractError("local, normalized, and raw metadata do not match")
+    return observed_values
 
 
 def validate_accepted_lease_identity(

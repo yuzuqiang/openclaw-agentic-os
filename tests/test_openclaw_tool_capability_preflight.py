@@ -52,7 +52,7 @@ VALID_CATALOG = {
             "inputSchema": {
                 "properties": {
                     "client_lease_id": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
+                    "release_idempotency_key": {"type": "string"},
                     "run_id": {"type": "string"},
                     "phase": {"type": "string"},
                     "transition_id": {"type": "string"},
@@ -110,6 +110,34 @@ def active_tool_entry(tool_id):
     return entry
 
 
+def write_contract_candidate_dist(install_root):
+    dist = os.path.join(install_root, "dist")
+    os.makedirs(dist, exist_ok=True)
+    with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+        json.dump({"name": "openclaw", "version": "2026.candidate"}, handle)
+    with open(os.path.join(dist, "openclaw-tools-candidate.js"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+            "function createSessionsListToolSchema(){return Type.Object({});}\n"
+            "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+            "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+            'name: "sessions_spawn", name: "sessions_list", '
+            'name: "sessions_history", name: "sessions_status"'
+        )
+    with open(os.path.join(dist, "server-methods-candidate.js"), "w", encoding="utf-8") as handle:
+        handle.write(
+            '"subagents.allowLease.status": ({ params }) => {},'
+            '"subagents.allowLease.acquire": ({ params }) => { '
+            "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+            "params?.phase; params?.transition_id; params?.agent_id; "
+            "params?.requester_agent_id; params?.ttl_ms },"
+            '"subagents.allowLease.release": ({ params }) => { '
+            "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
+            "params?.phase; params?.transition_id; params?.agent_id; "
+            "params?.requester_agent_id; params?.gateway_lease_id },"
+        )
+
+
 def add_fake_openclaw_to_env(
     env,
     directory,
@@ -131,6 +159,35 @@ def add_fake_openclaw_to_env(
             "import sys\n"
             "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
             f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+            "    raise SystemExit(0)\n"
+            "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
+            "raise SystemExit(1)\n"
+        )
+    os.chmod(executable, 0o755)
+    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+    return executable
+
+
+def add_env_sensitive_fake_openclaw_to_env(env, directory):
+    bin_dir = os.path.join(directory, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    executable = os.path.join(bin_dir, "openclaw")
+    baseline_entries = [
+        active_tool_entry(tool_id)
+        for tool_id in ACTIVE_TOOL_IDS
+        if tool_id != "sessions_status"
+    ]
+    candidate_entries = [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]
+    with open(executable, "w", encoding="utf-8") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+            "    entries = "
+            f"{candidate_entries!r} if os.environ.get('OPENCLAW_INSTALL_ROOT') else {baseline_entries!r}\n"
+            "    print(json.dumps({'groups': [{'id': 'unit', 'tools': entries}]}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
             "raise SystemExit(1)\n"
@@ -269,6 +326,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("client_lease_id", payload["error"])
         self.assertIn("idempotency_key", payload["error"])
+        self.assertIn("release_idempotency_key", payload["error"])
         self.assertIn("sessions_status", payload["error"])
         self.assertIn("metadata", payload["error"])
 
@@ -347,6 +405,237 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertTrue(all(not path.startswith("/") for path in source_paths))
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_isolated_candidate_openclaw_catalog_passes_and_records_target(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--isolated-candidate-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
+        self.assertEqual(
+            payload["catalog"]["required_canonical_session_status_method"],
+            "sessions_status",
+        )
+        status_tool = next(
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_status"
+        )
+        self.assertEqual(status_tool["parameters"], ["session_key"])
+
+    def test_isolated_candidate_openclaw_requires_explicit_install_root(self) -> None:
+        env = dict(os.environ)
+        env.pop("OPENCLAW_INSTALL_ROOT", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--isolated-candidate-openclaw",
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
+
+    def test_isolated_candidate_openclaw_rejects_invalid_override_without_path_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            valid_runtime = os.path.join(directory, "valid-openclaw")
+            invalid_runtime = os.path.join(directory, "invalid-openclaw")
+            os.makedirs(invalid_runtime)
+            write_contract_candidate_dist(valid_runtime)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = invalid_runtime
+            add_fake_openclaw_to_env(env, valid_runtime)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--isolated-candidate-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
+        self.assertIn("valid OpenClaw runtime bundle", payload["error"])
+        self.assertNotIn("catalog", payload)
+
+    def test_isolated_candidate_openclaw_rejects_non_openclaw_package_name(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "not-openclaw", "version": "2026.candidate"}, handle)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--isolated-candidate-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("valid OpenClaw runtime bundle", payload["error"])
+        self.assertNotIn("catalog", payload)
+
+    def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
+        evidence_dir = repository_root() / "docs" / "runtime-evidence"
+        isolated_files = sorted(evidence_dir.glob("*isolated*.json"))
+        self.assertTrue(isolated_files)
+        for path in isolated_files:
+            with self.subTest(path=path.name):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                catalog = payload.get("catalog")
+                if catalog is None:
+                    catalog = payload.get("preflight", {}).get("catalog")
+                self.assertIsInstance(catalog, dict)
+                self.assertEqual(catalog.get("runtime_target"), "isolated_candidate")
+                if payload.get("status") == "pass":
+                    release_tool = next(
+                        tool
+                        for tool in catalog.get("tools", [])
+                        if tool.get("name") == "subagents.allowLease.release"
+                    )
+                    self.assertIn(
+                        "release_idempotency_key",
+                        release_tool.get("parameters", []),
+                    )
+                elif path.name == "phase233549-round2-isolated-candidate-preflight.json":
+                    self.assertIn("release_idempotency_key", payload.get("error", ""))
+                if path.name.endswith("-live-probe.json") and payload.get("status") == "pass":
+                    history = payload.get("session_read_structured_evidence", {}).get(
+                        "sessions_history",
+                        {},
+                    )
+                    self.assertGreater(history.get("history_items_identity_checked", 0), 0)
+
+    def test_installed_openclaw_negative_baseline_fails_for_2026_7_1(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package_root = os.path.join(directory, "openclaw")
+            dist = os.path.join(package_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(package_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.7.1"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-baseline.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", name: "sessions_history"'
+                )
+            with open(os.path.join(dist, "server-methods-baseline.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.ttl_ms },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.gateway_lease_id },"
+                )
+            env = dict(os.environ)
+            env.pop("OPENCLAW_INSTALL_ROOT", None)
+            add_fake_openclaw_to_env(
+                env,
+                package_root,
+                active_tool_ids=[
+                    tool_id for tool_id in ACTIVE_TOOL_IDS if tool_id != "sessions_status"
+                ],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--installed-openclaw-negative-baseline",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(
+            payload["catalog"]["runtime_target"],
+            "installed_openclaw_negative_baseline",
+        )
+        self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
+        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+
+    def test_installed_openclaw_negative_baseline_scrubs_candidate_override_for_catalog(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_root = os.path.join(directory, "openclaw")
+            candidate_root = os.path.join(directory, "candidate-openclaw")
+            write_contract_candidate_dist(baseline_root)
+            write_contract_candidate_dist(candidate_root)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = candidate_root
+            add_env_sensitive_fake_openclaw_to_env(env, baseline_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--installed-openclaw-negative-baseline",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(
+            payload["catalog"]["runtime_target"],
+            "installed_openclaw_negative_baseline",
+        )
+        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
 
     def test_live_installed_openclaw_missing_runtime_writes_failure_evidence(self) -> None:
         module = load_preflight_module()
@@ -478,7 +767,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -561,7 +850,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -623,7 +912,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -687,7 +976,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -747,7 +1036,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -805,7 +1094,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -857,7 +1146,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -909,7 +1198,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -965,7 +1254,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     '"subagents.allowLease.acquire": ({ params }) => { '
                     "params?.client_lease_id; params?.idempotency_key; params?.run_id },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id },"
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id },"
                 )
             with open(os.path.join(dist, "server-methods-stale.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -1088,7 +1377,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -1151,7 +1440,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )

@@ -76,7 +76,7 @@ _REQUIRED_ALLOW_LEASE_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     "subagents.allowLease.release": frozenset(
         (
             "client_lease_id",
-            "idempotency_key",
+            "release_idempotency_key",
             "run_id",
             "phase",
             "transition_id",
@@ -352,7 +352,7 @@ def partial_observation_from_openclaw_response(
         or container.get("external_metadata")
     )
     if not isinstance(normalized, Mapping):
-        return None
+        normalized = None
     version = container.get("metadata_contract_version") or container.get(
         "contract_version"
     )
@@ -381,6 +381,13 @@ def partial_observation_from_openclaw_response(
         or _string_or_none(lease.get("gateway_lease_id"))
         or _string_or_none(lease.get("lease_id"))
     )
+    if (
+        normalized is None
+        and external_id is None
+        and session_key is None
+        and spawn_request_session_key is None
+    ):
+        return None
     status_metadata_json = response.get("status_metadata_json")
     return MetadataObservation(
         metadata_contract_version=version if isinstance(version, str) else None,

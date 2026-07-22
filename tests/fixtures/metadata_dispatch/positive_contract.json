@@ -13,7 +13,7 @@
   },
   "allow_lease_release": {
     "client_lease_id": "lease-client-1",
-    "idempotency_key": "lease-release-idem-1",
+    "release_idempotency_key": "lease-release-idem-1",
     "run_id": "run-1",
     "phase": "B",
     "transition_id": "transition-1",

@@ -67,7 +67,7 @@ INSTALLED_RUNTIME_TOOL_CATALOG = {
             "inputSchema": {
                 "properties": {
                     "client_lease_id": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
+                    "release_idempotency_key": {"type": "string"},
                     "run_id": {"type": "string"},
                     "phase": {"type": "string"},
                     "transition_id": {"type": "string"},

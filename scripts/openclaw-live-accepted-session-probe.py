@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Bounded live OpenClaw accepted-session identity/idempotency probe.
 
-The probe refuses to call mutating OpenClaw RPCs unless the installed runtime
-catalog first passes ``openclaw-tool-capability-preflight.py`` for the exact
-Agentic OS allowLease/session metadata contract.
+The probe refuses to call mutating OpenClaw RPCs unless the isolated candidate
+runtime catalog first passes ``openclaw-tool-capability-preflight.py`` for the
+exact Agentic OS allowLease/session metadata contract.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def _preflight() -> tuple[bool, dict[str, Any]]:
         [
             sys.executable,
             str(PREFLIGHT),
-            "--live-installed-openclaw",
+            "--isolated-candidate-openclaw",
             "--json",
         ],
         timeout=30,
@@ -291,6 +291,15 @@ def _metadata_alias(
 def _candidate_roots_for_executable(executable: Path) -> list[Path]:
     resolved = executable.resolve()
     candidates: list[Path] = []
+    override = os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip()
+    if override:
+        explicit_root = Path(override).expanduser().resolve()
+        try:
+            resolved.relative_to(explicit_root)
+        except ValueError:
+            pass
+        else:
+            candidates.append(explicit_root)
     for parent in (resolved.parent, *resolved.parents):
         candidates.extend(
             (
@@ -311,7 +320,14 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
     if not os.access(resolved, os.X_OK):
         raise RuntimeError(f"openclaw executable is not executable: {resolved.name}")
 
+    requires_binding_hashes = (
+        _path_value(preflight_payload, ("catalog", "runtime_target")) == "isolated_candidate"
+    )
     expected_root_sha = _path_value(preflight_payload, ("catalog", "install_root_path_sha256"))
+    if requires_binding_hashes and not (
+        isinstance(expected_root_sha, str) and expected_root_sha
+    ):
+        raise RuntimeError("preflighted OpenClaw install root hash is required")
     matching_roots: list[Path] = []
     if isinstance(expected_root_sha, str) and expected_root_sha:
         matching_roots = [
@@ -326,6 +342,10 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
     expected_executable_sha = _path_value(
         preflight_payload, ("catalog", "active_executable_path_sha256")
     )
+    if requires_binding_hashes and not (
+        isinstance(expected_executable_sha, str) and expected_executable_sha
+    ):
+        raise RuntimeError("preflighted OpenClaw executable path hash is required")
     if (
         isinstance(expected_executable_sha, str)
         and expected_executable_sha
@@ -337,6 +357,10 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
     expected_executable_file_sha = _path_value(
         preflight_payload, ("catalog", "active_executable_sha256")
     )
+    if requires_binding_hashes and not (
+        isinstance(expected_executable_file_sha, str) and expected_executable_file_sha
+    ):
+        raise RuntimeError("preflighted OpenClaw executable content hash is required")
     if (
         isinstance(expected_executable_file_sha, str)
         and expected_executable_file_sha
@@ -826,6 +850,15 @@ def _validate_session_raw_metadata(
         ("items",),
         ("result", "items"),
         ("output", "items"),
+        ("history",),
+        ("result", "history"),
+        ("output", "history"),
+        ("messages",),
+        ("result", "messages"),
+        ("output", "messages"),
+        ("events",),
+        ("result", "events"),
+        ("output", "events"),
     ):
         sequence = _sequence_path(response, path)
         if sequence is not None:
@@ -887,20 +920,138 @@ def _validate_session_raw_metadata(
     )
 
 
+def _history_item_identity_values(item: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for path in (
+        ("session_key",),
+        ("sessionKey",),
+        ("spawn_request_session_key",),
+        ("spawnRequestSessionKey",),
+        ("key",),
+        ("external_id",),
+        ("externalId",),
+        ("session", "session_key"),
+        ("session", "sessionKey"),
+        ("session", "spawn_request_session_key"),
+        ("session", "spawnRequestSessionKey"),
+        ("session", "key"),
+        ("session", "external_id"),
+        ("session", "externalId"),
+    ):
+        value = _path_value(dict(item), path)
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+    return values
+
+
+def _validate_history_items_match_session(
+    response: dict[str, Any],
+    *,
+    accepted_session_identity: str,
+    label: str,
+) -> int:
+    checked = 0
+    for path in (
+        ("sessions",),
+        ("result", "sessions"),
+        ("output", "sessions"),
+        ("items",),
+        ("result", "items"),
+        ("output", "items"),
+        ("history",),
+        ("result", "history"),
+        ("output", "history"),
+        ("messages",),
+        ("result", "messages"),
+        ("output", "messages"),
+        ("events",),
+        ("result", "events"),
+        ("output", "events"),
+    ):
+        sequence = _sequence_path(response, path)
+        if sequence is None:
+            continue
+        for item in sequence:
+            if not isinstance(item, Mapping):
+                raise MetadataContractError(
+                    f"{label} included history item without session identity"
+                )
+            identities = _history_item_identity_values(item)
+            if not identities:
+                raise MetadataContractError(
+                    f"{label} included history item without session identity"
+                )
+            checked += 1
+            mismatches = [
+                value for value in identities if value != accepted_session_identity
+            ]
+            if mismatches:
+                raise MetadataContractError(
+                    f"{label} included history item for another session"
+                )
+    return checked
+
+
+def _validate_response_level_session_identity(
+    response: dict[str, Any],
+    *,
+    accepted_session_identity: str,
+    label: str,
+) -> None:
+    identities = _string_values_from_paths(
+        response,
+        ("session_key",),
+        ("sessionKey",),
+        ("spawn_request_session_key",),
+        ("spawnRequestSessionKey",),
+        ("external_id",),
+        ("externalId",),
+        ("result", "session_key"),
+        ("result", "sessionKey"),
+        ("result", "spawn_request_session_key"),
+        ("result", "spawnRequestSessionKey"),
+        ("result", "external_id"),
+        ("result", "externalId"),
+        ("output", "session_key"),
+        ("output", "sessionKey"),
+        ("output", "spawn_request_session_key"),
+        ("output", "spawnRequestSessionKey"),
+        ("output", "external_id"),
+        ("output", "externalId"),
+    )
+    if any(identity != accepted_session_identity for identity in identities):
+        raise MetadataContractError(
+            f"{label} top-level identity did not match accepted session"
+        )
+
+
 def _validate_session_api_observes_session(
     response: dict[str, Any],
     *,
     accepted_session_identity: str,
     expected_metadata: dict[str, Any],
     label: str,
+    require_all_history_items_match: bool = False,
 ) -> dict[str, Any]:
+    history_items_checked = None
+    if require_all_history_items_match:
+        history_items_checked = _validate_history_items_match_session(
+            response,
+            accepted_session_identity=accepted_session_identity,
+            label=label,
+        )
+    _validate_response_level_session_identity(
+        response,
+        accepted_session_identity=accepted_session_identity,
+        label=label,
+    )
     raw_metadata = _validate_session_raw_metadata(
         response,
         accepted_session_identity=accepted_session_identity,
         expected_metadata=expected_metadata,
         label=label,
     )
-    return {
+    evidence = {
         "accepted_session_identity_sha256": _identity_sha256(accepted_session_identity),
         "metadata_contract_version": raw_metadata["metadata_contract_version"],
         "normalized_metadata": raw_metadata["normalized_metadata"],
@@ -908,6 +1059,9 @@ def _validate_session_api_observes_session(
         "raw_response_sha256": _raw_response_sha256(response),
         "response_top_level_keys": sorted(response),
     }
+    if history_items_checked is not None:
+        evidence["history_items_identity_checked"] = history_items_checked
+    return evidence
 
 
 def _session_status_method(preflight_payload: dict[str, Any]) -> str:
@@ -921,9 +1075,9 @@ def _session_status_method(preflight_payload: dict[str, Any]) -> str:
                     names.add(name)
     if "sessions_status" in names:
         return "sessions_status"
-    if "session_status" in names:
-        return "session_status"
-    return "sessions_status"
+    if not names:
+        return "sessions_status"
+    raise RuntimeError("isolated candidate catalog did not prove sessions_status")
 
 
 def _release_lease(
@@ -975,6 +1129,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     started = int(time.time() * 1000)
     evidence: dict[str, Any] = {
         "probe": "openclaw-live-accepted-session-identity",
+        "preflight_runtime_target": "isolated_candidate",
+        "required_canonical_session_status_method": "sessions_status",
         "started_epoch_ms": started,
         "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         "rpc_attempted": [],
@@ -1007,6 +1163,9 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         return evidence
     evidence["preflight"] = preflight_payload
+    evidence["observed_preflight_runtime_target"] = _path_value(
+        preflight_payload, ("catalog", "runtime_target")
+    )
     if not preflight_ok:
         evidence.update(
             {
@@ -1019,15 +1178,22 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         return evidence
     try:
+        if evidence["observed_preflight_runtime_target"] != "isolated_candidate":
+            raise RuntimeError("capability preflight did not target isolated candidate")
         openclaw_executable = _validated_openclaw_executable(preflight_payload)
     except RuntimeError as exc:
         sanitized = _sanitized_exception(exc)
         if str(exc).startswith("preflighted OpenClaw"):
             sanitized["error"] = str(exc)
+        reason = (
+            "capability_preflight_target_mismatch"
+            if str(exc) == "capability preflight did not target isolated candidate"
+            else "capability_preflight_executable_mismatch"
+        )
         evidence.update(
             {
                 "status": "fail_closed",
-                "reason": "capability_preflight_executable_mismatch",
+                "reason": reason,
                 **sanitized,
                 "spawn_attempted": False,
                 "lease_acquired": False,
@@ -1214,6 +1380,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             accepted_session_identity=session_identity,
             expected_metadata=spawn_args["metadata"],
             label="sessions_history response",
+            require_all_history_items_match=True,
         )
         evidence.update(
             {
@@ -1262,7 +1429,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             for index, acquired_lease_id in enumerate(lease_ids_to_release):
                 release_params = {
                     "client_lease_id": f"issue35-{args.probe_id}",
-                    "idempotency_key": f"issue35-release-{args.probe_id}-{index}",
+                    "release_idempotency_key": f"issue35-release-{args.probe_id}-{index}",
                     "run_id": f"issue35-run-{args.probe_id}",
                     "phase": "B",
                     "transition_id": f"issue35-transition-{args.probe_id}",

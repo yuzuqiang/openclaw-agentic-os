@@ -59,6 +59,8 @@ class MetadataTests(unittest.TestCase):
         local = values(ALLOW_LEASE_RELEASE_FIELDS)
         raw = dict(local)
         raw["metadata_contract_version"] = "v1"
+        expected = dict(local)
+        expected["idempotency_key"] = expected.pop("release_idempotency_key")
         self.assertEqual(
             validate_allow_lease_release_observation(
                 local=local,
@@ -66,8 +68,20 @@ class MetadataTests(unittest.TestCase):
                 raw_json=json.dumps(raw),
                 metadata_contract_version="v1",
             ),
-            local,
+            expected,
         )
+
+    def test_allow_lease_release_rejects_conflicting_legacy_alias(self) -> None:
+        local = values(ALLOW_LEASE_RELEASE_FIELDS)
+        raw = dict(local)
+        raw["idempotency_key"] = "different-release-key"
+        with self.assertRaisesRegex(MetadataContractError, "conflicts"):
+            validate_allow_lease_release_observation(
+                local=local,
+                normalized=dict(local),
+                raw_json=json.dumps(raw),
+                metadata_contract_version="v1",
+            )
 
     def test_allow_lease_version_only_or_mismatch_is_rejected(self) -> None:
         local = allow_values()
