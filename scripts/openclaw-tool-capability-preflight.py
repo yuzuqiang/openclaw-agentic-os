@@ -75,9 +75,17 @@ def _resolve_install_root(
     include_env_override: bool = True,
     require_env_override: bool = False,
 ) -> Path:
-    if require_env_override and not os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip():
+    if require_env_override:
+        override = os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip()
+        if not override:
+            raise AdapterContractError(
+                "isolated candidate OpenClaw preflight requires OPENCLAW_INSTALL_ROOT"
+            )
+        resolved = Path(override).expanduser().resolve()
+        if (resolved / "dist").is_dir() and (resolved / "package.json").is_file():
+            return resolved
         raise AdapterContractError(
-            "isolated candidate OpenClaw preflight requires OPENCLAW_INSTALL_ROOT"
+            "OPENCLAW_INSTALL_ROOT does not point to a valid OpenClaw runtime bundle"
         )
     seen: set[Path] = set()
     for candidate in _candidate_install_roots(include_env_override=include_env_override):
@@ -562,7 +570,16 @@ def _require_executable_matches_install_root(root: Path, executable: Path) -> No
         ) from exc
 
 
-def _run_gateway_tools_catalog(executable: Path, timeout_ms: int = 10_000) -> dict[str, Any]:
+def _run_gateway_tools_catalog(
+    executable: Path,
+    timeout_ms: int = 10_000,
+    *,
+    scrub_env_override: bool = False,
+) -> dict[str, Any]:
+    env = None
+    if scrub_env_override:
+        env = dict(os.environ)
+        env.pop("OPENCLAW_INSTALL_ROOT", None)
     try:
         proc = subprocess.run(
             [
@@ -581,6 +598,7 @@ def _run_gateway_tools_catalog(executable: Path, timeout_ms: int = 10_000) -> di
             stderr=subprocess.PIPE,
             timeout=max(5, timeout_ms // 1000 + 5),
             check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AdapterContractError(
@@ -702,6 +720,7 @@ def live_installed_openclaw_catalog(
     runtime_target: str = "live_installed_openclaw",
     include_env_override: bool = True,
     require_env_override: bool = False,
+    scrub_env_override: bool = False,
 ) -> dict[str, Any]:
     root = _resolve_install_root(
         include_env_override=include_env_override,
@@ -710,7 +729,10 @@ def live_installed_openclaw_catalog(
     executable = _resolve_openclaw_executable()
     _require_executable_matches_install_root(root, executable)
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    active_catalog = _run_gateway_tools_catalog(executable)
+    active_catalog = _run_gateway_tools_catalog(
+        executable,
+        scrub_env_override=scrub_env_override,
+    )
     active_params = _active_tool_parameters(active_catalog)
     active_names = set(active_params)
     if not active_params:
@@ -778,6 +800,7 @@ def installed_negative_baseline_catalog() -> dict[str, Any]:
     return live_installed_openclaw_catalog(
         runtime_target="installed_openclaw_negative_baseline",
         include_env_override=False,
+        scrub_env_override=True,
     )
 
 

@@ -168,6 +168,35 @@ def add_fake_openclaw_to_env(
     return executable
 
 
+def add_env_sensitive_fake_openclaw_to_env(env, directory):
+    bin_dir = os.path.join(directory, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    executable = os.path.join(bin_dir, "openclaw")
+    baseline_entries = [
+        active_tool_entry(tool_id)
+        for tool_id in ACTIVE_TOOL_IDS
+        if tool_id != "sessions_status"
+    ]
+    candidate_entries = [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]
+    with open(executable, "w", encoding="utf-8") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+            "    entries = "
+            f"{candidate_entries!r} if os.environ.get('OPENCLAW_INSTALL_ROOT') else {baseline_entries!r}\n"
+            "    print(json.dumps({'groups': [{'id': 'unit', 'tools': entries}]}, sort_keys=True))\n"
+            "    raise SystemExit(0)\n"
+            "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
+            "raise SystemExit(1)\n"
+        )
+    os.chmod(executable, 0o755)
+    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+    return executable
+
+
 class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
@@ -429,6 +458,48 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
 
+    def test_isolated_candidate_openclaw_rejects_invalid_override_without_path_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            valid_runtime = os.path.join(directory, "valid-openclaw")
+            invalid_runtime = os.path.join(directory, "invalid-openclaw")
+            os.makedirs(invalid_runtime)
+            write_contract_candidate_dist(valid_runtime)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = invalid_runtime
+            add_fake_openclaw_to_env(env, valid_runtime)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--isolated-candidate-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
+        self.assertIn("valid OpenClaw runtime bundle", payload["error"])
+        self.assertNotIn("catalog", payload)
+
+    def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
+        evidence_dir = repository_root() / "docs" / "runtime-evidence"
+        isolated_files = sorted(evidence_dir.glob("*isolated*.json"))
+        self.assertTrue(isolated_files)
+        for path in isolated_files:
+            with self.subTest(path=path.name):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                catalog = payload.get("catalog")
+                if catalog is None:
+                    catalog = payload.get("preflight", {}).get("catalog")
+                self.assertIsInstance(catalog, dict)
+                self.assertEqual(catalog.get("runtime_target"), "isolated_candidate")
+
     def test_installed_openclaw_negative_baseline_fails_for_2026_7_1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package_root = os.path.join(directory, "openclaw")
@@ -485,6 +556,39 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "installed_openclaw_negative_baseline",
         )
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
+        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+
+    def test_installed_openclaw_negative_baseline_scrubs_candidate_override_for_catalog(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_root = os.path.join(directory, "openclaw")
+            candidate_root = os.path.join(directory, "candidate-openclaw")
+            write_contract_candidate_dist(baseline_root)
+            write_contract_candidate_dist(candidate_root)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = candidate_root
+            add_env_sensitive_fake_openclaw_to_env(env, baseline_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--installed-openclaw-negative-baseline",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(
+            payload["catalog"]["runtime_target"],
+            "installed_openclaw_negative_baseline",
+        )
         self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
 
     def test_live_installed_openclaw_missing_runtime_writes_failure_evidence(self) -> None:
