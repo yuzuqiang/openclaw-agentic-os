@@ -424,6 +424,24 @@ direct structured `sessions_spawn` responses and treats any allowLease release
 failure as a failed probe.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
+The authoritative candidate proof is now the isolated real-Gateway probe. It
+refuses dirty candidate worktrees, starts the candidate's token-authenticated
+Gateway with isolated test state and a loopback OpenAI Responses fixture, and
+requires an actual child result before writing hash-only evidence:
+
+```bash
+python3 scripts/openclaw-real-gateway-contract-probe.py \
+  --openclaw-root /path/to/openclaw-candidate \
+  --evidence-file docs/runtime-evidence/openclaw-real-gateway-contract.json
+```
+
+The probe exercises the runtime-discovered `tools.catalog` RPC methods,
+principal-bound allowLease acquire/duplicate/status/release, concurrent spawn
+deduplication, canonical session reads, fail-closed authorization, and the real
+`spawnSubagentDirect` child runner. Direct handler imports, hand-written
+catalogs, mocked Gateway calls, and dirty exact-head evidence are rejected as
+non-authoritative.
+
 ## Version-management policy
 
 - `main` contains reviewed project state.
