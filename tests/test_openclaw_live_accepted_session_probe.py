@@ -256,6 +256,52 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         validated.assert_not_called()
         gateway.assert_not_called()
 
+    def test_missing_preflight_binding_hashes_fail_closed_before_any_rpc(self) -> None:
+        module = load_probe_module()
+        with tempfile.TemporaryDirectory() as directory:
+            package_root = Path(directory) / "openclaw"
+            executable = package_root / "bin" / "openclaw"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            required = {
+                "install_root_path_sha256": module._path_sha256(package_root),
+                "active_executable_path_sha256": module._path_sha256(executable),
+                "active_executable_sha256": module._file_sha256(executable),
+            }
+            cases = {
+                "install root": "install_root_path_sha256",
+                "executable path": "active_executable_path_sha256",
+                "executable content": "active_executable_sha256",
+            }
+            for label, omitted_key in cases.items():
+                with self.subTest(omitted=omitted_key):
+                    catalog = {
+                        "runtime_target": "isolated_candidate",
+                        **{
+                            key: value
+                            for key, value in required.items()
+                            if key != omitted_key
+                        },
+                    }
+                    with mock.patch.object(
+                        module,
+                        "_preflight",
+                        return_value=(True, {"status": "pass", "catalog": catalog}),
+                    ), mock.patch.object(
+                        module.shutil, "which", return_value=str(executable)
+                    ), mock.patch.object(module, "_gateway_call") as gateway:
+                        result = module.run_probe(args())
+
+                    self.assertEqual(result["status"], "fail_closed")
+                    self.assertEqual(
+                        result["reason"], "capability_preflight_executable_mismatch"
+                    )
+                    self.assertIn(f"{label} hash is required", result["error"])
+                    self.assertEqual(result["released"], "not_required")
+                    self.assertEqual(result["rpc_attempted"], [])
+                    gateway.assert_not_called()
+
     def test_session_status_alias_is_not_canonical_for_agentic_os_probe(self) -> None:
         module = load_probe_module()
         with self.assertRaisesRegex(RuntimeError, "sessions_status"):
