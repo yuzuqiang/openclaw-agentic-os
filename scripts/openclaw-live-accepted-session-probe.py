@@ -320,7 +320,14 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
     if not os.access(resolved, os.X_OK):
         raise RuntimeError(f"openclaw executable is not executable: {resolved.name}")
 
+    requires_binding_hashes = (
+        _path_value(preflight_payload, ("catalog", "runtime_target")) == "isolated_candidate"
+    )
     expected_root_sha = _path_value(preflight_payload, ("catalog", "install_root_path_sha256"))
+    if requires_binding_hashes and not (
+        isinstance(expected_root_sha, str) and expected_root_sha
+    ):
+        raise RuntimeError("preflighted OpenClaw install root hash is required")
     matching_roots: list[Path] = []
     if isinstance(expected_root_sha, str) and expected_root_sha:
         matching_roots = [
@@ -335,6 +342,10 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
     expected_executable_sha = _path_value(
         preflight_payload, ("catalog", "active_executable_path_sha256")
     )
+    if requires_binding_hashes and not (
+        isinstance(expected_executable_sha, str) and expected_executable_sha
+    ):
+        raise RuntimeError("preflighted OpenClaw executable path hash is required")
     if (
         isinstance(expected_executable_sha, str)
         and expected_executable_sha
@@ -346,6 +357,10 @@ def _validated_openclaw_executable(preflight_payload: dict[str, Any]) -> str:
     expected_executable_file_sha = _path_value(
         preflight_payload, ("catalog", "active_executable_sha256")
     )
+    if requires_binding_hashes and not (
+        isinstance(expected_executable_file_sha, str) and expected_executable_file_sha
+    ):
+        raise RuntimeError("preflighted OpenClaw executable content hash is required")
     if (
         isinstance(expected_executable_file_sha, str)
         and expected_executable_file_sha
