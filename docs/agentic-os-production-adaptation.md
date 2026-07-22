@@ -4052,7 +4052,11 @@ external metadata and matching external identity columns. Release proof
 triggers join on the full lease owner identity, not just run, transition,
 release key, and gateway lease id. The SQLite storage row may retain the legacy
 `idempotency_key` alias required by the original v1 table CHECK, but the
-external runtime metadata contract remains `release_idempotency_key`.
+external runtime metadata contract remains `release_idempotency_key`. During
+v14-to-v15 upgrade, existing `released` leases and terminal Gateway-owned
+`expired` / `human_review_required` leases must already have a matching
+accepted or reconciled release intent for that full owner tuple, or the
+migration aborts before installing the new triggers.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:

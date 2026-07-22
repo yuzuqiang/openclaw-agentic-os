@@ -806,6 +806,35 @@ WHERE EXISTS (
     ), 0)=0
 );
 
+INSERT INTO release_owner_metadata_migration_guard(violation)
+SELECT 'terminal lease release owner mismatch'
+WHERE EXISTS (
+  SELECT 1
+  FROM leases l
+  WHERE (
+      l.state='released'
+      OR (
+        l.state IN ('expired','human_review_required')
+        AND l.gateway_lease_id IS NOT NULL
+        AND l.gateway_lease_id <> ''
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM external_rpc_intents eri
+      WHERE eri.rpc_kind='allow_lease_release'
+        AND eri.state IN ('accepted','reconciled')
+        AND eri.run_id=l.run_id
+        AND eri.phase=l.phase
+        AND eri.transition_id=l.transition_id
+        AND eri.agent_id=l.agent_id
+        AND eri.requester_agent_id=l.requester_agent_id
+        AND eri.external_client_request_id=l.client_lease_id
+        AND eri.idempotency_key=l.release_idempotency_key
+        AND eri.external_id=l.gateway_lease_id
+    )
+);
+
 DROP TRIGGER IF EXISTS external_rpc_intents_validate_release_owner_metadata_insert;
 DROP TRIGGER IF EXISTS external_rpc_intents_validate_release_owner_metadata_update;
 

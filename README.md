@@ -13,10 +13,10 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `4b7f981e352d1ca3888332e28a8846e84a9e9fa0ff4ae67c7b64f3ff21a51693`
+- Current design artifact SHA-256: `6733bcef10fdd95b95767645a0c57e88fd24a814748e26dc9d70193816b6cd26`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `1b13bc11a6023345537a77cf85a4b31d75ac690808b3f00b5e235383c49a1084`
-- Current migration manifest SHA-256: `562f50e0e34e6b046a1e1adc2c906e35c16ed71720147f9e31dee1c97e785c9b`
+- Current latest migration SHA-256: `d693ff4c35e0b6b372c5a36f40af8d4134632ba15ba17e57d35cdc6a372bccff`
+- Current migration manifest SHA-256: `fc45a091cab0b8e35440b631e98deeea8a288b6d3519c083e7752f1ef60b6c12`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Completed bounded slices: privacy preflight, package/retrieval denylist,
   migration/package parity, file-authority shadow, dual-write shadow, synthetic
@@ -412,7 +412,10 @@ forward-only release-owner binding: accepted or reconciled `allow_lease_release`
 evidence must echo `client_lease_id`, `release_idempotency_key`, `run_id`,
 `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and
 `gateway_lease_id`, and release-proof triggers join on that full owner identity
-rather than only run/transition/key/gateway.
+rather than only run/transition/key/gateway. Upgrading v14 databases must also
+pass the same full-owner proof for existing `released` leases and terminal
+Gateway-owned `expired` / `human_review_required` leases before v15 installs
+the forward-only triggers.
 
 Issue #35 adds sanitized live runtime evidence for that boundary. The committed
 evidence in `docs/runtime-evidence/issue35-live-openclaw-20260721.json` captures
