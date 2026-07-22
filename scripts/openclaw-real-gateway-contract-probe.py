@@ -15,6 +15,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
+ADAPTER_PROBE = "scripts/openclaw-real-adapter-release-probe.py"
+AGENTIC_SOURCE_PATHS = (
+    "scripts/openclaw-real-gateway-contract-probe.py",
+    ADAPTER_PROBE,
+    "src/agentic_os/openclaw_adapter.py",
+)
 FORBIDDEN_EVIDENCE_KEYS = {
     "child_session_key",
     "child_run_id",
@@ -45,6 +51,12 @@ REQUIRED_RUNTIME_PROOFS = (
     "lifecycle_failure_observed",
     "duplicate_lease_identity_parity",
     "duplicate_spawn_identity_parity",
+    "duplicate_release_identity_parity",
+    "agentic_adapter_live_catalog",
+    "agentic_adapter_release_succeeded",
+    "agentic_adapter_duplicate_release_parity",
+    "agentic_adapter_release_metadata_parity",
+    "agentic_adapter_post_release_absent",
     "child_completed",
 )
 
@@ -122,7 +134,50 @@ def _walk_evidence(value: Any, path: tuple[str, ...] = ()) -> None:
             raise ProbeError(f"evidence contains forbidden raw value at {'.'.join(path)}")
 
 
-def validate_evidence(payload: dict[str, Any], *, openclaw_root: Path, head: str) -> None:
+def _source_binding(root: Path, relative: str) -> dict[str, str]:
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ProbeError("source binding path is invalid")
+    source_path = (root / relative_path).resolve()
+    if root.resolve() not in source_path.parents or not source_path.is_file():
+        raise ProbeError("source binding path escapes or is missing")
+    working_blob = _git(root, "hash-object", str(source_path))
+    committed_blob = _git(root, "rev-parse", f"HEAD:{relative_path.as_posix()}")
+    if working_blob != committed_blob:
+        raise ProbeError(f"{relative} is not the exact committed Agentic OS HEAD blob")
+    return {
+        "path": relative_path.as_posix(),
+        "sha256": _sha256_bytes(source_path.read_bytes()),
+    }
+
+
+def _validate_sources(value: Any, *, root: Path, label: str) -> None:
+    if not isinstance(value, list) or not value:
+        raise ProbeError(f"evidence {label} binding is missing")
+    for source in value:
+        if not isinstance(source, dict):
+            raise ProbeError(f"evidence {label} record is invalid")
+        relative = source.get("path")
+        expected = source.get("sha256")
+        if (
+            not isinstance(relative, str)
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
+            raise ProbeError(f"evidence {label} path is invalid")
+        source_path = (root / relative).resolve()
+        if root.resolve() not in source_path.parents or not source_path.is_file():
+            raise ProbeError(f"evidence {label} path escapes or is missing")
+        if (
+            not isinstance(expected, str)
+            or _sha256_bytes(source_path.read_bytes()) != expected
+        ):
+            raise ProbeError(f"evidence {label} hash does not match candidate")
+
+
+def validate_evidence(
+    payload: dict[str, Any], *, openclaw_root: Path, agentic_root: Path, head: str
+) -> None:
     if payload.get("status") != "pass" or payload.get("openclaw_head_sha") != head:
         raise ProbeError("evidence status or OpenClaw head binding is invalid")
     if not all(payload.get(key) is True for key in REQUIRED_RUNTIME_PROOFS):
@@ -131,32 +186,18 @@ def validate_evidence(payload: dict[str, Any], *, openclaw_root: Path, head: str
         raise ProbeError("evidence does not prove a non-wildcard static allowlist")
     if payload.get("model_request_count") != 2:
         raise ProbeError("evidence does not prove the successful and failed real child requests")
-    sources = payload.get("sources")
-    if not isinstance(sources, list) or not sources:
-        raise ProbeError("evidence source binding is missing")
-    for source in sources:
-        if not isinstance(source, dict):
-            raise ProbeError("evidence source record is invalid")
-        relative = source.get("path")
-        expected = source.get("sha256")
-        if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
-            raise ProbeError("evidence source path is invalid")
-        source_path = (openclaw_root / relative).resolve()
-        if openclaw_root.resolve() not in source_path.parents or not source_path.is_file():
-            raise ProbeError("evidence source path escapes or is missing")
-        if not isinstance(expected, str) or _sha256_bytes(source_path.read_bytes()) != expected:
-            raise ProbeError("evidence source hash does not match candidate")
+    _validate_sources(payload.get("sources"), root=openclaw_root, label="source")
+    _validate_sources(
+        payload.get("agentic_sources"), root=agentic_root, label="Agentic source"
+    )
     _walk_evidence(payload)
 
 
 def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[str, Any]:
     head = validate_candidate_root(openclaw_root)
-    runner_blob = _git(ROOT, "hash-object", str(Path(__file__).resolve()))
-    committed_runner_blob = _git(
-        ROOT, "rev-parse", f"HEAD:{Path(__file__).resolve().relative_to(ROOT).as_posix()}"
-    )
-    if runner_blob != committed_runner_blob:
-        raise ProbeError("probe runner is not the exact committed Agentic OS HEAD blob")
+    agentic_sources = [
+        _source_binding(ROOT, relative) for relative in AGENTIC_SOURCE_PATHS
+    ]
     evidence_file = evidence_file.resolve()
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -164,6 +205,7 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
         {
             "AGENTIC_OS_EXPECTED_OPENCLAW_HEAD": head,
             "AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE": str(evidence_file),
+            "AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT": str(ROOT / ADAPTER_PROBE),
         }
     )
     command = [
@@ -189,12 +231,14 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
         raise ProbeError("real Gateway E2E did not write valid evidence") from exc
     if not isinstance(payload, dict):
         raise ProbeError("real Gateway evidence must be a JSON object")
-    validate_evidence(payload, openclaw_root=openclaw_root, head=head)
     agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
     payload["agentic_os_head_sha"] = agentic_os_head
+    payload["agentic_sources"] = agentic_sources
     payload["probe_runner_sha256"] = _sha256_bytes(Path(__file__).read_bytes())
     payload["e2e_command_sha256"] = _sha256_bytes("\0".join(command).encode())
-    _walk_evidence(payload)
+    validate_evidence(
+        payload, openclaw_root=openclaw_root, agentic_root=ROOT, head=head
+    )
     evidence_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
 

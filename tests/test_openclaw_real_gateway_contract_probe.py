@@ -19,6 +19,24 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("lifecycle_running_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
         self.assertIn("lifecycle_completed_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
         self.assertIn("lifecycle_failure_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
+        self.assertIn("duplicate_release_identity_parity", MODULE.REQUIRED_RUNTIME_PROOFS)
+        self.assertIn("agentic_adapter_live_catalog", MODULE.REQUIRED_RUNTIME_PROOFS)
+        self.assertIn(
+            "agentic_adapter_duplicate_release_parity", MODULE.REQUIRED_RUNTIME_PROOFS
+        )
+        self.assertIn(
+            "agentic_adapter_release_metadata_parity", MODULE.REQUIRED_RUNTIME_PROOFS
+        )
+        self.assertIn(
+            "agentic_adapter_post_release_absent", MODULE.REQUIRED_RUNTIME_PROOFS
+        )
+
+    def test_binds_merged_adapter_and_composed_probe_sources(self) -> None:
+        self.assertIn(
+            "scripts/openclaw-real-adapter-release-probe.py",
+            MODULE.AGENTIC_SOURCE_PATHS,
+        )
+        self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
 
     def test_rejects_raw_session_identity(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
