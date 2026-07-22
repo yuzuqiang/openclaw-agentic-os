@@ -1209,6 +1209,113 @@ class MigrationTests(unittest.TestCase):
         ):
             apply_migrations(self.database)
 
+    def test_release_owner_migration_aborts_on_existing_terminal_lease_mismatch(
+        self,
+    ) -> None:
+        self._apply_migrations_through(14, "v14-release-owner-mismatch")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO workflow_authority(workflow,mode,updated_at) "
+                "VALUES('workflow','file_authority','now')"
+            )
+            connection.execute(
+                "INSERT INTO runs(run_id,prepare_idempotency_key,workflow,"
+                "authority_mode,state,risk_class,risk_dominance,created_at,updated_at) "
+                "VALUES('run','prepare','workflow','file_authority','candidate','R1',"
+                "'R1','now','now')"
+            )
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES('transition','run','before',"
+                "'after','dispatch','allow_lease','R1','transition-idem',0,'now')"
+            )
+            release_metadata = json.dumps(
+                {
+                    "client_lease_id": "other-client",
+                    "run_id": "run",
+                    "phase": "other-phase",
+                    "transition_id": "transition",
+                    "agent_id": "other-agent",
+                    "requester_agent_id": "other-requester",
+                    "idempotency_key": "release-idem",
+                    "release_idempotency_key": "release-idem",
+                    "gateway_lease_id": "gateway",
+                }
+            )
+            connection.execute(
+                "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
+                "rpc_kind,phase,agent_id,requester_agent_id,client_request_id,"
+                "idempotency_key,metadata_contract_version,metadata_json,"
+                "external_metadata_json,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_client_request_id,external_idempotency_key,state,external_id,"
+                "requested_at,requested_at_epoch_ms) VALUES('release-intent','run',"
+                "'transition','allow_lease_release','other-phase','other-agent',"
+                "'other-requester','other-client','release-idem','v1','{}',?,"
+                "'run','other-phase','transition','other-agent','other-requester',"
+                "'other-client','release-idem','accepted','gateway','now',1000)",
+                (release_metadata,),
+            )
+            acquire_metadata = {
+                "client_lease_id": "client",
+                "idempotency_key": "acquire-idem",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
+                "gateway_lease_id": "gateway",
+            }
+            lease_values = (
+                "lease",
+                "run",
+                "phase",
+                "transition",
+                "agent",
+                "requester",
+                "released",
+                "gateway",
+                "client",
+                "acquire-idem",
+                60000,
+                "v1",
+                "now",
+                json.dumps(acquire_metadata),
+                "client",
+                "acquire-idem",
+                "run",
+                "phase",
+                "transition",
+                "agent",
+                "requester",
+                60000,
+                "expires",
+                2000000000000,
+                "release-idem",
+                "release-requested",
+                "released-at",
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,gateway_lease_id,client_lease_id,"
+                "acquire_idempotency_key,ttl_ms,metadata_contract_version,"
+                "metadata_observed_at,external_metadata_json,external_client_lease_id,"
+                "external_idempotency_key,external_run_id,external_phase,"
+                "external_transition_id,external_agent_id,external_requester_agent_id,"
+                "external_ttl_ms,expires_at,expires_at_epoch_ms,"
+                "release_idempotency_key,release_requested_at,released_at) VALUES("
+                + ",".join("?" for _ in lease_values)
+                + ")",
+                lease_values,
+            )
+
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError, "__no_release_owner_metadata_violations__"
+        ):
+            apply_migrations(self.database)
+
     def test_strict_prior_reserve_trigger_stays_active_with_cross_workflow_trust(
         self,
     ) -> None:
