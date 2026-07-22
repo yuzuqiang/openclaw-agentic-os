@@ -25,8 +25,10 @@ AGENTIC_SOURCE_PATHS = (
 FORBIDDEN_EVIDENCE_KEYS = {
     "authToken",
     "childResult",
-    "child_result",
+    "childResultRaw",
     "childRunId",
+    "child_result",
+    "child_result_raw",
     "child_session_key",
     "child_run_id",
     "childSessionKey",
@@ -37,6 +39,8 @@ FORBIDDEN_EVIDENCE_KEYS = {
     "taskMarker",
     "task_marker",
     "token",
+    "rawChildResult",
+    "raw_child_result",
 }
 FORBIDDEN_EVIDENCE_FRAGMENTS = (
     "gateway-lease:",
@@ -214,6 +218,10 @@ def validate_evidence(
         raise ProbeError("evidence does not prove a non-wildcard static allowlist")
     if payload.get("model_request_count") != 2:
         raise ProbeError("evidence does not prove the successful and failed real child requests")
+    if payload.get("committed_snapshot_authority") != "non_authoritative_last_run_snapshot":
+        raise ProbeError("evidence does not declare the committed snapshot non-authoritative")
+    if payload.get("current_head_evidence_required") is not True:
+        raise ProbeError("evidence does not require current-head validation")
     if payload.get("child_completed") is True:
         for key in REQUIRED_CHILD_HASH_PROOFS:
             _validate_sha256_field(payload, key)
@@ -268,6 +276,8 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
             raise ProbeError("real Gateway evidence must be a JSON object")
         agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
         payload["agentic_os_head_sha"] = agentic_os_head
+        payload["committed_snapshot_authority"] = "non_authoritative_last_run_snapshot"
+        payload["current_head_evidence_required"] = True
         payload["agentic_sources"] = agentic_sources
         payload["probe_runner_sha256"] = _sha256_bytes(Path(__file__).read_bytes())
         payload["e2e_command_sha256"] = _sha256_bytes("\0".join(command).encode())

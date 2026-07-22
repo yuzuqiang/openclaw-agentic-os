@@ -51,12 +51,19 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE._walk_evidence({key: "raw-runtime-identity"})
 
     def test_rejects_raw_child_result_aliases(self) -> None:
-        for key in ("child_result", "childResult"):
+        for key in (
+            "child_result",
+            "childResult",
+            "child_result_raw",
+            "childResultRaw",
+            "raw_child_result",
+            "rawChildResult",
+        ):
             with self.subTest(key=key):
                 with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
                     MODULE._walk_evidence(
                         {
-                            key: "plaintext child output",
+                            key: {"status": "raw-child-output"},
                             "child_result_sha256": "0" * 64,
                         }
                     )
@@ -120,6 +127,24 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
         self.assertNotEqual(head, "stale-head")
 
+    def test_evidence_requires_non_authoritative_snapshot_annotations(self) -> None:
+        payload = {
+            "status": "pass",
+            "openclaw_head_sha": "openclaw-head",
+            "agentic_os_head_sha": MODULE._git(MODULE.ROOT, "rev-parse", "HEAD"),
+            "static_allow_agents_wildcard": False,
+            "model_request_count": 2,
+        }
+        for proof in MODULE.REQUIRED_RUNTIME_PROOFS:
+            payload[proof] = True
+        with self.assertRaisesRegex(MODULE.ProbeError, "non-authoritative"):
+            MODULE.validate_evidence(
+                payload,
+                openclaw_root=MODULE.ROOT,
+                agentic_root=MODULE.ROOT,
+                head="openclaw-head",
+            )
+
     def test_child_completion_requires_hash_only_proofs(self) -> None:
         payload = {
             "status": "pass",
@@ -127,6 +152,8 @@ class RealGatewayProbeTests(unittest.TestCase):
             "agentic_os_head_sha": MODULE._git(MODULE.ROOT, "rev-parse", "HEAD"),
             "static_allow_agents_wildcard": False,
             "model_request_count": 2,
+            "committed_snapshot_authority": "non_authoritative_last_run_snapshot",
+            "current_head_evidence_required": True,
         }
         for proof in MODULE.REQUIRED_RUNTIME_PROOFS:
             payload[proof] = True
