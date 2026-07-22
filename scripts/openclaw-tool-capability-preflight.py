@@ -75,9 +75,17 @@ def _resolve_install_root(
     include_env_override: bool = True,
     require_env_override: bool = False,
 ) -> Path:
-    if require_env_override and not os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip():
+    if require_env_override:
+        override = os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip()
+        if not override:
+            raise AdapterContractError(
+                "isolated candidate OpenClaw preflight requires OPENCLAW_INSTALL_ROOT"
+            )
+        resolved = Path(override).expanduser().resolve()
+        if (resolved / "dist").is_dir() and (resolved / "package.json").is_file():
+            return resolved
         raise AdapterContractError(
-            "isolated candidate OpenClaw preflight requires OPENCLAW_INSTALL_ROOT"
+            "OPENCLAW_INSTALL_ROOT does not point to a valid OpenClaw runtime bundle"
         )
     seen: set[Path] = set()
     for candidate in _candidate_install_roots(include_env_override=include_env_override):

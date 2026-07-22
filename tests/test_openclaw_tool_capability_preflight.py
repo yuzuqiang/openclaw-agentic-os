@@ -429,6 +429,48 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
 
+    def test_isolated_candidate_openclaw_rejects_invalid_override_without_path_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            valid_runtime = os.path.join(directory, "valid-openclaw")
+            invalid_runtime = os.path.join(directory, "invalid-openclaw")
+            os.makedirs(invalid_runtime)
+            write_contract_candidate_dist(valid_runtime)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = invalid_runtime
+            add_fake_openclaw_to_env(env, valid_runtime)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--isolated-candidate-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
+        self.assertIn("valid OpenClaw runtime bundle", payload["error"])
+        self.assertNotIn("catalog", payload)
+
+    def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
+        evidence_dir = repository_root() / "docs" / "runtime-evidence"
+        isolated_files = sorted(evidence_dir.glob("*isolated*.json"))
+        self.assertTrue(isolated_files)
+        for path in isolated_files:
+            with self.subTest(path=path.name):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                catalog = payload.get("catalog")
+                if catalog is None:
+                    catalog = payload.get("preflight", {}).get("catalog")
+                self.assertIsInstance(catalog, dict)
+                self.assertEqual(catalog.get("runtime_target"), "isolated_candidate")
+
     def test_installed_openclaw_negative_baseline_fails_for_2026_7_1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package_root = os.path.join(directory, "openclaw")
