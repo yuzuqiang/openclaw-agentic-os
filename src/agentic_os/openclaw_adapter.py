@@ -76,7 +76,7 @@ _REQUIRED_ALLOW_LEASE_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     "subagents.allowLease.release": frozenset(
         (
             "client_lease_id",
-            "idempotency_key",
+            "release_idempotency_key",
             "run_id",
             "phase",
             "transition_id",

@@ -197,7 +197,7 @@ External runtime metadata contract is a P0 prerequisite:
 - Duplicate allowLease acquire with the same idempotency key must return the same live lease identity and must not create another lease.
 - `subagents.allowLease.status` must expose all caller metadata for every live lease.
 - `subagents.allowLease.release` must be idempotent on `release_idempotency_key` and must refuse to release a lease whose owner metadata does not match the caller, except through explicit human review.
-- Release observations must echo `client_lease_id`, release `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id`; `run_id` plus `transition_id` alone is not owner proof.
+- Release observations must echo `client_lease_id`, `release_idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id`; `run_id` plus `transition_id` alone is not owner proof.
 - A local lease row cannot move to `released` or `release_pending` without a non-empty release idempotency key and release request evidence; `release_not_required` is valid only when no external Gateway lease identity exists.
 - `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
 - Session list/status/history-backed result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
@@ -206,7 +206,7 @@ External runtime metadata contract is a P0 prerequisite:
   declares `client_lease_id`, `idempotency_key`, `run_id`, `phase`,
   `transition_id`, `agent_id`, `requester_agent_id`, and `ttl_ms`,
   `subagents.allowLease.release` declares `client_lease_id`,
-  `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`,
+  `release_idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`,
   `requester_agent_id`, and `gateway_lease_id`, and
   `sessions_spawn` declares `client_request_id`, `idempotency_key`, and
   `metadata`; a spawn surface that cannot carry caller metadata is not valid
@@ -4040,6 +4040,19 @@ to the current v14 schema and migration identity, preserving the complete
 current-SLO proof requirement after the schema advances. This preserves the
 original canary proof boundary across rollback validation; it does not enable
 production database authority or external RPC.
+
+Current migration v15 release owner metadata binding:
+
+`0015_strict_prior_reserve_slo_identity.sql` preserves the historical v1
+migration hash and also adds a forward-only release-owner overlay. Accepted or
+reconciled `allow_lease_release` intents must now expose non-empty
+`client_lease_id`, `release_idempotency_key`, `run_id`, `phase`,
+`transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id` in
+external metadata and matching external identity columns. Release proof
+triggers join on the full lease owner identity, not just run, transition,
+release key, and gateway lease id. The SQLite storage row may retain the legacy
+`idempotency_key` alias required by the original v1 table CHECK, but the
+external runtime metadata contract remains `release_idempotency_key`.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:
