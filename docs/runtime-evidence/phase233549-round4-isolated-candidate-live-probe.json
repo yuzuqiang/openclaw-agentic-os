@@ -486,5 +486,7 @@
   },
   "spawn_attempted": true,
   "started_epoch_ms": 1784709686403,
-  "status": "pass"
+  "status": "superseded",
+  "superseded_by": "docs/runtime-evidence/openclaw-real-gateway-contract.json",
+  "superseded_reason": "Historical live probe predates the release_idempotency_key contract."
 }

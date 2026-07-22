@@ -149,5 +149,7 @@
       }
     ]
   },
-  "status": "pass"
+  "status": "superseded",
+  "superseded_by": "docs/runtime-evidence/openclaw-real-gateway-contract.json",
+  "superseded_reason": "Historical preflight predates the release_idempotency_key contract."
 }
