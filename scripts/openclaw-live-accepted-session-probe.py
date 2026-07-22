@@ -896,20 +896,91 @@ def _validate_session_raw_metadata(
     )
 
 
+def _history_item_identity_values(item: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for path in (
+        ("session_key",),
+        ("sessionKey",),
+        ("key",),
+        ("external_id",),
+        ("externalId",),
+        ("session", "session_key"),
+        ("session", "sessionKey"),
+        ("session", "key"),
+        ("session", "external_id"),
+        ("session", "externalId"),
+    ):
+        value = _path_value(dict(item), path)
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+    return values
+
+
+def _validate_history_items_match_session(
+    response: dict[str, Any],
+    *,
+    accepted_session_identity: str,
+    label: str,
+) -> int:
+    checked = 0
+    for path in (
+        ("sessions",),
+        ("result", "sessions"),
+        ("output", "sessions"),
+        ("items",),
+        ("result", "items"),
+        ("output", "items"),
+        ("history",),
+        ("result", "history"),
+        ("output", "history"),
+        ("messages",),
+        ("result", "messages"),
+        ("output", "messages"),
+        ("events",),
+        ("result", "events"),
+        ("output", "events"),
+    ):
+        sequence = _sequence_path(response, path)
+        if sequence is None:
+            continue
+        for item in sequence:
+            if not isinstance(item, Mapping):
+                continue
+            identities = _history_item_identity_values(item)
+            if identities:
+                checked += 1
+            mismatches = [
+                value for value in identities if value != accepted_session_identity
+            ]
+            if mismatches:
+                raise MetadataContractError(
+                    f"{label} included history item for another session"
+                )
+    return checked
+
+
 def _validate_session_api_observes_session(
     response: dict[str, Any],
     *,
     accepted_session_identity: str,
     expected_metadata: dict[str, Any],
     label: str,
+    require_all_history_items_match: bool = False,
 ) -> dict[str, Any]:
+    history_items_checked = None
+    if require_all_history_items_match:
+        history_items_checked = _validate_history_items_match_session(
+            response,
+            accepted_session_identity=accepted_session_identity,
+            label=label,
+        )
     raw_metadata = _validate_session_raw_metadata(
         response,
         accepted_session_identity=accepted_session_identity,
         expected_metadata=expected_metadata,
         label=label,
     )
-    return {
+    evidence = {
         "accepted_session_identity_sha256": _identity_sha256(accepted_session_identity),
         "metadata_contract_version": raw_metadata["metadata_contract_version"],
         "normalized_metadata": raw_metadata["normalized_metadata"],
@@ -917,6 +988,9 @@ def _validate_session_api_observes_session(
         "raw_response_sha256": _raw_response_sha256(response),
         "response_top_level_keys": sorted(response),
     }
+    if history_items_checked is not None:
+        evidence["history_items_identity_checked"] = history_items_checked
+    return evidence
 
 
 def _session_status_method(preflight_payload: dict[str, Any]) -> str:
@@ -1235,6 +1309,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             accepted_session_identity=session_identity,
             expected_metadata=spawn_args["metadata"],
             label="sessions_history response",
+            require_all_history_items_match=True,
         )
         evidence.update(
             {
@@ -1283,7 +1358,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             for index, acquired_lease_id in enumerate(lease_ids_to_release):
                 release_params = {
                     "client_lease_id": f"issue35-{args.probe_id}",
-                    "idempotency_key": f"issue35-release-{args.probe_id}-{index}",
+                    "release_idempotency_key": f"issue35-release-{args.probe_id}-{index}",
                     "run_id": f"issue35-run-{args.probe_id}",
                     "phase": "B",
                     "transition_id": f"issue35-transition-{args.probe_id}",

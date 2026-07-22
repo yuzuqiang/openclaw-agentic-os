@@ -82,7 +82,7 @@ def _resolve_install_root(
                 "isolated candidate OpenClaw preflight requires OPENCLAW_INSTALL_ROOT"
             )
         resolved = Path(override).expanduser().resolve()
-        if (resolved / "dist").is_dir() and (resolved / "package.json").is_file():
+        if _is_openclaw_runtime_bundle(resolved):
             return resolved
         raise AdapterContractError(
             "OPENCLAW_INSTALL_ROOT does not point to a valid OpenClaw runtime bundle"
@@ -93,9 +93,20 @@ def _resolve_install_root(
         if resolved in seen:
             continue
         seen.add(resolved)
-        if (resolved / "dist").is_dir() and (resolved / "package.json").is_file():
+        if _is_openclaw_runtime_bundle(resolved):
             return resolved
     raise AdapterContractError("OpenClaw runtime bundle was not found")
+
+
+def _is_openclaw_runtime_bundle(root: Path) -> bool:
+    package_path = root / "package.json"
+    if not (root / "dist").is_dir() or not package_path.is_file():
+        return False
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(package, Mapping) and package.get("name") == "openclaw"
 
 
 def _file_digest(path: Path) -> str:

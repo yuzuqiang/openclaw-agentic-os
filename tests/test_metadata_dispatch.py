@@ -47,7 +47,7 @@ def release_intent(data: dict[str, Any]) -> AllowLeaseReleaseIntent:
     release = data["allow_lease_release"]
     return AllowLeaseReleaseIntent(
         client_lease_id=release["client_lease_id"],
-        idempotency_key=release["idempotency_key"],
+        idempotency_key=release["release_idempotency_key"],
         run_id=release["run_id"],
         phase=release["phase"],
         transition_id=release["transition_id"],

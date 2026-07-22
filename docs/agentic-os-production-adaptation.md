@@ -197,7 +197,7 @@ External runtime metadata contract is a P0 prerequisite:
 - Duplicate allowLease acquire with the same idempotency key must return the same live lease identity and must not create another lease.
 - `subagents.allowLease.status` must expose all caller metadata for every live lease.
 - `subagents.allowLease.release` must be idempotent on `release_idempotency_key` and must refuse to release a lease whose owner metadata does not match the caller, except through explicit human review.
-- Release observations must echo `client_lease_id`, release `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id`; `run_id` plus `transition_id` alone is not owner proof.
+- Release observations must echo `client_lease_id`, `release_idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id`; `run_id` plus `transition_id` alone is not owner proof.
 - A local lease row cannot move to `released` or `release_pending` without a non-empty release idempotency key and release request evidence; `release_not_required` is valid only when no external Gateway lease identity exists.
 - `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
 - Session list/status/history-backed result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
@@ -206,7 +206,7 @@ External runtime metadata contract is a P0 prerequisite:
   declares `client_lease_id`, `idempotency_key`, `run_id`, `phase`,
   `transition_id`, `agent_id`, `requester_agent_id`, and `ttl_ms`,
   `subagents.allowLease.release` declares `client_lease_id`,
-  `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`,
+  `release_idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`,
   `requester_agent_id`, and `gateway_lease_id`, and
   `sessions_spawn` declares `client_request_id`, `idempotency_key`, and
   `metadata`; a spawn surface that cannot carry caller metadata is not valid
@@ -762,15 +762,15 @@ CREATE TABLE external_rpc_intents (
       WHEN json_valid(external_metadata_json) THEN CASE
         WHEN json_type(external_metadata_json,'$.run_id')='text'
           AND json_type(external_metadata_json,'$.transition_id')='text'
-          AND json_type(external_metadata_json,'$.idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.release_idempotency_key')='text'
           AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
           AND json_extract(external_metadata_json,'$.run_id') <> ''
           AND json_extract(external_metadata_json,'$.transition_id') <> ''
-          AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
+          AND json_extract(external_metadata_json,'$.release_idempotency_key') <> ''
           AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
           AND json_extract(external_metadata_json,'$.run_id') = run_id
           AND json_extract(external_metadata_json,'$.transition_id') = transition_id
-          AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.release_idempotency_key') = idempotency_key
           AND json_extract(external_metadata_json,'$.gateway_lease_id') = external_id
           AND external_run_id = run_id
           AND external_transition_id = transition_id

@@ -2866,7 +2866,7 @@ class MigrationTests(unittest.TestCase):
             {
                 "run_id": "other",
                 "transition_id": "transition",
-                "idempotency_key": "release-idem-bad",
+                "release_idempotency_key": "release-idem-bad",
                 "gateway_lease_id": "gateway-bad",
             }
         )
@@ -2885,7 +2885,7 @@ class MigrationTests(unittest.TestCase):
             {
                 "run_id": "run",
                 "transition_id": "transition",
-                "idempotency_key": "release-idem",
+                "release_idempotency_key": "release-idem",
                 "gateway_lease_id": "gateway-released-ok",
             }
         )

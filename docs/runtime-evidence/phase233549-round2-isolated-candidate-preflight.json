@@ -149,5 +149,6 @@
       }
     ]
   },
-  "status": "pass"
+  "error": "runtime tool catalog subagents.allowLease.release is missing parameters: release_idempotency_key",
+  "status": "fail"
 }

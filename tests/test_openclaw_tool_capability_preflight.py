@@ -52,7 +52,7 @@ VALID_CATALOG = {
             "inputSchema": {
                 "properties": {
                     "client_lease_id": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
+                    "release_idempotency_key": {"type": "string"},
                     "run_id": {"type": "string"},
                     "phase": {"type": "string"},
                     "transition_id": {"type": "string"},
@@ -132,7 +132,7 @@ def write_contract_candidate_dist(install_root):
             "params?.phase; params?.transition_id; params?.agent_id; "
             "params?.requester_agent_id; params?.ttl_ms },"
             '"subagents.allowLease.release": ({ params }) => { '
-            "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+            "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
             "params?.phase; params?.transition_id; params?.agent_id; "
             "params?.requester_agent_id; params?.gateway_lease_id },"
         )
@@ -326,6 +326,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("client_lease_id", payload["error"])
         self.assertIn("idempotency_key", payload["error"])
+        self.assertIn("release_idempotency_key", payload["error"])
         self.assertIn("sessions_status", payload["error"])
         self.assertIn("metadata", payload["error"])
 
@@ -487,6 +488,33 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("valid OpenClaw runtime bundle", payload["error"])
         self.assertNotIn("catalog", payload)
 
+    def test_isolated_candidate_openclaw_rejects_non_openclaw_package_name(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "not-openclaw", "version": "2026.candidate"}, handle)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(env, install_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--isolated-candidate-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("valid OpenClaw runtime bundle", payload["error"])
+        self.assertNotIn("catalog", payload)
+
     def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
         evidence_dir = repository_root() / "docs" / "runtime-evidence"
         isolated_files = sorted(evidence_dir.glob("*isolated*.json"))
@@ -499,6 +527,24 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     catalog = payload.get("preflight", {}).get("catalog")
                 self.assertIsInstance(catalog, dict)
                 self.assertEqual(catalog.get("runtime_target"), "isolated_candidate")
+                if payload.get("status") == "pass":
+                    release_tool = next(
+                        tool
+                        for tool in catalog.get("tools", [])
+                        if tool.get("name") == "subagents.allowLease.release"
+                    )
+                    self.assertIn(
+                        "release_idempotency_key",
+                        release_tool.get("parameters", []),
+                    )
+                elif path.name == "phase233549-round2-isolated-candidate-preflight.json":
+                    self.assertIn("release_idempotency_key", payload.get("error", ""))
+                if path.name.endswith("-live-probe.json") and payload.get("status") == "pass":
+                    history = payload.get("session_read_structured_evidence", {}).get(
+                        "sessions_history",
+                        {},
+                    )
+                    self.assertGreater(history.get("history_items_identity_checked", 0), 0)
 
     def test_installed_openclaw_negative_baseline_fails_for_2026_7_1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -522,7 +568,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -721,7 +767,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -804,7 +850,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -866,7 +912,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -930,7 +976,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -990,7 +1036,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -1048,7 +1094,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -1100,7 +1146,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -1152,7 +1198,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -1208,7 +1254,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     '"subagents.allowLease.acquire": ({ params }) => { '
                     "params?.client_lease_id; params?.idempotency_key; params?.run_id },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id },"
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id },"
                 )
             with open(os.path.join(dist, "server-methods-stale.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -1331,7 +1377,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
@@ -1394,7 +1440,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.ttl_ms },"
                     '"subagents.allowLease.release": ({ params }) => { '
-                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )

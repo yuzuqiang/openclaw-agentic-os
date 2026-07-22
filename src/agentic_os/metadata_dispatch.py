@@ -73,7 +73,7 @@ class AllowLeaseReleaseIntent:
     def metadata(self) -> dict[str, str]:
         return {
             "client_lease_id": self.client_lease_id,
-            "idempotency_key": self.idempotency_key,
+            "release_idempotency_key": self.idempotency_key,
             "run_id": self.run_id,
             "phase": self.phase,
             "transition_id": self.transition_id,

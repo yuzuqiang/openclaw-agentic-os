@@ -13,10 +13,10 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `793267f9ce12a14d506f7cee4426c90ada44cecf3877e82763a76e15b0aef439`
-- Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
+- Current design artifact SHA-256: `edf29676822ca67ce9743a093c542691bb5f961fa4a4d75c03b7462f28809c85`
+- Base DDL migration SHA-256: `5521c239639d8712b516816a44c9f6d8d5fd4d14e879178c679e466044b2f30b`
 - Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
-- Current migration manifest SHA-256: `bb1a5443dc21734a66c093bc8562c9ee8c7ffeb4f84862f4f0de0c1621c867b0`
+- Current migration manifest SHA-256: `e648169f87d1f612935693280fb3d261146633c329ad676f9005ac4eb7db7f02`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Completed bounded slices: privacy preflight, package/retrieval denylist,
   migration/package parity, file-authority shadow, dual-write shadow, synthetic

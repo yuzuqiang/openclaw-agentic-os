@@ -238,7 +238,7 @@ class RuntimeDispatchTests(unittest.TestCase):
     ) -> MetadataObservation:
         metadata = {
             "client_lease_id": request.client_lease_id,
-            "idempotency_key": request.release_idempotency_key,
+            "release_idempotency_key": request.release_idempotency_key,
             "run_id": request.run_id,
             "phase": request.phase,
             "transition_id": request.transition_id,

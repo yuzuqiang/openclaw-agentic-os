@@ -169,7 +169,7 @@ def lease_metadata(request: DispatchRequest, gateway_lease_id: str) -> dict[str,
 def release_metadata(request: DispatchRequest, gateway_lease_id: str) -> dict[str, str]:
     return {
         "client_lease_id": request.client_lease_id,
-        "idempotency_key": request.release_idempotency_key,
+        "release_idempotency_key": request.release_idempotency_key,
         "run_id": request.run_id,
         "phase": request.phase,
         "transition_id": request.transition_id,

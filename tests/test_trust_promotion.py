@@ -367,7 +367,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 "'transition','allow_lease_release','backdated-rpc-client',"
                 "'backdated-rpc-idem','v1','{}',"
                 "'{\"run_id\":\"run\",\"transition_id\":\"transition\","
-                "\"idempotency_key\":\"backdated-rpc-idem\","
+                "\"release_idempotency_key\":\"backdated-rpc-idem\","
                 "\"gateway_lease_id\":\"released\"}',"
                 "'run','transition',"
                 "'backdated-rpc-idem','reconciled','released','requested',?,"
@@ -1981,7 +1981,7 @@ class TrustPromotionWriterTests(unittest.TestCase):
                 {
                     "run_id": "missing-run",
                     "transition_id": "transition",
-                    "idempotency_key": "fk-broken-idem",
+                    "release_idempotency_key": "fk-broken-idem",
                     "gateway_lease_id": "external-intent",
                 },
                 sort_keys=True,

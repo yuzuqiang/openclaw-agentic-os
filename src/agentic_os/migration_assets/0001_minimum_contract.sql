@@ -508,15 +508,15 @@ CREATE TABLE external_rpc_intents (
       WHEN json_valid(external_metadata_json) THEN CASE
         WHEN json_type(external_metadata_json,'$.run_id')='text'
           AND json_type(external_metadata_json,'$.transition_id')='text'
-          AND json_type(external_metadata_json,'$.idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.release_idempotency_key')='text'
           AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
           AND json_extract(external_metadata_json,'$.run_id') <> ''
           AND json_extract(external_metadata_json,'$.transition_id') <> ''
-          AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
+          AND json_extract(external_metadata_json,'$.release_idempotency_key') <> ''
           AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
           AND json_extract(external_metadata_json,'$.run_id') = run_id
           AND json_extract(external_metadata_json,'$.transition_id') = transition_id
-          AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.release_idempotency_key') = idempotency_key
           AND json_extract(external_metadata_json,'$.gateway_lease_id') = external_id
           AND external_run_id = run_id
           AND external_transition_id = transition_id
