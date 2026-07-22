@@ -1,40 +1,60 @@
 {
-  "agentic_os_head_sha": "0ba05dbf051245455b95239b9842fc99af013031",
+  "agentic_adapter_duplicate_release_parity": true,
+  "agentic_adapter_live_catalog": true,
+  "agentic_adapter_post_release_absent": true,
+  "agentic_adapter_release_metadata_parity": true,
+  "agentic_adapter_release_succeeded": true,
+  "agentic_os_head_sha": "7004f808b02834cd4bf7ecb60db469c9cef159bd",
+  "agentic_sources": [
+    {
+      "path": "scripts/openclaw-real-gateway-contract-probe.py",
+      "sha256": "d2d43a423cff9fe06668ba5b42f4c56d35543a2ca5f18b71ffe93a9a43569eba"
+    },
+    {
+      "path": "scripts/openclaw-real-adapter-release-probe.py",
+      "sha256": "a287f3464a4672f1e6201dbfe0c889a7208ee0a0e3cc7ea9484298f5ac1fdca1"
+    },
+    {
+      "path": "src/agentic_os/openclaw_adapter.py",
+      "sha256": "78d0dee6ddd219772ad5e44a8110abbdadc0eb16e3bec087eb9d7364f0145604"
+    }
+  ],
   "authenticated_gateway": true,
   "canonical_session_observed": true,
   "child_completed": true,
   "child_result_sha256": "453135e40beed1fbefa26466f4ebe3415bc01b558bbb200bcb55e1e252740412",
-  "child_run_id_sha256": "9b465d2bc7cc55a13bf54b5b510b85deccd81d79b20d24ffd3e008a51fc623f3",
-  "child_session_key_sha256": "a1e5072f135118286437159a65a7e07b3312b97c1eb607a36d2433a334909f97",
+  "child_run_id_sha256": "87912ba4779c417555aadd4f794cdb77aae50db2449a51491805950af43bc909",
+  "child_session_key_sha256": "77edb6348545db51a636f86626584d474d56619b3e779edb6258c98ce69862c7",
   "cross_principal_lease_hidden": true,
   "cross_principal_sessions_hidden": true,
   "cross_principal_spawn_rejected": true,
   "cross_principal_status_rejected": true,
   "duplicate_lease_identity_parity": true,
+  "duplicate_release_identity_parity": true,
   "duplicate_spawn_identity_parity": true,
   "e2e_command_sha256": "74470fa78de8d96b64a09ec766ae7729a25d930bf45c59ec9a0cc25f08428613",
   "effective_allow_lease": true,
-  "gateway_lease_id_sha256": "ed8a6a22693061c4ed74eb60f0fdd32e8366d043dbb2432ad3fec2216f0b494d",
-  "history_response_sha256": "21a01a593df995113e718967dd056c608022aa4a9cfdf6786080449dadac3637",
+  "gateway_lease_id_sha256": "bef41614d268f4216156dc171e3498be99949814dfbbaca1a4c96cde08d478c4",
+  "history_response_sha256": "73b944c63acd5fcda0cfa1f8f2f4d8c6cc4113ee619dfad3e87fe26942b984fa",
   "lifecycle_completed_observed": true,
   "lifecycle_failure_observed": true,
   "lifecycle_running_observed": true,
   "model_request_count": 2,
-  "openclaw_head_sha": "42bb407b180710552fe048dbd326e7a40792d9eb",
+  "openclaw_head_sha": "219c71d13a743fec68b36c8e91c53868d841f435",
   "probe": "agentic-os-real-gateway-runtime-contract-v1",
-  "probe_runner_sha256": "7534d7720682ca057a82af0a259133b82dda0cccd8ab7f11c8f11996fe442e4d",
+  "probe_runner_sha256": "d2d43a423cff9fe06668ba5b42f4c56d35543a2ca5f18b71ffe93a9a43569eba",
   "read_only_acquire_rejected": true,
   "released_lease_spawn_rejected": true,
   "runtime_catalog_discovered": true,
-  "runtime_methods_sha256": "8c3e2eeb5bd0698f4fb7c828ee1e178797aafb1463cce7ad5266bb1511f14aff",
+  "runtime_methods_sha256": "490272e37f1d927100a94a5014e3cf3352795de38db6dc6e5e5cfdb36378f20c",
   "sources": [
     {
       "path": "src/gateway/agentic-os-runtime-contract.ts",
-      "sha256": "188068dd0995ab68d33714769724827e330f7e6278a2a6e83a9db2ddaebd8a82"
+      "sha256": "36bbadeddf149a73e0193901d56bdbea2086c8df4ed4d0bc83d8390071667a1f"
     },
     {
       "path": "src/gateway/server-methods/agentic-os-runtime-contract.ts",
-      "sha256": "2c7bbc4147b8831ed35ec9cd5997bc4e96721eb8d79c985895dec091f3aa36ec"
+      "sha256": "6632c9c8e5dc55fe9e3b4b8f641d2a9ad47681ccdb62d5dc3d7147de10c53eeb"
     },
     {
       "path": "src/agents/subagent-spawn.ts",
@@ -42,11 +62,11 @@
     },
     {
       "path": "test/agentic-os-runtime-contract.e2e.test.ts",
-      "sha256": "94dee33753b565ff8b339ee6d8429bd49a364565361e07c66d44321a8156c32c"
+      "sha256": "6e580eafdd28ac765388c0e0354b95cce57f2fb6a5ea6867c6f1374d9657c204"
     }
   ],
   "static_allow_agents_wildcard": false,
   "status": "pass",
-  "task_marker_sha256": "934bc6732af57ad6ae38248aa7b94a3c2b811c91df444de52e9ae474f5970533",
+  "task_marker_sha256": "f4fe66c434c4e5956160c08f09ac96dda911e635976692f0c9b0557959882ec5",
   "wrong_lease_rejected": true
 }
