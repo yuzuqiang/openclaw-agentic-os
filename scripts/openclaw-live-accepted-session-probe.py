@@ -291,6 +291,15 @@ def _metadata_alias(
 def _candidate_roots_for_executable(executable: Path) -> list[Path]:
     resolved = executable.resolve()
     candidates: list[Path] = []
+    override = os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip()
+    if override:
+        explicit_root = Path(override).expanduser().resolve()
+        try:
+            resolved.relative_to(explicit_root)
+        except ValueError:
+            pass
+        else:
+            candidates.append(explicit_root)
     for parent in (resolved.parent, *resolved.parents):
         candidates.extend(
             (
@@ -1024,12 +1033,9 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         return evidence
     try:
-        openclaw_executable = _validated_openclaw_executable(preflight_payload)
-        if (
-            evidence["observed_preflight_runtime_target"] is not None
-            and evidence["observed_preflight_runtime_target"] != "isolated_candidate"
-        ):
+        if evidence["observed_preflight_runtime_target"] != "isolated_candidate":
             raise RuntimeError("capability preflight did not target isolated candidate")
+        openclaw_executable = _validated_openclaw_executable(preflight_payload)
     except RuntimeError as exc:
         sanitized = _sanitized_exception(exc)
         if str(exc).startswith("preflighted OpenClaw"):

@@ -168,6 +168,35 @@ def add_fake_openclaw_to_env(
     return executable
 
 
+def add_env_sensitive_fake_openclaw_to_env(env, directory):
+    bin_dir = os.path.join(directory, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    executable = os.path.join(bin_dir, "openclaw")
+    baseline_entries = [
+        active_tool_entry(tool_id)
+        for tool_id in ACTIVE_TOOL_IDS
+        if tool_id != "sessions_status"
+    ]
+    candidate_entries = [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]
+    with open(executable, "w", encoding="utf-8") as handle:
+        handle.write(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "import os\n"
+            "import sys\n"
+            "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+            "    entries = "
+            f"{candidate_entries!r} if os.environ.get('OPENCLAW_INSTALL_ROOT') else {baseline_entries!r}\n"
+            "    print(json.dumps({'groups': [{'id': 'unit', 'tools': entries}]}, sort_keys=True))\n"
+            "    raise SystemExit(0)\n"
+            "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
+            "raise SystemExit(1)\n"
+        )
+    os.chmod(executable, 0o755)
+    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+    return executable
+
+
 class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
@@ -527,6 +556,39 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "installed_openclaw_negative_baseline",
         )
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
+        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+
+    def test_installed_openclaw_negative_baseline_scrubs_candidate_override_for_catalog(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline_root = os.path.join(directory, "openclaw")
+            candidate_root = os.path.join(directory, "candidate-openclaw")
+            write_contract_candidate_dist(baseline_root)
+            write_contract_candidate_dist(candidate_root)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = candidate_root
+            add_env_sensitive_fake_openclaw_to_env(env, baseline_root)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--installed-openclaw-negative-baseline",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(
+            payload["catalog"]["runtime_target"],
+            "installed_openclaw_negative_baseline",
+        )
         self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
 
     def test_live_installed_openclaw_missing_runtime_writes_failure_evidence(self) -> None:
