@@ -4,7 +4,7 @@
   "agentic_adapter_post_release_absent": true,
   "agentic_adapter_release_metadata_parity": true,
   "agentic_adapter_release_succeeded": true,
-  "agentic_os_head_sha": "933c65a1585815121c94072cd35ff48d9abf965d",
+  "agentic_os_head_sha": "ae59f7029f3e3bc912ed14fc9d5eaa3da9d9c8f9",
   "committed_snapshot_authority": "non_authoritative_last_run_snapshot",
   "current_head_evidence_required": true,
   "agentic_sources": [
@@ -25,8 +25,8 @@
   "canonical_session_observed": true,
   "child_completed": true,
   "child_result_sha256": "453135e40beed1fbefa26466f4ebe3415bc01b558bbb200bcb55e1e252740412",
-  "child_run_id_sha256": "cd8743aac47ceff0d7b095b22a63f3a039a5cdc69b065b861fcafc744551563f",
-  "child_session_key_sha256": "ae7d789be2253f188764d58923beee31117ec0cc2a638d648eec983b203d70f4",
+  "child_run_id_sha256": "b9aeb24c1ca01c4d5a190a9475e7399d802ec3f331ec89324d920435763e833e",
+  "child_session_key_sha256": "a33eebf1f4bd97f8e60a498b96fd9ec74cda5389e98072e06255751f6251a601",
   "cross_principal_lease_hidden": true,
   "cross_principal_sessions_hidden": true,
   "cross_principal_spawn_rejected": true,
@@ -36,8 +36,8 @@
   "duplicate_spawn_identity_parity": true,
   "e2e_command_sha256": "74470fa78de8d96b64a09ec766ae7729a25d930bf45c59ec9a0cc25f08428613",
   "effective_allow_lease": true,
-  "gateway_lease_id_sha256": "d5c21a628121e224bc31415e35cace186158882d3534c58095540af778433e6c",
-  "history_response_sha256": "e1ef422b753764146170b91b701179abe57471a75a3ababcd8708829c132d83b",
+  "gateway_lease_id_sha256": "bee1f7daf1b92a97093f7e10a88ff7492abe8490a4d7fff0fa083a115cd57970",
+  "history_response_sha256": "027211d500826a4e96e8e81e1b36c8984826f9ffdb4cdfa64d5d49ea6f3483b6",
   "lifecycle_completed_observed": true,
   "lifecycle_failure_observed": true,
   "lifecycle_running_observed": true,
@@ -69,6 +69,6 @@
   ],
   "static_allow_agents_wildcard": false,
   "status": "pass",
-  "task_marker_sha256": "a19d70eef6f09a61ca4bf5c3e2fcf0a5500d1067129bcfac5d772dcdb41f00c6",
+  "task_marker_sha256": "8cb61c3ed142d5ffebbfbb07871dc5a839b6564ed6f8d5b0468af0190c122d5e",
   "wrong_lease_rejected": true
 }
