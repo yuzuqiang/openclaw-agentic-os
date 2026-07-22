@@ -4,7 +4,7 @@
   "agentic_adapter_post_release_absent": true,
   "agentic_adapter_release_metadata_parity": true,
   "agentic_adapter_release_succeeded": true,
-  "agentic_os_head_sha": "671938b8759314d71d795142de47400c762ddb59",
+  "agentic_os_head_sha": "ac796d5253f658e17697a7dad5390fdcd0c9f9f4",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
@@ -23,8 +23,8 @@
   "canonical_session_observed": true,
   "child_completed": true,
   "child_result_sha256": "453135e40beed1fbefa26466f4ebe3415bc01b558bbb200bcb55e1e252740412",
-  "child_run_id_sha256": "aee8f0381398910d85db2be81ce358b8ac2d47b5b71c0ca33851baec49f72adc",
-  "child_session_key_sha256": "86a9e4b716d4533781c7e07df2e48bdb8c8087c7de5d3fbcd375a30023db4d88",
+  "child_run_id_sha256": "ce056694de26fa212787b08dfb5633b31fc2a8b792befc74baa099a9177c30c7",
+  "child_session_key_sha256": "d3760d563a3859c759f40df257e4b1886f4d19319f9e9c0b0bfd8f5b0eb57b14",
   "cross_principal_lease_hidden": true,
   "cross_principal_sessions_hidden": true,
   "cross_principal_spawn_rejected": true,
@@ -34,13 +34,13 @@
   "duplicate_spawn_identity_parity": true,
   "e2e_command_sha256": "74470fa78de8d96b64a09ec766ae7729a25d930bf45c59ec9a0cc25f08428613",
   "effective_allow_lease": true,
-  "gateway_lease_id_sha256": "1cec065b93f65bf797c0285684e2c925247b0e138db97993160446a7953dab57",
-  "history_response_sha256": "c293876eeb093b90e0f86940332320ee6b93a231578cbf16663da2cf3db66556",
+  "gateway_lease_id_sha256": "8cf9d347876ff3ba6b121d96d72869035a614353abc6bcff82ef6550260fdeaf",
+  "history_response_sha256": "4143e83f0721f769df7ef94fb3216d12a0358ad4b680f2c82afc8cfb5a03dc35",
   "lifecycle_completed_observed": true,
   "lifecycle_failure_observed": true,
   "lifecycle_running_observed": true,
   "model_request_count": 2,
-  "openclaw_head_sha": "7537bc71502a5ac7f584674a501fa8c80a2a818a",
+  "openclaw_head_sha": "20f896beb7a1297616550aa47ae3096b982f1fc2",
   "probe": "agentic-os-real-gateway-runtime-contract-v1",
   "probe_runner_sha256": "d2d43a423cff9fe06668ba5b42f4c56d35543a2ca5f18b71ffe93a9a43569eba",
   "read_only_acquire_rejected": true,
@@ -50,7 +50,7 @@
   "sources": [
     {
       "path": "src/gateway/agentic-os-runtime-contract.ts",
-      "sha256": "36bbadeddf149a73e0193901d56bdbea2086c8df4ed4d0bc83d8390071667a1f"
+      "sha256": "8eb899f45c5ba0bd0a3dd86ab93af1e80f4f012d279ef70082650a7aa3921b63"
     },
     {
       "path": "src/gateway/server-methods/agentic-os-runtime-contract.ts",
@@ -67,6 +67,6 @@
   ],
   "static_allow_agents_wildcard": false,
   "status": "pass",
-  "task_marker_sha256": "2fb75c1e6d244f5804eb66f2cf42b545f4be11a23b3188082851e05fb9550963",
+  "task_marker_sha256": "7ffe0c10824092dab1aeef8c021197eeded977d7d8ce8569707e92079cef7780",
   "wrong_lease_rejected": true
 }
