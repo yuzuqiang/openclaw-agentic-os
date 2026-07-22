@@ -111,6 +111,12 @@ class RealGatewayProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw value"):
             MODULE._walk_evidence({"error": "/Users/example/private"})
 
+    def test_rejects_windows_absolute_path_value(self) -> None:
+        for value in (r"C:\Users\example\private", r"\\server\share\private"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw value"):
+                    MODULE._walk_evidence({"error": value})
+
     def test_evidence_requires_current_agentic_head_binding(self) -> None:
         head = MODULE._git(MODULE.ROOT, "rev-parse", "HEAD")
         payload = {

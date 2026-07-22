@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 
@@ -147,7 +147,8 @@ def _walk_evidence(value: Any, path: tuple[str, ...] = ()) -> None:
             _walk_evidence(item, (*path, str(index)))
         return
     if isinstance(value, str):
-        if Path(value).is_absolute() or any(
+        windows_path = PureWindowsPath(value)
+        if Path(value).is_absolute() or windows_path.is_absolute() or windows_path.drive or any(
             fragment in value for fragment in FORBIDDEN_EVIDENCE_FRAGMENTS
         ):
             raise ProbeError(f"evidence contains forbidden raw value at {'.'.join(path)}")

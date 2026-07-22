@@ -15,8 +15,8 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
 - Current design artifact SHA-256: `6733bcef10fdd95b95767645a0c57e88fd24a814748e26dc9d70193816b6cd26`
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `d693ff4c35e0b6b372c5a36f40af8d4134632ba15ba17e57d35cdc6a372bccff`
-- Current migration manifest SHA-256: `fc45a091cab0b8e35440b631e98deeea8a288b6d3519c083e7752f1ef60b6c12`
+- Current latest migration SHA-256: `1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163`
+- Current migration manifest SHA-256: `c5e193b83c7d57969297bf4f7933a97a9e5a55cdba65a6a0ebd4292ab1bd6185`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Completed bounded slices: privacy preflight, package/retrieval denylist,
   migration/package parity, file-authority shadow, dual-write shadow, synthetic

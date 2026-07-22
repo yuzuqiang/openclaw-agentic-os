@@ -987,6 +987,39 @@ def _validate_history_items_match_session(
     return checked
 
 
+def _validate_response_level_session_identity(
+    response: dict[str, Any],
+    *,
+    accepted_session_identity: str,
+    label: str,
+) -> None:
+    identities = _string_values_from_paths(
+        response,
+        ("session_key",),
+        ("sessionKey",),
+        ("spawn_request_session_key",),
+        ("spawnRequestSessionKey",),
+        ("external_id",),
+        ("externalId",),
+        ("result", "session_key"),
+        ("result", "sessionKey"),
+        ("result", "spawn_request_session_key"),
+        ("result", "spawnRequestSessionKey"),
+        ("result", "external_id"),
+        ("result", "externalId"),
+        ("output", "session_key"),
+        ("output", "sessionKey"),
+        ("output", "spawn_request_session_key"),
+        ("output", "spawnRequestSessionKey"),
+        ("output", "external_id"),
+        ("output", "externalId"),
+    )
+    if any(identity != accepted_session_identity for identity in identities):
+        raise MetadataContractError(
+            f"{label} top-level identity did not match accepted session"
+        )
+
+
 def _validate_session_api_observes_session(
     response: dict[str, Any],
     *,
@@ -1002,6 +1035,11 @@ def _validate_session_api_observes_session(
             accepted_session_identity=accepted_session_identity,
             label=label,
         )
+    _validate_response_level_session_identity(
+        response,
+        accepted_session_identity=accepted_session_identity,
+        label=label,
+    )
     raw_metadata = _validate_session_raw_metadata(
         response,
         accepted_session_identity=accepted_session_identity,

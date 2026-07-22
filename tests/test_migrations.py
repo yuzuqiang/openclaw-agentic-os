@@ -3062,6 +3062,21 @@ class MigrationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
             connection.execute(
+                "UPDATE leases SET gateway_lease_id='gateway-released-other', "
+                "external_metadata_json=? WHERE lease_id='released-ok'",
+                (
+                    json.dumps(
+                        {
+                            **metadata,
+                            "client_lease_id": "client-ok",
+                            "idempotency_key": "idem-ok",
+                            "gateway_lease_id": "gateway-released-other",
+                        }
+                    ),
+                ),
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
+            connection.execute(
                 "UPDATE external_rpc_intents SET external_id='other-gateway' "
                 "WHERE intent_id='release-intent'"
             )
