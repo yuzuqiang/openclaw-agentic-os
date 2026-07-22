@@ -179,6 +179,63 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["rpc_attempted"], [])
         gateway.assert_not_called()
 
+    def test_preflight_command_targets_isolated_candidate_runtime(self) -> None:
+        module = load_probe_module()
+        with mock.patch.object(
+            module,
+            "_run_json",
+            return_value=(
+                0,
+                {
+                    "status": "pass",
+                    "catalog": {
+                        "runtime_target": "isolated_candidate",
+                        "tools": [{"name": "sessions_status"}],
+                    },
+                },
+            ),
+        ) as run_json:
+            ok, payload = module._preflight()
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
+        command = run_json.call_args.args[0]
+        self.assertIn("--isolated-candidate-openclaw", command)
+        self.assertNotIn("--live-installed-openclaw", command)
+
+    def test_wrong_preflight_target_fails_closed_before_any_rpc(self) -> None:
+        module = load_probe_module()
+        with mock.patch.object(
+            module,
+            "_preflight",
+            return_value=(
+                True,
+                {
+                    "status": "pass",
+                    "catalog": {
+                        "runtime_target": "live_installed_openclaw",
+                        "tools": [{"name": "sessions_status"}],
+                    },
+                },
+            ),
+        ), mock.patch.object(module, "_gateway_call") as gateway:
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "capability_preflight_target_mismatch")
+        self.assertFalse(payload["spawn_attempted"])
+        self.assertFalse(payload["lease_acquired"])
+        self.assertEqual(payload["released"], "not_required")
+        self.assertEqual(payload["rpc_attempted"], [])
+        gateway.assert_not_called()
+
+    def test_session_status_alias_is_not_canonical_for_agentic_os_probe(self) -> None:
+        module = load_probe_module()
+        with self.assertRaisesRegex(RuntimeError, "sessions_status"):
+            module._session_status_method(
+                {"catalog": {"tools": [{"name": "session_status"}]}}
+            )
+
     def test_db_authority_enabled_fails_closed_before_preflight(self) -> None:
         module = load_probe_module()
         with mock.patch.object(

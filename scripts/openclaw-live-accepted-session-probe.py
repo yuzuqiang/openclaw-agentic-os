@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Bounded live OpenClaw accepted-session identity/idempotency probe.
 
-The probe refuses to call mutating OpenClaw RPCs unless the installed runtime
-catalog first passes ``openclaw-tool-capability-preflight.py`` for the exact
-Agentic OS allowLease/session metadata contract.
+The probe refuses to call mutating OpenClaw RPCs unless the isolated candidate
+runtime catalog first passes ``openclaw-tool-capability-preflight.py`` for the
+exact Agentic OS allowLease/session metadata contract.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def _preflight() -> tuple[bool, dict[str, Any]]:
         [
             sys.executable,
             str(PREFLIGHT),
-            "--live-installed-openclaw",
+            "--isolated-candidate-openclaw",
             "--json",
         ],
         timeout=30,
@@ -921,9 +921,9 @@ def _session_status_method(preflight_payload: dict[str, Any]) -> str:
                     names.add(name)
     if "sessions_status" in names:
         return "sessions_status"
-    if "session_status" in names:
-        return "session_status"
-    return "sessions_status"
+    if not names:
+        return "sessions_status"
+    raise RuntimeError("isolated candidate catalog did not prove sessions_status")
 
 
 def _release_lease(
@@ -975,6 +975,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     started = int(time.time() * 1000)
     evidence: dict[str, Any] = {
         "probe": "openclaw-live-accepted-session-identity",
+        "preflight_runtime_target": "isolated_candidate",
+        "required_canonical_session_status_method": "sessions_status",
         "started_epoch_ms": started,
         "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         "rpc_attempted": [],
@@ -1007,6 +1009,9 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         return evidence
     evidence["preflight"] = preflight_payload
+    evidence["observed_preflight_runtime_target"] = _path_value(
+        preflight_payload, ("catalog", "runtime_target")
+    )
     if not preflight_ok:
         evidence.update(
             {
@@ -1020,14 +1025,24 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         return evidence
     try:
         openclaw_executable = _validated_openclaw_executable(preflight_payload)
+        if (
+            evidence["observed_preflight_runtime_target"] is not None
+            and evidence["observed_preflight_runtime_target"] != "isolated_candidate"
+        ):
+            raise RuntimeError("capability preflight did not target isolated candidate")
     except RuntimeError as exc:
         sanitized = _sanitized_exception(exc)
         if str(exc).startswith("preflighted OpenClaw"):
             sanitized["error"] = str(exc)
+        reason = (
+            "capability_preflight_target_mismatch"
+            if str(exc) == "capability preflight did not target isolated candidate"
+            else "capability_preflight_executable_mismatch"
+        )
         evidence.update(
             {
                 "status": "fail_closed",
-                "reason": "capability_preflight_executable_mismatch",
+                "reason": reason,
                 **sanitized,
                 "spawn_attempted": False,
                 "lease_acquired": False,

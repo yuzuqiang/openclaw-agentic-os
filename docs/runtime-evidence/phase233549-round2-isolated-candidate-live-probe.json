@@ -1,0 +1,490 @@
+{
+  "accepted_session_identity_parity": {
+    "external_rpc_intents.external_id_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+    "sessions.session_key_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+    "spawn_requests.session_key_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+  },
+  "accepted_session_identity_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+  "allow_lease": {
+    "duplicate_gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+    "duplicate_metadata_contract_version": "v1",
+    "duplicate_normalized_metadata": {
+      "agent_id": "ai-engineer",
+      "client_lease_id": "issue35-phase233549-round2",
+      "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+      "idempotency_key": "issue35-acquire-phase233549-round2",
+      "phase": "B",
+      "requester_agent_id": "agentic-os",
+      "run_id": "issue35-run-phase233549-round2",
+      "transition_id": "issue35-transition-phase233549-round2",
+      "ttl_ms": 60000
+    },
+    "duplicate_raw_metadata_json_sha256": "b204f4ed610be428791fa4266aec5907179d6e8923ce9a9938c3e50ddd9cf47f",
+    "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+    "metadata_contract_version": "v1",
+    "normalized_metadata": {
+      "agent_id": "ai-engineer",
+      "client_lease_id": "issue35-phase233549-round2",
+      "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+      "idempotency_key": "issue35-acquire-phase233549-round2",
+      "phase": "B",
+      "requester_agent_id": "agentic-os",
+      "run_id": "issue35-run-phase233549-round2",
+      "transition_id": "issue35-transition-phase233549-round2",
+      "ttl_ms": 60000
+    },
+    "raw_acquire_response_sha256": "96fb87d2ca9c7b498ed648a8824adcbe70a2f662b8260487ffc9e6e61ef2a2a2",
+    "raw_duplicate_response_sha256": "96fb87d2ca9c7b498ed648a8824adcbe70a2f662b8260487ffc9e6e61ef2a2a2",
+    "raw_metadata_json_sha256": "b204f4ed610be428791fa4266aec5907179d6e8923ce9a9938c3e50ddd9cf47f",
+    "status_observed_lease": {
+      "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+      "metadata_contract_version": "v1",
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_lease_id": "issue35-phase233549-round2",
+        "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+        "idempotency_key": "issue35-acquire-phase233549-round2",
+        "phase": "B",
+        "requester_agent_id": "agentic-os",
+        "run_id": "issue35-run-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2",
+        "ttl_ms": 60000
+      },
+      "raw_metadata_json_sha256": "b204f4ed610be428791fa4266aec5907179d6e8923ce9a9938c3e50ddd9cf47f",
+      "raw_response_sha256": "2cb12bd5ea3f622b39e9ae869419d6ed30f645fb774b268d13e4b5e6eca3beee",
+      "response_top_level_keys": [
+        "leases",
+        "status"
+      ]
+    }
+  },
+  "allow_lease_release": {
+    "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+    "metadata_contract_version": "v1",
+    "normalized_metadata": {
+      "agent_id": "ai-engineer",
+      "client_lease_id": "issue35-phase233549-round2",
+      "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+      "idempotency_key": "issue35-release-phase233549-round2-0",
+      "phase": "B",
+      "requester_agent_id": "agentic-os",
+      "run_id": "issue35-run-phase233549-round2",
+      "transition_id": "issue35-transition-phase233549-round2"
+    },
+    "raw_metadata_json_sha256": "58c232dd81bb43ff69b12c42a9c258641fd8106d4f6046dfe888020da5a793e8",
+    "raw_response_sha256": "d2cc4e4bc202cc58a7c2745145baddeadf6acefc36e56e967479d9439172626f",
+    "response_top_level_keys": [
+      "external_id",
+      "gateway_lease_id",
+      "lease",
+      "metadata",
+      "released",
+      "status"
+    ]
+  },
+  "allow_lease_releases": [
+    {
+      "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+      "metadata_contract_version": "v1",
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_lease_id": "issue35-phase233549-round2",
+        "gateway_lease_id_sha256": "33a8fe8cc7af4a1f6cc2a8595ec7ab746c4a1b6663aaa2bc50384d03db25395d",
+        "idempotency_key": "issue35-release-phase233549-round2-0",
+        "phase": "B",
+        "requester_agent_id": "agentic-os",
+        "run_id": "issue35-run-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "raw_metadata_json_sha256": "58c232dd81bb43ff69b12c42a9c258641fd8106d4f6046dfe888020da5a793e8",
+      "raw_response_sha256": "d2cc4e4bc202cc58a7c2745145baddeadf6acefc36e56e967479d9439172626f",
+      "response_top_level_keys": [
+        "external_id",
+        "gateway_lease_id",
+        "lease",
+        "metadata",
+        "released",
+        "status"
+      ]
+    }
+  ],
+  "db_authority_enabled": false,
+  "lease_acquired": true,
+  "observed_preflight_runtime_target": "isolated_candidate",
+  "preflight": {
+    "catalog": {
+      "active_catalog": {
+        "method": "tools.catalog",
+        "raw_response_sha256": "084c93c6294c98154a033116dc0b04c86c086f6f7983e25b2ba0f47c1e4f23dc",
+        "required_tool_names": [
+          "sessions_history",
+          "sessions_list",
+          "sessions_spawn",
+          "sessions_status",
+          "subagents.allowLease.acquire",
+          "subagents.allowLease.release",
+          "subagents.allowLease.status"
+        ]
+      },
+      "active_executable_path_sha256": "ffcf477543bd856bb1f45034fb1ae2730f5feaea064232701b89af5ee1c0d5c8",
+      "active_executable_sha256": "ca8d5d830f37154f322952d4d57b015d897c7fddccf940c74b9dd5f9ad13d0aa",
+      "catalog_kind": "sanitized_openclaw_runtime",
+      "install_root_basename": "openclaw",
+      "install_root_path_sha256": "509ec34e8d40637c45697d1020742147226c47c875664f7e59a493ad40d94574",
+      "openclaw_package_name": "openclaw",
+      "openclaw_version": "2026.7.2",
+      "required_canonical_session_status_method": "sessions_status",
+      "runtime_target": "isolated_candidate",
+      "sources": [
+        {
+          "path": "dist/core-descriptors-agentic-os-probe.js",
+          "sha256": "37bb95206488bebf3571be02714aa90a8a3ee50de04817bde43d89c09fb234a2"
+        },
+        {
+          "path": "dist/openclaw-tools-agentic-os-probe.js",
+          "sha256": "2dc281c0cd66175982dd124257d88767fc43dec49cea53bbfe7ad68e99fcb7c0"
+        },
+        {
+          "path": "dist/server-methods-agentic-os-probe.js",
+          "sha256": "6ed4db1c17f5d71d00bb32e09453f95aeae17ecced19f569596663d560d73e9b"
+        }
+      ],
+      "tools": [
+        {
+          "active_parameters": [
+            "agent_id",
+            "client_lease_id",
+            "idempotency_key",
+            "phase",
+            "requester_agent_id",
+            "run_id",
+            "transition_id",
+            "ttl_ms"
+          ],
+          "name": "subagents.allowLease.acquire",
+          "parameters": [
+            "agent_id",
+            "client_lease_id",
+            "idempotency_key",
+            "phase",
+            "requester_agent_id",
+            "run_id",
+            "transition_id",
+            "ttl_ms"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "active_parameters": [],
+          "name": "subagents.allowLease.status",
+          "parameters": [],
+          "schema_source": "declared_tool_name"
+        },
+        {
+          "active_parameters": [
+            "agent_id",
+            "client_lease_id",
+            "gateway_lease_id",
+            "idempotency_key",
+            "phase",
+            "requester_agent_id",
+            "run_id",
+            "transition_id"
+          ],
+          "name": "subagents.allowLease.release",
+          "parameters": [
+            "agent_id",
+            "client_lease_id",
+            "gateway_lease_id",
+            "idempotency_key",
+            "phase",
+            "requester_agent_id",
+            "run_id",
+            "transition_id"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "active_parameters": [
+            "agentId",
+            "client_request_id",
+            "gateway_lease_id",
+            "idempotency_key",
+            "metadata",
+            "mode",
+            "runtime",
+            "task",
+            "taskName"
+          ],
+          "name": "sessions_spawn",
+          "parameters": [
+            "agentId",
+            "client_request_id",
+            "gateway_lease_id",
+            "idempotency_key",
+            "metadata",
+            "mode",
+            "runtime",
+            "task",
+            "taskName"
+          ],
+          "schema_source": "model_tool_schema"
+        },
+        {
+          "active_parameters": [],
+          "name": "sessions_list",
+          "parameters": [],
+          "schema_source": "declared_tool_name"
+        },
+        {
+          "active_parameters": [
+            "includeTools",
+            "limit",
+            "sessionKey"
+          ],
+          "name": "sessions_history",
+          "parameters": [
+            "includeTools",
+            "limit",
+            "sessionKey"
+          ],
+          "schema_source": "model_tool_schema"
+        },
+        {
+          "active_parameters": [
+            "session_key"
+          ],
+          "name": "sessions_status",
+          "parameters": [
+            "session_key"
+          ],
+          "schema_source": "model_tool_schema"
+        }
+      ]
+    },
+    "status": "pass"
+  },
+  "preflight_runtime_target": "isolated_candidate",
+  "probe": "openclaw-live-accepted-session-identity",
+  "released": true,
+  "required_canonical_session_status_method": "sessions_status",
+  "rpc_attempted": [
+    "subagents.allowLease.acquire",
+    "subagents.allowLease.acquire:duplicate",
+    "subagents.allowLease.status",
+    "sessions_spawn",
+    "sessions_spawn:duplicate",
+    "sessions_list",
+    "sessions_status",
+    "sessions_history",
+    "subagents.allowLease.release"
+  ],
+  "session_read_structured_evidence": {
+    "sessions_history": {
+      "accepted_session_identity_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+      "metadata_contract_version": "v1",
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "raw_metadata_json_sha256": "c3d4a8b9f313d1d7a03b8d9d8c7b2ebe5a3e26e663608621bc8d68dcf0244473",
+      "raw_response_sha256": "84ab054fc09d67efee22f72d3df9a03e2ca9237c1e09c16139acc6b2a4c97178",
+      "response_top_level_keys": [
+        "agent_id",
+        "client_request_id",
+        "created_at_ms",
+        "external_id",
+        "gateway_lease_id",
+        "idempotency_key",
+        "key",
+        "messages",
+        "metadata",
+        "runId",
+        "session",
+        "sessionKey",
+        "session_key",
+        "spawn_request_session_key",
+        "status",
+        "task",
+        "taskName"
+      ]
+    },
+    "sessions_list": {
+      "accepted_session_identity_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+      "metadata_contract_version": "v1",
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "raw_metadata_json_sha256": "c3d4a8b9f313d1d7a03b8d9d8c7b2ebe5a3e26e663608621bc8d68dcf0244473",
+      "raw_response_sha256": "088100e4631f663837dabdc474b2ea833e2ed6846f2f03527f92c238a63a7f48",
+      "response_top_level_keys": [
+        "count",
+        "sessions",
+        "status"
+      ]
+    },
+    "sessions_status": {
+      "accepted_session_identity_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+      "metadata_contract_version": "v1",
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "raw_metadata_json_sha256": "c3d4a8b9f313d1d7a03b8d9d8c7b2ebe5a3e26e663608621bc8d68dcf0244473",
+      "raw_response_sha256": "3c23eaad9d2a203be68e2f5698dd67084e76d4ebd834521b0ff8d7d287f8d254",
+      "response_top_level_keys": [
+        "agent_id",
+        "client_request_id",
+        "created_at_ms",
+        "external_id",
+        "gateway_lease_id",
+        "idempotency_key",
+        "key",
+        "metadata",
+        "runId",
+        "session",
+        "sessionKey",
+        "session_key",
+        "spawn_request_session_key",
+        "status",
+        "task",
+        "taskName"
+      ]
+    }
+  },
+  "sessions_spawn_structured_evidence": {
+    "duplicate": {
+      "accepted_session_identity_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+      "identity": {
+        "external_id": {
+          "bytes": 63,
+          "sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+        },
+        "session_key": {
+          "bytes": 63,
+          "sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+        },
+        "spawn_request_session_key": {
+          "bytes": 63,
+          "sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+        }
+      },
+      "metadata_contract_version": "v1",
+      "metadata_echo": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "raw_metadata_json_sha256": "c3d4a8b9f313d1d7a03b8d9d8c7b2ebe5a3e26e663608621bc8d68dcf0244473",
+      "raw_response_sha256": "01ade81f80a8420b06803f104ca2b932f2fc10c0d731ac99f26b3d9d7c7f0572",
+      "response_top_level_keys": [
+        "agent_id",
+        "childSessionKey",
+        "client_request_id",
+        "created_at_ms",
+        "external_id",
+        "gateway_lease_id",
+        "idempotency_key",
+        "key",
+        "metadata",
+        "runId",
+        "session",
+        "sessionKey",
+        "session_key",
+        "spawn_request_session_key",
+        "status",
+        "task",
+        "taskName"
+      ]
+    },
+    "first": {
+      "accepted_session_identity_sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e",
+      "identity": {
+        "external_id": {
+          "bytes": 63,
+          "sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+        },
+        "session_key": {
+          "bytes": 63,
+          "sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+        },
+        "spawn_request_session_key": {
+          "bytes": 63,
+          "sha256": "c6cafcac998db4f580baba16a884c6479bd40d87ac43c4b8c187a5c41b8ec03e"
+        }
+      },
+      "metadata_contract_version": "v1",
+      "metadata_echo": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "normalized_metadata": {
+        "agent_id": "ai-engineer",
+        "client_request_id": "issue35-client-phase233549-round2",
+        "idempotency_key": "issue35-spawn-phase233549-round2",
+        "phase": "B",
+        "run_id": "issue35-run-phase233549-round2",
+        "task_digest": "issue35-task-phase233549-round2",
+        "transition_id": "issue35-transition-phase233549-round2"
+      },
+      "raw_metadata_json_sha256": "c3d4a8b9f313d1d7a03b8d9d8c7b2ebe5a3e26e663608621bc8d68dcf0244473",
+      "raw_response_sha256": "01ade81f80a8420b06803f104ca2b932f2fc10c0d731ac99f26b3d9d7c7f0572",
+      "response_top_level_keys": [
+        "agent_id",
+        "childSessionKey",
+        "client_request_id",
+        "created_at_ms",
+        "external_id",
+        "gateway_lease_id",
+        "idempotency_key",
+        "key",
+        "metadata",
+        "runId",
+        "session",
+        "sessionKey",
+        "session_key",
+        "spawn_request_session_key",
+        "status",
+        "task",
+        "taskName"
+      ]
+    }
+  },
+  "spawn_attempted": true,
+  "started_epoch_ms": 1784699396950,
+  "status": "pass"
+}

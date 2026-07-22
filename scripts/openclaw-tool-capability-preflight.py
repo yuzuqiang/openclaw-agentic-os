@@ -51,30 +51,43 @@ MODEL_TOOL_SCHEMA_MARKERS = {
 }
 
 
-def _candidate_install_roots() -> Iterable[Path]:
+def _candidate_install_roots(
+    *,
+    include_env_override: bool = True,
+) -> Iterable[Path]:
     override = os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip()
-    if override:
+    if include_env_override and override:
         yield Path(override).expanduser()
     executable = shutil.which("openclaw")
     if executable:
         resolved = Path(executable).resolve()
         for parent in (resolved.parent, *resolved.parents):
+            if parent.name == "openclaw":
+                yield parent
             yield parent / "lib" / "node_modules" / "openclaw"
             yield parent / "node_modules" / "openclaw"
     yield Path("/opt/homebrew/lib/node_modules/openclaw")
     yield Path("/usr/local/lib/node_modules/openclaw")
 
 
-def _resolve_install_root() -> Path:
+def _resolve_install_root(
+    *,
+    include_env_override: bool = True,
+    require_env_override: bool = False,
+) -> Path:
+    if require_env_override and not os.environ.get("OPENCLAW_INSTALL_ROOT", "").strip():
+        raise AdapterContractError(
+            "isolated candidate OpenClaw preflight requires OPENCLAW_INSTALL_ROOT"
+        )
     seen: set[Path] = set()
-    for candidate in _candidate_install_roots():
+    for candidate in _candidate_install_roots(include_env_override=include_env_override):
         resolved = candidate.resolve()
         if resolved in seen:
             continue
         seen.add(resolved)
         if (resolved / "dist").is_dir() and (resolved / "package.json").is_file():
             return resolved
-    raise AdapterContractError("installed OpenClaw runtime bundle was not found")
+    raise AdapterContractError("OpenClaw runtime bundle was not found")
 
 
 def _file_digest(path: Path) -> str:
@@ -684,8 +697,16 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
     return entries
 
 
-def live_installed_openclaw_catalog() -> dict[str, Any]:
-    root = _resolve_install_root()
+def live_installed_openclaw_catalog(
+    *,
+    runtime_target: str = "live_installed_openclaw",
+    include_env_override: bool = True,
+    require_env_override: bool = False,
+) -> dict[str, Any]:
+    root = _resolve_install_root(
+        include_env_override=include_env_override,
+        require_env_override=require_env_override,
+    )
     executable = _resolve_openclaw_executable()
     _require_executable_matches_install_root(root, executable)
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
@@ -724,7 +745,9 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
             )
     source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
     return {
-        "catalog_kind": "sanitized_installed_openclaw_runtime",
+        "catalog_kind": "sanitized_openclaw_runtime",
+        "runtime_target": runtime_target,
+        "required_canonical_session_status_method": "sessions_status",
         "openclaw_version": package.get("version"),
         "openclaw_package_name": package.get("name"),
         "install_root_basename": root.name,
@@ -741,6 +764,21 @@ def live_installed_openclaw_catalog() -> dict[str, Any]:
         "sources": [_source_record(root, path) for path in source_paths],
         "tools": tools,
     }
+
+
+def isolated_candidate_openclaw_catalog() -> dict[str, Any]:
+    return live_installed_openclaw_catalog(
+        runtime_target="isolated_candidate",
+        include_env_override=True,
+        require_env_override=True,
+    )
+
+
+def installed_negative_baseline_catalog() -> dict[str, Any]:
+    return live_installed_openclaw_catalog(
+        runtime_target="installed_openclaw_negative_baseline",
+        include_env_override=False,
+    )
 
 
 def _read_catalog(args: argparse.Namespace) -> dict[str, Any]:
@@ -797,6 +835,22 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--isolated-candidate-openclaw",
+        action="store_true",
+        help=(
+            "Build a sanitized catalog from the isolated candidate runtime named by "
+            "OPENCLAW_INSTALL_ROOT and the matching PATH openclaw executable."
+        ),
+    )
+    parser.add_argument(
+        "--installed-openclaw-negative-baseline",
+        action="store_true",
+        help=(
+            "Build a sanitized catalog from the active installed OpenClaw baseline, "
+            "ignoring OPENCLAW_INSTALL_ROOT, so incompatible installs fail closed."
+        ),
+    )
+    parser.add_argument(
         "--write-evidence",
         help="Write the preflight result and sanitized catalog evidence to this JSON file.",
     )
@@ -807,11 +861,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.live_installed_openclaw:
+    live_targets = [
+        flag
+        for flag in (
+            args.live_installed_openclaw,
+            args.isolated_candidate_openclaw,
+            args.installed_openclaw_negative_baseline,
+        )
+        if flag
+    ]
+    if len(live_targets) > 1:
+        raise SystemExit("provide only one OpenClaw runtime target flag")
+
+    if args.live_installed_openclaw or args.isolated_candidate_openclaw or args.installed_openclaw_negative_baseline:
         if args.catalog_json is not None or args.catalog_json_file is not None:
-            raise SystemExit("--live-installed-openclaw cannot be combined with catalog input")
+            raise SystemExit("OpenClaw runtime target flags cannot be combined with catalog input")
         try:
-            catalog = live_installed_openclaw_catalog()
+            if args.isolated_candidate_openclaw:
+                catalog = isolated_candidate_openclaw_catalog()
+            elif args.installed_openclaw_negative_baseline:
+                catalog = installed_negative_baseline_catalog()
+            else:
+                catalog = live_installed_openclaw_catalog()
         except AdapterContractError as exc:
             payload = {"error": str(exc), "status": "fail"}
             _write_evidence(args.write_evidence, payload)
@@ -825,14 +896,26 @@ def main(argv: list[str] | None = None) -> int:
         assert_installed_runtime_tools(catalog)
     except AdapterContractError as exc:
         payload = {"error": str(exc), "status": "fail"}
-        if args.live_installed_openclaw or args.json or args.write_evidence:
+        if (
+            args.live_installed_openclaw
+            or args.isolated_candidate_openclaw
+            or args.installed_openclaw_negative_baseline
+            or args.json
+            or args.write_evidence
+        ):
             payload["catalog"] = catalog
         _write_evidence(args.write_evidence, payload)
         print(json.dumps(payload, sort_keys=True))
         return 1
 
     payload = {"status": "pass"}
-    if args.live_installed_openclaw or args.json or args.write_evidence:
+    if (
+        args.live_installed_openclaw
+        or args.isolated_candidate_openclaw
+        or args.installed_openclaw_negative_baseline
+        or args.json
+        or args.write_evidence
+    ):
         payload["catalog"] = catalog
     _write_evidence(args.write_evidence, payload)
     if args.json:
