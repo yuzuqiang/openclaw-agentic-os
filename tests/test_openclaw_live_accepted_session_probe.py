@@ -1355,6 +1355,44 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertIn("another session", payload["error"])
         self.assertEqual(payload["released"], True)
 
+    def test_sessions_history_accepts_history_shaped_metadata_item(self) -> None:
+        module = load_probe_module()
+        spawn_metadata_seen: dict[str, object] = {}
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            nonlocal spawn_metadata_seen
+            if method == "subagents.allowLease.acquire":
+                return lease_acquire_response()
+            if method == "subagents.allowLease.status":
+                return {"leases": [status_lease()]}
+            if method == "subagents.allowLease.release":
+                return release_response(params)
+            if method == "sessions_spawn":
+                spawn_metadata_seen = dict(params["metadata"])
+                return spawn_response(params)
+            if method == "sessions_list":
+                return session_read_response(spawn_metadata_seen)
+            if method == "sessions_status":
+                return session_read_response(spawn_metadata_seen, wrapper="session")
+            if method == "sessions_history":
+                history_item = session_read_response(spawn_metadata_seen)["sessions"][0]
+                return {"history": [history_item]}
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, isolated_preflight_payload())
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args(execute_session_spawn=True))
+
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["session_read_structured_evidence"]["sessions_history"][
+                "history_items_identity_checked"
+            ],
+            1,
+        )
+
     def test_release_failure_downgrades_otherwise_passing_probe(self) -> None:
         module = load_probe_module()
         spawn_metadata_seen: dict[str, object] = {}

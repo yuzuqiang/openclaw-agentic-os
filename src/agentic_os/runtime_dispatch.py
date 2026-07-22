@@ -179,6 +179,14 @@ def release_metadata(request: DispatchRequest, gateway_lease_id: str) -> dict[st
     }
 
 
+def release_storage_metadata_json(raw_json: str, release_idempotency_key: str) -> str:
+    storage = json.loads(raw_json)
+    if not isinstance(storage, dict):
+        raise RuntimeDispatchError("allow_lease_release raw metadata is not an object")
+    storage["idempotency_key"] = release_idempotency_key
+    return stable_json(storage)
+
+
 def spawn_metadata(request: DispatchRequest) -> dict[str, str]:
     return {
         "run_id": request.run_id,
@@ -1067,6 +1075,10 @@ def persist_released_lease(
         idempotency_key=request.release_idempotency_key,
     )
     state = "reconciled" if reconciled else "accepted"
+    storage_metadata_json = release_storage_metadata_json(
+        observation.raw_json,
+        request.release_idempotency_key,
+    )
     intent_cursor = connection.execute(
         "UPDATE external_rpc_intents SET state=?,metadata_contract_version=?,"
         "external_metadata_json=?,external_run_id=?,external_transition_id=?,"
@@ -1078,7 +1090,7 @@ def persist_released_lease(
         (
             state,
             observation.metadata_contract_version,
-            observation.raw_json,
+            storage_metadata_json,
             observed["run_id"],
             observed["transition_id"],
             observed["client_lease_id"],

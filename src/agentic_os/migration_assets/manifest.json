@@ -4,7 +4,7 @@
       "version": 1,
       "name": "minimum_contract",
       "file": "0001_minimum_contract.sql",
-      "sha256": "5521c239639d8712b516816a44c9f6d8d5fd4d14e879178c679e466044b2f30b"
+      "sha256": "2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01"
     },
     {
       "version": 2,
@@ -88,7 +88,7 @@
       "version": 15,
       "name": "strict_prior_reserve_slo_identity",
       "file": "0015_strict_prior_reserve_slo_identity.sql",
-      "sha256": "b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce"
+      "sha256": "1b13bc11a6023345537a77cf85a4b31d75ac690808b3f00b5e235383c49a1084"
     }
   ]
 }

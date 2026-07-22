@@ -13,10 +13,10 @@ of local control-plane contracts, not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `edf29676822ca67ce9743a093c542691bb5f961fa4a4d75c03b7462f28809c85`
-- Base DDL migration SHA-256: `5521c239639d8712b516816a44c9f6d8d5fd4d14e879178c679e466044b2f30b`
-- Current latest migration SHA-256: `b02a591296259bf32ccb7254bd468f59e2ec6b303a9c15238ef76087a9fccfce`
-- Current migration manifest SHA-256: `e648169f87d1f612935693280fb3d261146633c329ad676f9005ac4eb7db7f02`
+- Current design artifact SHA-256: `4b7f981e352d1ca3888332e28a8846e84a9e9fa0ff4ae67c7b64f3ff21a51693`
+- Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
+- Current latest migration SHA-256: `1b13bc11a6023345537a77cf85a4b31d75ac690808b3f00b5e235383c49a1084`
+- Current migration manifest SHA-256: `562f50e0e34e6b046a1e1adc2c906e35c16ed71720147f9e31dee1c97e785c9b`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Completed bounded slices: privacy preflight, package/retrieval denylist,
   migration/package parity, file-authority shadow, dual-write shadow, synthetic
@@ -407,6 +407,12 @@ new SLO identity when active trust rows still exist under the previous bundle.
 Schema versions 1 through 14 keep their historical query hashes so already
 migrated databases can still verify and upgrade instead of failing closed on
 immutable `slo_queries` registry drift.
+The same v15 migration preserves the historical v1 DDL hash while adding
+forward-only release-owner binding: accepted or reconciled `allow_lease_release`
+evidence must echo `client_lease_id`, `release_idempotency_key`, `run_id`,
+`phase`, `transition_id`, `agent_id`, `requester_agent_id`, and
+`gateway_lease_id`, and release-proof triggers join on that full owner identity
+rather than only run/transition/key/gateway.
 
 Issue #35 adds sanitized live runtime evidence for that boundary. The committed
 evidence in `docs/runtime-evidence/issue35-live-openclaw-20260721.json` captures

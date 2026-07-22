@@ -357,22 +357,41 @@ class TrustPromotionWriterTests(unittest.TestCase):
             gate_epoch_ms = connection.execute(
                 "SELECT now_epoch_ms FROM gate_clock_context WHERE clock_context_id='clock'"
             ).fetchone()[0]
+            external_metadata = json.dumps(
+                {
+                    "agent_id": "agent",
+                    "client_lease_id": "backdated-rpc-client",
+                    "gateway_lease_id": "released",
+                    "idempotency_key": "backdated-rpc-idem",
+                    "phase": "phase",
+                    "release_idempotency_key": "backdated-rpc-idem",
+                    "requester_agent_id": "requester",
+                    "run_id": "run",
+                    "transition_id": "transition",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
                 "rpc_kind,client_request_id,idempotency_key,metadata_contract_version,"
-                "metadata_json,external_metadata_json,external_run_id,"
-                "external_transition_id,external_idempotency_key,state,external_id,requested_at,"
+                "metadata_json,external_metadata_json,phase,agent_id,requester_agent_id,"
+                "external_run_id,external_phase,external_transition_id,external_agent_id,"
+                "external_requester_agent_id,external_client_request_id,"
+                "external_idempotency_key,state,external_id,requested_at,"
                 "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms,"
                 "resolved_at,resolved_at_epoch_ms) VALUES('backdated-rpc','run',"
                 "'transition','allow_lease_release','backdated-rpc-client',"
-                "'backdated-rpc-idem','v1','{}',"
-                "'{\"run_id\":\"run\",\"transition_id\":\"transition\","
-                "\"release_idempotency_key\":\"backdated-rpc-idem\","
-                "\"gateway_lease_id\":\"released\"}',"
-                "'run','transition',"
+                "'backdated-rpc-idem','v1','{}',?,'phase','agent','requester',"
+                "'run','phase','transition','agent','requester','backdated-rpc-client',"
                 "'backdated-rpc-idem','reconciled','released','requested',?,"
                 "'accepted',?,'resolved',?)",
-                (gate_epoch_ms - 3, gate_epoch_ms - 2, gate_epoch_ms - 1),
+                (
+                    external_metadata,
+                    gate_epoch_ms - 3,
+                    gate_epoch_ms - 2,
+                    gate_epoch_ms - 1,
+                ),
             )
 
         self._assert_promotion_fails_without_write("complete bound evidence")
@@ -1979,10 +1998,15 @@ class TrustPromotionWriterTests(unittest.TestCase):
             bundle_hash = self._bundle_hash_from_binding(binding)
             external_metadata = json.dumps(
                 {
+                    "agent_id": "agent",
+                    "client_lease_id": "fk-broken-client",
+                    "gateway_lease_id": "external-intent",
+                    "idempotency_key": "fk-broken-idem",
+                    "phase": "phase",
+                    "release_idempotency_key": "fk-broken-idem",
+                    "requester_agent_id": "requester",
                     "run_id": "missing-run",
                     "transition_id": "transition",
-                    "release_idempotency_key": "fk-broken-idem",
-                    "gateway_lease_id": "external-intent",
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1990,13 +2014,15 @@ class TrustPromotionWriterTests(unittest.TestCase):
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,"
                 "rpc_kind,client_request_id,idempotency_key,metadata_contract_version,"
-                "metadata_json,external_metadata_json,external_run_id,"
-                "external_transition_id,external_client_request_id,"
+                "metadata_json,external_metadata_json,phase,agent_id,requester_agent_id,"
+                "external_run_id,external_phase,external_transition_id,external_agent_id,"
+                "external_requester_agent_id,external_client_request_id,"
                 "external_idempotency_key,state,external_id,requested_at,"
                 "requested_at_epoch_ms,accepted_at,accepted_at_epoch_ms) VALUES("
                 "'fk-broken-intent','missing-run','transition','allow_lease_release',"
                 "'fk-broken-client','fk-broken-idem','external-rpc-intent-v1',"
-                "'{}',?,'missing-run','transition','fk-broken-client',"
+                "'{}',?,'phase','agent','requester','missing-run','phase','transition',"
+                "'agent','requester','fk-broken-client',"
                 "'fk-broken-idem','accepted','external-intent','now',1,'now',1)",
                 (external_metadata,),
             )

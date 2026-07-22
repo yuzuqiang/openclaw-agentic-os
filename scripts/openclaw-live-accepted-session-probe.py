@@ -835,6 +835,15 @@ def _validate_session_raw_metadata(
         ("items",),
         ("result", "items"),
         ("output", "items"),
+        ("history",),
+        ("result", "history"),
+        ("output", "history"),
+        ("messages",),
+        ("result", "messages"),
+        ("output", "messages"),
+        ("events",),
+        ("result", "events"),
+        ("output", "events"),
     ):
         sequence = _sequence_path(response, path)
         if sequence is not None:

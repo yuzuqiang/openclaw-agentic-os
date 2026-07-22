@@ -762,15 +762,15 @@ CREATE TABLE external_rpc_intents (
       WHEN json_valid(external_metadata_json) THEN CASE
         WHEN json_type(external_metadata_json,'$.run_id')='text'
           AND json_type(external_metadata_json,'$.transition_id')='text'
-          AND json_type(external_metadata_json,'$.release_idempotency_key')='text'
+          AND json_type(external_metadata_json,'$.idempotency_key')='text'
           AND json_type(external_metadata_json,'$.gateway_lease_id')='text'
           AND json_extract(external_metadata_json,'$.run_id') <> ''
           AND json_extract(external_metadata_json,'$.transition_id') <> ''
-          AND json_extract(external_metadata_json,'$.release_idempotency_key') <> ''
+          AND json_extract(external_metadata_json,'$.idempotency_key') <> ''
           AND json_extract(external_metadata_json,'$.gateway_lease_id') <> ''
           AND json_extract(external_metadata_json,'$.run_id') = run_id
           AND json_extract(external_metadata_json,'$.transition_id') = transition_id
-          AND json_extract(external_metadata_json,'$.release_idempotency_key') = idempotency_key
+          AND json_extract(external_metadata_json,'$.idempotency_key') = idempotency_key
           AND json_extract(external_metadata_json,'$.gateway_lease_id') = external_id
           AND external_run_id = run_id
           AND external_transition_id = transition_id
@@ -4040,6 +4040,19 @@ to the current v14 schema and migration identity, preserving the complete
 current-SLO proof requirement after the schema advances. This preserves the
 original canary proof boundary across rollback validation; it does not enable
 production database authority or external RPC.
+
+Current migration v15 release owner metadata binding:
+
+`0015_strict_prior_reserve_slo_identity.sql` preserves the historical v1
+migration hash and also adds a forward-only release-owner overlay. Accepted or
+reconciled `allow_lease_release` intents must now expose non-empty
+`client_lease_id`, `release_idempotency_key`, `run_id`, `phase`,
+`transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id` in
+external metadata and matching external identity columns. Release proof
+triggers join on the full lease owner identity, not just run, transition,
+release key, and gateway lease id. The SQLite storage row may retain the legacy
+`idempotency_key` alias required by the original v1 table CHECK, but the
+external runtime metadata contract remains `release_idempotency_key`.
 
 The v8 executable overlay for `Budget event amount malformed or out of range`
 adds this settlement proof check to the baseline amount query:
