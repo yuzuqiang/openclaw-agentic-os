@@ -1,0 +1,153 @@
+{
+  "catalog": {
+    "active_catalog": {
+      "method": "tools.catalog",
+      "raw_response_sha256": "084c93c6294c98154a033116dc0b04c86c086f6f7983e25b2ba0f47c1e4f23dc",
+      "required_tool_names": [
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn",
+        "sessions_status",
+        "subagents.allowLease.acquire",
+        "subagents.allowLease.release",
+        "subagents.allowLease.status"
+      ]
+    },
+    "active_executable_path_sha256": "ffcf477543bd856bb1f45034fb1ae2730f5feaea064232701b89af5ee1c0d5c8",
+    "active_executable_sha256": "ca8d5d830f37154f322952d4d57b015d897c7fddccf940c74b9dd5f9ad13d0aa",
+    "catalog_kind": "sanitized_openclaw_runtime",
+    "install_root_basename": "openclaw",
+    "install_root_path_sha256": "509ec34e8d40637c45697d1020742147226c47c875664f7e59a493ad40d94574",
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.7.2",
+    "required_canonical_session_status_method": "sessions_status",
+    "runtime_target": "isolated_candidate",
+    "sources": [
+      {
+        "path": "dist/core-descriptors-agentic-os-probe.js",
+        "sha256": "37bb95206488bebf3571be02714aa90a8a3ee50de04817bde43d89c09fb234a2"
+      },
+      {
+        "path": "dist/openclaw-tools-agentic-os-probe.js",
+        "sha256": "2dc281c0cd66175982dd124257d88767fc43dec49cea53bbfe7ad68e99fcb7c0"
+      },
+      {
+        "path": "dist/server-methods-agentic-os-probe.js",
+        "sha256": "6ed4db1c17f5d71d00bb32e09453f95aeae17ecced19f569596663d560d73e9b"
+      }
+    ],
+    "tools": [
+      {
+        "active_parameters": [
+          "agent_id",
+          "client_lease_id",
+          "idempotency_key",
+          "phase",
+          "requester_agent_id",
+          "run_id",
+          "transition_id",
+          "ttl_ms"
+        ],
+        "name": "subagents.allowLease.acquire",
+        "parameters": [
+          "agent_id",
+          "client_lease_id",
+          "idempotency_key",
+          "phase",
+          "requester_agent_id",
+          "run_id",
+          "transition_id",
+          "ttl_ms"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "active_parameters": [],
+        "name": "subagents.allowLease.status",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      },
+      {
+        "active_parameters": [
+          "agent_id",
+          "client_lease_id",
+          "gateway_lease_id",
+          "idempotency_key",
+          "phase",
+          "requester_agent_id",
+          "run_id",
+          "transition_id"
+        ],
+        "name": "subagents.allowLease.release",
+        "parameters": [
+          "agent_id",
+          "client_lease_id",
+          "gateway_lease_id",
+          "idempotency_key",
+          "phase",
+          "requester_agent_id",
+          "run_id",
+          "transition_id"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "active_parameters": [
+          "agentId",
+          "client_request_id",
+          "gateway_lease_id",
+          "idempotency_key",
+          "metadata",
+          "mode",
+          "runtime",
+          "task",
+          "taskName"
+        ],
+        "name": "sessions_spawn",
+        "parameters": [
+          "agentId",
+          "client_request_id",
+          "gateway_lease_id",
+          "idempotency_key",
+          "metadata",
+          "mode",
+          "runtime",
+          "task",
+          "taskName"
+        ],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "active_parameters": [],
+        "name": "sessions_list",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      },
+      {
+        "active_parameters": [
+          "includeTools",
+          "limit",
+          "sessionKey"
+        ],
+        "name": "sessions_history",
+        "parameters": [
+          "includeTools",
+          "limit",
+          "sessionKey"
+        ],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "active_parameters": [
+          "session_key"
+        ],
+        "name": "sessions_status",
+        "parameters": [
+          "session_key"
+        ],
+        "schema_source": "model_tool_schema"
+      }
+    ]
+  },
+  "status": "pass"
+}
