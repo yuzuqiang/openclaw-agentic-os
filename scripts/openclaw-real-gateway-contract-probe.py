@@ -28,6 +28,25 @@ FORBIDDEN_EVIDENCE_FRAGMENTS = (
     "agent:",
     "test-token-placeholder",
 )
+REQUIRED_RUNTIME_PROOFS = (
+    "authenticated_gateway",
+    "effective_allow_lease",
+    "runtime_catalog_discovered",
+    "read_only_acquire_rejected",
+    "wrong_lease_rejected",
+    "cross_principal_lease_hidden",
+    "cross_principal_spawn_rejected",
+    "cross_principal_sessions_hidden",
+    "cross_principal_status_rejected",
+    "released_lease_spawn_rejected",
+    "canonical_session_observed",
+    "lifecycle_running_observed",
+    "lifecycle_completed_observed",
+    "lifecycle_failure_observed",
+    "duplicate_lease_identity_parity",
+    "duplicate_spawn_identity_parity",
+    "child_completed",
+)
 
 
 class ProbeError(RuntimeError):
@@ -106,28 +125,12 @@ def _walk_evidence(value: Any, path: tuple[str, ...] = ()) -> None:
 def validate_evidence(payload: dict[str, Any], *, openclaw_root: Path, head: str) -> None:
     if payload.get("status") != "pass" or payload.get("openclaw_head_sha") != head:
         raise ProbeError("evidence status or OpenClaw head binding is invalid")
-    required_true = (
-        "authenticated_gateway",
-        "effective_allow_lease",
-        "runtime_catalog_discovered",
-        "read_only_acquire_rejected",
-        "wrong_lease_rejected",
-        "cross_principal_lease_hidden",
-        "cross_principal_spawn_rejected",
-        "cross_principal_sessions_hidden",
-        "cross_principal_status_rejected",
-        "released_lease_spawn_rejected",
-        "canonical_session_observed",
-        "duplicate_lease_identity_parity",
-        "duplicate_spawn_identity_parity",
-        "child_completed",
-    )
-    if not all(payload.get(key) is True for key in required_true):
+    if not all(payload.get(key) is True for key in REQUIRED_RUNTIME_PROOFS):
         raise ProbeError("evidence is missing a required runtime proof")
     if payload.get("static_allow_agents_wildcard") is not False:
         raise ProbeError("evidence does not prove a non-wildcard static allowlist")
-    if payload.get("model_request_count") != 1:
-        raise ProbeError("evidence does not prove exactly one real child model request")
+    if payload.get("model_request_count") != 2:
+        raise ProbeError("evidence does not prove the successful and failed real child requests")
     sources = payload.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ProbeError("evidence source binding is missing")

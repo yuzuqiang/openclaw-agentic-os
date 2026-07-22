@@ -437,8 +437,8 @@ python3 scripts/openclaw-real-gateway-contract-probe.py \
 
 The probe exercises the runtime-discovered `tools.catalog` RPC methods,
 principal-bound allowLease acquire/duplicate/status/release, concurrent spawn
-deduplication, canonical session reads, fail-closed authorization, and the real
-`spawnSubagentDirect` child runner. Direct handler imports, hand-written
+deduplication, canonical session reads, canonical child lifecycle transitions,
+fail-closed authorization, and the real `spawnSubagentDirect` child runner. Direct handler imports, hand-written
 catalogs, mocked Gateway calls, and dirty exact-head evidence are rejected as
 non-authoritative.
 

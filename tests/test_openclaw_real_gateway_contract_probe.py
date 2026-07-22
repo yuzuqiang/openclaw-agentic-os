@@ -15,6 +15,11 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RealGatewayProbeTests(unittest.TestCase):
+    def test_requires_running_and_completed_lifecycle_proofs(self) -> None:
+        self.assertIn("lifecycle_running_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
+        self.assertIn("lifecycle_completed_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
+        self.assertIn("lifecycle_failure_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
+
     def test_rejects_raw_session_identity(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
             MODULE._walk_evidence({"child_session_key": "agent:worker:subagent:raw"})
