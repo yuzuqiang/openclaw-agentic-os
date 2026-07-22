@@ -22,10 +22,16 @@ AGENTIC_SOURCE_PATHS = (
     "src/agentic_os/openclaw_adapter.py",
 )
 FORBIDDEN_EVIDENCE_KEYS = {
+    "authToken",
+    "childRunId",
     "child_session_key",
     "child_run_id",
+    "childSessionKey",
+    "gatewayLeaseId",
     "gateway_lease_id",
+    "sessionKey",
     "session_key",
+    "taskMarker",
     "task_marker",
     "token",
 }
@@ -58,6 +64,12 @@ REQUIRED_RUNTIME_PROOFS = (
     "agentic_adapter_release_metadata_parity",
     "agentic_adapter_post_release_absent",
     "child_completed",
+)
+REQUIRED_CHILD_HASH_PROOFS = (
+    "child_result_sha256",
+    "child_run_id_sha256",
+    "child_session_key_sha256",
+    "task_marker_sha256",
 )
 
 
@@ -175,17 +187,33 @@ def _validate_sources(value: Any, *, root: Path, label: str) -> None:
             raise ProbeError(f"evidence {label} hash does not match candidate")
 
 
+def _validate_sha256_field(payload: Mapping[str, Any], key: str) -> None:
+    value = payload.get(key)
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ProbeError(f"evidence {key} must be a lowercase SHA-256 hex digest")
+
+
 def validate_evidence(
     payload: dict[str, Any], *, openclaw_root: Path, agentic_root: Path, head: str
 ) -> None:
     if payload.get("status") != "pass" or payload.get("openclaw_head_sha") != head:
         raise ProbeError("evidence status or OpenClaw head binding is invalid")
+    agentic_head = _git(agentic_root, "rev-parse", "HEAD")
+    if payload.get("agentic_os_head_sha") != agentic_head:
+        raise ProbeError("evidence Agentic OS head binding is invalid")
     if not all(payload.get(key) is True for key in REQUIRED_RUNTIME_PROOFS):
         raise ProbeError("evidence is missing a required runtime proof")
     if payload.get("static_allow_agents_wildcard") is not False:
         raise ProbeError("evidence does not prove a non-wildcard static allowlist")
     if payload.get("model_request_count") != 2:
         raise ProbeError("evidence does not prove the successful and failed real child requests")
+    if payload.get("child_completed") is True:
+        for key in REQUIRED_CHILD_HASH_PROOFS:
+            _validate_sha256_field(payload, key)
     _validate_sources(payload.get("sources"), root=openclaw_root, label="source")
     _validate_sources(
         payload.get("agentic_sources"), root=agentic_root, label="Agentic source"
@@ -200,11 +228,14 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
     ]
     evidence_file = evidence_file.resolve()
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_evidence_file = evidence_file.with_name(
+        f".{evidence_file.name}.{os.getpid()}.tmp"
+    )
     env = dict(os.environ)
     env.update(
         {
             "AGENTIC_OS_EXPECTED_OPENCLAW_HEAD": head,
-            "AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE": str(evidence_file),
+            "AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE": str(temporary_evidence_file),
             "AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT": str(ROOT / ADAPTER_PROBE),
         }
     )
@@ -216,31 +247,38 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
         "test/vitest/vitest.e2e.config.ts",
         E2E_TEST,
     ]
-    proc = _run(command, cwd=openclaw_root, env=env, timeout=timeout)
-    if proc.returncode != 0:
-        raise ProbeError(
-            "real Gateway E2E failed "
-            f"returncode={proc.returncode} stdout_sha256={_sha256_bytes(proc.stdout.encode())} "
-            f"stderr_sha256={_sha256_bytes(proc.stderr.encode())}"
-        )
-    if validate_candidate_root(openclaw_root) != head:
-        raise ProbeError("OpenClaw candidate changed while the real Gateway E2E was running")
     try:
-        payload = json.loads(evidence_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ProbeError("real Gateway E2E did not write valid evidence") from exc
-    if not isinstance(payload, dict):
-        raise ProbeError("real Gateway evidence must be a JSON object")
-    agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
-    payload["agentic_os_head_sha"] = agentic_os_head
-    payload["agentic_sources"] = agentic_sources
-    payload["probe_runner_sha256"] = _sha256_bytes(Path(__file__).read_bytes())
-    payload["e2e_command_sha256"] = _sha256_bytes("\0".join(command).encode())
-    validate_evidence(
-        payload, openclaw_root=openclaw_root, agentic_root=ROOT, head=head
-    )
-    evidence_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return payload
+        proc = _run(command, cwd=openclaw_root, env=env, timeout=timeout)
+        if proc.returncode != 0:
+            raise ProbeError(
+                "real Gateway E2E failed "
+                f"returncode={proc.returncode} stdout_sha256={_sha256_bytes(proc.stdout.encode())} "
+                f"stderr_sha256={_sha256_bytes(proc.stderr.encode())}"
+            )
+        if validate_candidate_root(openclaw_root) != head:
+            raise ProbeError("OpenClaw candidate changed while the real Gateway E2E was running")
+        try:
+            payload = json.loads(temporary_evidence_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProbeError("real Gateway E2E did not write valid evidence") from exc
+        if not isinstance(payload, dict):
+            raise ProbeError("real Gateway evidence must be a JSON object")
+        agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
+        payload["agentic_os_head_sha"] = agentic_os_head
+        payload["agentic_sources"] = agentic_sources
+        payload["probe_runner_sha256"] = _sha256_bytes(Path(__file__).read_bytes())
+        payload["e2e_command_sha256"] = _sha256_bytes("\0".join(command).encode())
+        validate_evidence(
+            payload, openclaw_root=openclaw_root, agentic_root=ROOT, head=head
+        )
+        temporary_evidence_file.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary_evidence_file.replace(evidence_file)
+        return payload
+    finally:
+        if temporary_evidence_file.exists():
+            temporary_evidence_file.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:

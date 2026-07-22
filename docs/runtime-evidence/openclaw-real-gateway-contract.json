@@ -5,6 +5,8 @@
   "agentic_adapter_release_metadata_parity": true,
   "agentic_adapter_release_succeeded": true,
   "agentic_os_head_sha": "ac796d5253f658e17697a7dad5390fdcd0c9f9f4",
+  "committed_snapshot_authority": "non_authoritative_last_run_snapshot",
+  "current_head_evidence_required": true,
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
