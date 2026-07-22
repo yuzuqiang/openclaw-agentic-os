@@ -20,9 +20,12 @@ AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
     ADAPTER_PROBE,
     "src/agentic_os/openclaw_adapter.py",
+    "src/agentic_os/metadata.py",
 )
 FORBIDDEN_EVIDENCE_KEYS = {
     "authToken",
+    "childResult",
+    "child_result",
     "childRunId",
     "child_session_key",
     "child_run_id",

@@ -38,6 +38,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             MODULE.AGENTIC_SOURCE_PATHS,
         )
         self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
+        self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
 
     def test_rejects_raw_session_identity(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
@@ -48,6 +49,17 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.subTest(key=key):
                 with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
                     MODULE._walk_evidence({key: "raw-runtime-identity"})
+
+    def test_rejects_raw_child_result_aliases(self) -> None:
+        for key in ("child_result", "childResult"):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
+                    MODULE._walk_evidence(
+                        {
+                            key: "plaintext child output",
+                            "child_result_sha256": "0" * 64,
+                        }
+                    )
 
     def test_probe_does_not_overwrite_final_evidence_before_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
