@@ -1,11 +1,11 @@
 {
-  "agentic_os_head_sha": "26fed6bd5255485055acc631e3779e219017ecca",
+  "agentic_os_head_sha": "0ba05dbf051245455b95239b9842fc99af013031",
   "authenticated_gateway": true,
   "canonical_session_observed": true,
   "child_completed": true,
   "child_result_sha256": "453135e40beed1fbefa26466f4ebe3415bc01b558bbb200bcb55e1e252740412",
-  "child_run_id_sha256": "8547f83773b06a65d64d47d41cbcf564a40206ad9cc2db27e7b56e4611297203",
-  "child_session_key_sha256": "aa79e032b73df3a3d0b64cbe21fd69fd24700e3befd113ce5a9328231dde73ef",
+  "child_run_id_sha256": "9b465d2bc7cc55a13bf54b5b510b85deccd81d79b20d24ffd3e008a51fc623f3",
+  "child_session_key_sha256": "a1e5072f135118286437159a65a7e07b3312b97c1eb607a36d2433a334909f97",
   "cross_principal_lease_hidden": true,
   "cross_principal_sessions_hidden": true,
   "cross_principal_spawn_rejected": true,
@@ -14,8 +14,8 @@
   "duplicate_spawn_identity_parity": true,
   "e2e_command_sha256": "74470fa78de8d96b64a09ec766ae7729a25d930bf45c59ec9a0cc25f08428613",
   "effective_allow_lease": true,
-  "gateway_lease_id_sha256": "0d24cde6fa438080124634cb3efb2117ec4481394dc45c900a409d82cd2ec592",
-  "history_response_sha256": "13986e4719503f6b630752b57368ba28812b087ae66d897a12af2d8099e62d56",
+  "gateway_lease_id_sha256": "ed8a6a22693061c4ed74eb60f0fdd32e8366d043dbb2432ad3fec2216f0b494d",
+  "history_response_sha256": "21a01a593df995113e718967dd056c608022aa4a9cfdf6786080449dadac3637",
   "lifecycle_completed_observed": true,
   "lifecycle_failure_observed": true,
   "lifecycle_running_observed": true,
@@ -47,6 +47,6 @@
   ],
   "static_allow_agents_wildcard": false,
   "status": "pass",
-  "task_marker_sha256": "f0c1d1655f5fdef11e2e09590ac934553503d29adaec8e8995426ba72c7f7e25",
+  "task_marker_sha256": "934bc6732af57ad6ae38248aa7b94a3c2b811c91df444de52e9ae474f5970533",
   "wrong_lease_rejected": true
 }
