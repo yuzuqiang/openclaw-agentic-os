@@ -196,6 +196,16 @@ def _release_values(value: Mapping[str, Any], label: str, *, exact: bool) -> dic
         label,
     )
     release_idem = external.pop("release_idempotency_key")
+    legacy_idem = value.get("idempotency_key")
+    if legacy_idem is not None:
+        if not isinstance(legacy_idem, str) or not legacy_idem:
+            raise MetadataContractError(
+                f"{label}.idempotency_key must be a non-empty string"
+            )
+        if legacy_idem != release_idem:
+            raise MetadataContractError(
+                f"{label}.idempotency_key conflicts with release_idempotency_key"
+            )
     external["idempotency_key"] = release_idem
     return external
 

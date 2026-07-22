@@ -654,6 +654,55 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "human_review_required",
             )
 
+    def test_release_raw_metadata_conflicting_idempotency_alias_requires_review(
+        self,
+    ) -> None:
+        wrong = dict(spawn_metadata(self.request))
+        wrong["task_digest"] = "other-task"
+        release_metadata_payload = release_metadata(self.request, "lease-gateway")
+        raw_release_metadata = dict(release_metadata_payload)
+        raw_release_metadata["idempotency_key"] = "other-release-idem"
+        adapter = ScriptedAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            spawn=[observation(wrong, external_id="session-key")],
+            release=[
+                MetadataObservation(
+                    metadata_contract_version="v1",
+                    normalized=release_metadata_payload,
+                    raw_json=stable_json(raw_release_metadata),
+                    external_id="lease-gateway",
+                    spawn_request_session_key="lease-gateway",
+                    session_key="lease-gateway",
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "release requires human review"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone(),
+                ("human_review_required",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,reconciliation_status FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                (
+                    "release_pending",
+                    "raw external metadata.idempotency_key conflicts "
+                    "with release_idempotency_key",
+                ),
+            )
+
     def test_release_transport_failure_keeps_pending_release_intent_unknown(self) -> None:
         wrong = dict(spawn_metadata(self.request))
         wrong["task_digest"] = "other-task"
