@@ -87,7 +87,9 @@ class FakeTransport:
             self.release_calls.append(dict(params))
             self.active = False
             if self.release_response is None:
-                self.release_response = self._response(params, "gateway-lease:test")
+                self.release_response = self._response(
+                    params, "gateway-lease:test", released=True
+                )
             return self.release_response
         if method == "subagents.allowLease.status":
             if self.status_response is not None:
@@ -100,9 +102,11 @@ class FakeTransport:
         raise AssertionError(f"unexpected method: {method}")
 
     @staticmethod
-    def _response(params: Mapping[str, Any], external_id: str) -> dict[str, Any]:
+    def _response(
+        params: Mapping[str, Any], external_id: str, *, released: bool | None = None
+    ) -> dict[str, Any]:
         normalized = dict(params)
-        return {
+        response: dict[str, Any] = {
             "external_id": external_id,
             "metadata": {
                 "metadata_contract_version": "v1",
@@ -110,6 +114,9 @@ class FakeTransport:
                 "raw_json": json.dumps(normalized, sort_keys=True),
             },
         }
+        if released is not None:
+            response["released"] = released
+        return response
 
 
 class RealAdapterReleaseProbeTests(unittest.TestCase):
@@ -150,8 +157,38 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
         wrong = dict(RELEASE_PARAMS)
         wrong["agent_id"] = "agent:other"
         wrong["gateway_lease_id"] = "gateway-lease:test"
-        transport.release_response = transport._response(wrong, "gateway-lease:test")
+        transport.release_response = transport._response(
+            wrong, "gateway-lease:test", released=True
+        )
         with self.assertRaisesRegex(MODULE.ProbeError, "does not match request"):
+            MODULE.run_release_probe(
+                transport=transport,
+                catalog=CATALOG,
+                acquire_params={"idempotency_key": "acquire-key"},
+                release_params=RELEASE_PARAMS,
+            )
+
+    def test_rejects_explicit_unsuccessful_release_response(self) -> None:
+        transport = FakeTransport()
+        release = dict(RELEASE_PARAMS)
+        release["gateway_lease_id"] = "gateway-lease:test"
+        transport.release_response = transport._response(
+            release, "gateway-lease:test", released=False
+        )
+        with self.assertRaisesRegex(MODULE.ProbeError, "did not report success"):
+            MODULE.run_release_probe(
+                transport=transport,
+                catalog=CATALOG,
+                acquire_params={"idempotency_key": "acquire-key"},
+                release_params=RELEASE_PARAMS,
+            )
+
+    def test_rejects_release_response_without_success_confirmation(self) -> None:
+        transport = FakeTransport()
+        release = dict(RELEASE_PARAMS)
+        release["gateway_lease_id"] = "gateway-lease:test"
+        transport.release_response = transport._response(release, "gateway-lease:test")
+        with self.assertRaisesRegex(MODULE.ProbeError, "lacks success confirmation"):
             MODULE.run_release_probe(
                 transport=transport,
                 catalog=CATALOG,

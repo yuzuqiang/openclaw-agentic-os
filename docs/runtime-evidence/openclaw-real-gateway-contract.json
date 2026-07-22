@@ -72,7 +72,8 @@
     }
   ],
   "static_allow_agents_wildcard": false,
-  "status": "pass",
+  "stale_snapshot_reason": "last-run runtime evidence is not bound to this Agentic OS head; rerun scripts/openclaw-real-gateway-contract-probe.py from the exact clean head before treating it as proof",
+  "status": "stale_snapshot",
   "task_marker_sha256": "1df3efc656a0f1a783728e6ae125860dd81cf03ec0002111c5cbc4928b0027ae",
   "wrong_lease_rejected": true
 }

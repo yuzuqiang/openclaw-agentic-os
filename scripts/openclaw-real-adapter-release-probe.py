@@ -149,6 +149,52 @@ def _release_metadata(observation: MetadataObservation) -> Mapping[str, Any]:
     return normalized
 
 
+def _path_value(value: Mapping[str, Any], path: tuple[str, ...]) -> Any:
+    current: Any = value
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _validate_release_succeeded(observation: MetadataObservation) -> None:
+    if not observation.raw_response_json:
+        raise ProbeError("release response lacks success confirmation")
+    try:
+        response = json.loads(observation.raw_response_json)
+    except json.JSONDecodeError as exc:
+        raise ProbeError("release response raw JSON is invalid") from exc
+    if not isinstance(response, Mapping):
+        raise ProbeError("release response raw JSON must be an object")
+    for path in (
+        ("released",),
+        ("lease", "released"),
+        ("result", "released"),
+        ("result", "lease", "released"),
+        ("output", "released"),
+        ("output", "lease", "released"),
+    ):
+        value = _path_value(response, path)
+        if value is not None:
+            if value is True:
+                return
+            raise ProbeError("release response did not report success")
+    for path in (
+        ("status",),
+        ("result",),
+        ("lease", "status"),
+        ("result", "status"),
+        ("result", "lease", "status"),
+        ("output", "status"),
+        ("output", "lease", "status"),
+    ):
+        value = _path_value(response, path)
+        if isinstance(value, str) and value.lower() in {"released", "success", "ok", "pass"}:
+            return
+    raise ProbeError("release response lacks success confirmation")
+
+
 def run_release_probe(
     *,
     transport: Any,
@@ -170,6 +216,8 @@ def run_release_probe(
     second = adapter.allow_lease_release(canonical_release)
     _release_metadata(first)
     _release_metadata(second)
+    _validate_release_succeeded(first)
+    _validate_release_succeeded(second)
     first_metadata = _validated_release_metadata(first, canonical_release)
     second_metadata = _validated_release_metadata(second, canonical_release)
     if (

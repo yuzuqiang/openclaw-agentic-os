@@ -973,10 +973,15 @@ def _validate_history_items_match_session(
             continue
         for item in sequence:
             if not isinstance(item, Mapping):
-                continue
+                raise MetadataContractError(
+                    f"{label} included history item without session identity"
+                )
             identities = _history_item_identity_values(item)
-            if identities:
-                checked += 1
+            if not identities:
+                raise MetadataContractError(
+                    f"{label} included history item without session identity"
+                )
+            checked += 1
             mismatches = [
                 value for value in identities if value != accepted_session_identity
             ]

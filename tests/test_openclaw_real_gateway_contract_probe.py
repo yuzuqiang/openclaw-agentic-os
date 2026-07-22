@@ -133,6 +133,29 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
         self.assertNotEqual(head, "stale-head")
 
+    def test_committed_runtime_evidence_does_not_claim_stale_pass(self) -> None:
+        evidence = MODULE.ROOT / "docs" / "runtime-evidence" / "openclaw-real-gateway-contract.json"
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        agentic_head = MODULE._git(MODULE.ROOT, "rev-parse", "HEAD")
+        if payload.get("status") == "pass":
+            self.assertEqual(payload.get("agentic_os_head_sha"), agentic_head)
+            expected_sources = {
+                item.get("path"): item.get("sha256")
+                for item in payload.get("agentic_sources", [])
+                if isinstance(item, dict)
+            }
+            for relative in MODULE.AGENTIC_SOURCE_PATHS:
+                source = MODULE.ROOT / relative
+                self.assertEqual(
+                    expected_sources.get(relative),
+                    MODULE._sha256_bytes(source.read_bytes()),
+                )
+        else:
+            self.assertEqual(
+                payload.get("committed_snapshot_authority"),
+                "non_authoritative_last_run_snapshot",
+            )
+
     def test_evidence_requires_non_authoritative_snapshot_annotations(self) -> None:
         payload = {
             "status": "pass",
