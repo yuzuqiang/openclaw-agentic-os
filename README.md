@@ -444,6 +444,12 @@ python3 scripts/openclaw-real-gateway-contract-probe.py \
   --evidence-file docs/runtime-evidence/openclaw-real-gateway-contract.json
 ```
 
+The committed JSON at that path is only a sanitized last-run snapshot. It is
+not authoritative for a later PR head unless this command is rerun from that
+exact clean Agentic OS head and the probe validates the embedded
+`agentic_os_head_sha`, source hashes, and hash-only child-result proof before
+writing the file.
+
 The probe exercises the runtime-discovered `tools.catalog` RPC methods,
 principal-bound allowLease acquire/duplicate/status/release, concurrent spawn
 deduplication, canonical session reads, canonical child lifecycle transitions,

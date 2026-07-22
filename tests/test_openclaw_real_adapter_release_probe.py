@@ -61,6 +61,15 @@ CATALOG = {
         },
     ]
 }
+RELEASE_PARAMS = {
+    "client_lease_id": "client-lease:test",
+    "release_idempotency_key": "release-key",
+    "run_id": "run:test",
+    "phase": "phase-b",
+    "transition_id": "transition:test",
+    "agent_id": "agent:worker",
+    "requester_agent_id": "agent:main",
+}
 
 
 class FakeTransport:
@@ -68,6 +77,7 @@ class FakeTransport:
         self.active = False
         self.release_calls: list[dict[str, Any]] = []
         self.release_response: dict[str, Any] | None = None
+        self.status_response: dict[str, Any] | None = None
 
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         if method == "subagents.allowLease.acquire":
@@ -80,6 +90,8 @@ class FakeTransport:
                 self.release_response = self._response(params, "gateway-lease:test")
             return self.release_response
         if method == "subagents.allowLease.status":
+            if self.status_response is not None:
+                return self.status_response
             return {
                 "leases": [self._response({}, "gateway-lease:test")]
                 if self.active
@@ -107,7 +119,7 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
             transport=transport,
             catalog=CATALOG,
             acquire_params={"idempotency_key": "acquire-key"},
-            release_params={"release_idempotency_key": "release-key"},
+            release_params=RELEASE_PARAMS,
         )
 
         self.assertTrue(all(result.values()))
@@ -116,6 +128,9 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
             transport.release_calls[0]["release_idempotency_key"], "release-key"
         )
         self.assertNotIn("idempotency_key", transport.release_calls[0])
+        self.assertEqual(
+            transport.release_calls[0]["gateway_lease_id"], "gateway-lease:test"
+        )
 
     def test_rejects_legacy_release_metadata(self) -> None:
         transport = FakeTransport()
@@ -127,7 +142,38 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
                 transport=transport,
                 catalog=CATALOG,
                 acquire_params={"idempotency_key": "acquire-key"},
-                release_params={"release_idempotency_key": "release-key"},
+                release_params=RELEASE_PARAMS,
+            )
+
+    def test_rejects_release_metadata_that_does_not_match_request(self) -> None:
+        transport = FakeTransport()
+        wrong = dict(RELEASE_PARAMS)
+        wrong["agent_id"] = "agent:other"
+        wrong["gateway_lease_id"] = "gateway-lease:test"
+        transport.release_response = transport._response(wrong, "gateway-lease:test")
+        with self.assertRaisesRegex(MODULE.ProbeError, "does not match request"):
+            MODULE.run_release_probe(
+                transport=transport,
+                catalog=CATALOG,
+                acquire_params={"idempotency_key": "acquire-key"},
+                release_params=RELEASE_PARAMS,
+            )
+
+    def test_rejects_visible_post_release_lease_with_incomplete_metadata(self) -> None:
+        transport = FakeTransport()
+        transport.status_response = {
+            "leases": [
+                {
+                    "gateway_lease_id": "gateway-lease:test",
+                }
+            ]
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "incomplete metadata"):
+            MODULE.run_release_probe(
+                transport=transport,
+                catalog=CATALOG,
+                acquire_params={"idempotency_key": "acquire-key"},
+                release_params=RELEASE_PARAMS,
             )
 
 

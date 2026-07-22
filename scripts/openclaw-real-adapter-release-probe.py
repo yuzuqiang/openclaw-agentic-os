@@ -18,6 +18,10 @@ from agentic_os.openclaw_adapter import (  # noqa: E402
     MetadataObservation,
     OpenClawAdapter,
 )
+from agentic_os.metadata import (  # noqa: E402
+    MetadataContractError,
+    validate_allow_lease_release_observation,
+)
 
 
 class ProbeError(RuntimeError):
@@ -59,6 +63,80 @@ def _object(value: Any, label: str) -> Mapping[str, Any]:
     return value
 
 
+def _validated_release_metadata(
+    observation: MetadataObservation, expected: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    try:
+        return validate_allow_lease_release_observation(
+            local=expected,
+            normalized=observation.normalized,
+            raw_json=observation.raw_json,
+            metadata_contract_version=observation.metadata_contract_version,
+        )
+    except MetadataContractError as exc:
+        raise ProbeError("release response metadata does not match request") from exc
+
+
+def _matches_released_lease(
+    observation: MetadataObservation,
+    *,
+    acquired_external_id: str,
+    release_params: Mapping[str, Any],
+) -> bool:
+    if observation.external_id == acquired_external_id:
+        return True
+    normalized = observation.normalized
+    if not isinstance(normalized, Mapping):
+        return False
+    gateway_lease_id = normalized.get("gateway_lease_id")
+    client_lease_id = normalized.get("client_lease_id")
+    return (
+        gateway_lease_id == acquired_external_id
+        or client_lease_id == release_params.get("client_lease_id")
+    )
+
+
+def _reject_visible_post_release_lease(
+    observation: MetadataObservation,
+    *,
+    acquired_external_id: str,
+    release_params: Mapping[str, Any],
+) -> None:
+    if not _matches_released_lease(
+        observation,
+        acquired_external_id=acquired_external_id,
+        release_params=release_params,
+    ):
+        return
+    if (
+        observation.metadata_contract_version is None
+        or observation.raw_json is None
+        or observation.external_id is None
+    ):
+        raise ProbeError("released lease remains visible with incomplete metadata")
+    raise ProbeError("released lease remains visible")
+
+
+def _require_release_request_fields(release_params: Mapping[str, Any]) -> None:
+    required = (
+        "client_lease_id",
+        "release_idempotency_key",
+        "run_id",
+        "phase",
+        "transition_id",
+        "agent_id",
+        "requester_agent_id",
+        "gateway_lease_id",
+    )
+    missing = [
+        field
+        for field in required
+        if not isinstance(release_params.get(field), str) or not release_params.get(field)
+    ]
+    if missing:
+        raise ProbeError(f"release request is missing required fields: {missing}")
+
+
 def _release_metadata(observation: MetadataObservation) -> Mapping[str, Any]:
     normalized = observation.normalized
     if not isinstance(normalized, Mapping):
@@ -87,10 +165,13 @@ def run_release_probe(
 
     canonical_release = dict(release_params)
     canonical_release["gateway_lease_id"] = acquired.external_id
+    _require_release_request_fields(canonical_release)
     first = adapter.allow_lease_release(canonical_release)
     second = adapter.allow_lease_release(canonical_release)
-    first_metadata = _release_metadata(first)
-    second_metadata = _release_metadata(second)
+    _release_metadata(first)
+    _release_metadata(second)
+    first_metadata = _validated_release_metadata(first, canonical_release)
+    second_metadata = _validated_release_metadata(second, canonical_release)
     if (
         first.external_id != acquired.external_id
         or second.external_id != acquired.external_id
@@ -100,11 +181,12 @@ def run_release_probe(
         raise ProbeError("duplicate release metadata differs")
     if first.raw_response_json != second.raw_response_json:
         raise ProbeError("duplicate release response differs")
-    if any(
-        lease.external_id == acquired.external_id
-        for lease in adapter.allow_lease_list()
-    ):
-        raise ProbeError("released lease remains visible")
+    for lease in adapter.allow_lease_list():
+        _reject_visible_post_release_lease(
+            lease,
+            acquired_external_id=acquired.external_id,
+            release_params=canonical_release,
+        )
     return {
         "agentic_adapter_live_catalog": True,
         "agentic_adapter_release_succeeded": True,
