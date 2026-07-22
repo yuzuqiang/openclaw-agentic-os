@@ -1,11 +1,11 @@
 {
-  "agentic_os_head_sha": "b7567c30185b1aee436ca9ea733808dd303e9093",
+  "agentic_os_head_sha": "52ae84a3026b665d89f12a23f75426d208545df4",
   "authenticated_gateway": true,
   "canonical_session_observed": true,
   "child_completed": true,
   "child_result_sha256": "453135e40beed1fbefa26466f4ebe3415bc01b558bbb200bcb55e1e252740412",
-  "child_run_id_sha256": "6c1090dd1328e104837f144b4a57a4a68fdc6d7730a051a65c76887803f9dbe3",
-  "child_session_key_sha256": "d131347e65213adef2e277bb592e650df624e881aee43c07251f57b73d1120a9",
+  "child_run_id_sha256": "71829d54dd4067e9237b4369f518af44a62c7bed16e7eda60acaedab9b6962f6",
+  "child_session_key_sha256": "9b446017c5136d5ed9147694aa37e1c4c8bc7a4b4cb09cb8598361888160955a",
   "cross_principal_lease_hidden": true,
   "cross_principal_sessions_hidden": true,
   "cross_principal_spawn_rejected": true,
@@ -14,10 +14,10 @@
   "duplicate_spawn_identity_parity": true,
   "e2e_command_sha256": "74470fa78de8d96b64a09ec766ae7729a25d930bf45c59ec9a0cc25f08428613",
   "effective_allow_lease": true,
-  "gateway_lease_id_sha256": "baec6917f6ac68447c447f4acd0b11c89e8252a3d2cc0b9e47decdabd6218c20",
-  "history_response_sha256": "3ee18ba1ef9bbbb8707136630162976db3071051a1b2fedec2cd165122243b75",
+  "gateway_lease_id_sha256": "0dfcbcad4d18ab9ac891b2f511acaea9fa8948122d98838c4d14812446c7bf21",
+  "history_response_sha256": "0c96cd53921a57958eecca1925286065e5e12b3d1c6186d1dadc182ae8b538e5",
   "model_request_count": 1,
-  "openclaw_head_sha": "f67702b1685efc49d5d7a0a2435e32fe587586e1",
+  "openclaw_head_sha": "a178b82897af368eb290069898af374595a428c5",
   "probe": "agentic-os-real-gateway-runtime-contract-v1",
   "probe_runner_sha256": "2ca8564a5c5f30ab849f7a87f42fb5ba1413137ceed6f006748c49563a8cc645",
   "read_only_acquire_rejected": true,
@@ -31,7 +31,7 @@
     },
     {
       "path": "src/gateway/server-methods/agentic-os-runtime-contract.ts",
-      "sha256": "02dbbf59fe19630ce5c72d95f4ff25791f7697214e03ebba1949863513884f2e"
+      "sha256": "f5c731375fcaf36fa9a93a60aed9c1c7163465a1201b528c5d05fec134b3d6cd"
     },
     {
       "path": "src/agents/subagent-spawn.ts",
@@ -44,6 +44,6 @@
   ],
   "static_allow_agents_wildcard": false,
   "status": "pass",
-  "task_marker_sha256": "31ce79710db7f20cf18dad8b4428a6f152d30a6c198b34ccd01001b2afd2a654",
+  "task_marker_sha256": "0829573a40c85e6aab013eb317154b48849bb77b546bd0cbff44b174311f9e4f",
   "wrong_lease_rejected": true
 }
