@@ -53,6 +53,20 @@ class CurrentStatusTests(unittest.TestCase):
             payload["audited_origin_main_sha"],
             "fa79a7ea4235a2c822e51052649f982f61c962e7",
         )
+        self.assertEqual(
+            payload["audited_github_review_binding"]["reviewed_head_sha"],
+            "7f1453769fddee1ea482c6f32ef506b4d16b9733",
+        )
+        self.assertEqual(
+            payload["audited_github_review_binding"]["reviewed_head_tree_sha"],
+            "30f122ae32335c51de8eb23740497468307f3fdd",
+        )
+        self.assertEqual(
+            payload["completion_gate_receipt"]["run_id"],
+            "phase-20260809-053538-phase-b-software-architect-completion-final",
+        )
+        self.assertEqual(payload["completion_gate_receipt"]["status"], "PASS")
+        self.assertRegex(payload["completion_gate_receipt"]["report_sha256"], r"^[0-9a-f]{64}$")
         self.assertFalse(payload["production_behavior_proven"])
         self.assertFalse(payload["db_authority_enabled"])
         self.assertEqual(
@@ -63,6 +77,36 @@ class CurrentStatusTests(unittest.TestCase):
             payload["runtime_evidence"]["fresh_installed_negative_preflight"]["status"],
             "fail",
         )
+
+    def test_installed_negative_baseline_preserves_runtime_provenance(self) -> None:
+        root = repository_root()
+        payload = json.loads(
+            (
+                root
+                / "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(
+            payload["catalog"]["runtime_target"],
+            "installed_openclaw_negative_baseline",
+        )
+        self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["method"],
+            "tools.catalog",
+        )
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["status"],
+            "failed_before_contract_validation",
+        )
+        for key in (
+            "install_root_path_sha256",
+            "active_executable_path_sha256",
+            "active_executable_sha256",
+        ):
+            self.assertRegex(payload["catalog"][key], r"^[0-9a-f]{64}$")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,18 @@
 {
+  "catalog": {
+    "active_catalog": {
+      "method": "tools.catalog",
+      "status": "failed_before_contract_validation"
+    },
+    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
+    "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
+    "catalog_kind": "sanitized_openclaw_runtime",
+    "install_root_basename": "openclaw",
+    "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.7.1",
+    "runtime_target": "installed_openclaw_negative_baseline"
+  },
   "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}",
   "status": "fail"
 }

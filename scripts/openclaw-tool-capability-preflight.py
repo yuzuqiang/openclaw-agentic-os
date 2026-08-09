@@ -799,6 +799,47 @@ def live_installed_openclaw_catalog(
     }
 
 
+def _runtime_failure_catalog(
+    *,
+    runtime_target: str,
+    include_env_override: bool,
+    require_env_override: bool,
+) -> dict[str, Any]:
+    catalog: dict[str, Any] = {
+        "catalog_kind": "sanitized_openclaw_runtime",
+        "runtime_target": runtime_target,
+        "active_catalog": {
+            "method": "tools.catalog",
+            "status": "failed_before_contract_validation",
+        },
+    }
+    try:
+        root = _resolve_install_root(
+            include_env_override=include_env_override,
+            require_env_override=require_env_override,
+        )
+    except AdapterContractError as exc:
+        catalog["install_root_resolution_error"] = str(exc)
+        return catalog
+    catalog["install_root_basename"] = root.name
+    catalog["install_root_path_sha256"] = _path_digest(root)
+    try:
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        catalog["package_resolution_error"] = type(exc).__name__
+    else:
+        catalog["openclaw_version"] = package.get("version")
+        catalog["openclaw_package_name"] = package.get("name")
+    try:
+        executable = _resolve_openclaw_executable()
+        catalog["active_executable_path_sha256"] = _path_digest(executable)
+        catalog["active_executable_sha256"] = _file_digest(executable)
+        _require_executable_matches_install_root(root, executable)
+    except AdapterContractError as exc:
+        catalog["executable_resolution_error"] = str(exc)
+    return catalog
+
+
 def isolated_candidate_openclaw_catalog() -> dict[str, Any]:
     return live_installed_openclaw_catalog(
         runtime_target="isolated_candidate",
@@ -813,6 +854,28 @@ def installed_negative_baseline_catalog() -> dict[str, Any]:
         include_env_override=False,
         scrub_env_override=True,
     )
+
+
+def _runtime_failure_catalog_for_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.isolated_candidate_openclaw:
+        return _runtime_failure_catalog(
+            runtime_target="isolated_candidate",
+            include_env_override=True,
+            require_env_override=True,
+        )
+    if args.installed_openclaw_negative_baseline:
+        return _runtime_failure_catalog(
+            runtime_target="installed_openclaw_negative_baseline",
+            include_env_override=False,
+            require_env_override=False,
+        )
+    if args.live_installed_openclaw:
+        return _runtime_failure_catalog(
+            runtime_target="live_installed_openclaw",
+            include_env_override=True,
+            require_env_override=False,
+        )
+    return None
 
 
 def _read_catalog(args: argparse.Namespace) -> dict[str, Any]:
@@ -919,6 +982,9 @@ def main(argv: list[str] | None = None) -> int:
                 catalog = live_installed_openclaw_catalog()
         except AdapterContractError as exc:
             payload = {"error": str(exc), "status": "fail"}
+            failure_catalog = _runtime_failure_catalog_for_args(args)
+            if failure_catalog is not None:
+                payload["catalog"] = failure_catalog
             _write_evidence(args.write_evidence, payload)
             print(json.dumps(payload, sort_keys=True))
             return 1

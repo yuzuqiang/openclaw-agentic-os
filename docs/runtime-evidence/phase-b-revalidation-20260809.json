@@ -1,5 +1,33 @@
 {
+  "audited_github_review_binding": {
+    "binding_source": "GitHub PR #38 review comments fetched before edit on 2026-08-09; all current P2 findings were bound by original_commit_id/review_commit_id to the reviewed head.",
+    "codex_required_rework_count_before_fix": 3,
+    "review_comment_ids": [
+      3743593406,
+      3743593411,
+      3743593414
+    ],
+    "reviewed_head_parent_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
+    "reviewed_head_sha": "7f1453769fddee1ea482c6f32ef506b4d16b9733",
+    "reviewed_head_tree_sha": "30f122ae32335c51de8eb23740497468307f3fdd"
+  },
   "audited_origin_main_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
+  "completion_gate_receipt": {
+    "created_at": "2026-08-09T10:29:13Z",
+    "independent_verifier_report_sha256": "15a4bebbcecd0354d7d6486c96a145dbf33cd4805528afbb5b09bf91a7718a87",
+    "independent_verifier_status": "PASS",
+    "report_sha256": "7937186afed9813fa6707071f15e1ce53d9f120a80c8f84ea2bf51772bf958b6",
+    "result_sha256": "f730162c90ea6643135e104ed119e3dc9dd0f884c0103f503f560c89eb19c4a7",
+    "run_id": "phase-20260809-053538-phase-b-software-architect-completion-final",
+    "status": "PASS",
+    "task": "openclaw-agentic-os phase-b exact-head revalidation docs final",
+    "verified_command_summary": [
+      "PYTHONPATH=src python3 -m unittest tests.test_current_status tests.test_migrations.MigrationTests.test_readme_digests_match_current_design_and_migration tests.test_openclaw_real_gateway_contract_probe -v",
+      "PYTHONPATH=src python3 -m agentic_os.cli preflight",
+      "python3 -m json.tool docs/runtime-evidence/phase-b-revalidation-20260809.json",
+      "git diff --check origin/main...HEAD"
+    ]
+  },
   "db_authority_enabled": false,
   "design_status": "exact_head_design_local_fixture_revalidated",
   "file_hashes": {
@@ -13,7 +41,7 @@
   "runtime_evidence": {
     "fresh_installed_negative_preflight": {
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "17029b35ecabbda8bde68da93b616e9e9cf996ce6b3e83bbc9559e660d30edb0",
+      "sha256": "5d1a1924e7e10f3474af42f711b152df2e4d0d8682322579ad681855f2dd1dbc",
       "status": "fail"
     },
     "installed_2026_7_1_negative_baseline": {

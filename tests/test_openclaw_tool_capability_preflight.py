@@ -486,7 +486,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
         self.assertIn("valid OpenClaw runtime bundle", payload["error"])
-        self.assertNotIn("catalog", payload)
+        self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
+        self.assertIn("install_root_resolution_error", payload["catalog"])
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["status"],
+            "failed_before_contract_validation",
+        )
 
     def test_isolated_candidate_openclaw_rejects_non_openclaw_package_name(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -513,7 +518,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("valid OpenClaw runtime bundle", payload["error"])
-        self.assertNotIn("catalog", payload)
+        self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
+        self.assertIn("install_root_resolution_error", payload["catalog"])
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["status"],
+            "failed_before_contract_validation",
+        )
 
     def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
         evidence_dir = repository_root() / "docs" / "runtime-evidence"
@@ -658,7 +668,13 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             self.assertEqual(status, 1)
             payload = json.loads(output.getvalue())
-            self.assertEqual(payload, {"error": "runtime missing", "status": "fail"})
+            self.assertEqual(payload["error"], "runtime missing")
+            self.assertEqual(payload["status"], "fail")
+            self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["status"],
+                "failed_before_contract_validation",
+            )
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
 
@@ -705,7 +721,17 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             serialized = json.dumps(payload, sort_keys=True)
             self.assertIn("active OpenClaw tool catalog failed", payload["error"])
             self.assertIn("payload_sha256", payload["error"])
+            self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+            self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
+            self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["status"],
+                "failed_before_contract_validation",
+            )
+            self.assertIn("active_executable_sha256", payload["catalog"])
+            self.assertIn("install_root_path_sha256", payload["catalog"])
             self.assertNotIn("secret-runtime-path-token", serialized)
+            self.assertNotIn(install_root, serialized)
             self.assertEqual(evidence_payload, payload)
 
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
