@@ -16,7 +16,7 @@ production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `a7765fb169e86753e98d24cdfbe0f2d7795cd74f85d46ad0972e7a06efb6e342`
+- Current design artifact SHA-256: `2620affde4756b4577e06992121b19c0e4fc169ad3c5a2ae6717d2a94c9bfaec`
 - Historical revalidation evidence, superseded by the current Draft remediation:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Bound installed-runtime negative preflight evidence: [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)

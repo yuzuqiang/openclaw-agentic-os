@@ -46,6 +46,24 @@ class CurrentStatusTests(unittest.TestCase):
                 self.assertNotIn(claim, readme_status)
                 self.assertNotIn(claim, design_current_status)
 
+    def test_current_vs_proposed_truth_claims_are_independently_present(self) -> None:
+        root = repository_root()
+        design_current_status = (
+            root / "docs/agentic-os-production-adaptation.md"
+        ).read_text(encoding="utf-8").split("## Test and Acceptance Matrix", 1)[0]
+
+        required_claims = (
+            "Current file artifacts remain operational authority.",
+            "Current production OpenClaw is not proven to satisfy",
+            "Current bounded local/synthetic implementation slices include",
+            "Runtime production behavior remains unproven.",
+            "agentic_os.DB_AUTHORITY_ENABLED",
+            "False",
+        )
+        for claim in required_claims:
+            with self.subTest(claim=claim):
+                self.assertIn(claim, design_current_status)
+
     def test_phase_b_revalidation_evidence_preserves_runtime_boundaries(self) -> None:
         root = repository_root()
         payload = json.loads(

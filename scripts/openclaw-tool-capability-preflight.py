@@ -609,7 +609,7 @@ def _run_gateway_tools_catalog(
     timeout_ms: int = 10_000,
     *,
     scrub_env_override: bool = False,
-) -> dict[str, Any]:
+) -> Any:
     env = None
     if scrub_env_override:
         env = dict(os.environ)
@@ -683,8 +683,6 @@ def _run_gateway_tools_catalog(
                 "stdout": _stream_digest(proc.stdout or ""),
             },
         )
-    if not isinstance(payload, dict):
-        raise AdapterContractError("active OpenClaw tool catalog must be a JSON object")
     return payload
 
 
@@ -782,6 +780,7 @@ def _active_catalog_validation_failure_catalog(
     root: Path,
     executable: Path,
     active_catalog_sha256: str,
+    validation_stage: str = "active_tool_parameters",
     required_tool_names: list[str] | None = None,
 ) -> dict[str, Any]:
     catalog: dict[str, Any] = {
@@ -796,7 +795,7 @@ def _active_catalog_validation_failure_catalog(
         "active_catalog": {
             "method": "tools.catalog",
             "status": "contract_validation_failed",
-            "validation_stage": "active_tool_parameters",
+            "validation_stage": validation_stage,
             "raw_response_sha256": active_catalog_sha256,
         },
     }
@@ -827,6 +826,22 @@ def live_installed_openclaw_catalog(
     active_catalog_sha256 = hashlib.sha256(
         json.dumps(active_catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    if not isinstance(active_catalog, Mapping):
+        validation_catalog = _active_catalog_validation_failure_catalog(
+            runtime_target=runtime_target,
+            package=package,
+            root=root,
+            executable=executable,
+            active_catalog_sha256=active_catalog_sha256,
+            validation_stage="active_catalog_shape",
+        )
+        validation_catalog["active_catalog"]["observed_json_type"] = type(
+            active_catalog
+        ).__name__
+        raise RuntimeEvidenceError(
+            "active OpenClaw tool catalog must be a JSON object",
+            catalog=validation_catalog,
+        )
     try:
         active_params = _active_tool_parameters(active_catalog)
     except AdapterContractError as exc:
@@ -1032,14 +1047,44 @@ def _display_path(root: Path, value: str) -> str:
         return path.name
 
 
+def _sanitize_invocation_argv(
+    root: Path,
+    argv: list[str],
+    path_options: Mapping[str, str | None],
+) -> list[str]:
+    sanitized: list[str] = []
+    pending_path_option: str | None = None
+    for item in argv:
+        if pending_path_option is not None:
+            sanitized.append(_display_path(root, item))
+            pending_path_option = None
+            continue
+        matched_equals = False
+        for option in path_options:
+            prefix = f"{option}="
+            if item.startswith(prefix):
+                value = item[len(prefix) :]
+                sanitized.append(f"{option}={_display_path(root, value)}")
+                matched_equals = True
+                break
+        if matched_equals:
+            continue
+        sanitized.append(item)
+        if item in path_options:
+            pending_path_option = item
+    return sanitized
+
+
 def _evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict[str, Any]:
     root = Path(__file__).resolve().parents[1]
-    sanitized_argv = list(argv)
-    if args.write_evidence:
-        sanitized_argv = [
-            _display_path(root, item) if item == args.write_evidence else item
-            for item in sanitized_argv
-        ]
+    sanitized_argv = _sanitize_invocation_argv(
+        root,
+        argv,
+        {
+            "--catalog-json-file": args.catalog_json_file,
+            "--write-evidence": args.write_evidence,
+        },
+    )
     return {
         "agentic_os_head_sha": _git_rev_parse(root, "HEAD"),
         "agentic_os_tree_sha": _git_rev_parse(root, "HEAD^{tree}"),
