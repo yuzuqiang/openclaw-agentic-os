@@ -1,12 +1,12 @@
 {
   "catalog": {
-    "active_catalog": {
+    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
+    "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
+    "catalog_capture": {
       "method": "tools.catalog",
       "status": "catalog_unavailable_before_contract_validation",
       "validation_stage": "catalog_capture"
     },
-    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
-    "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
     "catalog_kind": "sanitized_openclaw_runtime",
     "install_root_basename": "openclaw",
     "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
@@ -30,9 +30,9 @@
   },
   "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}",
   "preflight_evidence_binding": {
-    "agentic_os_head_sha": "0e59bb0799e6b5a4804a70abfbf4b766c6a8b1a9",
-    "agentic_os_tree_sha": "06c9987b5338fc882b30aee6aaa448e68447bbb7",
-    "generated_at_utc": "2026-08-09T14:26:26+00:00",
+    "agentic_os_head_sha": "b850fd85c79c3310774355fd906766d1adca8533",
+    "agentic_os_tree_sha": "35bbb6fe32576fecec0dd2cdab85985c3db2fead",
+    "generated_at_utc": "2026-08-09T14:29:27+00:00",
     "invocation": {
       "argv": [
         "--installed-openclaw-negative-baseline",
@@ -42,7 +42,7 @@
       ],
       "script": "scripts/openclaw-tool-capability-preflight.py"
     },
-    "preflight_script_sha256": "b975eafaa3b2769fd10b48a2dddabaec1b5129ba49792ad0a5a642b48fd5693a"
+    "preflight_script_sha256": "712ae4fbecdad72071de3657980c85937342591683a768df0d480721d466afc9"
   },
   "status": "fail"
 }

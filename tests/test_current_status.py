@@ -113,15 +113,15 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(
-            payload["catalog"]["active_catalog"]["method"],
+            payload["catalog"]["catalog_capture"]["method"],
             "tools.catalog",
         )
         self.assertEqual(
-            payload["catalog"]["active_catalog"]["status"],
+            payload["catalog"]["catalog_capture"]["status"],
             "catalog_unavailable_before_contract_validation",
         )
         self.assertEqual(
-            payload["catalog"]["active_catalog"]["validation_stage"],
+            payload["catalog"]["catalog_capture"]["validation_stage"],
             "catalog_capture",
         )
         self.assertTrue(payload["catalog_failure"]["runtime_provenance_preserved"])

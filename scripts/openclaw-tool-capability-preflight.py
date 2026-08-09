@@ -878,7 +878,7 @@ def _runtime_failure_catalog(
     catalog: dict[str, Any] = {
         "catalog_kind": "sanitized_openclaw_runtime",
         "runtime_target": runtime_target,
-        "active_catalog": {
+        "catalog_capture": {
             "method": "tools.catalog",
             "status": "catalog_unavailable_before_contract_validation",
             "validation_stage": "catalog_capture",

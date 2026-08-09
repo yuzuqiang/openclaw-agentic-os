@@ -489,7 +489,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
         self.assertIn("install_root_resolution_error", payload["catalog"])
         self.assertEqual(
-            payload["catalog"]["active_catalog"]["status"],
+            payload["catalog"]["catalog_capture"]["status"],
             "catalog_unavailable_before_contract_validation",
         )
 
@@ -521,7 +521,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
         self.assertIn("install_root_resolution_error", payload["catalog"])
         self.assertEqual(
-            payload["catalog"]["active_catalog"]["status"],
+            payload["catalog"]["catalog_capture"]["status"],
             "catalog_unavailable_before_contract_validation",
         )
 
@@ -672,7 +672,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["status"], "fail")
             self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
             self.assertEqual(
-                payload["catalog"]["active_catalog"]["status"],
+                payload["catalog"]["catalog_capture"]["status"],
                 "catalog_unavailable_before_contract_validation",
             )
             with open(evidence, encoding="utf-8") as handle:
@@ -787,7 +787,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
             self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
             self.assertEqual(
-                payload["catalog"]["active_catalog"]["status"],
+                payload["catalog"]["catalog_capture"]["status"],
                 "catalog_unavailable_before_contract_validation",
             )
             self.assertIn("active_executable_sha256", payload["catalog"])
