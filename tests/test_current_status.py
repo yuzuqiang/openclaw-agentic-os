@@ -122,6 +122,19 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertTrue(payload["catalog_failure"]["runtime_provenance_preserved"])
         self.assertEqual(payload["catalog_failure"]["returncode"], 1)
+        binding = payload["preflight_evidence_binding"]
+        self.assertRegex(binding["agentic_os_head_sha"], r"^[0-9a-f]{40}$")
+        self.assertRegex(binding["agentic_os_tree_sha"], r"^[0-9a-f]{40}$")
+        self.assertRegex(binding["preflight_script_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            binding["invocation"]["script"],
+            "scripts/openclaw-tool-capability-preflight.py",
+        )
+        self.assertIn("--installed-openclaw-negative-baseline", binding["invocation"]["argv"])
+        self.assertIn(
+            "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
+            binding["invocation"]["argv"],
+        )
         for key in (
             "install_root_path_sha256",
             "active_executable_path_sha256",

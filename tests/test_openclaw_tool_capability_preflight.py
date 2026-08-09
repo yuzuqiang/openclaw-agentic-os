@@ -678,6 +678,68 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
 
+    def test_live_runtime_failure_evidence_records_unreadable_executable_digest(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            os.makedirs(os.path.join(install_root, "dist"))
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 1\n")
+            evidence = os.path.join(install_root, "evidence.json")
+            original_file_digest = module._file_digest
+
+            def file_digest_or_permission_error(path):
+                if path == module.Path(executable).resolve():
+                    raise PermissionError("execute-only launcher")
+                return original_file_digest(path)
+
+            output = io.StringIO()
+            with mock.patch.object(
+                module,
+                "live_installed_openclaw_catalog",
+                side_effect=module.AdapterContractError("catalog unavailable"),
+            ), mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                side_effect=file_digest_or_permission_error,
+            ), contextlib.redirect_stdout(output):
+                status = module.main(
+                    [
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ]
+                )
+
+            self.assertEqual(status, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "fail")
+            self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
+            self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
+            self.assertEqual(
+                payload["catalog"]["active_executable_sha256_error"],
+                "PermissionError",
+            )
+            self.assertNotIn("active_executable_sha256", payload["catalog"])
+            self.assertIn("preflight_evidence_binding", payload)
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
+
     def test_live_tools_catalog_failure_evidence_is_sanitized(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
             dist = os.path.join(install_root, "dist")
@@ -732,6 +794,56 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertIn("install_root_path_sha256", payload["catalog"])
             self.assertNotIn("secret-runtime-path-token", serialized)
             self.assertNotIn(install_root, serialized)
+            self.assertEqual(evidence_payload, payload)
+
+    def test_successful_catalog_validation_failure_preserves_catalog_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            evidence = os.path.join(install_root, "evidence.json")
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            duplicate_spawn = active_tool_entry("sessions_spawn")
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_entries=[duplicate_spawn, duplicate_spawn],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                    "--write-evidence",
+                    evidence,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                evidence_payload = json.loads(handle.read())
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn("duplicate sessions_spawn", payload["error"])
+            self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["status"],
+                "contract_validation_failed",
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["validation_stage"],
+                "active_tool_parameters",
+            )
+            self.assertRegex(
+                payload["catalog"]["active_catalog"]["raw_response_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertNotIn("catalog_failure", payload)
             self.assertEqual(evidence_payload, payload)
 
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:

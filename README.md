@@ -19,7 +19,7 @@ production OpenClaw authority.
 - Current design artifact SHA-256: `a7765fb169e86753e98d24cdfbe0f2d7795cd74f85d46ad0972e7a06efb6e342`
 - Historical revalidation evidence, superseded by the current Draft remediation:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
-- Fresh installed-runtime negative preflight evidence: [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
+- Bound installed-runtime negative preflight evidence: [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163`
 - Current migration manifest SHA-256: `c5e193b83c7d57969297bf4f7933a97a9e5a55cdba65a6a0ebd4292ab1bd6185`
@@ -437,7 +437,7 @@ If a future runtime passes preflight, the probe validates duplicate session
 identity plus session-local normalized/raw metadata contract evidence from
 direct structured `sessions_spawn` responses and treats any allowLease release
 failure as a failed probe.
-The 2026-08-09 exact-head installed-runtime preflight in
+The 2026-08-09 bound installed-runtime negative preflight in
 `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also
 fails closed before any runtime contract proof is available. It is a fresh
 negative baseline, not production authority.

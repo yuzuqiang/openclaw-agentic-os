@@ -27,5 +27,21 @@
       "sha256": "f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95"
     }
   },
+  "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}",
+  "preflight_evidence_binding": {
+    "agentic_os_head_sha": "66aa128e4d11c169ddcd08d7226e9eb552309b1c",
+    "agentic_os_tree_sha": "90427706c9783e61d08f7f6dfa343ebb619b4ade",
+    "generated_at_utc": "2026-08-09T14:21:43+00:00",
+    "invocation": {
+      "argv": [
+        "--installed-openclaw-negative-baseline",
+        "--json",
+        "--write-evidence",
+        "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
+      ],
+      "script": "scripts/openclaw-tool-capability-preflight.py"
+    },
+    "preflight_script_sha256": "b7c53d963ab77123274ed245b8abd09da481b2be9a0e46ce5a680911daf6ad02"
+  },
   "status": "fail"
 }
