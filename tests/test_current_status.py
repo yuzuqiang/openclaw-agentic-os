@@ -69,11 +69,11 @@ class CurrentStatusTests(unittest.TestCase):
             "fa79a7ea4235a2c822e51052649f982f61c962e7",
         )
         self.assertEqual(
-            payload["audited_github_review_binding"]["reviewed_head_sha"],
+            payload["historical_github_review_binding"]["historical_candidate_sha"],
             "7f1453769fddee1ea482c6f32ef506b4d16b9733",
         )
         self.assertEqual(
-            payload["audited_github_review_binding"]["reviewed_head_tree_sha"],
+            payload["historical_github_review_binding"]["historical_candidate_tree_sha"],
             "30f122ae32335c51de8eb23740497468307f3fdd",
         )
         self.assertEqual(
@@ -84,7 +84,7 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertRegex(payload["completion_gate_receipt"]["report_sha256"], r"^[0-9a-f]{64}$")
         self.assertIn(
             3743656102,
-            payload["audited_github_review_binding"]["review_comment_ids"],
+            payload["historical_github_review_binding"]["review_comment_ids"],
         )
         self.assertFalse(payload["production_behavior_proven"])
         self.assertFalse(payload["db_authority_enabled"])

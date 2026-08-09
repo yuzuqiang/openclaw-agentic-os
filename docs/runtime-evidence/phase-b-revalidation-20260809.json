@@ -1,5 +1,5 @@
 {
-  "audited_github_review_binding": {
+  "historical_github_review_binding": {
     "binding_source": "GitHub PR #38 review threads fetched before edit on 2026-08-09. This record is historical evidence for an earlier candidate and is not a final exact-head acceptance receipt for the current Draft successor.",
     "codex_required_rework_count_before_fix": 5,
     "review_comment_ids": [
@@ -9,9 +9,9 @@
       3743656099,
       3743656102
     ],
-    "reviewed_head_parent_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
-    "reviewed_head_sha": "7f1453769fddee1ea482c6f32ef506b4d16b9733",
-    "reviewed_head_tree_sha": "30f122ae32335c51de8eb23740497468307f3fdd"
+    "historical_candidate_parent_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
+    "historical_candidate_sha": "7f1453769fddee1ea482c6f32ef506b4d16b9733",
+    "historical_candidate_tree_sha": "30f122ae32335c51de8eb23740497468307f3fdd"
   },
   "current_successor_revalidation": {
     "required_before_independent_acceptance": true,
