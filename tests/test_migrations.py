@@ -7897,8 +7897,9 @@ class MigrationTests(unittest.TestCase):
         latest_migration_digest = hashlib.sha256(
             (repository_root() / "migrations" / manifest["migrations"][-1]["file"]).read_bytes()
         ).hexdigest()
-        self.assertIn("has now passed a fresh exact-head", readme)
-        self.assertIn("evidence-backed revalidation", readme)
+        self.assertIn("still required before it can be", readme)
+        self.assertIn("final exact-head", readme)
+        self.assertIn("Phase C revalidation", readme)
         self.assertIn(
             "docs/runtime-evidence/phase-b-revalidation-20260809.json", readme
         )

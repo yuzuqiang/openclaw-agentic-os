@@ -5,17 +5,20 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 ## Current status
 
 The initial design artifact passed dual independent design acceptance. The
-current corrected design artifact has now passed a fresh exact-head
-evidence-backed revalidation for design/local-fixture status; neither artifact
-proves production runtime behavior. Since that design pass, the repository has
-accumulated bounded local/synthetic P0/P1/P2 implementation slices with
-executable tests; those slices are evidence of local control-plane contracts,
-not evidence of production OpenClaw authority.
+current corrected design artifact is a Draft PR successor after Codex review
+remediation; final exact-head Phase C revalidation for the successor head is
+still required before it can be treated as independently accepted. Neither
+artifact proves production runtime
+behavior. Since that design pass, the repository has accumulated bounded
+local/synthetic P0/P1/P2 implementation slices with executable tests; those
+slices are evidence of local control-plane contracts, not evidence of
+production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `91cc89367bccf978d4e1993ec6079d765098aaf9edf5d85ecac5b10198d5018b`
-- Current exact-head revalidation evidence: [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
+- Current design artifact SHA-256: `a7765fb169e86753e98d24cdfbe0f2d7795cd74f85d46ad0972e7a06efb6e342`
+- Historical revalidation evidence, superseded by the current Draft remediation:
+  [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Fresh installed-runtime negative preflight evidence: [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163`

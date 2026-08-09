@@ -19,21 +19,27 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), digest)
 
-    def test_current_status_no_longer_claims_revalidation_is_pending(self) -> None:
+    def test_current_status_keeps_revalidation_status_consistent(self) -> None:
         root = repository_root()
         readme_status = (root / "README.md").read_text(encoding="utf-8").split(
             "## Foundation commands", 1
         )[0]
         design_current_status = (
-            (root / "docs/agentic-os-production-adaptation.md")
-            .read_text(encoding="utf-8")
-            .split("## Unified Target Architecture", 1)[0]
+            root / "docs/agentic-os-production-adaptation.md"
+        ).read_text(encoding="utf-8")
+
+        current_required_claim = (
+            "current Draft successor head still requires final exact-head Phase C "
+            "revalidation"
         )
+        self.assertIn("final exact-head", readme_status)
+        self.assertIn("Phase C revalidation", readme_status)
+        self.assertIn(current_required_claim, design_current_status)
 
         stale_claims = (
             "has **not** yet passed fresh independent revalidation",
             "still requires fresh independent revalidation",
-            "fresh independent revalidation is still required",
+            "Runtime behavior remains unproven and fresh independent revalidation is required.",
         )
         for claim in stale_claims:
             with self.subTest(claim=claim):
@@ -48,7 +54,11 @@ class CurrentStatusTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
-        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["status"], "superseded")
+        self.assertEqual(
+            payload["design_status"],
+            "historical_revalidation_superseded_by_current_draft_remediation",
+        )
         self.assertEqual(
             payload["audited_origin_main_sha"],
             "fa79a7ea4235a2c822e51052649f982f61c962e7",
@@ -67,6 +77,10 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(payload["completion_gate_receipt"]["status"], "PASS")
         self.assertRegex(payload["completion_gate_receipt"]["report_sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn(
+            3743656102,
+            payload["audited_github_review_binding"]["review_comment_ids"],
+        )
         self.assertFalse(payload["production_behavior_proven"])
         self.assertFalse(payload["db_authority_enabled"])
         self.assertEqual(
