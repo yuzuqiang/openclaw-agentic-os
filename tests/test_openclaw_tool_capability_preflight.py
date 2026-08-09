@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -144,14 +145,18 @@ def add_fake_openclaw_to_env(
     *,
     active_tool_ids=None,
     active_tool_entries=None,
+    catalog_override=None,
 ):
     bin_dir = os.path.join(directory, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     executable = os.path.join(bin_dir, "openclaw")
-    entries = active_tool_entries
-    if entries is None:
-        entries = [active_tool_entry(tool_id) for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)]
-    catalog = {"groups": [{"id": "unit", "tools": entries}]}
+    if catalog_override is None:
+        entries = active_tool_entries
+        if entries is None:
+            entries = [active_tool_entry(tool_id) for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)]
+        catalog = {"groups": [{"id": "unit", "tools": entries}]}
+    else:
+        catalog = catalog_override
     with open(executable, "w", encoding="utf-8") as handle:
         handle.write(
             "#!/usr/bin/env python3\n"
@@ -845,6 +850,84 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             )
             self.assertNotIn("catalog_failure", payload)
             self.assertEqual(evidence_payload, payload)
+
+    def test_successful_catalog_with_no_required_tools_preserves_catalog_provenance(
+        self,
+    ) -> None:
+        cases = {
+            "empty_object": {},
+            "unrelated_tool": {
+                "groups": [
+                    {
+                        "id": "unit",
+                        "tools": [
+                            {
+                                "id": "unrelated.tool",
+                                "inputSchema": {"properties": {"token": {"type": "string"}}},
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        for name, catalog in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as install_root:
+                write_contract_candidate_dist(install_root)
+                evidence = os.path.join(install_root, "evidence.json")
+                env = dict(os.environ)
+                env["OPENCLAW_INSTALL_ROOT"] = install_root
+                add_fake_openclaw_to_env(
+                    env,
+                    install_root,
+                    catalog_override=catalog,
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                with open(evidence, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                expected_sha = hashlib.sha256(
+                    json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                payload = json.loads(result.stdout)
+                serialized = json.dumps(payload, sort_keys=True)
+
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("did not expose required tools", payload["error"])
+                self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["status"],
+                    "contract_validation_failed",
+                )
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["validation_stage"],
+                    "active_tool_parameters",
+                )
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["raw_response_sha256"],
+                    expected_sha,
+                )
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["required_tool_names"],
+                    [],
+                )
+                self.assertIn("active_executable_sha256", payload["catalog"])
+                self.assertNotIn("catalog_capture", payload["catalog"])
+                self.assertNotIn("catalog_unavailable_before_contract_validation", serialized)
+                self.assertNotIn("catalog_failure", payload)
+                self.assertEqual(evidence_payload, payload)
 
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:

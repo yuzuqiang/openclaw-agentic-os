@@ -47,7 +47,7 @@
   "runtime_evidence": {
     "fresh_installed_negative_preflight": {
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "2df7cf390e7c77906a3000949405e60602d8739c07ac0623eca3ce18d1de0bc7",
+      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
       "status": "fail"
     },
     "installed_2026_7_1_negative_baseline": {

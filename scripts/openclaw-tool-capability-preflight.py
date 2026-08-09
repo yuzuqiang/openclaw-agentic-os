@@ -775,6 +775,37 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
     return entries
 
 
+def _active_catalog_validation_failure_catalog(
+    *,
+    runtime_target: str,
+    package: Mapping[str, Any],
+    root: Path,
+    executable: Path,
+    active_catalog_sha256: str,
+    required_tool_names: list[str] | None = None,
+) -> dict[str, Any]:
+    catalog: dict[str, Any] = {
+        "catalog_kind": "sanitized_openclaw_runtime",
+        "runtime_target": runtime_target,
+        "required_canonical_session_status_method": "sessions_status",
+        "openclaw_version": package.get("version"),
+        "openclaw_package_name": package.get("name"),
+        "install_root_basename": root.name,
+        "install_root_path_sha256": _path_digest(root),
+        "active_executable_path_sha256": _path_digest(executable),
+        "active_catalog": {
+            "method": "tools.catalog",
+            "status": "contract_validation_failed",
+            "validation_stage": "active_tool_parameters",
+            "raw_response_sha256": active_catalog_sha256,
+        },
+    }
+    if required_tool_names is not None:
+        catalog["active_catalog"]["required_tool_names"] = required_tool_names
+    _record_file_digest(catalog, "active_executable_sha256", executable)
+    return catalog
+
+
 def live_installed_openclaw_catalog(
     *,
     runtime_target: str = "live_installed_openclaw",
@@ -799,27 +830,26 @@ def live_installed_openclaw_catalog(
     try:
         active_params = _active_tool_parameters(active_catalog)
     except AdapterContractError as exc:
-        validation_catalog: dict[str, Any] = {
-            "catalog_kind": "sanitized_openclaw_runtime",
-            "runtime_target": runtime_target,
-            "required_canonical_session_status_method": "sessions_status",
-            "openclaw_version": package.get("version"),
-            "openclaw_package_name": package.get("name"),
-            "install_root_basename": root.name,
-            "install_root_path_sha256": _path_digest(root),
-            "active_executable_path_sha256": _path_digest(executable),
-            "active_catalog": {
-                "method": "tools.catalog",
-                "status": "contract_validation_failed",
-                "validation_stage": "active_tool_parameters",
-                "raw_response_sha256": active_catalog_sha256,
-            },
-        }
-        _record_file_digest(validation_catalog, "active_executable_sha256", executable)
+        validation_catalog = _active_catalog_validation_failure_catalog(
+            runtime_target=runtime_target,
+            package=package,
+            root=root,
+            executable=executable,
+            active_catalog_sha256=active_catalog_sha256,
+        )
         raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
     active_names = set(active_params)
     if not active_params:
-        raise AdapterContractError("active OpenClaw tool catalog did not expose required tools")
+        exc = AdapterContractError("active OpenClaw tool catalog did not expose required tools")
+        validation_catalog = _active_catalog_validation_failure_catalog(
+            runtime_target=runtime_target,
+            package=package,
+            root=root,
+            executable=executable,
+            active_catalog_sha256=active_catalog_sha256,
+            required_tool_names=sorted(active_names),
+        )
+        raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
     model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
     gateway_params, gateway_sources = _extract_gateway_method_params(root)
     declared_names, declaration_sources = _declared_core_names(root)

@@ -96,6 +96,12 @@ class CurrentStatusTests(unittest.TestCase):
             payload["runtime_evidence"]["fresh_installed_negative_preflight"]["status"],
             "fail",
         )
+        negative_preflight = payload["runtime_evidence"]["fresh_installed_negative_preflight"]
+        negative_preflight_path = root / negative_preflight["path"]
+        self.assertEqual(
+            negative_preflight["sha256"],
+            hashlib.sha256(negative_preflight_path.read_bytes()).hexdigest(),
+        )
 
     def test_installed_negative_baseline_preserves_runtime_provenance(self) -> None:
         root = repository_root()
