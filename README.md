@@ -5,15 +5,18 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 ## Current status
 
 The initial design artifact passed dual independent design acceptance. The
-current corrected design artifact has **not** yet passed fresh independent
-revalidation, and neither artifact proves production runtime behavior. Since
-that design pass, the repository has accumulated bounded local/synthetic
-P0/P1/P2 implementation slices with executable tests; those slices are evidence
-of local control-plane contracts, not evidence of production OpenClaw authority.
+current corrected design artifact has now passed a fresh exact-head
+evidence-backed revalidation for design/local-fixture status; neither artifact
+proves production runtime behavior. Since that design pass, the repository has
+accumulated bounded local/synthetic P0/P1/P2 implementation slices with
+executable tests; those slices are evidence of local control-plane contracts,
+not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `6733bcef10fdd95b95767645a0c57e88fd24a814748e26dc9d70193816b6cd26`
+- Current design artifact SHA-256: `91cc89367bccf978d4e1993ec6079d765098aaf9edf5d85ecac5b10198d5018b`
+- Current exact-head revalidation evidence: [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
+- Fresh installed-runtime negative preflight evidence: [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163`
 - Current migration manifest SHA-256: `c5e193b83c7d57969297bf4f7933a97a9e5a55cdba65a6a0ebd4292ab1bd6185`
@@ -431,6 +434,10 @@ If a future runtime passes preflight, the probe validates duplicate session
 identity plus session-local normalized/raw metadata contract evidence from
 direct structured `sessions_spawn` responses and treats any allowLease release
 failure as a failed probe.
+The 2026-08-09 exact-head installed-runtime preflight in
+`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also
+fails closed before any runtime contract proof is available. It is a fresh
+negative baseline, not production authority.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
 The authoritative candidate proof is now the isolated real-Gateway probe. It
