@@ -59,8 +59,13 @@ class CurrentStatusTests(unittest.TestCase):
             payload["design_status"],
             "historical_revalidation_superseded_by_current_draft_remediation",
         )
+        self.assertTrue(
+            payload["current_successor_revalidation"][
+                "required_before_independent_acceptance"
+            ]
+        )
         self.assertEqual(
-            payload["audited_origin_main_sha"],
+            payload["historical_origin_main_sha"],
             "fa79a7ea4235a2c822e51052649f982f61c962e7",
         )
         self.assertEqual(
@@ -115,6 +120,8 @@ class CurrentStatusTests(unittest.TestCase):
             payload["catalog"]["active_catalog"]["status"],
             "failed_before_contract_validation",
         )
+        self.assertTrue(payload["catalog_failure"]["runtime_provenance_preserved"])
+        self.assertEqual(payload["catalog_failure"]["returncode"], 1)
         for key in (
             "install_root_path_sha256",
             "active_executable_path_sha256",

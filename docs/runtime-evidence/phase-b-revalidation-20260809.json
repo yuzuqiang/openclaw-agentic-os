@@ -13,7 +13,10 @@
     "reviewed_head_sha": "7f1453769fddee1ea482c6f32ef506b4d16b9733",
     "reviewed_head_tree_sha": "30f122ae32335c51de8eb23740497468307f3fdd"
   },
-  "audited_origin_main_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
+  "current_successor_revalidation": {
+    "required_before_independent_acceptance": true,
+    "reason": "This Draft remediation changed the status/evidence contract after the historical pass; final Phase C must bind the pushed PR head externally before the design is independently accepted."
+  },
   "completion_gate_receipt": {
     "created_at": "2026-08-09T10:29:13Z",
     "independent_verifier_report_sha256": "15a4bebbcecd0354d7d6486c96a145dbf33cd4805528afbb5b09bf91a7718a87",
@@ -40,10 +43,11 @@
   },
   "production_behavior_proven": false,
   "revalidated_at": "2026-08-09",
+  "historical_origin_main_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
   "runtime_evidence": {
     "fresh_installed_negative_preflight": {
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "5d1a1924e7e10f3474af42f711b152df2e4d0d8682322579ad681855f2dd1dbc",
+      "sha256": "2df7cf390e7c77906a3000949405e60602d8739c07ac0623eca3ce18d1de0bc7",
       "status": "fail"
     },
     "installed_2026_7_1_negative_baseline": {

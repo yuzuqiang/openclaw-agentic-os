@@ -13,6 +13,19 @@
     "openclaw_version": "2026.7.1",
     "runtime_target": "installed_openclaw_negative_baseline"
   },
-  "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}",
+  "catalog_failure": {
+    "message": "active OpenClaw tool catalog failed before contract validation",
+    "payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
+    "returncode": 1,
+    "runtime_provenance_preserved": true,
+    "stderr": {
+      "bytes": 982,
+      "sha256": "99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d"
+    },
+    "stdout": {
+      "bytes": 363,
+      "sha256": "f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95"
+    }
+  },
   "status": "fail"
 }
