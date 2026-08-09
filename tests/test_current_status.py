@@ -118,7 +118,11 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["catalog"]["active_catalog"]["status"],
-            "failed_before_contract_validation",
+            "catalog_unavailable_before_contract_validation",
+        )
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["validation_stage"],
+            "catalog_capture",
         )
         self.assertTrue(payload["catalog_failure"]["runtime_provenance_preserved"])
         self.assertEqual(payload["catalog_failure"]["returncode"], 1)

@@ -490,7 +490,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("install_root_resolution_error", payload["catalog"])
         self.assertEqual(
             payload["catalog"]["active_catalog"]["status"],
-            "failed_before_contract_validation",
+            "catalog_unavailable_before_contract_validation",
         )
 
     def test_isolated_candidate_openclaw_rejects_non_openclaw_package_name(self) -> None:
@@ -522,7 +522,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("install_root_resolution_error", payload["catalog"])
         self.assertEqual(
             payload["catalog"]["active_catalog"]["status"],
-            "failed_before_contract_validation",
+            "catalog_unavailable_before_contract_validation",
         )
 
     def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
@@ -673,7 +673,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
             self.assertEqual(
                 payload["catalog"]["active_catalog"]["status"],
-                "failed_before_contract_validation",
+                "catalog_unavailable_before_contract_validation",
             )
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
@@ -788,7 +788,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
             self.assertEqual(
                 payload["catalog"]["active_catalog"]["status"],
-                "failed_before_contract_validation",
+                "catalog_unavailable_before_contract_validation",
             )
             self.assertIn("active_executable_sha256", payload["catalog"])
             self.assertIn("install_root_path_sha256", payload["catalog"])

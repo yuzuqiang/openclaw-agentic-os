@@ -880,7 +880,8 @@ def _runtime_failure_catalog(
         "runtime_target": runtime_target,
         "active_catalog": {
             "method": "tools.catalog",
-            "status": "failed_before_contract_validation",
+            "status": "catalog_unavailable_before_contract_validation",
+            "validation_stage": "catalog_capture",
         },
     }
     try:
