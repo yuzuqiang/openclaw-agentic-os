@@ -1364,9 +1364,23 @@ def _runtime_target_requested(args: argparse.Namespace) -> bool:
 
 def _caller_catalog_tool_entries(catalog: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     entries: list[Mapping[str, Any]] = []
+
+    def extend_mapping_entries(tools: Mapping[str, Any]) -> None:
+        for name, value in tools.items():
+            if not isinstance(name, str):
+                continue
+            entry: dict[str, Any] = {"name": name}
+            if isinstance(value, Mapping):
+                entry.update(value)
+            entries.append(entry)
+
     tools = catalog.get("tools")
     if isinstance(tools, list):
         entries.extend(tool for tool in tools if isinstance(tool, Mapping))
+    elif isinstance(tools, Mapping):
+        extend_mapping_entries(tools)
+    elif "tools" not in catalog:
+        extend_mapping_entries(catalog)
     groups = catalog.get("groups")
     if isinstance(groups, list):
         for group in groups:

@@ -1530,6 +1530,51 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertNotIn(private_marker, serialized_payload)
         self.assertNotIn("/private/customer/runtime", serialized_payload)
 
+    def test_write_evidence_sanitizes_mapping_catalog_payloads(self) -> None:
+        def mapping_catalog() -> dict[str, dict[str, object]]:
+            return {
+                tool["name"]: {
+                    key: json.loads(json.dumps(value))
+                    for key, value in tool.items()
+                    if key != "name"
+                }
+                for tool in VALID_CATALOG["tools"]
+            }
+
+        cases = {
+            "tools_mapping": {"tools": mapping_catalog()},
+            "root_mapping": mapping_catalog(),
+        }
+        for name, catalog in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                evidence_path = os.path.join(directory, "evidence.json")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--catalog-json",
+                        json.dumps(catalog),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with open(evidence_path, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload, evidence_payload)
+                self.assertEqual(payload["catalog"]["catalog_kind"], "sanitized_caller_tool_catalog")
+                self.assertEqual(payload["catalog"]["tool_entry_count"], len(VALID_CATALOG["tools"]))
+                self.assertEqual(
+                    payload["catalog"]["required_tool_names"],
+                    sorted(ACTIVE_TOOL_IDS),
+                )
+
     def test_evidence_binding_sanitizes_path_option_forms(self) -> None:
         cases = (
             ("catalog_equals", "catalog_equals.json", "evidence_separate.json"),
