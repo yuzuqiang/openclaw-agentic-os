@@ -1038,6 +1038,38 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 self.assertNotIn(private_dir, serialized)
                 self.assertNotIn(directory, serialized)
 
+    def test_write_evidence_refuses_dirty_worktree_before_git_binding(self) -> None:
+        root = repository_root()
+        dirty_path = root / ".preflight-dirty-worktree-test"
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            try:
+                dirty_path.write_text("dirty\n", encoding="utf-8")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--catalog-json",
+                        json.dumps(VALID_CATALOG),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    dirty_path.unlink()
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "refusing to write exact-head evidence from a dirty Git worktree",
+                result.stderr,
+            )
+            self.assertFalse(os.path.exists(evidence_path))
+
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
             dist = os.path.join(install_root, "dist")

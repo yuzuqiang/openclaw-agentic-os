@@ -1039,6 +1039,28 @@ def _git_rev_parse(root: Path, revision: str) -> str | None:
     return value or None
 
 
+def _git_status_porcelain(root: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=normal"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return proc.stdout
+
+
+def _require_clean_worktree_for_evidence(root: Path) -> None:
+    status = _git_status_porcelain(root)
+    if status is None:
+        raise SystemExit("cannot verify Git worktree cleanliness before writing evidence")
+    if status.strip():
+        raise SystemExit("refusing to write exact-head evidence from a dirty Git worktree")
+
+
 def _display_path(root: Path, value: str) -> str:
     path = Path(value)
     try:
@@ -1077,6 +1099,7 @@ def _sanitize_invocation_argv(
 
 def _evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict[str, Any]:
     root = Path(__file__).resolve().parents[1]
+    _require_clean_worktree_for_evidence(root)
     sanitized_argv = _sanitize_invocation_argv(
         root,
         argv,
