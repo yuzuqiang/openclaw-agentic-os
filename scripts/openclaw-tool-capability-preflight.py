@@ -1023,6 +1023,44 @@ def _require_runtime_sources_unchanged_after_scan(
         )
 
 
+def _scan_runtime_source_contract(
+    *,
+    root: Path,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str,
+) -> tuple[
+    dict[str, set[str]],
+    list[Path],
+    dict[str, set[str]],
+    list[Path],
+    set[str],
+    list[Path],
+]:
+    try:
+        model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
+        gateway_params, gateway_sources = _extract_gateway_method_params(root)
+        declared_names, declaration_sources = _declared_core_names(root)
+    except OSError as exc:
+        catalog = _runtime_source_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            status="runtime_source_scan_failed",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime sources could not be scanned after catalog capture",
+            catalog=catalog,
+        ) from exc
+    return (
+        model_tool_params,
+        model_tool_sources,
+        gateway_params,
+        gateway_sources,
+        declared_names,
+        declaration_sources,
+    )
+
+
 def live_installed_openclaw_catalog(
     *,
     runtime_target: str = "live_installed_openclaw",
@@ -1093,9 +1131,18 @@ def live_installed_openclaw_catalog(
             required_tool_names=sorted(active_names),
         )
         raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
-    model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
-    gateway_params, gateway_sources = _extract_gateway_method_params(root)
-    declared_names, declaration_sources = _declared_core_names(root)
+    (
+        model_tool_params,
+        model_tool_sources,
+        gateway_params,
+        gateway_sources,
+        declared_names,
+        declaration_sources,
+    ) = _scan_runtime_source_contract(
+        root=root,
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+    )
     _require_runtime_sources_unchanged_after_scan(
         runtime_identity_catalog=runtime_identity_catalog,
         active_catalog_sha256=active_catalog_sha256,

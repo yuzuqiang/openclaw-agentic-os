@@ -985,6 +985,90 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             source_binding["observed_sources"]["dist/openclaw-tools-candidate.js"],
         )
 
+    def test_source_scan_oserror_writes_fail_closed_evidence(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            os.chmod(executable, 0o755)
+            evidence = os.path.join(install_root, "evidence.json")
+
+            def scan_raises_oserror(_root):
+                raise PermissionError("runtime source disappeared")
+
+            output = io.StringIO()
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                return_value={
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                },
+            ), mock.patch.object(
+                module,
+                "_extract_model_tool_schemas",
+                side_effect=scan_raises_oserror,
+            ), mock.patch.object(
+                module,
+                "_capture_evidence_binding",
+                return_value={"test": "binding"},
+            ), mock.patch.object(
+                module,
+                "_require_same_evidence_binding",
+            ), contextlib.redirect_stdout(output):
+                status = module.main(
+                    [
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ]
+                )
+
+            self.assertEqual(status, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "fail")
+            self.assertIn(
+                "active OpenClaw runtime sources could not be scanned",
+                payload["error"],
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["status"],
+                "runtime_source_scan_failed",
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["validation_stage"],
+                "runtime_source_binding",
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["source_verification_error"],
+                "PermissionError",
+            )
+            self.assertIn(
+                "raw_response_sha256",
+                payload["catalog"]["active_catalog"],
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
+
     def test_successful_catalog_validation_failure_preserves_catalog_provenance(
         self,
     ) -> None:
