@@ -1303,13 +1303,21 @@ def _sanitize_invocation_argv(
     root: Path,
     argv: list[str],
     path_options: Mapping[str, str | None],
+    inline_json_options: set[str] | None = None,
 ) -> list[str]:
+    inline_json_options = inline_json_options or set()
     sanitized: list[str] = []
     pending_path_option: str | None = None
+    pending_inline_json_option: str | None = None
     for item in argv:
         if pending_path_option is not None:
             sanitized.append(_display_path(root, item))
             pending_path_option = None
+            continue
+        if pending_inline_json_option is not None:
+            digest = hashlib.sha256(item.encode("utf-8")).hexdigest()
+            sanitized.append(f"<redacted:{pending_inline_json_option}:sha256:{digest}>")
+            pending_inline_json_option = None
             continue
         matched_equals = False
         for option in path_options:
@@ -1321,9 +1329,21 @@ def _sanitize_invocation_argv(
                 break
         if matched_equals:
             continue
+        for option in inline_json_options:
+            prefix = f"{option}="
+            if item.startswith(prefix):
+                value = item[len(prefix) :]
+                digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+                sanitized.append(f"{option}=<redacted:sha256:{digest}>")
+                matched_equals = True
+                break
+        if matched_equals:
+            continue
         sanitized.append(item)
         if item in path_options:
             pending_path_option = item
+        elif item in inline_json_options:
+            pending_inline_json_option = item
     return sanitized
 
 
@@ -1337,6 +1357,7 @@ def _capture_evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict
             "--catalog-json-file": args.catalog_json_file,
             "--write-evidence": args.write_evidence,
         },
+        {"--catalog-json"},
     )
     return {
         "agentic_os_head_sha": _git_rev_parse(root, "HEAD"),

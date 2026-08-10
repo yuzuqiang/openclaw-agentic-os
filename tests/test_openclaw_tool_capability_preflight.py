@@ -1169,6 +1169,53 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 self.assertNotIn("catalog_failure", payload)
                 self.assertEqual(evidence_payload, payload)
 
+    def test_evidence_binding_redacts_inline_catalog_json(self) -> None:
+        private_marker = "sk-private-inline-catalog-token"
+        catalog = json.loads(json.dumps(VALID_CATALOG))
+        catalog["private_runtime_metadata"] = {"token": private_marker}
+        catalog_json = json.dumps(catalog, sort_keys=True)
+        expected_digest = hashlib.sha256(catalog_json.encode("utf-8")).hexdigest()
+        cases = (
+            (
+                "separate",
+                ["--catalog-json", catalog_json],
+                ["--catalog-json", f"<redacted:--catalog-json:sha256:{expected_digest}>"],
+            ),
+            (
+                "equals",
+                [f"--catalog-json={catalog_json}"],
+                [f"--catalog-json=<redacted:sha256:{expected_digest}>"],
+            ),
+        )
+        for name, catalog_args, expected_items in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                evidence_path = os.path.join(directory, "evidence.json")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        *catalog_args,
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with open(evidence_path, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload, evidence_payload)
+                argv = payload["preflight_evidence_binding"]["invocation"]["argv"]
+                serialized_argv = json.dumps(argv, sort_keys=True)
+                for item in expected_items:
+                    self.assertIn(item, argv)
+                self.assertNotIn(catalog_json, serialized_argv)
+                self.assertNotIn(private_marker, serialized_argv)
+
     def test_evidence_binding_sanitizes_path_option_forms(self) -> None:
         cases = (
             ("catalog_equals", "catalog_equals.json", "evidence_separate.json"),
