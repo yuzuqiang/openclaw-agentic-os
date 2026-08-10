@@ -925,6 +925,66 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "runtime_identity_binding",
         )
 
+    def test_successful_catalog_rejects_runtime_source_change_after_capture(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            os.chmod(executable, 0o755)
+            source_path = os.path.join(install_root, "dist", "openclaw-tools-candidate.js")
+
+            def replace_source_after_catalog(*_args, **_kwargs):
+                with open(source_path, "a", encoding="utf-8") as handle:
+                    handle.write("\n// same-version reinstall after tools.catalog\n")
+                return {
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                }
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=replace_source_after_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_sources_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_source_binding",
+        )
+        source_binding = catalog["runtime_source_binding"]
+        self.assertIn("dist/openclaw-tools-candidate.js", source_binding["expected_sources"])
+        self.assertIn("dist/openclaw-tools-candidate.js", source_binding["observed_sources"])
+        self.assertNotEqual(
+            source_binding["expected_sources"]["dist/openclaw-tools-candidate.js"],
+            source_binding["observed_sources"]["dist/openclaw-tools-candidate.js"],
+        )
+
     def test_successful_catalog_validation_failure_preserves_catalog_provenance(
         self,
     ) -> None:

@@ -50,6 +50,11 @@ MODEL_TOOL_SCHEMA_MARKERS = {
     "session_status": "function createSessionStatusToolSchema",
     "sessions_status": "function createSessionsStatusToolSchema",
 }
+RUNTIME_SOURCE_PATTERNS = (
+    "openclaw-tools-*.js",
+    "core-descriptors-*.js",
+    "server-methods-*.js",
+)
 
 
 class RuntimeEvidenceError(AdapterContractError):
@@ -154,12 +159,28 @@ def _stream_digest(value: str) -> dict[str, Any]:
     return {"bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def _source_record(root: Path, path: Path) -> dict[str, str]:
+def _relative_source_path(root: Path, path: Path) -> str:
     try:
-        relative = path.resolve().relative_to(root.resolve()).as_posix()
+        return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
-        relative = path.name
-    return {"path": relative, "sha256": _file_digest(path)}
+        return path.name
+
+
+def _source_record_from_snapshot(
+    root: Path,
+    path: Path,
+    source_digest_snapshot: Mapping[str, str],
+) -> dict[str, str]:
+    relative = _relative_source_path(root, path)
+    return {"path": relative, "sha256": source_digest_snapshot[relative]}
+
+
+def _runtime_source_digest_snapshot(root: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    for pattern in RUNTIME_SOURCE_PATTERNS:
+        for path in sorted((root / "dist").glob(pattern)):
+            snapshot[_relative_source_path(root, path)] = _file_digest(path)
+    return snapshot
 
 
 def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
@@ -904,6 +925,33 @@ def _runtime_identity_binding_failure_catalog(
     return catalog
 
 
+def _runtime_source_binding_failure_catalog(
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str | None,
+    status: str,
+    expected_sources: Mapping[str, str] | None = None,
+    observed_sources: Mapping[str, str] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    catalog = dict(runtime_identity_catalog)
+    catalog["active_catalog"] = {
+        "method": "tools.catalog",
+        "status": status,
+        "validation_stage": "runtime_source_binding",
+    }
+    if active_catalog_sha256 is not None:
+        catalog["active_catalog"]["raw_response_sha256"] = active_catalog_sha256
+    if error is not None:
+        catalog["active_catalog"]["source_verification_error"] = error
+    if expected_sources is not None:
+        catalog["runtime_source_binding"] = {
+            "expected_sources": dict(sorted(expected_sources.items())),
+            "observed_sources": dict(sorted((observed_sources or {}).items())),
+        }
+    return catalog
+
+
 def _require_runtime_identity_unchanged_after_catalog(
     *,
     runtime_identity_catalog: Mapping[str, Any],
@@ -941,6 +989,40 @@ def _require_runtime_identity_unchanged_after_catalog(
         )
 
 
+def _require_runtime_sources_unchanged_after_scan(
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str,
+    source_digest_snapshot: Mapping[str, str],
+    root: Path,
+) -> None:
+    try:
+        observed_sources = _runtime_source_digest_snapshot(root)
+    except OSError as exc:
+        catalog = _runtime_source_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            status="runtime_source_verification_failed",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime sources could not be verified after catalog capture",
+            catalog=catalog,
+        ) from exc
+    if dict(source_digest_snapshot) != observed_sources:
+        catalog = _runtime_source_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            status="runtime_sources_changed_after_catalog_capture",
+            expected_sources=source_digest_snapshot,
+            observed_sources=observed_sources,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime sources changed during catalog capture",
+            catalog=catalog,
+        )
+
+
 def live_installed_openclaw_catalog(
     *,
     runtime_target: str = "live_installed_openclaw",
@@ -953,6 +1035,19 @@ def live_installed_openclaw_catalog(
         include_env_override=include_env_override,
         require_env_override=require_env_override,
     )
+    try:
+        source_digest_snapshot = _runtime_source_digest_snapshot(root)
+    except OSError as exc:
+        catalog = _runtime_source_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=None,
+            status="runtime_source_snapshot_failed",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime sources could not be snapshotted before catalog capture",
+            catalog=catalog,
+        ) from exc
     active_catalog = _run_gateway_tools_catalog(
         executable,
         scrub_env_override=scrub_env_override,
@@ -1001,6 +1096,12 @@ def live_installed_openclaw_catalog(
     model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
     gateway_params, gateway_sources = _extract_gateway_method_params(root)
     declared_names, declaration_sources = _declared_core_names(root)
+    _require_runtime_sources_unchanged_after_scan(
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+        source_digest_snapshot=source_digest_snapshot,
+        root=root,
+    )
     tools: list[dict[str, Any]] = []
     for name in LIVE_TOOL_NAMES:
         source_params = set()
@@ -1035,7 +1136,10 @@ def live_installed_openclaw_catalog(
             "raw_response_sha256": active_catalog_sha256,
             "required_tool_names": sorted(active_names),
         },
-        "sources": [_source_record(root, path) for path in source_paths],
+        "sources": [
+            _source_record_from_snapshot(root, path, source_digest_snapshot)
+            for path in source_paths
+        ],
         "tools": tools,
     }
 
