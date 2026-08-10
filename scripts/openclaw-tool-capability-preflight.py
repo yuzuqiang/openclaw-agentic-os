@@ -1408,6 +1408,7 @@ def _finalize_payload(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
             "Fail closed unless an OpenClaw runtime tool catalog exposes the "
             "allowLease and session tool surface required by the Agentic OS adapter."
