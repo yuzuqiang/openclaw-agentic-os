@@ -609,6 +609,7 @@ def _run_gateway_tools_catalog(
     timeout_ms: int = 10_000,
     *,
     scrub_env_override: bool = False,
+    failure_catalog: dict[str, Any] | None = None,
 ) -> Any:
     env = None
     if scrub_env_override:
@@ -638,6 +639,7 @@ def _run_gateway_tools_catalog(
         message = f"active OpenClaw tool catalog unavailable: {type(exc).__name__}"
         raise RuntimeEvidenceError(
             message,
+            catalog=failure_catalog,
             catalog_failure={
                 "message": message,
                 "exception_type": type(exc).__name__,
@@ -654,6 +656,7 @@ def _run_gateway_tools_catalog(
         )
         raise RuntimeEvidenceError(
             message,
+            catalog=failure_catalog,
             catalog_failure={
                 "message": "active OpenClaw tool catalog returned non-JSON output",
                 "stdout": _stream_digest(proc.stdout or ""),
@@ -674,6 +677,7 @@ def _run_gateway_tools_catalog(
         )
         raise RuntimeEvidenceError(
             message,
+            catalog=failure_catalog,
             catalog_failure={
                 "message": "active OpenClaw tool catalog failed before contract validation",
                 "payload_sha256": payload_sha,
@@ -684,6 +688,69 @@ def _run_gateway_tools_catalog(
             },
         )
     return payload
+
+
+def _runtime_identity_catalog(
+    *,
+    runtime_target: str,
+    package: Mapping[str, Any],
+    root: Path,
+    executable: Path,
+) -> dict[str, Any]:
+    catalog: dict[str, Any] = {
+        "catalog_kind": "sanitized_openclaw_runtime",
+        "runtime_target": runtime_target,
+        "openclaw_version": package.get("version"),
+        "openclaw_package_name": package.get("name"),
+        "install_root_basename": root.name,
+        "install_root_path_sha256": _path_digest(root),
+        "active_executable_path_sha256": _path_digest(executable),
+    }
+    _record_file_digest(catalog, "active_executable_sha256", executable)
+    return catalog
+
+
+def _runtime_failure_catalog_from_identity(
+    *,
+    runtime_target: str,
+    package: Mapping[str, Any],
+    root: Path,
+    executable: Path,
+) -> dict[str, Any]:
+    catalog = _runtime_identity_catalog(
+        runtime_target=runtime_target,
+        package=package,
+        root=root,
+        executable=executable,
+    )
+    catalog["catalog_capture"] = {
+        "method": "tools.catalog",
+        "status": "catalog_unavailable_before_contract_validation",
+        "validation_stage": "catalog_capture",
+    }
+    return catalog
+
+
+def _runtime_identity_snapshot(
+    *,
+    runtime_target: str,
+    include_env_override: bool,
+    require_env_override: bool,
+) -> tuple[Path, Path, Mapping[str, Any], dict[str, Any]]:
+    root = _resolve_install_root(
+        include_env_override=include_env_override,
+        require_env_override=require_env_override,
+    )
+    executable = _resolve_openclaw_executable()
+    _require_executable_matches_install_root(root, executable)
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    failure_catalog = _runtime_failure_catalog_from_identity(
+        runtime_target=runtime_target,
+        package=package,
+        root=root,
+        executable=executable,
+    )
+    return root, executable, package, failure_catalog
 
 
 def _catalog_parameter_names(value: Any) -> set[str]:
@@ -783,25 +850,25 @@ def _active_catalog_validation_failure_catalog(
     validation_stage: str = "active_tool_parameters",
     required_tool_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    catalog: dict[str, Any] = {
-        "catalog_kind": "sanitized_openclaw_runtime",
-        "runtime_target": runtime_target,
-        "required_canonical_session_status_method": "sessions_status",
-        "openclaw_version": package.get("version"),
-        "openclaw_package_name": package.get("name"),
-        "install_root_basename": root.name,
-        "install_root_path_sha256": _path_digest(root),
-        "active_executable_path_sha256": _path_digest(executable),
-        "active_catalog": {
-            "method": "tools.catalog",
-            "status": "contract_validation_failed",
-            "validation_stage": validation_stage,
-            "raw_response_sha256": active_catalog_sha256,
-        },
-    }
+    catalog = _runtime_identity_catalog(
+        runtime_target=runtime_target,
+        package=package,
+        root=root,
+        executable=executable,
+    )
+    catalog.update(
+        {
+            "required_canonical_session_status_method": "sessions_status",
+            "active_catalog": {
+                "method": "tools.catalog",
+                "status": "contract_validation_failed",
+                "validation_stage": validation_stage,
+                "raw_response_sha256": active_catalog_sha256,
+            },
+        }
+    )
     if required_tool_names is not None:
         catalog["active_catalog"]["required_tool_names"] = required_tool_names
-    _record_file_digest(catalog, "active_executable_sha256", executable)
     return catalog
 
 
@@ -812,16 +879,15 @@ def live_installed_openclaw_catalog(
     require_env_override: bool = False,
     scrub_env_override: bool = False,
 ) -> dict[str, Any]:
-    root = _resolve_install_root(
+    root, executable, package, failure_catalog = _runtime_identity_snapshot(
+        runtime_target=runtime_target,
         include_env_override=include_env_override,
         require_env_override=require_env_override,
     )
-    executable = _resolve_openclaw_executable()
-    _require_executable_matches_install_root(root, executable)
-    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     active_catalog = _run_gateway_tools_catalog(
         executable,
         scrub_env_override=scrub_env_override,
+        failure_catalog=failure_catalog,
     )
     active_catalog_sha256 = hashlib.sha256(
         json.dumps(active_catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -895,15 +961,13 @@ def live_installed_openclaw_catalog(
             )
     source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
     return {
-        "catalog_kind": "sanitized_openclaw_runtime",
-        "runtime_target": runtime_target,
+        **_runtime_identity_catalog(
+            runtime_target=runtime_target,
+            package=package,
+            root=root,
+            executable=executable,
+        ),
         "required_canonical_session_status_method": "sessions_status",
-        "openclaw_version": package.get("version"),
-        "openclaw_package_name": package.get("name"),
-        "install_root_basename": root.name,
-        "install_root_path_sha256": _path_digest(root),
-        "active_executable_path_sha256": _path_digest(executable),
-        "active_executable_sha256": _file_digest(executable),
         "active_catalog": {
             "method": "tools.catalog",
             "raw_response_sha256": active_catalog_sha256,
@@ -1097,7 +1161,7 @@ def _sanitize_invocation_argv(
     return sanitized
 
 
-def _evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict[str, Any]:
+def _capture_evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict[str, Any]:
     root = Path(__file__).resolve().parents[1]
     _require_clean_worktree_for_evidence(root)
     sanitized_argv = _sanitize_invocation_argv(
@@ -1122,13 +1186,36 @@ def _evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict[str, An
     }
 
 
+def _require_same_evidence_binding(binding: Mapping[str, Any]) -> None:
+    root = Path(__file__).resolve().parents[1]
+    _require_clean_worktree_for_evidence(root)
+    current = {
+        "agentic_os_head_sha": _git_rev_parse(root, "HEAD"),
+        "agentic_os_tree_sha": _git_rev_parse(root, "HEAD^{tree}"),
+        "preflight_script_sha256": _file_digest(Path(__file__).resolve()),
+    }
+    expected = {
+        "agentic_os_head_sha": binding.get("agentic_os_head_sha"),
+        "agentic_os_tree_sha": binding.get("agentic_os_tree_sha"),
+        "preflight_script_sha256": binding.get("preflight_script_sha256"),
+    }
+    if current != expected:
+        raise SystemExit(
+            "refusing to write exact-head evidence after Git identity changed during preflight"
+        )
+
+
 def _finalize_payload(
     args: argparse.Namespace,
     argv: list[str],
     payload: dict[str, Any],
+    evidence_binding: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if args.write_evidence:
-        payload["preflight_evidence_binding"] = _evidence_binding(args, argv)
+        if evidence_binding is None:
+            evidence_binding = _capture_evidence_binding(args, argv)
+        _require_same_evidence_binding(evidence_binding)
+        payload["preflight_evidence_binding"] = dict(evidence_binding)
     return payload
 
 
@@ -1182,6 +1269,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     original_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(original_argv)
+    evidence_binding = (
+        _capture_evidence_binding(args, original_argv) if args.write_evidence else None
+    )
 
     live_targets = [
         flag
@@ -1212,7 +1302,7 @@ def main(argv: list[str] | None = None) -> int:
             failure_catalog = exc.catalog or _runtime_failure_catalog_for_args(args)
             if failure_catalog is not None:
                 payload["catalog"] = failure_catalog
-            _finalize_payload(args, original_argv, payload)
+            _finalize_payload(args, original_argv, payload, evidence_binding)
             _write_evidence(args.write_evidence, payload)
             print(json.dumps(payload, sort_keys=True))
             return 1
@@ -1221,7 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
             failure_catalog = _runtime_failure_catalog_for_args(args)
             if failure_catalog is not None:
                 payload["catalog"] = failure_catalog
-            _finalize_payload(args, original_argv, payload)
+            _finalize_payload(args, original_argv, payload, evidence_binding)
             _write_evidence(args.write_evidence, payload)
             print(json.dumps(payload, sort_keys=True))
             return 1
@@ -1241,7 +1331,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.write_evidence
         ):
             payload["catalog"] = catalog
-        _finalize_payload(args, original_argv, payload)
+        _finalize_payload(args, original_argv, payload, evidence_binding)
         _write_evidence(args.write_evidence, payload)
         print(json.dumps(payload, sort_keys=True))
         return 1
@@ -1255,7 +1345,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.write_evidence
     ):
         payload["catalog"] = catalog
-    _finalize_payload(args, original_argv, payload)
+    _finalize_payload(args, original_argv, payload, evidence_binding)
     _write_evidence(args.write_evidence, payload)
     if args.json:
         print(json.dumps(payload, sort_keys=True))

@@ -801,6 +801,48 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertNotIn(install_root, serialized)
             self.assertEqual(evidence_payload, payload)
 
+    def test_live_tools_catalog_failure_uses_prelaunch_runtime_identity(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            initial_root = os.path.join(directory, "openclaw")
+            os.makedirs(os.path.join(initial_root, "bin"), exist_ok=True)
+            with open(os.path.join(initial_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.initial"}, handle)
+            initial_executable = os.path.join(initial_root, "bin", "openclaw")
+            with open(initial_executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(1)\n")
+            os.chmod(initial_executable, 0o755)
+            with open(initial_executable, "rb") as handle:
+                expected_initial_executable_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+            def fail_catalog(*_args, **kwargs):
+                raise module.RuntimeEvidenceError(
+                    "catalog failed",
+                    catalog=kwargs.get("failure_catalog"),
+                    catalog_failure={"runtime_provenance_preserved": True},
+                )
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(initial_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(initial_executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=fail_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["openclaw_version"], "2026.initial")
+        self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
+
     def test_successful_catalog_validation_failure_preserves_catalog_provenance(
         self,
     ) -> None:
@@ -1068,6 +1110,47 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 "refusing to write exact-head evidence from a dirty Git worktree",
                 result.stderr,
             )
+            self.assertFalse(os.path.exists(evidence_path))
+
+    def test_write_evidence_refuses_git_identity_change_before_write(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            output = io.StringIO()
+            head_values = iter(("a" * 40, "b" * 40))
+            tree_values = iter(("c" * 40, "c" * 40))
+
+            def changed_rev_parse(_root, revision):
+                if revision == "HEAD":
+                    return next(head_values)
+                if revision == "HEAD^{tree}":
+                    return next(tree_values)
+                raise AssertionError(f"unexpected revision {revision}")
+
+            with mock.patch.object(
+                module,
+                "_git_rev_parse",
+                side_effect=changed_rev_parse,
+            ), mock.patch.object(
+                module,
+                "_git_status_porcelain",
+                return_value="",
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                return_value="d" * 64,
+            ), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                module.main(
+                    [
+                        "--catalog-json",
+                        json.dumps(VALID_CATALOG),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ]
+                )
+
+            self.assertIn("Git identity changed", str(raised.exception))
             self.assertFalse(os.path.exists(evidence_path))
 
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
