@@ -726,9 +726,9 @@ def _runtime_identity_catalog(
     package: Mapping[str, Any],
     root: Path,
     executable: Path,
-    require_executable_digest: bool = False,
+    executable_digest: str,
 ) -> dict[str, Any]:
-    catalog: dict[str, Any] = {
+    return {
         "catalog_kind": "sanitized_openclaw_runtime",
         "runtime_target": runtime_target,
         "openclaw_version": package.get("version"),
@@ -736,12 +736,8 @@ def _runtime_identity_catalog(
         "install_root_basename": root.name,
         "install_root_path_sha256": _path_digest(root),
         "active_executable_path_sha256": _path_digest(executable),
+        "active_executable_sha256": executable_digest,
     }
-    if require_executable_digest:
-        _require_file_digest(catalog, "active_executable_sha256", executable)
-    else:
-        _record_file_digest(catalog, "active_executable_sha256", executable)
-    return catalog
 
 
 def _runtime_failure_catalog_from_identity(
@@ -750,19 +746,44 @@ def _runtime_failure_catalog_from_identity(
     package: Mapping[str, Any],
     root: Path,
     executable: Path,
+    executable_digest: str,
 ) -> dict[str, Any]:
     catalog = _runtime_identity_catalog(
         runtime_target=runtime_target,
         package=package,
         root=root,
         executable=executable,
-        require_executable_digest=False,
+        executable_digest=executable_digest,
     )
     catalog["catalog_capture"] = {
         "method": "tools.catalog",
         "status": "catalog_unavailable_before_contract_validation",
         "validation_stage": "catalog_capture",
     }
+    return catalog
+
+
+def _runtime_identity_snapshot_failure_catalog(
+    *,
+    runtime_target: str,
+    root: Path,
+    executable: Path,
+    error: str,
+) -> dict[str, Any]:
+    catalog: dict[str, Any] = {
+        "catalog_kind": "sanitized_openclaw_runtime",
+        "runtime_target": runtime_target,
+        "install_root_basename": root.name,
+        "install_root_path_sha256": _path_digest(root),
+        "active_executable_path_sha256": _path_digest(executable),
+        "catalog_capture": {
+            "method": "tools.catalog",
+            "status": "runtime_identity_snapshot_failed",
+            "validation_stage": "runtime_identity_snapshot",
+            "identity_verification_error": error,
+        },
+    }
+    _record_file_digest(catalog, "active_executable_sha256", executable)
     return catalog
 
 
@@ -778,19 +799,40 @@ def _runtime_identity_snapshot(
     )
     executable = _resolve_openclaw_executable()
     _require_executable_matches_install_root(root, executable)
-    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    try:
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        if not isinstance(package, Mapping):
+            raise AdapterContractError("OpenClaw package.json must be a JSON object")
+    except (OSError, json.JSONDecodeError, AdapterContractError) as exc:
+        catalog = _runtime_identity_snapshot_failure_catalog(
+            runtime_target=runtime_target,
+            root=root,
+            executable=executable,
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime identity could not be snapshotted before catalog capture",
+            catalog=catalog,
+        ) from exc
+    try:
+        executable_digest = _file_digest(executable)
+    except OSError as exc:
+        raise AdapterContractError(
+            f"active OpenClaw executable could not be hashed: {type(exc).__name__}"
+        ) from exc
     failure_catalog = _runtime_failure_catalog_from_identity(
         runtime_target=runtime_target,
         package=package,
         root=root,
         executable=executable,
+        executable_digest=executable_digest,
     )
     positive_catalog = _runtime_identity_catalog(
         runtime_target=runtime_target,
         package=package,
         root=root,
         executable=executable,
-        require_executable_digest=True,
+        executable_digest=executable_digest,
     )
     return root, executable, package, positive_catalog, failure_catalog
 
@@ -966,6 +1008,17 @@ def _require_runtime_identity_unchanged_after_catalog(
             include_env_override=include_env_override,
             require_env_override=require_env_override,
         )
+    except RuntimeEvidenceError as exc:
+        catalog = _runtime_identity_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            status="runtime_identity_verification_failed",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime identity could not be verified after catalog capture",
+            catalog=catalog,
+        ) from exc
     except (AdapterContractError, OSError, json.JSONDecodeError) as exc:
         catalog = _runtime_identity_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1149,6 +1202,13 @@ def live_installed_openclaw_catalog(
         source_digest_snapshot=source_digest_snapshot,
         root=root,
     )
+    _require_runtime_identity_unchanged_after_catalog(
+        runtime_identity_catalog=runtime_identity_catalog,
+        runtime_target=runtime_target,
+        include_env_override=include_env_override,
+        require_env_override=require_env_override,
+        active_catalog_sha256=active_catalog_sha256,
+    )
     tools: list[dict[str, Any]] = []
     for name in LIVE_TOOL_NAMES:
         source_params = set()
@@ -1218,7 +1278,9 @@ def _runtime_failure_catalog(
     catalog["install_root_path_sha256"] = _path_digest(root)
     try:
         package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        if not isinstance(package, Mapping):
+            raise AdapterContractError("OpenClaw package.json must be a JSON object")
+    except (OSError, json.JSONDecodeError, AdapterContractError) as exc:
         catalog["package_resolution_error"] = type(exc).__name__
     else:
         catalog["openclaw_version"] = package.get("version")
@@ -1289,6 +1351,53 @@ def _read_catalog(args: argparse.Namespace) -> dict[str, Any]:
 
     if not isinstance(catalog, dict):
         raise SystemExit("tool catalog must be a JSON object")
+    return catalog
+
+
+def _runtime_target_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        args.live_installed_openclaw
+        or args.isolated_candidate_openclaw
+        or args.installed_openclaw_negative_baseline
+    )
+
+
+def _caller_catalog_tool_entries(catalog: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    entries: list[Mapping[str, Any]] = []
+    tools = catalog.get("tools")
+    if isinstance(tools, list):
+        entries.extend(tool for tool in tools if isinstance(tool, Mapping))
+    groups = catalog.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            group_tools = group.get("tools")
+            if isinstance(group_tools, list):
+                entries.extend(tool for tool in group_tools if isinstance(tool, Mapping))
+    return entries
+
+
+def _sanitize_caller_catalog_for_evidence(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    raw_catalog_sha256 = hashlib.sha256(
+        json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    required_names: set[str] = set()
+    for entry in _caller_catalog_tool_entries(catalog):
+        name = entry.get("name") or entry.get("id")
+        if isinstance(name, str) and name in LIVE_TOOL_NAMES:
+            required_names.add(name)
+    return {
+        "catalog_kind": "sanitized_caller_tool_catalog",
+        "raw_catalog_sha256": raw_catalog_sha256,
+        "tool_entry_count": len(_caller_catalog_tool_entries(catalog)),
+        "required_tool_names": sorted(required_names),
+    }
+
+
+def _catalog_for_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> dict[str, Any]:
+    if args.write_evidence and not _runtime_target_requested(args):
+        return _sanitize_caller_catalog_for_evidence(catalog)
     return catalog
 
 
@@ -1565,7 +1674,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.json
             or args.write_evidence
         ):
-            payload["catalog"] = catalog
+            payload["catalog"] = _catalog_for_payload(args, catalog)
         _finalize_payload(args, original_argv, payload, evidence_binding)
         _write_evidence(args.write_evidence, payload)
         print(json.dumps(payload, sort_keys=True))
@@ -1579,7 +1688,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.json
         or args.write_evidence
     ):
-        payload["catalog"] = catalog
+        payload["catalog"] = _catalog_for_payload(args, catalog)
     _finalize_payload(args, original_argv, payload, evidence_binding)
     _write_evidence(args.write_evidence, payload)
     if args.json:
