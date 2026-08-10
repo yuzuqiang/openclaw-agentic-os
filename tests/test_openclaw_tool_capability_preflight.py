@@ -843,6 +843,88 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(catalog["openclaw_version"], "2026.initial")
         self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
 
+    def test_live_positive_evidence_rejects_unreadable_executable_digest(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            original_file_digest = module._file_digest
+
+            def file_digest_or_permission_error(path):
+                if path == module.Path(executable).resolve():
+                    raise PermissionError("execute-only launcher")
+                return original_file_digest(path)
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                side_effect=file_digest_or_permission_error,
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+            ) as run_catalog, self.assertRaises(module.AdapterContractError) as raised:
+                module.live_installed_openclaw_catalog()
+
+        self.assertIn("active OpenClaw executable could not be hashed", str(raised.exception))
+        self.assertFalse(run_catalog.called)
+
+    def test_successful_catalog_rejects_runtime_identity_change(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            with open(executable, "rb") as handle:
+                expected_initial_executable_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+            def replace_launcher_after_catalog(*_args, **_kwargs):
+                with open(executable, "w", encoding="utf-8") as handle:
+                    handle.write("#!/usr/bin/env python3\nraise SystemExit(42)\n")
+                return {"groups": [{"id": "unit", "tools": [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]}]}
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=replace_launcher_after_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_identity_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_identity_binding",
+        )
+
     def test_successful_catalog_validation_failure_preserves_catalog_provenance(
         self,
     ) -> None:

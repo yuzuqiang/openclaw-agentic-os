@@ -136,6 +136,15 @@ def _record_file_digest(payload: dict[str, Any], key: str, path: Path) -> None:
         payload[f"{key}_error"] = type(exc).__name__
 
 
+def _require_file_digest(payload: dict[str, Any], key: str, path: Path) -> None:
+    try:
+        payload[key] = _file_digest(path)
+    except OSError as exc:
+        raise AdapterContractError(
+            f"active OpenClaw executable could not be hashed: {type(exc).__name__}"
+        ) from exc
+
+
 def _path_digest(path: Path) -> str:
     return hashlib.sha256(path.resolve().as_posix().encode("utf-8")).hexdigest()
 
@@ -696,6 +705,7 @@ def _runtime_identity_catalog(
     package: Mapping[str, Any],
     root: Path,
     executable: Path,
+    require_executable_digest: bool = False,
 ) -> dict[str, Any]:
     catalog: dict[str, Any] = {
         "catalog_kind": "sanitized_openclaw_runtime",
@@ -706,7 +716,10 @@ def _runtime_identity_catalog(
         "install_root_path_sha256": _path_digest(root),
         "active_executable_path_sha256": _path_digest(executable),
     }
-    _record_file_digest(catalog, "active_executable_sha256", executable)
+    if require_executable_digest:
+        _require_file_digest(catalog, "active_executable_sha256", executable)
+    else:
+        _record_file_digest(catalog, "active_executable_sha256", executable)
     return catalog
 
 
@@ -722,6 +735,7 @@ def _runtime_failure_catalog_from_identity(
         package=package,
         root=root,
         executable=executable,
+        require_executable_digest=False,
     )
     catalog["catalog_capture"] = {
         "method": "tools.catalog",
@@ -736,7 +750,7 @@ def _runtime_identity_snapshot(
     runtime_target: str,
     include_env_override: bool,
     require_env_override: bool,
-) -> tuple[Path, Path, Mapping[str, Any], dict[str, Any]]:
+) -> tuple[Path, Path, Mapping[str, Any], dict[str, Any], dict[str, Any]]:
     root = _resolve_install_root(
         include_env_override=include_env_override,
         require_env_override=require_env_override,
@@ -750,7 +764,14 @@ def _runtime_identity_snapshot(
         root=root,
         executable=executable,
     )
-    return root, executable, package, failure_catalog
+    positive_catalog = _runtime_identity_catalog(
+        runtime_target=runtime_target,
+        package=package,
+        root=root,
+        executable=executable,
+        require_executable_digest=True,
+    )
+    return root, executable, package, positive_catalog, failure_catalog
 
 
 def _catalog_parameter_names(value: Any) -> set[str]:
@@ -842,20 +863,12 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
 
 def _active_catalog_validation_failure_catalog(
     *,
-    runtime_target: str,
-    package: Mapping[str, Any],
-    root: Path,
-    executable: Path,
+    runtime_identity_catalog: Mapping[str, Any],
     active_catalog_sha256: str,
     validation_stage: str = "active_tool_parameters",
     required_tool_names: list[str] | None = None,
 ) -> dict[str, Any]:
-    catalog = _runtime_identity_catalog(
-        runtime_target=runtime_target,
-        package=package,
-        root=root,
-        executable=executable,
-    )
+    catalog = dict(runtime_identity_catalog)
     catalog.update(
         {
             "required_canonical_session_status_method": "sessions_status",
@@ -872,6 +885,62 @@ def _active_catalog_validation_failure_catalog(
     return catalog
 
 
+def _runtime_identity_binding_failure_catalog(
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    catalog = dict(runtime_identity_catalog)
+    catalog["active_catalog"] = {
+        "method": "tools.catalog",
+        "status": status,
+        "validation_stage": "runtime_identity_binding",
+        "raw_response_sha256": active_catalog_sha256,
+    }
+    if error is not None:
+        catalog["active_catalog"]["identity_verification_error"] = error
+    return catalog
+
+
+def _require_runtime_identity_unchanged_after_catalog(
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    runtime_target: str,
+    include_env_override: bool,
+    require_env_override: bool,
+    active_catalog_sha256: str,
+) -> None:
+    try:
+        _, _, _, current_identity, _ = _runtime_identity_snapshot(
+            runtime_target=runtime_target,
+            include_env_override=include_env_override,
+            require_env_override=require_env_override,
+        )
+    except (AdapterContractError, OSError, json.JSONDecodeError) as exc:
+        catalog = _runtime_identity_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            status="runtime_identity_verification_failed",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime identity could not be verified after catalog capture",
+            catalog=catalog,
+        ) from exc
+    if current_identity != dict(runtime_identity_catalog):
+        catalog = _runtime_identity_binding_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            status="runtime_identity_changed_after_catalog_capture",
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw runtime identity changed during catalog capture",
+            catalog=catalog,
+        )
+
+
 def live_installed_openclaw_catalog(
     *,
     runtime_target: str = "live_installed_openclaw",
@@ -879,7 +948,7 @@ def live_installed_openclaw_catalog(
     require_env_override: bool = False,
     scrub_env_override: bool = False,
 ) -> dict[str, Any]:
-    root, executable, package, failure_catalog = _runtime_identity_snapshot(
+    root, executable, package, runtime_identity_catalog, failure_catalog = _runtime_identity_snapshot(
         runtime_target=runtime_target,
         include_env_override=include_env_override,
         require_env_override=require_env_override,
@@ -892,12 +961,16 @@ def live_installed_openclaw_catalog(
     active_catalog_sha256 = hashlib.sha256(
         json.dumps(active_catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    _require_runtime_identity_unchanged_after_catalog(
+        runtime_identity_catalog=runtime_identity_catalog,
+        runtime_target=runtime_target,
+        include_env_override=include_env_override,
+        require_env_override=require_env_override,
+        active_catalog_sha256=active_catalog_sha256,
+    )
     if not isinstance(active_catalog, Mapping):
         validation_catalog = _active_catalog_validation_failure_catalog(
-            runtime_target=runtime_target,
-            package=package,
-            root=root,
-            executable=executable,
+            runtime_identity_catalog=runtime_identity_catalog,
             active_catalog_sha256=active_catalog_sha256,
             validation_stage="active_catalog_shape",
         )
@@ -912,10 +985,7 @@ def live_installed_openclaw_catalog(
         active_params = _active_tool_parameters(active_catalog)
     except AdapterContractError as exc:
         validation_catalog = _active_catalog_validation_failure_catalog(
-            runtime_target=runtime_target,
-            package=package,
-            root=root,
-            executable=executable,
+            runtime_identity_catalog=runtime_identity_catalog,
             active_catalog_sha256=active_catalog_sha256,
         )
         raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
@@ -923,10 +993,7 @@ def live_installed_openclaw_catalog(
     if not active_params:
         exc = AdapterContractError("active OpenClaw tool catalog did not expose required tools")
         validation_catalog = _active_catalog_validation_failure_catalog(
-            runtime_target=runtime_target,
-            package=package,
-            root=root,
-            executable=executable,
+            runtime_identity_catalog=runtime_identity_catalog,
             active_catalog_sha256=active_catalog_sha256,
             required_tool_names=sorted(active_names),
         )
@@ -961,12 +1028,7 @@ def live_installed_openclaw_catalog(
             )
     source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
     return {
-        **_runtime_identity_catalog(
-            runtime_target=runtime_target,
-            package=package,
-            root=root,
-            executable=executable,
-        ),
+        **runtime_identity_catalog,
         "required_canonical_session_status_method": "sessions_status",
         "active_catalog": {
             "method": "tools.catalog",
