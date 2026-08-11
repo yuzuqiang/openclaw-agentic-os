@@ -451,11 +451,12 @@ against the exact PR head before any controlled external review. The
 plain-catalog path is deliberately offline-only: it reports
 `classification=offline_schema_validation_only` and can never set
 `runtime_ready=true`. An unsigned catalog mapping cannot mint
-`OpenClawAdapter` runtime authority, direct construction requires the
-module-private capability, and the cross-process release-probe entry point
-rejects unsigned stdin before invoking transport. Only an in-process caller
-holding verified opaque runtime authority can reach the production release
-probe. The bounded accepted-session probe in
+`OpenClawAdapter` runtime authority. No production authority-minting path exists
+today: direct construction is disabled and every production adapter RPC rejects
+before `transport.call` until a real transport-bound attestor can mark the exact
+adapter instance verified. The cross-process release-probe entry point likewise
+rejects unsigned stdin before invoking transport. The bounded accepted-session
+probe in
 `docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
 therefore fails closed before any Gateway lease or session RPC is attempted.
 If a future runtime passes preflight, the probe validates duplicate session

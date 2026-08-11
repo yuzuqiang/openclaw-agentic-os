@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from typing import Any
 
 from agentic_os.openclaw_adapter import (
@@ -10,6 +11,7 @@ from agentic_os.openclaw_adapter import (
     assert_installed_runtime_tools,
     assert_installed_session_tools,
 )
+from tests.openclaw_adapter_test_harness import CannedOpenClawAdapter
 
 
 INSTALLED_SESSION_TOOL_CATALOG = {
@@ -316,7 +318,7 @@ class CannedTransport:
 class OpenClawAdapterTests(unittest.TestCase):
     def test_canned_allow_lease_and_spawn_responses_extract_metadata(self) -> None:
         transport = CannedTransport()
-        adapter = OpenClawAdapter._from_unverified_transport_for_tests(transport)
+        adapter = CannedOpenClawAdapter(transport)
         self.assertFalse(adapter.runtime_authority_verified)
         lease = adapter.allow_lease_acquire({"client_lease_id": "client-lease"})
         self.assertEqual(lease.external_id, "lease-gateway")
@@ -367,15 +369,64 @@ class OpenClawAdapterTests(unittest.TestCase):
                 CannedTransport(), INSTALLED_RUNTIME_TOOL_CATALOG
             )
 
-    def test_direct_constructor_and_forged_capability_are_rejected(self) -> None:
-        with self.assertRaisesRegex(AdapterContractError, "direct.*forbidden"):
+    def test_direct_constructor_is_inert(self) -> None:
+        with self.assertRaisesRegex(AdapterContractError, "transport-bound.*attestor"):
             OpenClawAdapter(CannedTransport())
-        with self.assertRaisesRegex(AdapterContractError, "direct.*forbidden"):
-            OpenClawAdapter(CannedTransport(), _authority_capability=object())
-        with self.assertRaisesRegex(AdapterContractError, "capability is invalid"):
-            OpenClawAdapter._from_verified_runtime_authority(
-                CannedTransport(), object()
-            )
+
+    def test_object_new_and_injected_state_cannot_reach_transport(self) -> None:
+        class RecordingTransport:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, Any]]] = []
+
+            def call(self, method, params):
+                self.calls.append((method, dict(params)))
+                return {}
+
+        transport = RecordingTransport()
+        adapter = object.__new__(OpenClawAdapter)
+        adapter.__dict__.update(
+            {
+                "_transport": transport,
+                "_authority_mode": "verified_runtime",
+                "_authority_capability": object(),
+                "_runtime_authority_verified": True,
+                "_verified_runtime_authority": True,
+            }
+        )
+        calls = (
+            lambda: adapter.allow_lease_acquire({}),
+            adapter.allow_lease_list,
+            lambda: adapter.allow_lease_release({}),
+            lambda: adapter.sessions_spawn({}),
+            adapter.sessions_list,
+            lambda: adapter.session_status("session-key"),
+            lambda: adapter.session_result("session-key"),
+        )
+        for call in calls:
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(
+                    AdapterContractError, "no verified transport-bound"
+                ):
+                    call()
+                self.assertEqual(transport.calls, [])
+
+    def test_production_tree_has_no_authority_token_or_test_transport_factory(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        production = "\n".join(
+            path.read_text(encoding="utf-8")
+            for directory in (root / "src", root / "scripts")
+            for path in directory.rglob("*.py")
+        )
+        for forbidden in (
+            "_AdapterConstructionCapability",
+            "_RUNTIME_AUTHORITY_CAPABILITY_GUARD",
+            "_UNVERIFIED_TEST_CAPABILITY_GUARD",
+            "_from_verified_runtime_authority",
+            "_from_unverified_transport_for_tests",
+            "run_release_probe_for_offline_tests",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, production)
 
     def test_preflighted_adapter_rejects_unproven_connected_build(self) -> None:
         payload = verified_runtime_envelope()
@@ -583,7 +634,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 MissingRawResultTransport()
             ).session_result("session-key")
 
@@ -613,7 +664,7 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(
             AdapterContractError, "accepted session identity"
         ):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 MissingIdentityResultTransport()
             ).session_result("session-key")
 
@@ -642,7 +693,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "requested session"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 DifferentSessionResultTransport()
             ).session_result("session-key")
 
@@ -679,7 +730,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\]"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 DifferentHistoryItemResultTransport()
             ).session_result("session-key")
 
@@ -717,7 +768,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\]"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 DifferentHistoryItemExternalIdTransport()
             ).session_result("session-key")
 
@@ -751,7 +802,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 ConflictingResultTransport()
             ).session_result("session-key")
 
@@ -761,7 +812,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 return ["not", "an", "object"]
 
         with self.assertRaisesRegex(AdapterContractError, "sessions_history response"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 MalformedResultTransport()
             ).session_result("session-key")
 
@@ -791,7 +842,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "JSON serializable"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 NonSerializableResultTransport()
             ).session_result("session-key")
 
@@ -801,7 +852,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 raise TimeoutError("result timed out")
 
         with self.assertRaisesRegex(TimeoutError, "result timed out"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 FailingResultTransport()
             ).session_result("session-key")
 
@@ -811,7 +862,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 return {"ok": True}
 
         with self.assertRaises(AdapterContractError):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 BadTransport()
             ).sessions_spawn({})
 
@@ -838,7 +889,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 MissingRawTransport()
             ).sessions_spawn({})
 
@@ -871,7 +922,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 ConflictingSessionTransport()
             ).sessions_spawn({})
 
@@ -903,7 +954,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 ConflictingNestedAliasTransport()
             ).sessions_spawn({})
 
@@ -937,7 +988,7 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(
             AdapterContractError, "conflicting spawn request session key"
         ):
-            OpenClawAdapter._from_unverified_transport_for_tests(
+            CannedOpenClawAdapter(
                 ConflictingSpawnRequestAliasTransport()
             ).sessions_spawn({})
 
@@ -966,7 +1017,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                     },
                 }
 
-        observation = OpenClawAdapter._from_unverified_transport_for_tests(
+        observation = CannedOpenClawAdapter(
             GatewayEchoSessionTransport()
         ).sessions_spawn({})
         self.assertEqual(observation.external_id, "session-key")
@@ -1035,7 +1086,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                     }
                 raise AssertionError(method)
 
-        adapter = OpenClawAdapter._from_unverified_transport_for_tests(
+        adapter = CannedOpenClawAdapter(
             LegacyListTransport()
         )
         self.assertEqual(
@@ -1056,7 +1107,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                     return {"sessions": {"legacy": True}}
                 raise AssertionError(method)
 
-        adapter = OpenClawAdapter._from_unverified_transport_for_tests(
+        adapter = CannedOpenClawAdapter(
             MalformedListTransport()
         )
         with self.assertRaisesRegex(AdapterContractError, "lease response"):

@@ -92,28 +92,6 @@ _REQUIRED_RUNTIME_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     **_REQUIRED_SESSION_TOOL_PARAMS,
 }
 
-_RUNTIME_AUTHORITY_CAPABILITY_GUARD = object()
-_UNVERIFIED_TEST_CAPABILITY_GUARD = object()
-
-
-class _AdapterConstructionCapability:
-    """Module-private constructor authority; arbitrary objects are never accepted."""
-
-    __slots__ = ("mode", "_guard")
-
-    def __init__(self, *, guard: object, mode: str) -> None:
-        if mode == "verified_runtime":
-            expected_guard = _RUNTIME_AUTHORITY_CAPABILITY_GUARD
-        elif mode == "unverified_test":
-            expected_guard = _UNVERIFIED_TEST_CAPABILITY_GUARD
-        else:
-            raise AdapterContractError("adapter construction capability mode is invalid")
-        if guard is not expected_guard:
-            raise AdapterContractError("adapter construction capability is invalid")
-        self.mode = mode
-        self._guard = guard
-
-
 def _json_object(value: Mapping[str, Any]) -> str:
     try:
         return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
@@ -748,39 +726,25 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
 
 
 class OpenClawAdapter:
-    """Thin adapter over an RPC transport using canned OpenClaw response shapes."""
+    """Fail-closed RPC adapter pending a transport-bound runtime attestor."""
 
-    def __init__(
-        self,
-        transport: OpenClawTransport,
-        *,
-        _authority_capability: _AdapterConstructionCapability | None = None,
-    ) -> None:
-        valid_capability = isinstance(
-            _authority_capability, _AdapterConstructionCapability
-        ) and (
-            (
-                _authority_capability.mode == "verified_runtime"
-                and _authority_capability._guard
-                is _RUNTIME_AUTHORITY_CAPABILITY_GUARD
-            )
-            or (
-                _authority_capability.mode == "unverified_test"
-                and _authority_capability._guard
-                is _UNVERIFIED_TEST_CAPABILITY_GUARD
-            )
+    def __init__(self, transport: OpenClawTransport) -> None:
+        del transport
+        raise AdapterContractError(
+            "OpenClawAdapter construction is disabled until a transport-bound "
+            "runtime attestor is implemented"
         )
-        if not valid_capability:
-            raise AdapterContractError(
-                "direct OpenClawAdapter construction is forbidden; use verified "
-                "runtime authority or the explicit unverified test factory"
-            )
-        self._transport = transport
-        self._authority_mode = _authority_capability.mode
+
+    def _require_verified_runtime_authority(self) -> None:
+        """Reject until a real attestor can bind authority to this exact instance."""
+
+        raise AdapterContractError(
+            "OpenClawAdapter has no verified transport-bound runtime authority"
+        )
 
     @property
     def runtime_authority_verified(self) -> bool:
-        return self._authority_mode == "verified_runtime"
+        return False
 
     @classmethod
     def from_preflighted_catalog(
@@ -791,35 +755,8 @@ class OpenClawAdapter:
             "unsigned preflight mapping cannot mint verified runtime authority"
         )
 
-    @classmethod
-    def _from_verified_runtime_authority(
-        cls,
-        transport: OpenClawTransport,
-        authority: _AdapterConstructionCapability,
-    ) -> "OpenClawAdapter":
-        """Accept only an opaque capability from a future transport-bound attestor."""
-
-        if (
-            not isinstance(authority, _AdapterConstructionCapability)
-            or authority.mode != "verified_runtime"
-            or authority._guard is not _RUNTIME_AUTHORITY_CAPABILITY_GUARD
-        ):
-            raise AdapterContractError("verified runtime authority capability is invalid")
-        return cls(transport, _authority_capability=authority)
-
-    @classmethod
-    def _from_unverified_transport_for_tests(
-        cls, transport: OpenClawTransport
-    ) -> "OpenClawAdapter":
-        """Build only an explicit offline/canned test harness; never runtime authority."""
-
-        capability = _AdapterConstructionCapability(
-            guard=_UNVERIFIED_TEST_CAPABILITY_GUARD,
-            mode="unverified_test",
-        )
-        return cls(transport, _authority_capability=capability)
-
     def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         return observation_from_openclaw_response(
             _transport_response(
                 self._transport.call("subagents.allowLease.acquire", params),
@@ -828,6 +765,7 @@ class OpenClawAdapter:
         )
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         response = _transport_response(
             self._transport.call("subagents.allowLease.status", {}),
             "subagents.allowLease.status",
@@ -835,6 +773,7 @@ class OpenClawAdapter:
         return _observations_from_items(response.get("leases"), "lease")
 
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         return observation_from_openclaw_response(
             _transport_response(
                 self._transport.call("subagents.allowLease.release", params),
@@ -843,6 +782,7 @@ class OpenClawAdapter:
         )
 
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         return observation_from_openclaw_response(
             _transport_response(
                 self._transport.call("sessions_spawn", params), "sessions_spawn"
@@ -850,12 +790,14 @@ class OpenClawAdapter:
         )
 
     def sessions_list(self) -> Sequence[MetadataObservation]:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         response = _transport_response(
             self._transport.call("sessions_list", {}), "sessions_list"
         )
         return _observations_from_items(response.get("sessions"), "session")
 
     def session_status(self, session_key: str) -> MetadataObservation:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         return observation_from_openclaw_response(
             _transport_response(
                 self._transport.call("sessions_status", {"session_key": session_key}),
@@ -864,6 +806,7 @@ class OpenClawAdapter:
         )
 
     def session_result(self, session_key: str) -> MetadataObservation:
+        OpenClawAdapter._require_verified_runtime_authority(self)
         response = _transport_response(
             self._transport.call(
                 "sessions_history",
