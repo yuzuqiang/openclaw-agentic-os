@@ -92,6 +92,27 @@ _REQUIRED_RUNTIME_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     **_REQUIRED_SESSION_TOOL_PARAMS,
 }
 
+_RUNTIME_AUTHORITY_CAPABILITY_GUARD = object()
+_UNVERIFIED_TEST_CAPABILITY_GUARD = object()
+
+
+class _AdapterConstructionCapability:
+    """Module-private constructor authority; arbitrary objects are never accepted."""
+
+    __slots__ = ("mode", "_guard")
+
+    def __init__(self, *, guard: object, mode: str) -> None:
+        if mode == "verified_runtime":
+            expected_guard = _RUNTIME_AUTHORITY_CAPABILITY_GUARD
+        elif mode == "unverified_test":
+            expected_guard = _UNVERIFIED_TEST_CAPABILITY_GUARD
+        else:
+            raise AdapterContractError("adapter construction capability mode is invalid")
+        if guard is not expected_guard:
+            raise AdapterContractError("adapter construction capability is invalid")
+        self.mode = mode
+        self._guard = guard
+
 
 def _json_object(value: Mapping[str, Any]) -> str:
     try:
@@ -199,16 +220,24 @@ def _split_evidence_authority_errors(
     gateway_catalog = catalog.get("gateway_rpc_catalog")
     if isinstance(gateway_catalog, Mapping):
         raw_rpc_evidence = gateway_catalog.get("rpc_evidence")
-        rpc_evidence = (
-            {
-                item.get("name"): item
-                for item in raw_rpc_evidence
-                if isinstance(item, Mapping) and isinstance(item.get("name"), str)
-            }
-            if isinstance(raw_rpc_evidence, Sequence)
-            and not isinstance(raw_rpc_evidence, (str, bytes, bytearray))
-            else {}
-        )
+        rpc_evidence: dict[str, Mapping[str, Any]] = {}
+        if not isinstance(raw_rpc_evidence, Sequence) or isinstance(
+            raw_rpc_evidence, (str, bytes, bytearray)
+        ):
+            errors.append("runtime Gateway RPC evidence must be a list")
+        else:
+            for item in raw_rpc_evidence:
+                if not isinstance(item, Mapping):
+                    errors.append("runtime Gateway RPC evidence entry must be an object")
+                    continue
+                name = item.get("name")
+                if not isinstance(name, str) or name not in _REQUIRED_ALLOW_LEASE_TOOL_PARAMS:
+                    errors.append("runtime Gateway RPC evidence has an unexpected method")
+                    continue
+                if name in rpc_evidence:
+                    errors.append(f"runtime Gateway RPC evidence duplicates {name}")
+                    continue
+                rpc_evidence[name] = item
         for method in _REQUIRED_ALLOW_LEASE_TOOL_PARAMS:
             if method not in required_tools:
                 continue
@@ -224,6 +253,137 @@ def _split_evidence_authority_errors(
                     "installed source declaration is not runtime reachability proof"
                 )
     return errors, frozenset(unproven_parameter_methods)
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def assert_preflighted_runtime_authority(payload: Mapping[str, Any]) -> None:
+    """Require a complete, live-proven envelope before constructing an online adapter."""
+
+    errors: list[str] = []
+    if payload.get("status") != "pass":
+        errors.append("runtime authority envelope status must be pass")
+    if payload.get("runtime_ready") is not True:
+        errors.append("runtime authority envelope must declare runtime_ready=true")
+    catalog = payload.get("catalog")
+    if not isinstance(catalog, Mapping):
+        raise AdapterContractError(
+            "; ".join((*errors, "runtime authority envelope must include catalog"))
+        )
+
+    try:
+        assert_installed_runtime_tools(catalog)
+    except AdapterContractError as exc:
+        errors.append(str(exc))
+
+    if catalog.get("catalog_kind") != "sanitized_openclaw_runtime":
+        errors.append("runtime authority catalog kind is invalid")
+    if catalog.get("runtime_target") not in {
+        "live_installed_openclaw",
+        "isolated_candidate",
+    }:
+        errors.append("runtime authority target is not an online OpenClaw runtime")
+
+    model_catalog = catalog.get("model_tool_catalog")
+    gateway_catalog = catalog.get("gateway_rpc_catalog")
+    model_entries: Mapping[str, frozenset[str]] = {}
+    gateway_entries: Mapping[str, frozenset[str]] = {}
+    if not isinstance(model_catalog, Mapping):
+        errors.append("runtime authority requires model_tool_catalog")
+    else:
+        if model_catalog.get("catalog_kind") != "model_callable_tools_catalog":
+            errors.append("runtime model tool catalog kind is invalid")
+        if model_catalog.get("authority") != "tools.catalog":
+            errors.append("runtime model tool catalog authority must be tools.catalog")
+        if not _is_sha256(model_catalog.get("raw_response_sha256")):
+            errors.append("runtime model tool catalog response digest is invalid")
+        try:
+            model_entries = _tool_entries({"tools": model_catalog.get("tools")})
+            _assert_installed_tools(
+                {"tools": model_catalog.get("tools")},
+                _REQUIRED_SESSION_TOOL_PARAMS,
+            )
+        except AdapterContractError as exc:
+            errors.append(f"runtime model tool authority is incomplete: {exc}")
+
+    if not isinstance(gateway_catalog, Mapping):
+        errors.append("runtime authority requires gateway_rpc_catalog")
+    else:
+        if gateway_catalog.get("catalog_kind") != "source_bound_gateway_rpc_catalog":
+            errors.append("runtime Gateway RPC catalog kind is invalid")
+        if gateway_catalog.get("authority") != "installed_runtime_dist_sources":
+            errors.append(
+                "runtime Gateway RPC catalog authority must be installed runtime sources"
+            )
+        source_bound_rpc_names = gateway_catalog.get("source_bound_rpc_names")
+        if (
+            gateway_catalog.get("status") != "disk_source_declarations_complete"
+            or not isinstance(source_bound_rpc_names, Sequence)
+            or isinstance(source_bound_rpc_names, (str, bytes, bytearray))
+            or any(not isinstance(name, str) for name in source_bound_rpc_names)
+            or set(source_bound_rpc_names) != set(_REQUIRED_ALLOW_LEASE_TOOL_PARAMS)
+        ):
+            errors.append("runtime Gateway RPC source declarations are incomplete")
+        try:
+            gateway_entries = _tool_entries({"tools": gateway_catalog.get("tools")})
+            _assert_installed_tools(
+                {"tools": gateway_catalog.get("tools")},
+                _REQUIRED_ALLOW_LEASE_TOOL_PARAMS,
+            )
+        except AdapterContractError as exc:
+            errors.append(f"runtime Gateway RPC source authority is incomplete: {exc}")
+        status_corroboration = gateway_catalog.get("status_corroboration")
+        if not isinstance(status_corroboration, Mapping):
+            errors.append("runtime Gateway status corroboration is missing")
+        elif (
+            status_corroboration.get("method") != "subagents.allowLease.status"
+            or status_corroboration.get("status") != "ok"
+            or status_corroboration.get("live_reachability") != "reachable"
+            or not _is_sha256(status_corroboration.get("raw_response_sha256"))
+        ):
+            errors.append("runtime Gateway status corroboration is not live-proven")
+
+    try:
+        aggregate_entries = _tool_entries(catalog)
+    except AdapterContractError as exc:
+        errors.append(str(exc))
+        aggregate_entries = {}
+    if model_entries and gateway_entries:
+        for method in _REQUIRED_RUNTIME_TOOL_PARAMS:
+            nested = (
+                gateway_entries
+                if method in _REQUIRED_ALLOW_LEASE_TOOL_PARAMS
+                else model_entries
+            )
+            if aggregate_entries.get(method) != nested.get(method):
+                errors.append(
+                    f"runtime aggregate and authority catalog disagree for {method}"
+                )
+
+    if catalog.get("connected_gateway_build_identity") != "proven":
+        errors.append("connected Gateway build identity is not proven")
+    build_evidence = catalog.get("connected_gateway_build_evidence")
+    active_executable_sha256 = catalog.get("active_executable_sha256")
+    if not isinstance(build_evidence, Mapping):
+        errors.append("connected Gateway build evidence is missing")
+    elif (
+        build_evidence.get("status") != "proven"
+        or build_evidence.get("verification_method")
+        != "gateway_reported_executable_sha256"
+        or not _is_sha256(active_executable_sha256)
+        or build_evidence.get("connected_executable_sha256")
+        != active_executable_sha256
+    ):
+        errors.append("connected Gateway build evidence is invalid")
+
+    if errors:
+        raise AdapterContractError("; ".join(errors))
 
 
 def assert_installed_session_tools(catalog: Mapping[str, Any]) -> None:
@@ -575,15 +735,74 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
 class OpenClawAdapter:
     """Thin adapter over an RPC transport using canned OpenClaw response shapes."""
 
-    def __init__(self, transport: OpenClawTransport) -> None:
+    def __init__(
+        self,
+        transport: OpenClawTransport,
+        *,
+        _authority_capability: _AdapterConstructionCapability | None = None,
+    ) -> None:
+        valid_capability = isinstance(
+            _authority_capability, _AdapterConstructionCapability
+        ) and (
+            (
+                _authority_capability.mode == "verified_runtime"
+                and _authority_capability._guard
+                is _RUNTIME_AUTHORITY_CAPABILITY_GUARD
+            )
+            or (
+                _authority_capability.mode == "unverified_test"
+                and _authority_capability._guard
+                is _UNVERIFIED_TEST_CAPABILITY_GUARD
+            )
+        )
+        if not valid_capability:
+            raise AdapterContractError(
+                "direct OpenClawAdapter construction is forbidden; use verified "
+                "runtime authority or the explicit unverified test factory"
+            )
         self._transport = transport
+        self._authority_mode = _authority_capability.mode
+
+    @property
+    def runtime_authority_verified(self) -> bool:
+        return self._authority_mode == "verified_runtime"
 
     @classmethod
     def from_preflighted_catalog(
-        cls, transport: OpenClawTransport, catalog: Mapping[str, Any]
+        cls, transport: OpenClawTransport, payload: Mapping[str, Any]
     ) -> "OpenClawAdapter":
-        assert_installed_runtime_tools(catalog)
-        return cls(transport)
+        assert_preflighted_runtime_authority(payload)
+        raise AdapterContractError(
+            "unsigned preflight mapping cannot mint verified runtime authority"
+        )
+
+    @classmethod
+    def _from_verified_runtime_authority(
+        cls,
+        transport: OpenClawTransport,
+        authority: _AdapterConstructionCapability,
+    ) -> "OpenClawAdapter":
+        """Accept only an opaque capability from a future transport-bound attestor."""
+
+        if (
+            not isinstance(authority, _AdapterConstructionCapability)
+            or authority.mode != "verified_runtime"
+            or authority._guard is not _RUNTIME_AUTHORITY_CAPABILITY_GUARD
+        ):
+            raise AdapterContractError("verified runtime authority capability is invalid")
+        return cls(transport, _authority_capability=authority)
+
+    @classmethod
+    def _from_unverified_transport_for_tests(
+        cls, transport: OpenClawTransport
+    ) -> "OpenClawAdapter":
+        """Build only an explicit offline/canned test harness; never runtime authority."""
+
+        capability = _AdapterConstructionCapability(
+            guard=_UNVERIFIED_TEST_CAPABILITY_GUARD,
+            mode="unverified_test",
+        )
+        return cls(transport, _authority_capability=capability)
 
     def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
         return observation_from_openclaw_response(

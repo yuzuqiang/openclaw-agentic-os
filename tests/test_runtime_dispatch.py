@@ -511,7 +511,9 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "diagnostic": object(),
                 }
 
-        adapter = OpenClawAdapter(NonSerializableTransport())
+        adapter = OpenClawAdapter._from_unverified_transport_for_tests(
+            NonSerializableTransport()
+        )
         with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
             dispatch_with_metadata(self.database, adapter, self.request)
         with self._connect() as connection:
@@ -1690,7 +1692,10 @@ class RuntimeDispatchTests(unittest.TestCase):
                 raise AssertionError(method)
 
         self_request = self.request
-        summary = reconcile_unknown_metadata(self.database, OpenClawAdapter(ListTransport()))
+        summary = reconcile_unknown_metadata(
+            self.database,
+            OpenClawAdapter._from_unverified_transport_for_tests(ListTransport()),
+        )
         self.assertEqual(summary.reconciled, 0)
         self.assertEqual(summary.human_review_required, 1)
         with self._connect() as connection:

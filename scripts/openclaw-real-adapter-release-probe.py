@@ -195,16 +195,14 @@ def _validate_release_succeeded(observation: MetadataObservation) -> None:
     raise ProbeError("release response lacks success confirmation")
 
 
-def run_release_probe(
+def _run_release_probe(
     *,
-    transport: Any,
-    catalog: Mapping[str, Any],
+    adapter: OpenClawAdapter,
     acquire_params: Mapping[str, Any],
     release_params: Mapping[str, Any],
 ) -> dict[str, bool]:
-    """Preflight the live catalog and prove canonical release replay semantics."""
+    """Core release semantics shared by verified runtime and explicit offline tests."""
 
-    adapter = OpenClawAdapter.from_preflighted_catalog(transport, catalog)
     acquired = adapter.allow_lease_acquire(acquire_params)
     if not acquired.external_id:
         raise ProbeError("acquire response lacks an external lease identity")
@@ -244,6 +242,39 @@ def run_release_probe(
     }
 
 
+def run_release_probe(
+    *,
+    adapter: OpenClawAdapter,
+    acquire_params: Mapping[str, Any],
+    release_params: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Run only with an in-process adapter that proved live runtime authority."""
+
+    if not adapter.runtime_authority_verified:
+        raise ProbeError("release probe requires verified in-process runtime authority")
+    return _run_release_probe(
+        adapter=adapter,
+        acquire_params=acquire_params,
+        release_params=release_params,
+    )
+
+
+def run_release_probe_for_offline_tests(
+    *,
+    transport: Any,
+    acquire_params: Mapping[str, Any],
+    release_params: Mapping[str, Any],
+) -> dict[str, bool]:
+    """Exercise canned transports without creating or claiming runtime authority."""
+
+    adapter = OpenClawAdapter._from_unverified_transport_for_tests(transport)
+    return _run_release_probe(
+        adapter=adapter,
+        acquire_params=acquire_params,
+        release_params=release_params,
+    )
+
+
 def main() -> int:
     line = sys.stdin.readline()
     if not line:
@@ -253,14 +284,13 @@ def main() -> int:
     except json.JSONDecodeError as exc:
         raise ProbeError("probe initialization is invalid JSON") from exc
     request = _object(request, "probe initialization")
-    result = run_release_probe(
-        transport=JsonLineTransport(),
-        catalog=_object(request.get("catalog"), "catalog"),
-        acquire_params=_object(request.get("acquire_params"), "acquire_params"),
-        release_params=_object(request.get("release_params"), "release_params"),
+    if "catalog" in request:
+        raise ProbeError(
+            "unsigned cross-process catalog cannot create live adapter authority"
+        )
+    raise ProbeError(
+        "cross-process release probe requires a verified in-process adapter capability"
     )
-    print(json.dumps({"type": "result", **result}, sort_keys=True), flush=True)
-    return 0
 
 
 if __name__ == "__main__":

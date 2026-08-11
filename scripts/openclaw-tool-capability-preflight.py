@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import agentic_os
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
+    assert_preflighted_runtime_authority,
     assert_installed_runtime_tools,
 )
 
@@ -2077,8 +2078,14 @@ def _catalog_for_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> d
     return catalog
 
 
-def _assert_preflight_runtime_tools(catalog: Mapping[str, Any]) -> None:
-    """Validate live evidence without calling absent parameter schemas "missing"."""
+def _assert_preflight_runtime_tools(
+    catalog: Mapping[str, Any], *, runtime_target: bool
+) -> None:
+    """Keep offline schema validation separate from online runtime authority."""
+
+    if runtime_target:
+        assert_preflighted_runtime_authority({"status": "pass", "catalog": catalog})
+        return
     assert_installed_runtime_tools(catalog)
 
 
@@ -2342,7 +2349,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 catalog = live_installed_openclaw_catalog()
         except RuntimeEvidenceError as exc:
-            payload = {"error": str(exc), "status": "fail"}
+            payload = {
+                "classification": "fail_closed_future_contract",
+                "error": str(exc),
+                "runtime_ready": False,
+                "status": "fail",
+            }
             if exc.catalog_failure is not None:
                 payload["catalog_failure"] = exc.catalog_failure
             failure_catalog = exc.catalog or _runtime_failure_catalog_for_args(args)
@@ -2353,7 +2365,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, sort_keys=True))
             return 1
         except AdapterContractError as exc:
-            payload = {"error": str(exc), "status": "fail"}
+            payload = {
+                "classification": "fail_closed_future_contract",
+                "error": str(exc),
+                "runtime_ready": False,
+                "status": "fail",
+            }
             failure_catalog = _runtime_failure_catalog_for_args(args)
             if failure_catalog is not None:
                 payload["catalog"] = failure_catalog
@@ -2366,11 +2383,16 @@ def main(argv: list[str] | None = None) -> int:
 
     payload: dict[str, Any]
     try:
-        _assert_preflight_runtime_tools(catalog)
+        _assert_preflight_runtime_tools(
+            catalog,
+            runtime_target=_runtime_target_requested(args),
+        )
     except AdapterContractError as exc:
-        payload = {"error": str(exc), "status": "fail"}
+        payload = {"error": str(exc), "runtime_ready": False, "status": "fail"}
         if _runtime_target_requested(args):
             payload["classification"] = "fail_closed_future_contract"
+        else:
+            payload["classification"] = "offline_schema_validation_failed"
         if (
             args.live_installed_openclaw
             or args.isolated_candidate_openclaw
@@ -2384,7 +2406,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, sort_keys=True))
         return 1
 
-    payload = {"status": "pass"}
+    if _runtime_target_requested(args):
+        payload = {"runtime_ready": True, "status": "pass"}
+    else:
+        payload = {
+            "classification": "offline_schema_validation_only",
+            "runtime_ready": False,
+            "status": "declared_schema_validated",
+        }
     if (
         args.live_installed_openclaw
         or args.isolated_candidate_openclaw
@@ -2398,7 +2427,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(payload, sort_keys=True))
     else:
-        print(json.dumps({"status": "pass"}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "runtime_ready": payload["runtime_ready"],
+                    "status": payload["status"],
+                },
+                sort_keys=True,
+            )
+        )
     return 0
 
 

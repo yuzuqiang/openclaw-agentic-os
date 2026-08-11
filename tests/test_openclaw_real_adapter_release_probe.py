@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -120,11 +122,48 @@ class FakeTransport:
 
 
 class RealAdapterReleaseProbeTests(unittest.TestCase):
+    def test_unverified_in_process_adapter_refuses_before_any_rpc(self) -> None:
+        transport = FakeTransport()
+        adapter = MODULE.OpenClawAdapter._from_unverified_transport_for_tests(transport)
+
+        with self.assertRaisesRegex(MODULE.ProbeError, "verified in-process"):
+            MODULE.run_release_probe(
+                adapter=adapter,
+                acquire_params={"idempotency_key": "acquire-key"},
+                release_params=RELEASE_PARAMS,
+            )
+
+        self.assertFalse(transport.active)
+        self.assertEqual(transport.release_calls, [])
+
+    def test_cross_process_unsigned_catalog_refuses_before_any_rpc(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            input=json.dumps(
+                {
+                    "acquire_params": {"idempotency_key": "acquire-key"},
+                    "catalog": CATALOG,
+                    "release_params": RELEASE_PARAMS,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["type"], "error")
+        self.assertIn("unsigned cross-process catalog", messages[0]["error"])
+        self.assertNotIn('"type": "rpc"', result.stdout)
+
     def test_canonical_release_replays_and_disappears(self) -> None:
         transport = FakeTransport()
-        result = MODULE.run_release_probe(
+        result = MODULE.run_release_probe_for_offline_tests(
             transport=transport,
-            catalog=CATALOG,
             acquire_params={"idempotency_key": "acquire-key"},
             release_params=RELEASE_PARAMS,
         )
@@ -145,9 +184,8 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
             {"idempotency_key": "legacy"}, "gateway-lease:test"
         )
         with self.assertRaisesRegex(MODULE.ProbeError, "legacy idempotency_key"):
-            MODULE.run_release_probe(
+            MODULE.run_release_probe_for_offline_tests(
                 transport=transport,
-                catalog=CATALOG,
                 acquire_params={"idempotency_key": "acquire-key"},
                 release_params=RELEASE_PARAMS,
             )
@@ -161,9 +199,8 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
             wrong, "gateway-lease:test", released=True
         )
         with self.assertRaisesRegex(MODULE.ProbeError, "does not match request"):
-            MODULE.run_release_probe(
+            MODULE.run_release_probe_for_offline_tests(
                 transport=transport,
-                catalog=CATALOG,
                 acquire_params={"idempotency_key": "acquire-key"},
                 release_params=RELEASE_PARAMS,
             )
@@ -176,9 +213,8 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
             release, "gateway-lease:test", released=False
         )
         with self.assertRaisesRegex(MODULE.ProbeError, "did not report success"):
-            MODULE.run_release_probe(
+            MODULE.run_release_probe_for_offline_tests(
                 transport=transport,
-                catalog=CATALOG,
                 acquire_params={"idempotency_key": "acquire-key"},
                 release_params=RELEASE_PARAMS,
             )
@@ -189,9 +225,8 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
         release["gateway_lease_id"] = "gateway-lease:test"
         transport.release_response = transport._response(release, "gateway-lease:test")
         with self.assertRaisesRegex(MODULE.ProbeError, "lacks success confirmation"):
-            MODULE.run_release_probe(
+            MODULE.run_release_probe_for_offline_tests(
                 transport=transport,
-                catalog=CATALOG,
                 acquire_params={"idempotency_key": "acquire-key"},
                 release_params=RELEASE_PARAMS,
             )
@@ -206,9 +241,8 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
             ]
         }
         with self.assertRaisesRegex(MODULE.ProbeError, "incomplete metadata"):
-            MODULE.run_release_probe(
+            MODULE.run_release_probe_for_offline_tests(
                 transport=transport,
-                catalog=CATALOG,
                 acquire_params={"idempotency_key": "acquire-key"},
                 release_params=RELEASE_PARAMS,
             )

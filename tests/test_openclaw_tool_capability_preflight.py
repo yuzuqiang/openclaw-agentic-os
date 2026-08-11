@@ -226,7 +226,30 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {"status": "pass"})
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"runtime_ready": False, "status": "declared_schema_validated"},
+        )
+
+    def test_declared_catalog_json_is_explicitly_offline_only(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--catalog-json",
+                json.dumps(VALID_CATALOG),
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "declared_schema_validated")
+        self.assertEqual(payload["classification"], "offline_schema_validation_only")
+        self.assertFalse(payload["runtime_ready"])
 
     def test_active_tool_entry_rejects_conflicting_schema_forms(self) -> None:
         module = load_preflight_module()
@@ -468,8 +491,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         catalog = payload["catalog"]
         self.assertEqual(payload["status"], "fail")
         self.assertEqual(payload["classification"], "fail_closed_future_contract")
+        self.assertFalse(payload["runtime_ready"])
         self.assertIn("acquire live reachability is unproven", payload["error"])
         self.assertIn("release live reachability is unproven", payload["error"])
+        self.assertIn("connected Gateway build identity is not proven", payload["error"])
         self.assertEqual(
             catalog["model_tool_catalog"]["required_tool_names"],
             [
