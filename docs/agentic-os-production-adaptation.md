@@ -24,7 +24,7 @@ Non-goals:
 ## Delivery Change Log
 
 - 2026-08-11: Corrected the installed-runtime preflight evidence model after Phase A found a combined-catalog false negative:
-  - Corrections: `scripts/openclaw-tool-capability-preflight.py` separates model-callable `tools.catalog` names from hashed installed-source parameter evidence and disk-only Gateway declarations. Missing catalog schemas are source-bound or marked unproven rather than treated as empty. Only `subagents.allowLease.status` has live reachability evidence; acquire/release and the connected Gateway build identity remain unproven, so source-only declarations cannot pass the adapter gate. The status request asks for no mutation but can trigger expired-lease cleanup and CLI bootstrap state writes. Both 2026-08-09 JSONs remain byte-for-byte frozen; retraction, invalid historical binding, and current capture state live only in the forward evidence index. Current evidence uses raw `status=fail` plus `classification=fail_closed_future_contract`; Phase C must replay against the exact PR head. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
+  - Corrections: `scripts/openclaw-tool-capability-preflight.py` separates model-callable `tools.catalog` names from hashed installed-source parameter evidence and disk-only Gateway declarations. Missing catalog schemas are source-bound or marked unproven rather than treated as empty. Only `subagents.allowLease.status` has method-bound live reachability evidence; acquire/release and the connected Gateway build identity remain unproven, so source-only declarations cannot pass the adapter gate. The status request asks for no mutation but can trigger expired-lease cleanup and CLI bootstrap state writes. Plain caller catalogs are offline-only and cannot report runtime readiness; unsigned mappings, direct construction without the module-private capability, and cross-process release-probe input cannot mint runtime adapter authority. Both 2026-08-09 JSONs remain byte-for-byte frozen; retraction, invalid historical binding, and current capture state live only in the forward evidence index. Current evidence uses raw `status=fail` plus `classification=fail_closed_future_contract`; Phase C must replay against the exact PR head. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-09: Revalidated the corrected Round 11 design boundary against exact `origin/main` `fa79a7ea4235a2c822e51052649f982f61c962e7` and the merged PR #36/#37 runtime evidence:
   - Corrections: README and this document no longer treat historical evidence as final proof for the current Draft successor head. The remediation keeps production authority unproven: committed live installed OpenClaw 2026.7.1 evidence still fails closed, the fresh installed-runtime negative preflight in `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also failed closed before a contract proof and is now superseded by split-catalog evidence, PR #37's real-Gateway snapshot remains a non-authoritative last-run snapshot bound to an older Agentic OS head, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-07-18: Added the local fail-closed trust promotion writer and migration v13 binding overlay:
@@ -130,8 +130,12 @@ Current-vs-proposed truth:
   and the connected Gateway build identity remain unproven, so source-only
   declarations cannot make preflight pass. The status call is a read-only
   request, not mutation-free: expired-lease cleanup and CLI bootstrap state
-  writes are possible. The evidence still fails closed on the future contract,
-  and exact PR-head authority requires Phase C replay before controlled review.
+  writes are possible. The evidence still has `runtime_ready=false` and fails
+  closed on the future contract. A plain catalog validates only an offline
+  declared schema; unsigned mappings, direct construction without the
+  module-private capability, and cross-process release-probe input cannot mint
+  production adapter authority. Exact PR-head authority requires Phase C replay
+  before controlled review.
 - PR #37's real-Gateway evidence in
   `docs/runtime-evidence/openclaw-real-gateway-contract.json` remains useful as
   a historical isolated candidate snapshot, but it is explicitly
@@ -4607,11 +4611,13 @@ P0.0 - privacy and external contract preflight:
 - Not production-proven: live OpenClaw/Gateway/session metadata conformance.
   The 2026-08-11 split-catalog preflight proves the exact current boundary:
   model-callable tools come from `tools.catalog`; allowLease RPC registration is
-  source-bound and corroborated only with read-only
-  `subagents.allowLease.status`; DB authority still fails closed on future
-  metadata/idempotency/full-owner fields, missing `sessions_spawn` metadata, and
-  the future canonical `sessions_status` alias. Before any real RPC is relied
-  on, the exact tool/RPC surface must be proven with
+  source-bound and only `subagents.allowLease.status` has a method-bound live
+  read-only-request probe. Plain catalogs remain offline-only, unsigned mappings
+  cannot mint runtime adapter authority, and the cross-process release probe
+  rejects unsigned input before transport. DB authority still fails closed on
+  future metadata/idempotency/full-owner fields, missing `sessions_spawn`
+  metadata, and the future canonical `sessions_status` alias. Before any real
+  RPC is relied on, the exact tool/RPC surface must be proven with
   `scripts/openclaw-tool-capability-preflight.py`.
   Run it against the installed runtime with
   `python scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`.

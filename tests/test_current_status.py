@@ -254,6 +254,7 @@ class CurrentStatusTests(unittest.TestCase):
         payload = json.loads(evidence_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["status"], "fail")
         self.assertEqual(payload["classification"], "fail_closed_future_contract")
+        self.assertFalse(payload["runtime_ready"])
         self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
@@ -303,6 +304,14 @@ class CurrentStatusTests(unittest.TestCase):
             rpc_evidence["subagents.allowLease.status"]["live_reachability"],
             "reachable",
         )
+        status_probe = rpc_evidence["subagents.allowLease.status"]["live_probe"]
+        self.assertEqual(status_probe["method"], "subagents.allowLease.status")
+        self.assertEqual(status_probe["status"], "ok")
+        self.assertEqual(status_probe["live_reachability"], "reachable")
+        self.assertRegex(status_probe["raw_response_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(status_probe["request_semantics"], "read_only_request")
+        self.assertFalse(status_probe["requested_mutation"])
+        self.assertGreaterEqual(len(status_probe["incidental_mutations_possible"]), 2)
         for method in (
             "subagents.allowLease.acquire",
             "subagents.allowLease.release",
@@ -312,6 +321,7 @@ class CurrentStatusTests(unittest.TestCase):
                     rpc_evidence[method]["disk_source_declaration"], "observed"
                 )
                 self.assertEqual(rpc_evidence[method]["live_reachability"], "unproven")
+                self.assertNotIn("live_probe", rpc_evidence[method])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
                 "method"
@@ -371,6 +381,10 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
         self.assertIn("live reachability is unproven", payload["error"])
         self.assertNotIn("sessions_history is missing parameters", payload["error"])
+        self.assertNotIn(
+            "runtime authority envelope must declare runtime_ready=true",
+            payload["error"],
+        )
         binding = payload["preflight_evidence_binding"]
         self.assertEqual(binding["binding_kind"], "generator_revision")
         self.assertFalse(binding["containing_commit_self_binding"])

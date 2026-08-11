@@ -16,7 +16,7 @@ production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `d3208bfaef1f238fff406952bd99fc6595b5970642326f0d711de951316dc5e6`
+- Current design artifact SHA-256: `b43f6e5bc628e16ff1e8fa7f47d227d855225fee43c11382662313c2d201c653`
 - Historical revalidation evidence, superseded by the current Draft remediation:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and capture state:
@@ -447,8 +447,15 @@ future DB authority requires `sessions_status` as the canonical status alias.
 The split-catalog JSON is generator-revision-bound audit evidence, not exact
 PR-head authority; Phase C must replay
 `python3 scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`
-against the exact PR head before any controlled external review. The bounded
-accepted-session probe in
+against the exact PR head before any controlled external review. The
+plain-catalog path is deliberately offline-only: it reports
+`classification=offline_schema_validation_only` and can never set
+`runtime_ready=true`. An unsigned catalog mapping cannot mint
+`OpenClawAdapter` runtime authority, direct construction requires the
+module-private capability, and the cross-process release-probe entry point
+rejects unsigned stdin before invoking transport. Only an in-process caller
+holding verified opaque runtime authority can reach the production release
+probe. The bounded accepted-session probe in
 `docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
 therefore fails closed before any Gateway lease or session RPC is attempted.
 If a future runtime passes preflight, the probe validates duplicate session
