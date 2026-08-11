@@ -97,6 +97,15 @@ FUTURE_DB_AUTHORITY_CONTRACT = {
     ),
     "future_canonical_status_method": "sessions_status",
 }
+STATUS_RPC_INCIDENTAL_MUTATIONS = (
+    "expired_lease_cleanup",
+    "cli_bootstrap_state",
+)
+EVIDENCE_CAPABILITY_SOURCE_PATHS = (
+    "scripts/openclaw-tool-capability-preflight.py",
+    "src/agentic_os/openclaw_adapter.py",
+    "src/agentic_os/__init__.py",
+)
 
 
 class RuntimeEvidenceError(AdapterContractError):
@@ -781,7 +790,9 @@ def _gateway_rpc_validation_failure_catalog(
     catalog = dict(runtime_identity_catalog)
     status_corroboration: dict[str, Any] = {
         "method": "subagents.allowLease.status",
-        "non_mutating": True,
+        "request_semantics": "read_only_request",
+        "requested_mutation": False,
+        "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
         "status": status,
     }
     if error is not None:
@@ -920,7 +931,10 @@ def _run_gateway_allow_lease_status(
         )
     corroboration: dict[str, Any] = {
         "method": "subagents.allowLease.status",
-        "non_mutating": True,
+        "request_semantics": "read_only_request",
+        "requested_mutation": False,
+        "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+        "live_reachability": "reachable",
         "status": "ok",
         "raw_response_sha256": response_sha256,
         "ok": True,
@@ -1107,6 +1121,15 @@ def _active_entry_parameters(entry: Mapping[str, Any]) -> set[str]:
     return set(first_params)
 
 
+def _active_entry_has_parameter_schema(entry: Mapping[str, Any]) -> bool:
+    if any(key in entry for key in ("parameters", "input_schema", "inputSchema")):
+        return True
+    schema = entry.get("schema")
+    return isinstance(schema, Mapping) and any(
+        key in schema for key in ("parameters", "input_schema", "inputSchema")
+    )
+
+
 def _adapter_tool_name(entry: Mapping[str, Any]) -> str | None:
     for key in ("name", "method", "id"):
         value = entry.get(key)
@@ -1115,15 +1138,20 @@ def _adapter_tool_name(entry: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
-    entries: dict[str, set[str]] = {}
+def _active_tool_parameter_evidence(
+    catalog: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
 
-    def add_entry(name: str, params: set[str]) -> None:
+    def add_entry(name: str, entry: Mapping[str, Any]) -> None:
         if name not in LIVE_TOOL_NAMES:
             return
         if name in entries:
             raise AdapterContractError(f"active OpenClaw tool catalog has duplicate {name} entries")
-        entries[name] = set(params)
+        entries[name] = {
+            "parameters": _active_entry_parameters(entry),
+            "schema_available": _active_entry_has_parameter_schema(entry),
+        }
 
     groups = catalog.get("groups")
     if isinstance(groups, list):
@@ -1138,7 +1166,7 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
                     continue
                 name = _adapter_tool_name(tool)
                 if name is not None:
-                    add_entry(name, _active_entry_parameters(tool))
+                    add_entry(name, tool)
     tools = catalog.get("tools")
     if isinstance(tools, list):
         for tool in tools:
@@ -1146,13 +1174,20 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
                 continue
             name = _adapter_tool_name(tool)
             if name is not None:
-                add_entry(name, _active_entry_parameters(tool))
+                add_entry(name, tool)
     elif isinstance(tools, Mapping):
         for name, value in tools.items():
             if isinstance(name, str) and name in LIVE_TOOL_NAMES:
-                params = _active_entry_parameters(value) if isinstance(value, Mapping) else set()
-                add_entry(name, params)
+                entry = value if isinstance(value, Mapping) else {}
+                add_entry(name, entry)
     return entries
+
+
+def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
+    return {
+        name: set(evidence["parameters"])
+        for name, evidence in _active_tool_parameter_evidence(catalog).items()
+    }
 
 
 def _active_catalog_validation_failure_catalog(
@@ -1369,8 +1404,11 @@ def _gateway_status_for_source_bound_names(
     if "subagents.allowLease.status" not in source_bound_rpc_names:
         return {
             "method": "subagents.allowLease.status",
-            "non_mutating": True,
-            "status": "source_registration_missing",
+            "request_semantics": "read_only_request",
+            "requested_mutation": False,
+            "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+            "live_reachability": "unproven",
+            "status": "disk_source_declaration_missing",
         }
     return _run_gateway_allow_lease_status(
         executable,
@@ -1383,14 +1421,34 @@ def _gateway_status_for_source_bound_names(
 
 def _gateway_catalog_status(
     source_bound_rpc_names: set[str],
-    gateway_status: Mapping[str, Any],
 ) -> str:
-    if (
-        set(GATEWAY_RPC_METHOD_NAMES).issubset(source_bound_rpc_names)
-        and gateway_status.get("status") == "ok"
-    ):
-        return "registration_corroborated"
+    if set(GATEWAY_RPC_METHOD_NAMES).issubset(source_bound_rpc_names):
+        return "disk_source_declarations_complete"
     return "partial_source_bound"
+
+
+def _gateway_rpc_evidence(
+    *,
+    source_bound_rpc_names: set[str],
+    gateway_status: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    status_reachable = gateway_status.get("status") == "ok"
+    return [
+        {
+            "name": name,
+            "disk_source_declaration": (
+                "observed"
+                if name in source_bound_rpc_names
+                else "not_observed"
+            ),
+            "live_reachability": (
+                "reachable"
+                if name == "subagents.allowLease.status" and status_reachable
+                else "unproven"
+            ),
+        }
+        for name in GATEWAY_RPC_METHOD_NAMES
+    ]
 
 
 def _gateway_tools_from_sources(
@@ -1490,6 +1548,11 @@ def _model_catalog_unavailable_catalog(
         **runtime_identity_catalog,
         "required_canonical_session_status_method": "sessions_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
+        "runtime_process_binding_limit": (
+            "installed dist source identity does not prove the connected Gateway "
+            "process is executing that exact bundle"
+        ),
+        "connected_gateway_build_identity": "unproven",
         "status_alias_requirement": _status_alias_requirement(
             active_names=set(),
             model_tool_params=model_tool_params,
@@ -1506,8 +1569,12 @@ def _model_catalog_unavailable_catalog(
         "gateway_rpc_catalog": {
             "catalog_kind": "source_bound_gateway_rpc_catalog",
             "authority": "installed_runtime_dist_sources",
-            "status": _gateway_catalog_status(source_bound_rpc_names, gateway_status),
+            "status": _gateway_catalog_status(source_bound_rpc_names),
             "source_bound_rpc_names": sorted(source_bound_rpc_names),
+            "rpc_evidence": _gateway_rpc_evidence(
+                source_bound_rpc_names=source_bound_rpc_names,
+                gateway_status=gateway_status,
+            ),
             "status_corroboration": gateway_status,
             "tools": gateway_tools,
         },
@@ -1594,7 +1661,12 @@ def live_installed_openclaw_catalog(
                 if isinstance(corroboration, Mapping)
                 else {
                     "method": "subagents.allowLease.status",
-                    "non_mutating": True,
+                    "request_semantics": "read_only_request",
+                    "requested_mutation": False,
+                    "incidental_mutations_possible": list(
+                        STATUS_RPC_INCIDENTAL_MUTATIONS
+                    ),
+                    "live_reachability": "unproven",
                     "status": "status_corroboration_failed",
                 }
             )
@@ -1651,15 +1723,15 @@ def live_installed_openclaw_catalog(
             catalog=validation_catalog,
         )
     try:
-        active_params = _active_tool_parameters(active_catalog)
+        active_parameter_evidence = _active_tool_parameter_evidence(active_catalog)
     except AdapterContractError as exc:
         validation_catalog = _active_catalog_validation_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
             active_catalog_sha256=active_catalog_sha256,
         )
         raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
-    active_names = set(active_params)
-    if not active_params:
+    active_names = set(active_parameter_evidence)
+    if not active_parameter_evidence:
         exc = AdapterContractError("active OpenClaw tool catalog did not expose required tools")
         validation_catalog = _active_catalog_validation_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1737,22 +1809,63 @@ def live_installed_openclaw_catalog(
         if declared and active and source_kind == "absent":
             source_kind = "declared_tool_name"
         if active and declared:
-            params = sorted(active_params[name] & source_params)
+            catalog_params = set(active_parameter_evidence[name]["parameters"])
+            catalog_schema_available = bool(
+                active_parameter_evidence[name]["schema_available"]
+            )
+            if catalog_schema_available:
+                params = sorted(catalog_params & source_params)
+                parameter_evidence = {
+                    "status": "catalog_schema_intersected_with_installed_source",
+                    "catalog_schema_available": True,
+                    "catalog_parameters": sorted(catalog_params),
+                    "parameter_authority": [
+                        "tools.catalog",
+                        "installed_runtime_dist_sources",
+                    ],
+                }
+            elif name in model_tool_params:
+                params = sorted(source_params)
+                parameter_evidence = {
+                    "status": "installed_source_bound_catalog_schema_unavailable",
+                    "catalog_schema_available": False,
+                    "parameter_authority": "installed_runtime_dist_sources",
+                }
+            else:
+                params = []
+                parameter_evidence = {
+                    "status": "unproven_from_catalog_and_installed_sources",
+                    "catalog_schema_available": False,
+                    "parameter_authority": "unproven",
+                }
             tool = {
                 "name": name,
                 "parameters": params,
-                "active_parameters": sorted(active_params[name]),
                 "catalog_surface": "model_tool",
                 "schema_source": source_kind,
+                "parameter_evidence": parameter_evidence,
             }
             model_tools.append(tool)
             tools.append(tool)
     source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
     model_tool_names = sorted(active_names & set(MODEL_CALLABLE_TOOL_NAMES))
+    model_tools_with_catalog_schema = sorted(
+        name
+        for name in model_tool_names
+        if active_parameter_evidence[name]["schema_available"]
+    )
+    model_tools_without_catalog_schema = sorted(
+        set(model_tool_names) - set(model_tools_with_catalog_schema)
+    )
     return {
         **runtime_identity_catalog,
         "required_canonical_session_status_method": "sessions_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
+        "runtime_process_binding_limit": (
+            "installed dist source identity does not prove the connected Gateway "
+            "process is executing that exact bundle"
+        ),
+        "connected_gateway_build_identity": "unproven",
         "status_alias_requirement": _status_alias_requirement(
             active_names=active_names,
             model_tool_params=model_tool_params,
@@ -1763,6 +1876,10 @@ def live_installed_openclaw_catalog(
             "method": "tools.catalog",
             "raw_response_sha256": active_catalog_sha256,
             "required_tool_names": sorted(active_names),
+            "parameter_schema_tool_names": model_tools_with_catalog_schema,
+            "parameter_schema_unavailable_tool_names": (
+                model_tools_without_catalog_schema
+            ),
         },
         "model_tool_catalog": {
             "catalog_kind": "model_callable_tools_catalog",
@@ -1770,13 +1887,21 @@ def live_installed_openclaw_catalog(
             "method": "tools.catalog",
             "raw_response_sha256": active_catalog_sha256,
             "required_tool_names": model_tool_names,
+            "parameter_schema_tool_names": model_tools_with_catalog_schema,
+            "parameter_schema_unavailable_tool_names": (
+                model_tools_without_catalog_schema
+            ),
             "tools": model_tools,
         },
         "gateway_rpc_catalog": {
             "catalog_kind": "source_bound_gateway_rpc_catalog",
             "authority": "installed_runtime_dist_sources",
-            "status": _gateway_catalog_status(source_bound_rpc_names, gateway_status),
+            "status": _gateway_catalog_status(source_bound_rpc_names),
             "source_bound_rpc_names": sorted(source_bound_rpc_names),
+            "rpc_evidence": _gateway_rpc_evidence(
+                source_bound_rpc_names=source_bound_rpc_names,
+                gateway_status=gateway_status,
+            ),
             "status_corroboration": gateway_status,
             "tools": gateway_tools,
         },
@@ -1952,6 +2077,11 @@ def _catalog_for_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> d
     return catalog
 
 
+def _assert_preflight_runtime_tools(catalog: Mapping[str, Any]) -> None:
+    """Validate live evidence without calling absent parameter schemas "missing"."""
+    assert_installed_runtime_tools(catalog)
+
+
 def _write_evidence(path: str | None, payload: dict[str, Any]) -> None:
     if path is None:
         return
@@ -2081,8 +2211,11 @@ def _capture_evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict
         {"--catalog-json"},
     )
     return {
+        "binding_kind": "generator_revision",
         "agentic_os_head_sha": _require_valid_git_revision(root, "HEAD"),
         "agentic_os_tree_sha": _require_valid_git_revision(root, "HEAD^{tree}"),
+        "capability_source_paths": list(EVIDENCE_CAPABILITY_SOURCE_PATHS),
+        "containing_commit_self_binding": False,
         "generated_at_utc": dt.datetime.now(dt.timezone.utc)
         .replace(microsecond=0)
         .isoformat(),
@@ -2233,9 +2366,11 @@ def main(argv: list[str] | None = None) -> int:
 
     payload: dict[str, Any]
     try:
-        assert_installed_runtime_tools(catalog)
+        _assert_preflight_runtime_tools(catalog)
     except AdapterContractError as exc:
         payload = {"error": str(exc), "status": "fail"}
+        if _runtime_target_requested(args):
+            payload["classification"] = "fail_closed_future_contract"
         if (
             args.live_installed_openclaw
             or args.isolated_candidate_openclaw

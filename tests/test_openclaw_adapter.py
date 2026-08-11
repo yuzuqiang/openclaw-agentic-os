@@ -287,6 +287,35 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "gateway_lease_id"):
             assert_installed_runtime_tools(catalog)
 
+    def test_preflighted_adapter_rejects_source_only_gateway_rpc_authority(self) -> None:
+        catalog = json.loads(json.dumps(INSTALLED_RUNTIME_TOOL_CATALOG))
+        catalog["gateway_rpc_catalog"] = {
+            "authority": "installed_runtime_dist_sources",
+            "rpc_evidence": [
+                {
+                    "name": "subagents.allowLease.acquire",
+                    "disk_source_declaration": "observed",
+                    "live_reachability": "unproven",
+                },
+                {
+                    "name": "subagents.allowLease.status",
+                    "disk_source_declaration": "observed",
+                    "live_reachability": "reachable",
+                },
+                {
+                    "name": "subagents.allowLease.release",
+                    "disk_source_declaration": "observed",
+                    "live_reachability": "unproven",
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "acquire live reachability is unproven.*release live reachability is unproven",
+        ):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), catalog)
+
     def test_session_tool_catalog_preflight_rejects_missing_history_parameter(self) -> None:
         catalog = {
             "tools": {

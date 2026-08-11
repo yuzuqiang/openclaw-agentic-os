@@ -173,6 +173,59 @@ def _tool_entries(catalog: Mapping[str, Any]) -> Mapping[str, frozenset[str]]:
     raise AdapterContractError("runtime tool catalog must expose tools")
 
 
+def _split_evidence_authority_errors(
+    catalog: Mapping[str, Any], required_tools: Mapping[str, frozenset[str]]
+) -> tuple[list[str], frozenset[str]]:
+    """Reject split evidence that promotes source declarations into live authority."""
+
+    errors: list[str] = []
+    unproven_parameter_methods: set[str] = set()
+    tools = catalog.get("tools")
+    if isinstance(tools, Sequence) and not isinstance(tools, (str, bytes, bytearray)):
+        for value in tools:
+            if not isinstance(value, Mapping):
+                continue
+            name = _tool_name(value)
+            parameter_evidence = value.get("parameter_evidence")
+            if (
+                name in required_tools
+                and required_tools[name]
+                and isinstance(parameter_evidence, Mapping)
+                and parameter_evidence.get("status")
+                == "unproven_from_catalog_and_installed_sources"
+            ):
+                unproven_parameter_methods.add(name)
+
+    gateway_catalog = catalog.get("gateway_rpc_catalog")
+    if isinstance(gateway_catalog, Mapping):
+        raw_rpc_evidence = gateway_catalog.get("rpc_evidence")
+        rpc_evidence = (
+            {
+                item.get("name"): item
+                for item in raw_rpc_evidence
+                if isinstance(item, Mapping) and isinstance(item.get("name"), str)
+            }
+            if isinstance(raw_rpc_evidence, Sequence)
+            and not isinstance(raw_rpc_evidence, (str, bytes, bytearray))
+            else {}
+        )
+        for method in _REQUIRED_ALLOW_LEASE_TOOL_PARAMS:
+            if method not in required_tools:
+                continue
+            evidence = rpc_evidence.get(method)
+            if not isinstance(evidence, Mapping):
+                errors.append(
+                    f"runtime Gateway RPC {method} is missing authority-aware live "
+                    "reachability evidence"
+                )
+            elif evidence.get("live_reachability") != "reachable":
+                errors.append(
+                    f"runtime Gateway RPC {method} live reachability is unproven; "
+                    "installed source declaration is not runtime reachability proof"
+                )
+    return errors, frozenset(unproven_parameter_methods)
+
+
 def assert_installed_session_tools(catalog: Mapping[str, Any]) -> None:
     """Fail closed unless the runtime exposes the session tools this adapter calls."""
 
@@ -189,10 +242,18 @@ def _assert_installed_tools(
     catalog: Mapping[str, Any], required_tools: Mapping[str, frozenset[str]]
 ) -> None:
     entries = _tool_entries(catalog)
-    errors: list[str] = []
+    errors, unproven_parameter_methods = _split_evidence_authority_errors(
+        catalog, required_tools
+    )
     for method, required_params in required_tools.items():
         if method not in entries:
             errors.append(f"runtime tool catalog is missing {method}")
+            continue
+        if method in unproven_parameter_methods:
+            errors.append(
+                f"runtime tool catalog {method} required parameter schema is unproven "
+                "by tools.catalog and installed runtime source evidence"
+            )
             continue
         missing_params = sorted(required_params - entries[method])
         if missing_params:

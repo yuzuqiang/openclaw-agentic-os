@@ -103,10 +103,10 @@ ACTIVE_TOOL_IDS = [
 ]
 
 
-def active_tool_entry(tool_id):
+def active_tool_entry(tool_id, *, include_schema=False):
     source = next((tool for tool in VALID_CATALOG["tools"] if tool["name"] == tool_id), {})
     entry = {"id": tool_id, "label": tool_id}
-    if "inputSchema" in source:
+    if include_schema and "inputSchema" in source:
         entry["inputSchema"] = json.loads(json.dumps(source["inputSchema"]))
     return entry
 
@@ -414,15 +414,15 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["catalog"]["gateway_rpc_catalog"]["status"],
-                "registration_corroborated",
+                "disk_source_declarations_complete",
             )
             self.assertEqual(
                 payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"]["method"],
                 "subagents.allowLease.status",
             )
-            self.assertTrue(
+            self.assertFalse(
                 payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
-                    "non_mutating"
+                    "requested_mutation"
                 ]
             )
             spawn_tool = next(
@@ -434,7 +434,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
 
-    def test_live_split_catalog_accepts_gateway_rpcs_absent_from_tools_catalog(
+    def test_live_split_catalog_rejects_source_only_gateway_rpc_reachability(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -463,10 +463,13 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 env=env,
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         payload = json.loads(result.stdout)
         catalog = payload["catalog"]
-        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(payload["classification"], "fail_closed_future_contract")
+        self.assertIn("acquire live reachability is unproven", payload["error"])
+        self.assertIn("release live reachability is unproven", payload["error"])
         self.assertEqual(
             catalog["model_tool_catalog"]["required_tool_names"],
             [
@@ -492,6 +495,42 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             catalog["gateway_rpc_catalog"]["status_corroboration"]["status"],
             "ok",
         )
+        self.assertEqual(
+            catalog["gateway_rpc_catalog"]["status_corroboration"][
+                "request_semantics"
+            ],
+            "read_only_request",
+        )
+        self.assertFalse(
+            catalog["gateway_rpc_catalog"]["status_corroboration"][
+                "requested_mutation"
+            ]
+        )
+        self.assertEqual(
+            set(
+                catalog["gateway_rpc_catalog"]["status_corroboration"][
+                    "incidental_mutations_possible"
+                ]
+            ),
+            {"expired_lease_cleanup", "cli_bootstrap_state"},
+        )
+        self.assertEqual(catalog["connected_gateway_build_identity"], "unproven")
+        rpc_evidence = {
+            item["name"]: item
+            for item in catalog["gateway_rpc_catalog"]["rpc_evidence"]
+        }
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.status"]["live_reachability"],
+            "reachable",
+        )
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.acquire"]["live_reachability"],
+            "unproven",
+        )
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.release"]["live_reachability"],
+            "unproven",
+        )
         acquire_tool = next(
             tool
             for tool in catalog["tools"]
@@ -499,6 +538,22 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertEqual(acquire_tool["catalog_surface"], "gateway_rpc")
         self.assertIn("client_lease_id", acquire_tool["parameters"])
+        spawn_tool = next(
+            tool for tool in catalog["tools"] if tool["name"] == "sessions_spawn"
+        )
+        history_tool = next(
+            tool for tool in catalog["tools"] if tool["name"] == "sessions_history"
+        )
+        self.assertEqual(
+            spawn_tool["parameter_evidence"]["status"],
+            "installed_source_bound_catalog_schema_unavailable",
+        )
+        self.assertEqual(
+            history_tool["parameter_evidence"]["status"],
+            "installed_source_bound_catalog_schema_unavailable",
+        )
+        self.assertIn("includeTools", history_tool["parameters"])
+        self.assertNotIn("sessions_history is missing parameters", payload["error"])
 
     def test_live_catalog_failure_still_records_source_bound_gateway_status(
         self,
@@ -555,14 +610,16 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             catalog["gateway_rpc_catalog"]["status"],
-            "registration_corroborated",
+            "disk_source_declarations_complete",
         )
         self.assertEqual(
             catalog["gateway_rpc_catalog"]["status_corroboration"]["method"],
             "subagents.allowLease.status",
         )
-        self.assertTrue(
-            catalog["gateway_rpc_catalog"]["status_corroboration"]["non_mutating"]
+        self.assertFalse(
+            catalog["gateway_rpc_catalog"]["status_corroboration"][
+                "requested_mutation"
+            ]
         )
         self.assertEqual(
             catalog["gateway_rpc_catalog"]["status_corroboration"]["status"],
@@ -576,7 +633,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("model-callable tools.catalog is unavailable", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
 
-    def test_isolated_candidate_openclaw_catalog_passes_and_records_target(self) -> None:
+    def test_isolated_candidate_records_target_but_rejects_unproven_gateway_reachability(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
             write_contract_candidate_dist(install_root)
             env = dict(os.environ)
@@ -595,9 +652,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 env=env,
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("live reachability is unproven", payload["error"])
         self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
         self.assertEqual(
             payload["catalog"]["required_canonical_session_status_method"],
@@ -786,7 +844,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
-            "registration_corroborated",
+            "disk_source_declarations_complete",
         )
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"]["status"],
@@ -828,7 +886,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
-            "registration_corroborated",
+            "disk_source_declarations_complete",
         )
 
     def test_live_installed_openclaw_missing_runtime_writes_failure_evidence(self) -> None:
@@ -2264,7 +2322,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("sessions_spawn", payload["error"])
-        self.assertIn("client_request_id", payload["error"])
+        self.assertIn("required parameter schema is unproven", payload["error"])
 
     def test_live_catalog_rejects_active_schema_missing_required_parameter(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -2293,7 +2351,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "params?.phase; params?.transition_id; params?.agent_id; "
                     "params?.requester_agent_id; params?.gateway_lease_id },"
                 )
-            active_spawn = active_tool_entry("sessions_spawn")
+            active_spawn = active_tool_entry("sessions_spawn", include_schema=True)
             del active_spawn["inputSchema"]["properties"]["metadata"]
 
             env = dict(os.environ)
@@ -2332,7 +2390,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
         )
         self.assertNotIn("metadata", spawn_tool["parameters"])
-        self.assertNotIn("metadata", spawn_tool["active_parameters"])
+        self.assertNotIn(
+            "metadata", spawn_tool["parameter_evidence"]["catalog_parameters"]
+        )
 
     def test_live_installed_openclaw_requires_matching_active_executable_root(self) -> None:
         module = load_preflight_module()
@@ -2455,7 +2515,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 env=env,
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         payload = json.loads(result.stdout)
         spawn_tool = next(
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
@@ -2464,6 +2524,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             spawn_tool["parameters"],
             ["client_request_id", "idempotency_key", "metadata"],
         )
+        self.assertIn("live reachability is unproven", payload["error"])
 
     def test_live_schema_parser_rejects_nested_non_input_parameter_mentions(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -2528,8 +2589,11 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
         )
         self.assertNotIn("client_request_id", spawn_tool["parameters"])
-        self.assertEqual(spawn_tool["parameters"], [])
-        self.assertIn("client_request_id", spawn_tool["active_parameters"])
+        self.assertEqual(spawn_tool["parameters"], ["output", "task"])
+        self.assertEqual(
+            spawn_tool["parameter_evidence"]["status"],
+            "installed_source_bound_catalog_schema_unavailable",
+        )
 
     def test_live_schema_parser_does_not_union_across_tool_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -2983,9 +3047,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 env=env,
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("live reachability is unproven", payload["error"])
         source_paths = {item["path"] for item in payload["catalog"]["sources"]}
         self.assertIn("dist/core-descriptors-test.js", source_paths)
         sessions_list = next(
