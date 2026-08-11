@@ -1859,6 +1859,38 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             )
             self.assertFalse(os.path.exists(evidence_path))
 
+    def test_write_evidence_refuses_missing_git_revisions(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            output = io.StringIO()
+
+            with mock.patch.object(
+                module,
+                "_git_rev_parse",
+                return_value=None,
+            ), mock.patch.object(
+                module,
+                "_git_status_porcelain",
+                return_value="",
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                return_value="d" * 64,
+            ), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                module.main(
+                    [
+                        "--catalog-json",
+                        json.dumps(VALID_CATALOG),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ]
+                )
+
+            self.assertIn("cannot verify Git revision HEAD", str(raised.exception))
+            self.assertFalse(os.path.exists(evidence_path))
+
     def test_write_evidence_refuses_git_identity_change_before_write(self) -> None:
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as directory:

@@ -31,6 +31,7 @@ OBJECT_SCHEMA_FIELD = re.compile(
     re.MULTILINE,
 )
 IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+GIT_SHA = re.compile(r"^[0-9a-f]{40}$", re.I)
 
 LIVE_TOOL_NAMES = (
     "subagents.allowLease.acquire",
@@ -1444,6 +1445,15 @@ def _git_rev_parse(root: Path, revision: str) -> str | None:
     return value or None
 
 
+def _require_valid_git_revision(root: Path, revision: str) -> str:
+    value = _git_rev_parse(root, revision)
+    if value is None or GIT_SHA.fullmatch(value) is None:
+        raise SystemExit(
+            f"cannot verify Git revision {revision} before writing exact-head evidence"
+        )
+    return value.lower()
+
+
 def _git_status_porcelain(root: Path) -> str | None:
     try:
         proc = subprocess.run(
@@ -1540,8 +1550,8 @@ def _capture_evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict
         {"--catalog-json"},
     )
     return {
-        "agentic_os_head_sha": _git_rev_parse(root, "HEAD"),
-        "agentic_os_tree_sha": _git_rev_parse(root, "HEAD^{tree}"),
+        "agentic_os_head_sha": _require_valid_git_revision(root, "HEAD"),
+        "agentic_os_tree_sha": _require_valid_git_revision(root, "HEAD^{tree}"),
         "generated_at_utc": dt.datetime.now(dt.timezone.utc)
         .replace(microsecond=0)
         .isoformat(),
@@ -1557,8 +1567,8 @@ def _require_same_evidence_binding(binding: Mapping[str, Any]) -> None:
     root = Path(__file__).resolve().parents[1]
     _require_clean_worktree_for_evidence(root)
     current = {
-        "agentic_os_head_sha": _git_rev_parse(root, "HEAD"),
-        "agentic_os_tree_sha": _git_rev_parse(root, "HEAD^{tree}"),
+        "agentic_os_head_sha": _require_valid_git_revision(root, "HEAD"),
+        "agentic_os_tree_sha": _require_valid_git_revision(root, "HEAD^{tree}"),
         "preflight_script_sha256": _file_digest(Path(__file__).resolve()),
     }
     expected = {
