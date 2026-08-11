@@ -165,6 +165,9 @@ def add_fake_openclaw_to_env(
             "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
             f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
+            "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+            "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
+            "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
             "raise SystemExit(1)\n"
         )
@@ -193,6 +196,9 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
             "    entries = "
             f"{candidate_entries!r} if os.environ.get('OPENCLAW_INSTALL_ROOT') else {baseline_entries!r}\n"
             "    print(json.dumps({'groups': [{'id': 'unit', 'tools': entries}]}, sort_keys=True))\n"
+            "    raise SystemExit(0)\n"
+            "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+            "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
             "raise SystemExit(1)\n"
@@ -402,6 +408,23 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["catalog"]["install_root_basename"], os.path.basename(install_root))
             self.assertIn("client_lease_id", payload["error"])
             self.assertIn("sessions_history", payload["error"])
+            self.assertEqual(
+                payload["catalog"]["model_tool_catalog"]["authority"],
+                "tools.catalog",
+            )
+            self.assertEqual(
+                payload["catalog"]["gateway_rpc_catalog"]["status"],
+                "registration_corroborated",
+            )
+            self.assertEqual(
+                payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"]["method"],
+                "subagents.allowLease.status",
+            )
+            self.assertTrue(
+                payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+                    "non_mutating"
+                ]
+            )
             spawn_tool = next(
                 tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
             )
@@ -410,6 +433,72 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertTrue(all(not path.startswith("/") for path in source_paths))
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_live_split_catalog_accepts_gateway_rpcs_absent_from_tools_catalog(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_ids=[
+                    tool_id
+                    for tool_id in ACTIVE_TOOL_IDS
+                    if not tool_id.startswith("subagents.allowLease.")
+                ],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        catalog = payload["catalog"]
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(
+            catalog["model_tool_catalog"]["required_tool_names"],
+            [
+                "sessions_history",
+                "sessions_list",
+                "sessions_spawn",
+                "sessions_status",
+            ],
+        )
+        self.assertNotIn(
+            "subagents.allowLease.acquire",
+            catalog["model_tool_catalog"]["required_tool_names"],
+        )
+        self.assertEqual(
+            catalog["gateway_rpc_catalog"]["source_bound_rpc_names"],
+            [
+                "subagents.allowLease.acquire",
+                "subagents.allowLease.release",
+                "subagents.allowLease.status",
+            ],
+        )
+        self.assertEqual(
+            catalog["gateway_rpc_catalog"]["status_corroboration"]["status"],
+            "ok",
+        )
+        acquire_tool = next(
+            tool
+            for tool in catalog["tools"]
+            if tool["name"] == "subagents.allowLease.acquire"
+        )
+        self.assertEqual(acquire_tool["catalog_surface"], "gateway_rpc")
+        self.assertIn("client_lease_id", acquire_tool["parameters"])
 
     def test_isolated_candidate_openclaw_catalog_passes_and_records_target(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -618,6 +707,15 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
         self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status"],
+            "registration_corroborated",
+        )
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"]["status"],
+            "ok",
+        )
 
     def test_installed_openclaw_negative_baseline_scrubs_candidate_override_for_catalog(
         self,
@@ -651,6 +749,11 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "installed_openclaw_negative_baseline",
         )
         self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status"],
+            "registration_corroborated",
+        )
 
     def test_live_installed_openclaw_missing_runtime_writes_failure_evidence(self) -> None:
         module = load_preflight_module()
@@ -2684,8 +2787,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             for tool in payload["catalog"]["tools"]
             if tool["name"] == "subagents.allowLease.acquire"
         )
-        self.assertEqual(acquire_tool["parameters"], [])
-        self.assertIn("requester_agent_id", acquire_tool["active_parameters"])
+        self.assertEqual(acquire_tool["parameters"], ["requesterAgentId"])
+        self.assertNotIn("requester_agent_id", acquire_tool["parameters"])
         self.assertIn("client_lease_id", payload["error"])
 
     def test_live_declared_zero_param_tools_ignore_comments_and_dead_strings(self) -> None:
