@@ -1209,6 +1209,12 @@ def live_installed_openclaw_catalog(
         require_env_override=require_env_override,
         active_catalog_sha256=active_catalog_sha256,
     )
+    _require_runtime_sources_unchanged_after_scan(
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+        source_digest_snapshot=source_digest_snapshot,
+        root=root,
+    )
     tools: list[dict[str, Any]] = []
     for name in LIVE_TOOL_NAMES:
         source_params = set()
@@ -1397,7 +1403,7 @@ def _sanitize_caller_catalog_for_evidence(catalog: Mapping[str, Any]) -> dict[st
     ).hexdigest()
     required_names: set[str] = set()
     for entry in _caller_catalog_tool_entries(catalog):
-        name = entry.get("name") or entry.get("id")
+        name = entry.get("name") or entry.get("method") or entry.get("id")
         if isinstance(name, str) and name in LIVE_TOOL_NAMES:
             required_names.add(name)
     return {
@@ -1465,7 +1471,12 @@ def _display_path(root: Path, value: str) -> str:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except (OSError, ValueError):
-        return path.name
+        try:
+            path_identity = path.resolve().as_posix()
+        except OSError:
+            path_identity = path.as_posix()
+        digest = hashlib.sha256(path_identity.encode("utf-8")).hexdigest()
+        return f"<external-path:sha256:{digest}>"
 
 
 def _sanitize_invocation_argv(
