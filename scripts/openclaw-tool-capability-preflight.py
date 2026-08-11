@@ -725,6 +725,7 @@ def _runtime_identity_catalog(
     *,
     runtime_target: str,
     package: Mapping[str, Any],
+    package_json_digest: str,
     root: Path,
     executable: Path,
     executable_digest: str,
@@ -734,6 +735,7 @@ def _runtime_identity_catalog(
         "runtime_target": runtime_target,
         "openclaw_version": package.get("version"),
         "openclaw_package_name": package.get("name"),
+        "package_json_sha256": package_json_digest,
         "install_root_basename": root.name,
         "install_root_path_sha256": _path_digest(root),
         "active_executable_path_sha256": _path_digest(executable),
@@ -745,6 +747,7 @@ def _runtime_failure_catalog_from_identity(
     *,
     runtime_target: str,
     package: Mapping[str, Any],
+    package_json_digest: str,
     root: Path,
     executable: Path,
     executable_digest: str,
@@ -752,6 +755,7 @@ def _runtime_failure_catalog_from_identity(
     catalog = _runtime_identity_catalog(
         runtime_target=runtime_target,
         package=package,
+        package_json_digest=package_json_digest,
         root=root,
         executable=executable,
         executable_digest=executable_digest,
@@ -785,6 +789,7 @@ def _runtime_identity_snapshot_failure_catalog(
         },
     }
     _record_file_digest(catalog, "active_executable_sha256", executable)
+    _record_file_digest(catalog, "package_json_sha256", root / "package.json")
     return catalog
 
 
@@ -800,8 +805,11 @@ def _runtime_identity_snapshot(
     )
     executable = _resolve_openclaw_executable()
     _require_executable_matches_install_root(root, executable)
+    package_path = root / "package.json"
     try:
-        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        package_raw = package_path.read_bytes()
+        package_json_digest = hashlib.sha256(package_raw).hexdigest()
+        package = json.loads(package_raw.decode("utf-8"))
         if not isinstance(package, Mapping):
             raise AdapterContractError("OpenClaw package.json must be a JSON object")
     except (OSError, json.JSONDecodeError, AdapterContractError) as exc:
@@ -824,6 +832,7 @@ def _runtime_identity_snapshot(
     failure_catalog = _runtime_failure_catalog_from_identity(
         runtime_target=runtime_target,
         package=package,
+        package_json_digest=package_json_digest,
         root=root,
         executable=executable,
         executable_digest=executable_digest,
@@ -831,6 +840,7 @@ def _runtime_identity_snapshot(
     positive_catalog = _runtime_identity_catalog(
         runtime_target=runtime_target,
         package=package,
+        package_json_digest=package_json_digest,
         root=root,
         executable=executable,
         executable_digest=executable_digest,
@@ -881,6 +891,14 @@ def _active_entry_parameters(entry: Mapping[str, Any]) -> set[str]:
     return set(first_params)
 
 
+def _adapter_tool_name(entry: Mapping[str, Any]) -> str | None:
+    for key in ("id", "name", "method"):
+        value = entry.get(key)
+        if isinstance(value, str) and value in LIVE_TOOL_NAMES:
+            return value
+    return None
+
+
 def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
     entries: dict[str, set[str]] = {}
 
@@ -902,21 +920,17 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
             for tool in tools:
                 if not isinstance(tool, Mapping):
                     continue
-                for key in ("id", "name", "method"):
-                    value = tool.get(key)
-                    if isinstance(value, str) and value in LIVE_TOOL_NAMES:
-                        add_entry(value, _active_entry_parameters(tool))
-                        break
+                name = _adapter_tool_name(tool)
+                if name is not None:
+                    add_entry(name, _active_entry_parameters(tool))
     tools = catalog.get("tools")
     if isinstance(tools, list):
         for tool in tools:
             if not isinstance(tool, Mapping):
                 continue
-            for key in ("id", "name", "method"):
-                value = tool.get(key)
-                if isinstance(value, str) and value in LIVE_TOOL_NAMES:
-                    add_entry(value, _active_entry_parameters(tool))
-                    break
+            name = _adapter_tool_name(tool)
+            if name is not None:
+                add_entry(name, _active_entry_parameters(tool))
     elif isinstance(tools, Mapping):
         for name, value in tools.items():
             if isinstance(name, str) and name in LIVE_TOOL_NAMES:
@@ -1377,6 +1391,7 @@ def _caller_catalog_tool_entries(catalog: Mapping[str, Any]) -> list[Mapping[str
             if not isinstance(name, str):
                 continue
             entry: dict[str, Any] = dict(value) if isinstance(value, Mapping) else {}
+            entry["id"] = name
             entry["name"] = name
             entries.append(entry)
 
@@ -1404,8 +1419,8 @@ def _sanitize_caller_catalog_for_evidence(catalog: Mapping[str, Any]) -> dict[st
     ).hexdigest()
     required_names: set[str] = set()
     for entry in _caller_catalog_tool_entries(catalog):
-        name = entry.get("name") or entry.get("method") or entry.get("id")
-        if isinstance(name, str) and name in LIVE_TOOL_NAMES:
+        name = _adapter_tool_name(entry)
+        if name is not None:
             required_names.add(name)
     return {
         "catalog_kind": "sanitized_caller_tool_catalog",

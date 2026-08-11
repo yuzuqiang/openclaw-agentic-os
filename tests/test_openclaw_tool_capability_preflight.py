@@ -1036,6 +1036,69 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "runtime_identity_binding",
         )
 
+    def test_successful_catalog_rejects_same_version_package_manifest_change(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            package_path = os.path.join(install_root, "package.json")
+            with open(package_path, "rb") as handle:
+                expected_initial_package_sha256 = hashlib.sha256(handle.read()).hexdigest()
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+
+            def replace_package_manifest_after_catalog(*_args, **_kwargs):
+                with open(package_path, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "name": "openclaw",
+                            "version": "2026.candidate",
+                            "main": "dist/replaced-entrypoint.js",
+                        },
+                        handle,
+                        sort_keys=True,
+                    )
+                return {
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                }
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=replace_package_manifest_after_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["package_json_sha256"], expected_initial_package_sha256)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_identity_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_identity_binding",
+        )
+
     def test_successful_catalog_rejects_runtime_source_change_after_capture(self) -> None:
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
@@ -1732,6 +1795,30 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             payload["catalog"]["required_tool_names"],
             sorted(ACTIVE_TOOL_IDS),
         )
+
+    def test_write_evidence_matches_adapter_string_filtered_aliases(self) -> None:
+        preflight = load_preflight_module()
+        catalog = {
+            "tools": [
+                {
+                    **{
+                        key: json.loads(json.dumps(value))
+                        for key, value in tool.items()
+                        if key != "name"
+                    },
+                    "id": ["not", "a", "string"],
+                    "name": 123,
+                    "method": tool["name"],
+                }
+                for tool in VALID_CATALOG["tools"]
+            ]
+        }
+
+        payload = preflight._sanitize_caller_catalog_for_evidence(catalog)
+
+        self.assertEqual(payload["catalog_kind"], "sanitized_caller_tool_catalog")
+        self.assertEqual(payload["tool_entry_count"], len(VALID_CATALOG["tools"]))
+        self.assertEqual(payload["required_tool_names"], sorted(ACTIVE_TOOL_IDS))
 
     def test_evidence_binding_sanitizes_path_option_forms(self) -> None:
         preflight = load_preflight_module()
