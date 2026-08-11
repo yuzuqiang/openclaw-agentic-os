@@ -344,8 +344,8 @@
   "classification": "fail_closed_future_contract",
   "error": "runtime Gateway RPC subagents.allowLease.acquire live reachability is unproven; installed source declaration is not runtime reachability proof; runtime Gateway RPC subagents.allowLease.release live reachability is unproven; installed source declaration is not runtime reachability proof; runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history required parameter schema is unproven by tools.catalog and installed runtime source evidence; runtime model tool authority is incomplete: runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history required parameter schema is unproven by tools.catalog and installed runtime source evidence; runtime Gateway RPC source authority is incomplete: runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; connected Gateway build identity is not proven; connected Gateway build evidence is missing",
   "preflight_evidence_binding": {
-    "agentic_os_head_sha": "ac38e8d3b3e1b1c644c1345276b7ed886105fa6f",
-    "agentic_os_tree_sha": "caa66d08c45e56057c5cec17712cbe835f41a629",
+    "agentic_os_head_sha": "484ec039fb3996fe56e7324520963b6dbc17c8a6",
+    "agentic_os_tree_sha": "9240d24a41e94659aadb944702cad60ff1f45d1f",
     "binding_kind": "generator_revision",
     "capability_source_paths": [
       "scripts/openclaw-tool-capability-preflight.py",
@@ -353,7 +353,7 @@
       "src/agentic_os/__init__.py"
     ],
     "containing_commit_self_binding": false,
-    "generated_at_utc": "2026-08-11T19:36:05+00:00",
+    "generated_at_utc": "2026-08-11T19:58:54+00:00",
     "invocation": {
       "argv": [
         "--live-installed-openclaw",
