@@ -252,6 +252,21 @@ def _split_evidence_authority_errors(
                     f"runtime Gateway RPC {method} live reachability is unproven; "
                     "installed source declaration is not runtime reachability proof"
                 )
+            else:
+                live_probe = evidence.get("live_probe")
+                if (
+                    not isinstance(live_probe, Mapping)
+                    or live_probe.get("method") != method
+                    or live_probe.get("status") != "ok"
+                    or live_probe.get("live_reachability") != "reachable"
+                    or not _is_sha256(live_probe.get("raw_response_sha256"))
+                    or not isinstance(live_probe.get("request_semantics"), str)
+                    or not live_probe.get("request_semantics")
+                ):
+                    errors.append(
+                        f"runtime Gateway RPC {method} reachable claim lacks a valid "
+                        "method-bound live probe"
+                    )
     return errors, frozenset(unproven_parameter_methods)
 
 

@@ -122,6 +122,25 @@ class FakeTransport:
 
 
 class RealAdapterReleaseProbeTests(unittest.TestCase):
+    def test_unverified_factory_is_confined_to_explicit_test_path(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        production_prefix, test_suffix = source.split(
+            "def run_release_probe_for_offline_tests", 1
+        )
+        main_source = test_suffix.split("def main", 1)[1]
+
+        self.assertNotIn("_from_unverified_transport_for_tests", production_prefix)
+        self.assertNotIn("_from_unverified_transport_for_tests", main_source)
+        root = SCRIPT.parents[1]
+        for path in (root / "src" / "agentic_os").rglob("*.py"):
+            if path.name == "openclaw_adapter.py":
+                continue
+            with self.subTest(path=path.relative_to(root)):
+                self.assertNotIn(
+                    "_from_unverified_transport_for_tests",
+                    path.read_text(encoding="utf-8"),
+                )
+
     def test_unverified_in_process_adapter_refuses_before_any_rpc(self) -> None:
         transport = FakeTransport()
         adapter = MODULE.OpenClawAdapter._from_unverified_transport_for_tests(transport)

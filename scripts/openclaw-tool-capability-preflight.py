@@ -1434,8 +1434,9 @@ def _gateway_rpc_evidence(
     gateway_status: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     status_reachable = gateway_status.get("status") == "ok"
-    return [
-        {
+    evidence: list[dict[str, Any]] = []
+    for name in GATEWAY_RPC_METHOD_NAMES:
+        record: dict[str, Any] = {
             "name": name,
             "disk_source_declaration": (
                 "observed"
@@ -1448,8 +1449,10 @@ def _gateway_rpc_evidence(
                 else "unproven"
             ),
         }
-        for name in GATEWAY_RPC_METHOD_NAMES
-    ]
+        if name == "subagents.allowLease.status" and status_reachable:
+            record["live_probe"] = dict(gateway_status)
+        evidence.append(record)
+    return evidence
 
 
 def _gateway_tools_from_sources(
@@ -2084,7 +2087,9 @@ def _assert_preflight_runtime_tools(
     """Keep offline schema validation separate from online runtime authority."""
 
     if runtime_target:
-        assert_preflighted_runtime_authority({"status": "pass", "catalog": catalog})
+        assert_preflighted_runtime_authority(
+            {"catalog": catalog, "runtime_ready": True, "status": "pass"}
+        )
         return
     assert_installed_runtime_tools(catalog)
 

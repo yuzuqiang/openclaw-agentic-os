@@ -126,6 +126,21 @@ def verified_runtime_envelope() -> dict[str, Any]:
                     {
                         "disk_source_declaration": "observed",
                         "live_reachability": "reachable",
+                        "live_probe": {
+                            "live_reachability": "reachable",
+                            "method": name,
+                            "raw_response_sha256": (
+                                "b" * 64
+                                if name == "subagents.allowLease.status"
+                                else "d" * 64
+                            ),
+                            "request_semantics": (
+                                "read_only_request"
+                                if name == "subagents.allowLease.status"
+                                else "bounded_contract_probe"
+                            ),
+                            "status": "ok",
+                        },
                         "name": name,
                     }
                     for name in (
@@ -441,6 +456,19 @@ class OpenClawAdapterTests(unittest.TestCase):
         rpc_evidence.append(json.loads(json.dumps(rpc_evidence[0])))
 
         with self.assertRaisesRegex(AdapterContractError, "duplicates.*acquire"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_bare_reachability_claim(self) -> None:
+        payload = verified_runtime_envelope()
+        rpc_evidence = payload["catalog"]["gateway_rpc_catalog"]["rpc_evidence"]
+        status = next(
+            item
+            for item in rpc_evidence
+            if item["name"] == "subagents.allowLease.status"
+        )
+        del status["live_probe"]
+
+        with self.assertRaisesRegex(AdapterContractError, "method-bound live probe"):
             OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
 
     def test_session_tool_catalog_preflight_rejects_missing_history_parameter(self) -> None:
