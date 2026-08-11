@@ -1369,9 +1369,8 @@ def _caller_catalog_tool_entries(catalog: Mapping[str, Any]) -> list[Mapping[str
         for name, value in tools.items():
             if not isinstance(name, str):
                 continue
-            entry: dict[str, Any] = {"name": name}
-            if isinstance(value, Mapping):
-                entry.update(value)
+            entry: dict[str, Any] = dict(value) if isinstance(value, Mapping) else {}
+            entry["name"] = name
             entries.append(entry)
 
     tools = catalog.get("tools")

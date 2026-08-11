@@ -1575,6 +1575,56 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     sorted(ACTIVE_TOOL_IDS),
                 )
 
+    def test_write_evidence_uses_mapping_keys_over_value_identity_aliases(self) -> None:
+        private_marker = "sk-private-mapping-alias-token"
+        preflight = load_preflight_module()
+
+        def mapping_catalog() -> dict[str, dict[str, object]]:
+            catalog: dict[str, dict[str, object]] = {}
+            for tool in VALID_CATALOG["tools"]:
+                entry = {
+                    key: json.loads(json.dumps(value))
+                    for key, value in tool.items()
+                    if key != "name"
+                }
+                entry["name"] = "sessions_list"
+                entry["id"] = "sessions_list"
+                entry["method"] = "sessions_list"
+                entry["private_runtime_metadata"] = private_marker
+                catalog[tool["name"]] = entry
+            return catalog
+
+        cases = {
+            "tools_mapping": {"tools": mapping_catalog()},
+            "root_mapping": mapping_catalog(),
+        }
+        for name, catalog in cases.items():
+            with self.subTest(name=name):
+                payload = preflight._sanitize_caller_catalog_for_evidence(catalog)
+                self.assertEqual(
+                    payload["catalog_kind"],
+                    "sanitized_caller_tool_catalog",
+                )
+                self.assertEqual(
+                    payload["raw_catalog_sha256"],
+                    hashlib.sha256(
+                        json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
+                    ).hexdigest(),
+                )
+                self.assertEqual(
+                    payload["tool_entry_count"],
+                    len(VALID_CATALOG["tools"]),
+                )
+                self.assertEqual(
+                    payload["required_tool_names"],
+                    sorted(ACTIVE_TOOL_IDS),
+                )
+                serialized_payload = json.dumps(payload, sort_keys=True)
+                self.assertNotIn(private_marker, serialized_payload)
+                self.assertNotIn(json.dumps(catalog), serialized_payload)
+
     def test_evidence_binding_sanitizes_path_option_forms(self) -> None:
         cases = (
             ("catalog_equals", "catalog_equals.json", "evidence_separate.json"),
