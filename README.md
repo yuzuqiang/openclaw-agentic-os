@@ -16,11 +16,12 @@ production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `99ab2f93dab75a0139f4b9c8e5c358d451303c437818e29d3a54d8a915b9dd06`
+- Current design artifact SHA-256: `d3208bfaef1f238fff406952bd99fc6595b5970642326f0d711de951316dc5e6`
 - Historical revalidation evidence, superseded by the current Draft remediation:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
-- Current installed-runtime split-catalog preflight evidence: [`docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json`](docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json)
-- Superseded installed-runtime negative baseline, retained for audit history:
+- Current installed-runtime evidence lineage and capture state:
+  [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
+- Historical installed-runtime negative baseline, retained byte-for-byte:
   [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
 - Current latest migration SHA-256: `1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163`
@@ -428,19 +429,23 @@ the forward-only triggers.
 Issue #35 adds sanitized live runtime evidence for that boundary. The committed
 evidence in `docs/runtime-evidence/issue35-live-openclaw-20260721.json` captures
 OpenClaw 2026.7.1 installed catalog source hashes and proves the current runtime
-does not satisfy the exact Agentic OS contract. The current correction in
-`docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json` supersedes
-the earlier combined-catalog negative baseline: `tools.catalog` is model-callable
-tool evidence, while allowLease registration is source-bound Gateway RPC
-evidence corroborated only by the non-mutating
-`subagents.allowLease.status` call. The installed Gateway exposes all three
-allowLease RPC names and status returns `ok=true` with `writeMode=memory`, but
-the runtime still fails closed because acquire/release expose legacy
-`agentId`/`requesterAgentId`/`ttlMs`/`leaseId` parameters, `sessions_spawn` lacks
-`client_request_id`, `idempotency_key`, and `metadata`, and the current model
-tool alias is `session_status` while future DB authority requires
-`sessions_status` as the canonical status alias. The committed split-catalog
-JSON is an audit snapshot, not exact-head authority; Phase C must replay
+does not satisfy the exact Agentic OS contract. The forward-only correction
+index in `docs/runtime-evidence/phase-b-20260811-evidence-index.json`
+supersedes the earlier combined-catalog interpretation without rewriting
+historical JSON. `tools.catalog` proves model-callable tool names, but the real
+response may omit parameter schemas; parameter claims are then either bound
+explicitly to hashed installed sources or marked unproven. Installed source
+files declare all three allowLease RPC names, while the read-only-request
+`subagents.allowLease.status` call proves reachability only for `status`.
+Acquire/release reachability and the connected Gateway build identity remain
+unproven; `status` may clean expired leases and CLI bootstrap may write local
+state. The runtime still fails closed because source evidence exposes legacy
+acquire/release parameters, acquire/release were not live-probed,
+`sessions_spawn` source evidence lacks `client_request_id`, `idempotency_key`,
+and `metadata`, and the current model tool alias is `session_status` while
+future DB authority requires `sessions_status` as the canonical status alias.
+The split-catalog JSON is generator-revision-bound audit evidence, not exact
+PR-head authority; Phase C must replay
 `python3 scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`
 against the exact PR head before any controlled external review. The bounded
 accepted-session probe in
@@ -450,12 +455,13 @@ If a future runtime passes preflight, the probe validates duplicate session
 identity plus session-local normalized/raw metadata contract evidence from
 direct structured `sessions_spawn` responses and treats any allowLease release
 failure as a failed probe.
-The 2026-08-09 bound installed-runtime negative preflight in
+The 2026-08-09 installed-runtime negative preflight in
 `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also
-failed closed before any runtime contract proof was available. It is retained
-as a superseded audit artifact because it conflated model-callable
-`tools.catalog` evidence with Gateway RPC registration and is a false negative
-for allowLease RPC availability.
+failed closed before any runtime contract proof was available. Its original
+bytes are frozen. The forward index marks its stored generator binding invalid
+because the stored script digest does not match the script at its bound head,
+and marks its combined-catalog interpretation superseded because it conflated
+model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
 The authoritative candidate proof is now the isolated real-Gateway probe. It

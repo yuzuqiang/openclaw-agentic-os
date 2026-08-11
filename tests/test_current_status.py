@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 import unittest
 
 from agentic_os.migrations import repository_root
@@ -112,7 +113,7 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["runtime_evidence"]["fresh_installed_negative_preflight"]["status"],
-            "superseded",
+            "fail",
         )
         negative_preflight = payload["runtime_evidence"]["fresh_installed_negative_preflight"]
         negative_preflight_path = root / negative_preflight["path"]
@@ -120,16 +121,12 @@ class CurrentStatusTests(unittest.TestCase):
             negative_preflight["sha256"],
             hashlib.sha256(negative_preflight_path.read_bytes()).hexdigest(),
         )
+        self.assertNotIn("live_split_catalog_preflight", payload["runtime_evidence"])
         self.assertEqual(
-            negative_preflight["superseded_by"],
-            "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
-        )
-        split_preflight = payload["runtime_evidence"]["live_split_catalog_preflight"]
-        split_preflight_path = root / split_preflight["path"]
-        self.assertEqual(split_preflight["status"], "fail_closed_future_contract")
-        self.assertEqual(
-            split_preflight["sha256"],
-            hashlib.sha256(split_preflight_path.read_bytes()).hexdigest(),
+            hashlib.sha256(
+                (root / "docs/runtime-evidence/phase-b-revalidation-20260809.json").read_bytes()
+            ).hexdigest(),
+            "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3",
         )
 
     def test_installed_negative_baseline_preserves_runtime_provenance(self) -> None:
@@ -141,17 +138,10 @@ class CurrentStatusTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
-        self.assertEqual(payload["status"], "superseded")
-        self.assertEqual(payload["original_status"], "fail")
-        self.assertIn("false negative", payload["retraction_reason"])
-        self.assertEqual(
-            payload["superseded_by"]["path"],
-            "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
-        )
-        self.assertEqual(
-            payload["superseded_by"]["status"],
-            "fail_closed_future_contract",
-        )
+        self.assertEqual(payload["status"], "fail")
+        self.assertNotIn("original_status", payload)
+        self.assertNotIn("retraction_reason", payload)
+        self.assertNotIn("superseded_by", payload)
         self.assertEqual(
             payload["catalog"]["runtime_target"],
             "installed_openclaw_negative_baseline",
@@ -171,10 +161,6 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertTrue(payload["catalog_failure"]["runtime_provenance_preserved"])
         self.assertEqual(payload["catalog_failure"]["returncode"], 1)
-        self.assertEqual(
-            payload["preflight_evidence_binding_status"],
-            "historical_original_capture_not_current_authority",
-        )
         binding = payload["preflight_evidence_binding"]
         self.assertRegex(binding["agentic_os_head_sha"], r"^[0-9a-f]{40}$")
         self.assertRegex(binding["agentic_os_tree_sha"], r"^[0-9a-f]{40}$")
@@ -194,17 +180,80 @@ class CurrentStatusTests(unittest.TestCase):
             "active_executable_sha256",
         ):
             self.assertRegex(payload["catalog"][key], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            hashlib.sha256(
+                (
+                    root
+                    / "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
+                ).read_bytes()
+            ).hexdigest(),
+            "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
+        )
+
+    def test_evidence_index_preserves_history_and_current_epoch_boundary(self) -> None:
+        root = repository_root()
+        index = json.loads(
+            (
+                root
+                / "docs/runtime-evidence/phase-b-20260811-evidence-index.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(index["classification"], "evidence_lineage_correction")
+        self.assertIn("byte-for-byte immutable", index["mutation_policy"])
+        historical = {item["path"]: item for item in index["historical_artifacts"]}
+        negative = historical[
+            "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
+        ]
+        self.assertEqual(
+            negative["binding_assessment"]["status"],
+            "invalid_mixed_revision_binding",
+        )
+        self.assertNotEqual(
+            negative["binding_assessment"]["stored_script_sha256"],
+            negative["binding_assessment"]["actual_script_sha256_at_bound_head"],
+        )
+        historical_script = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "show",
+                f"{negative['binding_assessment']['bound_head']}:scripts/openclaw-tool-capability-preflight.py",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        self.assertEqual(
+            hashlib.sha256(historical_script).hexdigest(),
+            negative["binding_assessment"]["actual_script_sha256_at_bound_head"],
+        )
+        for path, record in historical.items():
+            self.assertTrue(record["immutable_historical_bytes"])
+            self.assertEqual(
+                record["sha256"], hashlib.sha256((root / path).read_bytes()).hexdigest()
+            )
 
     def test_live_split_catalog_preflight_preserves_dual_catalog_boundary(self) -> None:
         root = repository_root()
-        payload = json.loads(
-            (
-                root
-                / "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json"
-            ).read_text(encoding="utf-8")
+        index = json.loads(
+            (root / "docs/runtime-evidence/phase-b-20260811-evidence-index.json").read_text(
+                encoding="utf-8"
+            )
         )
-
+        current = index["current_evidence"]
+        evidence_path = root / current["path"]
+        if current["status"] == "pending_clean_generator_revision_capture":
+            self.assertEqual(index["status"], "pending_current_evidence")
+            self.assertFalse(evidence_path.exists())
+            return
+        self.assertEqual(current["status"], "captured_from_clean_generator_revision")
+        self.assertEqual(index["status"], "current_evidence_captured")
+        self.assertEqual(
+            current["sha256"], hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        )
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["status"], "fail")
+        self.assertEqual(payload["classification"], "fail_closed_future_contract")
         self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
@@ -217,6 +266,24 @@ class CurrentStatusTests(unittest.TestCase):
             ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
         )
         self.assertEqual(
+            payload["catalog"]["model_tool_catalog"][
+                "parameter_schema_unavailable_tool_names"
+            ],
+            ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
+        )
+        model_tools = {
+            item["name"]: item
+            for item in payload["catalog"]["model_tool_catalog"]["tools"]
+        }
+        self.assertEqual(
+            model_tools["sessions_spawn"]["parameter_evidence"]["status"],
+            "installed_source_bound_catalog_schema_unavailable",
+        )
+        self.assertEqual(
+            model_tools["sessions_history"]["parameter_evidence"]["status"],
+            "unproven_from_catalog_and_installed_sources",
+        )
+        self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["source_bound_rpc_names"],
             [
                 "subagents.allowLease.acquire",
@@ -226,19 +293,51 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
-            "registration_corroborated",
+            "disk_source_declarations_complete",
         )
+        rpc_evidence = {
+            item["name"]: item
+            for item in payload["catalog"]["gateway_rpc_catalog"]["rpc_evidence"]
+        }
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.status"]["live_reachability"],
+            "reachable",
+        )
+        for method in (
+            "subagents.allowLease.acquire",
+            "subagents.allowLease.release",
+        ):
+            with self.subTest(method=method):
+                self.assertEqual(
+                    rpc_evidence[method]["disk_source_declaration"], "observed"
+                )
+                self.assertEqual(rpc_evidence[method]["live_reachability"], "unproven")
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
                 "method"
             ],
             "subagents.allowLease.status",
         )
-        self.assertTrue(
+        self.assertFalse(
             payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
-                "non_mutating"
+                "requested_mutation"
             ]
         )
+        self.assertNotIn(
+            "non_mutating",
+            payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"],
+        )
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+                "request_semantics"
+            ],
+            "read_only_request",
+        )
+        self.assertGreaterEqual(
+            len(payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"]["incidental_mutations_possible"]),
+            2,
+        )
+        self.assertEqual(payload["catalog"]["connected_gateway_build_identity"], "unproven")
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
                 "status"
@@ -270,15 +369,59 @@ class CurrentStatusTests(unittest.TestCase):
             payload["catalog"]["future_db_authority_contract"],
         )
         self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
-        self.assertNotIn(
-            "runtime tool catalog is missing subagents.allowLease",
-            payload["error"],
+        self.assertIn("live reachability is unproven", payload["error"])
+        self.assertNotIn("sessions_history is missing parameters", payload["error"])
+        binding = payload["preflight_evidence_binding"]
+        self.assertEqual(binding["binding_kind"], "generator_revision")
+        self.assertFalse(binding["containing_commit_self_binding"])
+        self.assertEqual(
+            current["generator_revision"],
+            {
+                "head_sha": binding["agentic_os_head_sha"],
+                "script_sha256": binding["preflight_script_sha256"],
+                "tree_sha": binding["agentic_os_tree_sha"],
+            },
         )
-        self.assertNotIn("preflight_evidence_binding", payload)
-        binding = payload["committed_audit_evidence_binding"]
-        self.assertFalse(binding["exact_head_authority"])
-        self.assertTrue(binding["phase_c_required"])
-        self.assertIn("Phase C must replay", binding["review_head_policy"])
+        bound_head = binding["agentic_os_head_sha"]
+        bound_tree = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", f"{bound_head}^{{tree}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(bound_tree, binding["agentic_os_tree_sha"])
+        script_blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "show",
+                f"{bound_head}:scripts/openclaw-tool-capability-preflight.py",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        self.assertEqual(
+            hashlib.sha256(script_blob).hexdigest(),
+            binding["preflight_script_sha256"],
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "diff",
+                "--exit-code",
+                f"{bound_head}..HEAD",
+                "--",
+                *binding["capability_source_paths"],
+            ],
+            check=True,
+        )
 
 
 if __name__ == "__main__":

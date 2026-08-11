@@ -2,6 +2,13 @@
   "catalog": {
     "active_catalog": {
       "method": "tools.catalog",
+      "parameter_schema_tool_names": [],
+      "parameter_schema_unavailable_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
       "raw_response_sha256": "de3a8aa7c86b93928c2d67aff3a367ab6d111a7b49b50d7a355cee74161766e6",
       "required_tool_names": [
         "session_status",
@@ -13,6 +20,7 @@
     "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
     "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
     "catalog_kind": "sanitized_openclaw_runtime",
+    "connected_gateway_build_identity": "unproven",
     "future_db_authority_contract": {
       "accepted_session_identity_requirement": "future_db_authority_requires_duplicate_spawn_to_return_the_same_non_empty_accepted_session_identity",
       "allow_lease_acquire_required_metadata": [
@@ -47,19 +55,42 @@
     "gateway_rpc_catalog": {
       "authority": "installed_runtime_dist_sources",
       "catalog_kind": "source_bound_gateway_rpc_catalog",
+      "rpc_evidence": [
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "unproven",
+          "name": "subagents.allowLease.acquire"
+        },
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "reachable",
+          "name": "subagents.allowLease.status"
+        },
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "unproven",
+          "name": "subagents.allowLease.release"
+        }
+      ],
       "source_bound_rpc_names": [
         "subagents.allowLease.acquire",
         "subagents.allowLease.release",
         "subagents.allowLease.status"
       ],
-      "status": "registration_corroborated",
+      "status": "disk_source_declarations_complete",
       "status_corroboration": {
-        "allowAgents_count": 3,
-        "leases_count": 1,
+        "allowAgents_count": 2,
+        "incidental_mutations_possible": [
+          "expired_lease_cleanup",
+          "cli_bootstrap_state"
+        ],
+        "leases_count": 0,
+        "live_reachability": "reachable",
         "method": "subagents.allowLease.status",
-        "non_mutating": true,
         "ok": true,
-        "raw_response_sha256": "783280b6858c9c2c7405c4eb4ceedbe1cc7a7285d77a43f0ce1fc174bf2db771",
+        "raw_response_sha256": "e6d87b02b2525b3da0d4ce712493c44411afeb15d07953fb065a71c22883e741",
+        "request_semantics": "read_only_request",
+        "requested_mutation": false,
         "status": "ok",
         "writeMode": "memory"
       },
@@ -98,6 +129,13 @@
       "authority": "tools.catalog",
       "catalog_kind": "model_callable_tools_catalog",
       "method": "tools.catalog",
+      "parameter_schema_tool_names": [],
+      "parameter_schema_unavailable_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
       "raw_response_sha256": "de3a8aa7c86b93928c2d67aff3a367ab6d111a7b49b50d7a355cee74161766e6",
       "required_tool_names": [
         "session_status",
@@ -107,30 +145,62 @@
       ],
       "tools": [
         {
-          "active_parameters": [],
           "catalog_surface": "model_tool",
           "name": "sessions_spawn",
-          "parameters": [],
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "installed_runtime_dist_sources",
+            "status": "installed_source_bound_catalog_schema_unavailable"
+          },
+          "parameters": [
+            "agentId",
+            "attachAs",
+            "attachments",
+            "cleanup",
+            "context",
+            "cwd",
+            "label",
+            "lightContext",
+            "mode",
+            "model",
+            "runtime",
+            "sandbox",
+            "task",
+            "taskName",
+            "thinking"
+          ],
           "schema_source": "model_tool_schema"
         },
         {
-          "active_parameters": [],
           "catalog_surface": "model_tool",
           "name": "sessions_list",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "unproven",
+            "status": "unproven_from_catalog_and_installed_sources"
+          },
           "parameters": [],
           "schema_source": "declared_tool_name"
         },
         {
-          "active_parameters": [],
           "catalog_surface": "model_tool",
           "name": "sessions_history",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "unproven",
+            "status": "unproven_from_catalog_and_installed_sources"
+          },
           "parameters": [],
           "schema_source": "declared_tool_name"
         },
         {
-          "active_parameters": [],
           "catalog_surface": "model_tool",
           "name": "session_status",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "unproven",
+            "status": "unproven_from_catalog_and_installed_sources"
+          },
           "parameters": [],
           "schema_source": "declared_tool_name"
         }
@@ -140,6 +210,7 @@
     "openclaw_version": "2026.7.1",
     "package_json_sha256": "aa481474c58c5be5e14513e622d7720fd54f896d6c32da70250d8b6310586153",
     "required_canonical_session_status_method": "sessions_status",
+    "runtime_process_binding_limit": "installed dist source identity does not prove the connected Gateway process is executing that exact bundle",
     "runtime_target": "live_installed_openclaw",
     "sources": [
       {
@@ -193,48 +264,90 @@
         "schema_source": "gateway_server_method_params"
       },
       {
-        "active_parameters": [],
         "catalog_surface": "model_tool",
         "name": "sessions_spawn",
-        "parameters": [],
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "installed_runtime_dist_sources",
+          "status": "installed_source_bound_catalog_schema_unavailable"
+        },
+        "parameters": [
+          "agentId",
+          "attachAs",
+          "attachments",
+          "cleanup",
+          "context",
+          "cwd",
+          "label",
+          "lightContext",
+          "mode",
+          "model",
+          "runtime",
+          "sandbox",
+          "task",
+          "taskName",
+          "thinking"
+        ],
         "schema_source": "model_tool_schema"
       },
       {
-        "active_parameters": [],
         "catalog_surface": "model_tool",
         "name": "sessions_list",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "unproven",
+          "status": "unproven_from_catalog_and_installed_sources"
+        },
         "parameters": [],
         "schema_source": "declared_tool_name"
       },
       {
-        "active_parameters": [],
         "catalog_surface": "model_tool",
         "name": "sessions_history",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "unproven",
+          "status": "unproven_from_catalog_and_installed_sources"
+        },
         "parameters": [],
         "schema_source": "declared_tool_name"
       },
       {
-        "active_parameters": [],
         "catalog_surface": "model_tool",
         "name": "session_status",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "unproven",
+          "status": "unproven_from_catalog_and_installed_sources"
+        },
         "parameters": [],
         "schema_source": "declared_tool_name"
       }
     ]
   },
-  "committed_audit_evidence_binding": {
-    "binding_kind": "committed_runtime_audit_snapshot",
-    "capture_command": [
-      "python3",
+  "classification": "fail_closed_future_contract",
+  "error": "runtime Gateway RPC subagents.allowLease.acquire live reachability is unproven; installed source declaration is not runtime reachability proof; runtime Gateway RPC subagents.allowLease.release live reachability is unproven; installed source declaration is not runtime reachability proof; runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history required parameter schema is unproven by tools.catalog and installed runtime source evidence",
+  "preflight_evidence_binding": {
+    "agentic_os_head_sha": "bf182e16a81a25b7ecfa237164e8762b39e8020e",
+    "agentic_os_tree_sha": "56c30372bc7e30191b85f58dfa7f2a5ad252bd22",
+    "binding_kind": "generator_revision",
+    "capability_source_paths": [
       "scripts/openclaw-tool-capability-preflight.py",
-      "--live-installed-openclaw",
-      "--json"
+      "src/agentic_os/openclaw_adapter.py",
+      "src/agentic_os/__init__.py"
     ],
-    "exact_head_authority": false,
-    "generated_at_utc": "2026-08-11T13:32:03+00:00",
-    "phase_c_required": true,
-    "review_head_policy": "Committed JSON is audit evidence and cannot self-contain the SHA of the commit that contains it; Phase C must replay this command against the exact PR head before external review."
+    "containing_commit_self_binding": false,
+    "generated_at_utc": "2026-08-11T19:01:18+00:00",
+    "invocation": {
+      "argv": [
+        "--live-installed-openclaw",
+        "--json",
+        "--write-evidence",
+        "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json"
+      ],
+      "script": "scripts/openclaw-tool-capability-preflight.py"
+    },
+    "preflight_script_sha256": "71ea94cf3587cedcc3cb2700fe2ad7a801704cf29728dedb58f68b3adc0ae49c"
   },
-  "error": "runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history is missing parameters: includeTools, limit, sessionKey",
   "status": "fail"
 }
