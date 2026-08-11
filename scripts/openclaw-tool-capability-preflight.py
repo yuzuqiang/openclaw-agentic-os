@@ -892,10 +892,10 @@ def _active_entry_parameters(entry: Mapping[str, Any]) -> set[str]:
 
 
 def _adapter_tool_name(entry: Mapping[str, Any]) -> str | None:
-    for key in ("id", "name", "method"):
+    for key in ("name", "method", "id"):
         value = entry.get(key)
-        if isinstance(value, str) and value in LIVE_TOOL_NAMES:
-            return value
+        if isinstance(value, str) and value:
+            return value if value in LIVE_TOOL_NAMES else None
     return None
 
 

@@ -1820,6 +1820,30 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["tool_entry_count"], len(VALID_CATALOG["tools"]))
         self.assertEqual(payload["required_tool_names"], sorted(ACTIVE_TOOL_IDS))
 
+    def test_write_evidence_uses_adapter_alias_precedence(self) -> None:
+        preflight = load_preflight_module()
+        catalog = {
+            "tools": [
+                {
+                    "name": "sessions_spawn",
+                    "id": "sessions_status",
+                    "inputSchema": {
+                        "properties": {
+                            "client_request_id": {"type": "string"},
+                            "idempotency_key": {"type": "string"},
+                            "metadata": {"type": "object"},
+                        }
+                    },
+                }
+            ]
+        }
+
+        payload = preflight._sanitize_caller_catalog_for_evidence(catalog)
+
+        self.assertEqual(payload["catalog_kind"], "sanitized_caller_tool_catalog")
+        self.assertEqual(payload["tool_entry_count"], 1)
+        self.assertEqual(payload["required_tool_names"], ["sessions_spawn"])
+
     def test_evidence_binding_sanitizes_path_option_forms(self) -> None:
         preflight = load_preflight_module()
         root = repository_root()
