@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -144,14 +145,18 @@ def add_fake_openclaw_to_env(
     *,
     active_tool_ids=None,
     active_tool_entries=None,
+    catalog_override=None,
 ):
     bin_dir = os.path.join(directory, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     executable = os.path.join(bin_dir, "openclaw")
-    entries = active_tool_entries
-    if entries is None:
-        entries = [active_tool_entry(tool_id) for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)]
-    catalog = {"groups": [{"id": "unit", "tools": entries}]}
+    if catalog_override is None:
+        entries = active_tool_entries
+        if entries is None:
+            entries = [active_tool_entry(tool_id) for tool_id in (active_tool_ids or ACTIVE_TOOL_IDS)]
+        catalog = {"groups": [{"id": "unit", "tools": entries}]}
+    else:
+        catalog = catalog_override
     with open(executable, "w", encoding="utf-8") as handle:
         handle.write(
             "#!/usr/bin/env python3\n"
@@ -486,7 +491,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("OPENCLAW_INSTALL_ROOT", payload["error"])
         self.assertIn("valid OpenClaw runtime bundle", payload["error"])
-        self.assertNotIn("catalog", payload)
+        self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
+        self.assertIn("install_root_resolution_error", payload["catalog"])
+        self.assertEqual(
+            payload["catalog"]["catalog_capture"]["status"],
+            "catalog_unavailable_before_contract_validation",
+        )
 
     def test_isolated_candidate_openclaw_rejects_non_openclaw_package_name(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
@@ -513,7 +523,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("valid OpenClaw runtime bundle", payload["error"])
-        self.assertNotIn("catalog", payload)
+        self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
+        self.assertIn("install_root_resolution_error", payload["catalog"])
+        self.assertEqual(
+            payload["catalog"]["catalog_capture"]["status"],
+            "catalog_unavailable_before_contract_validation",
+        )
 
     def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
         evidence_dir = repository_root() / "docs" / "runtime-evidence"
@@ -658,7 +673,75 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
             self.assertEqual(status, 1)
             payload = json.loads(output.getvalue())
-            self.assertEqual(payload, {"error": "runtime missing", "status": "fail"})
+            self.assertEqual(payload["error"], "runtime missing")
+            self.assertEqual(payload["status"], "fail")
+            self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+            self.assertEqual(
+                payload["catalog"]["catalog_capture"]["status"],
+                "catalog_unavailable_before_contract_validation",
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_live_runtime_failure_evidence_records_unreadable_executable_digest(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            os.makedirs(os.path.join(install_root, "dist"))
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 1\n")
+            evidence = os.path.join(install_root, "evidence.json")
+            original_file_digest = module._file_digest
+
+            def file_digest_or_permission_error(path):
+                if path == module.Path(executable).resolve():
+                    raise PermissionError("execute-only launcher")
+                return original_file_digest(path)
+
+            output = io.StringIO()
+            with mock.patch.object(
+                module,
+                "live_installed_openclaw_catalog",
+                side_effect=module.AdapterContractError("catalog unavailable"),
+            ), mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                side_effect=file_digest_or_permission_error,
+            ), contextlib.redirect_stdout(output):
+                status = module.main(
+                    [
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ]
+                )
+
+            self.assertEqual(status, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "fail")
+            self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
+            self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
+            self.assertEqual(
+                payload["catalog"]["active_executable_sha256_error"],
+                "PermissionError",
+            )
+            self.assertNotIn("active_executable_sha256", payload["catalog"])
+            self.assertIn("preflight_evidence_binding", payload)
             with open(evidence, encoding="utf-8") as handle:
                 self.assertEqual(json.loads(handle.read()), payload)
 
@@ -705,8 +788,1260 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             serialized = json.dumps(payload, sort_keys=True)
             self.assertIn("active OpenClaw tool catalog failed", payload["error"])
             self.assertIn("payload_sha256", payload["error"])
+            self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+            self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
+            self.assertEqual(payload["catalog"]["openclaw_version"], "2026.test")
+            self.assertEqual(
+                payload["catalog"]["catalog_capture"]["status"],
+                "catalog_unavailable_before_contract_validation",
+            )
+            self.assertIn("active_executable_sha256", payload["catalog"])
+            self.assertIn("install_root_path_sha256", payload["catalog"])
             self.assertNotIn("secret-runtime-path-token", serialized)
+            self.assertNotIn(install_root, serialized)
             self.assertEqual(evidence_payload, payload)
+
+    def test_live_tools_catalog_failure_uses_prelaunch_runtime_identity(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            initial_root = os.path.join(directory, "openclaw")
+            os.makedirs(os.path.join(initial_root, "bin"), exist_ok=True)
+            with open(os.path.join(initial_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.initial"}, handle)
+            initial_executable = os.path.join(initial_root, "bin", "openclaw")
+            with open(initial_executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(1)\n")
+            os.chmod(initial_executable, 0o755)
+            with open(initial_executable, "rb") as handle:
+                expected_initial_executable_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+            def fail_catalog(*_args, **kwargs):
+                raise module.RuntimeEvidenceError(
+                    "catalog failed",
+                    catalog=kwargs.get("failure_catalog"),
+                    catalog_failure={"runtime_provenance_preserved": True},
+                )
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(initial_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(initial_executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=fail_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["openclaw_version"], "2026.initial")
+        self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
+
+    def test_live_tools_catalog_failure_uses_one_executable_snapshot(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(1)\n")
+            executable_path = module.Path(executable).resolve()
+            original_file_digest = module._file_digest
+            expected_executable_sha256 = original_file_digest(executable_path)
+            executable_digest_reads = 0
+
+            def counting_file_digest(path):
+                nonlocal executable_digest_reads
+                if path == executable_path:
+                    executable_digest_reads += 1
+                return original_file_digest(path)
+
+            def fail_catalog(*_args, **kwargs):
+                raise module.RuntimeEvidenceError(
+                    "catalog failed",
+                    catalog=kwargs.get("failure_catalog"),
+                    catalog_failure={"runtime_provenance_preserved": True},
+                )
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=executable_path,
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                side_effect=counting_file_digest,
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=fail_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(executable_digest_reads, 1)
+        self.assertEqual(catalog["active_executable_sha256"], expected_executable_sha256)
+
+    def test_live_positive_evidence_rejects_unreadable_executable_digest(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            original_file_digest = module._file_digest
+
+            def file_digest_or_permission_error(path):
+                if path == module.Path(executable).resolve():
+                    raise PermissionError("execute-only launcher")
+                return original_file_digest(path)
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                side_effect=file_digest_or_permission_error,
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+            ) as run_catalog, self.assertRaises(module.AdapterContractError) as raised:
+                module.live_installed_openclaw_catalog()
+
+        self.assertIn("active OpenClaw executable could not be hashed", str(raised.exception))
+        self.assertFalse(run_catalog.called)
+
+    def test_successful_catalog_rejects_runtime_identity_change(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            with open(executable, "rb") as handle:
+                expected_initial_executable_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+            def replace_launcher_after_catalog(*_args, **_kwargs):
+                with open(executable, "w", encoding="utf-8") as handle:
+                    handle.write("#!/usr/bin/env python3\nraise SystemExit(42)\n")
+                return {"groups": [{"id": "unit", "tools": [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]}]}
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=replace_launcher_after_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_identity_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_identity_binding",
+        )
+
+    def test_successful_catalog_rejects_runtime_identity_change_after_source_scan(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            with open(executable, "rb") as handle:
+                expected_initial_executable_sha256 = hashlib.sha256(handle.read()).hexdigest()
+            original_extract_model_tool_schemas = module._extract_model_tool_schemas
+
+            def replace_launcher_during_source_scan(root):
+                with open(executable, "w", encoding="utf-8") as handle:
+                    handle.write("#!/usr/bin/env python3\nraise SystemExit(43)\n")
+                return original_extract_model_tool_schemas(root)
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                return_value={
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                },
+            ), mock.patch.object(
+                module,
+                "_extract_model_tool_schemas",
+                side_effect=replace_launcher_during_source_scan,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_identity_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_identity_binding",
+        )
+
+    def test_successful_catalog_rejects_same_version_package_manifest_change(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            package_path = os.path.join(install_root, "package.json")
+            with open(package_path, "rb") as handle:
+                expected_initial_package_sha256 = hashlib.sha256(handle.read()).hexdigest()
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+
+            def replace_package_manifest_after_catalog(*_args, **_kwargs):
+                with open(package_path, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "name": "openclaw",
+                            "version": "2026.candidate",
+                            "main": "dist/replaced-entrypoint.js",
+                        },
+                        handle,
+                        sort_keys=True,
+                    )
+                return {
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                }
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=replace_package_manifest_after_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["package_json_sha256"], expected_initial_package_sha256)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_identity_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_identity_binding",
+        )
+
+    def test_successful_catalog_rejects_runtime_source_change_after_capture(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            os.chmod(executable, 0o755)
+            source_path = os.path.join(install_root, "dist", "openclaw-tools-candidate.js")
+
+            def replace_source_after_catalog(*_args, **_kwargs):
+                with open(source_path, "a", encoding="utf-8") as handle:
+                    handle.write("\n// same-version reinstall after tools.catalog\n")
+                return {
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                }
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=replace_source_after_catalog,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_sources_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_source_binding",
+        )
+        source_binding = catalog["runtime_source_binding"]
+        self.assertIn("dist/openclaw-tools-candidate.js", source_binding["expected_sources"])
+        self.assertIn("dist/openclaw-tools-candidate.js", source_binding["observed_sources"])
+        self.assertNotEqual(
+            source_binding["expected_sources"]["dist/openclaw-tools-candidate.js"],
+            source_binding["observed_sources"]["dist/openclaw-tools-candidate.js"],
+        )
+
+    def test_successful_catalog_rejects_runtime_source_change_during_final_identity_check(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            os.chmod(executable, 0o755)
+            source_path = os.path.join(install_root, "dist", "openclaw-tools-candidate.js")
+
+            def replace_source_during_final_identity_check(**_kwargs):
+                with open(source_path, "a", encoding="utf-8") as handle:
+                    handle.write("\n// same-version reinstall during final identity CAS\n")
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                return_value={
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                },
+            ), mock.patch.object(
+                module,
+                "_require_runtime_identity_unchanged_after_catalog",
+                side_effect=replace_source_during_final_identity_check,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_sources_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_source_binding",
+        )
+        source_binding = catalog["runtime_source_binding"]
+        self.assertIn("dist/openclaw-tools-candidate.js", source_binding["expected_sources"])
+        self.assertIn("dist/openclaw-tools-candidate.js", source_binding["observed_sources"])
+        self.assertNotEqual(
+            source_binding["expected_sources"]["dist/openclaw-tools-candidate.js"],
+            source_binding["observed_sources"]["dist/openclaw-tools-candidate.js"],
+        )
+
+    def test_source_scan_oserror_writes_fail_closed_evidence(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            os.chmod(executable, 0o755)
+            evidence = os.path.join(install_root, "evidence.json")
+
+            def scan_raises_oserror(_root):
+                raise PermissionError("runtime source disappeared")
+
+            output = io.StringIO()
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                return_value={
+                    "groups": [
+                        {
+                            "id": "unit",
+                            "tools": [
+                                active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS
+                            ],
+                        }
+                    ]
+                },
+            ), mock.patch.object(
+                module,
+                "_extract_model_tool_schemas",
+                side_effect=scan_raises_oserror,
+            ), mock.patch.object(
+                module,
+                "_capture_evidence_binding",
+                return_value={"test": "binding"},
+            ), mock.patch.object(
+                module,
+                "_require_same_evidence_binding",
+            ), contextlib.redirect_stdout(output):
+                status = module.main(
+                    [
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ]
+                )
+
+            self.assertEqual(status, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "fail")
+            self.assertIn(
+                "active OpenClaw runtime sources could not be scanned",
+                payload["error"],
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["status"],
+                "runtime_source_scan_failed",
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["validation_stage"],
+                "runtime_source_binding",
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["source_verification_error"],
+                "PermissionError",
+            )
+            self.assertIn(
+                "raw_response_sha256",
+                payload["catalog"]["active_catalog"],
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_identity_snapshot_error_writes_fail_closed_evidence(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                handle.write("{")
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+            evidence = os.path.join(install_root, "evidence.json")
+            output = io.StringIO()
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=module.Path(executable).resolve(),
+            ), mock.patch.object(
+                module,
+                "_capture_evidence_binding",
+                return_value={"test": "binding"},
+            ), mock.patch.object(
+                module,
+                "_require_same_evidence_binding",
+            ), contextlib.redirect_stdout(output):
+                status = module.main(
+                    [
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ]
+                )
+
+            self.assertEqual(status, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "fail")
+            self.assertIn("runtime identity could not be snapshotted", payload["error"])
+            self.assertEqual(
+                payload["catalog"]["catalog_capture"]["status"],
+                "runtime_identity_snapshot_failed",
+            )
+            self.assertEqual(
+                payload["catalog"]["catalog_capture"]["validation_stage"],
+                "runtime_identity_snapshot",
+            )
+            self.assertEqual(
+                payload["catalog"]["catalog_capture"]["identity_verification_error"],
+                "JSONDecodeError",
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                self.assertEqual(json.loads(handle.read()), payload)
+
+    def test_successful_catalog_validation_failure_preserves_catalog_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            evidence = os.path.join(install_root, "evidence.json")
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            duplicate_spawn = active_tool_entry("sessions_spawn")
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_entries=[duplicate_spawn, duplicate_spawn],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                    "--write-evidence",
+                    evidence,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                evidence_payload = json.loads(handle.read())
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn("duplicate sessions_spawn", payload["error"])
+            self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["status"],
+                "contract_validation_failed",
+            )
+            self.assertEqual(
+                payload["catalog"]["active_catalog"]["validation_stage"],
+                "active_tool_parameters",
+            )
+            self.assertRegex(
+                payload["catalog"]["active_catalog"]["raw_response_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertNotIn("catalog_failure", payload)
+            self.assertEqual(evidence_payload, payload)
+
+    def test_successful_non_object_catalog_preserves_catalog_provenance(self) -> None:
+        catalog = []
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            evidence = os.path.join(install_root, "evidence.json")
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                catalog_override=catalog,
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                    "--write-evidence",
+                    evidence,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            with open(evidence, encoding="utf-8") as handle:
+                evidence_payload = json.loads(handle.read())
+
+        expected_sha = hashlib.sha256(
+            json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        payload = json.loads(result.stdout)
+        serialized = json.dumps(payload, sort_keys=True)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("must be a JSON object", payload["error"])
+        self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["status"],
+            "contract_validation_failed",
+        )
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["validation_stage"],
+            "active_catalog_shape",
+        )
+        self.assertEqual(
+            payload["catalog"]["active_catalog"]["raw_response_sha256"],
+            expected_sha,
+        )
+        self.assertEqual(payload["catalog"]["active_catalog"]["observed_json_type"], "list")
+        self.assertNotIn("catalog_capture", payload["catalog"])
+        self.assertNotIn("catalog_unavailable_before_contract_validation", serialized)
+        self.assertNotIn("catalog_failure", payload)
+        self.assertEqual(evidence_payload, payload)
+
+    def test_successful_catalog_with_no_required_tools_preserves_catalog_provenance(
+        self,
+    ) -> None:
+        cases = {
+            "empty_object": {},
+            "unrelated_tool": {
+                "groups": [
+                    {
+                        "id": "unit",
+                        "tools": [
+                            {
+                                "id": "unrelated.tool",
+                                "inputSchema": {"properties": {"token": {"type": "string"}}},
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+        for name, catalog in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as install_root:
+                write_contract_candidate_dist(install_root)
+                evidence = os.path.join(install_root, "evidence.json")
+                env = dict(os.environ)
+                env["OPENCLAW_INSTALL_ROOT"] = install_root
+                add_fake_openclaw_to_env(
+                    env,
+                    install_root,
+                    catalog_override=catalog,
+                )
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--live-installed-openclaw",
+                        "--json",
+                        "--write-evidence",
+                        evidence,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                with open(evidence, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                expected_sha = hashlib.sha256(
+                    json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                payload = json.loads(result.stdout)
+                serialized = json.dumps(payload, sort_keys=True)
+
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("did not expose required tools", payload["error"])
+                self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["status"],
+                    "contract_validation_failed",
+                )
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["validation_stage"],
+                    "active_tool_parameters",
+                )
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["raw_response_sha256"],
+                    expected_sha,
+                )
+                self.assertEqual(
+                    payload["catalog"]["active_catalog"]["required_tool_names"],
+                    [],
+                )
+                self.assertIn("active_executable_sha256", payload["catalog"])
+                self.assertNotIn("catalog_capture", payload["catalog"])
+                self.assertNotIn("catalog_unavailable_before_contract_validation", serialized)
+                self.assertNotIn("catalog_failure", payload)
+                self.assertEqual(evidence_payload, payload)
+
+    def test_evidence_binding_redacts_inline_catalog_json(self) -> None:
+        private_marker = "sk-private-inline-catalog-token"
+        catalog = json.loads(json.dumps(VALID_CATALOG))
+        catalog["private_runtime_metadata"] = {"token": private_marker}
+        catalog_json = json.dumps(catalog, sort_keys=True)
+        expected_digest = hashlib.sha256(catalog_json.encode("utf-8")).hexdigest()
+        expected_catalog_digest = hashlib.sha256(
+            json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        cases = (
+            (
+                "separate",
+                ["--catalog-json", catalog_json],
+                ["--catalog-json", f"<redacted:--catalog-json:sha256:{expected_digest}>"],
+            ),
+            (
+                "equals",
+                [f"--catalog-json={catalog_json}"],
+                [f"--catalog-json=<redacted:sha256:{expected_digest}>"],
+            ),
+        )
+        for name, catalog_args, expected_items in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                evidence_path = os.path.join(directory, "evidence.json")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        *catalog_args,
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with open(evidence_path, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload, evidence_payload)
+                argv = payload["preflight_evidence_binding"]["invocation"]["argv"]
+                serialized_argv = json.dumps(argv, sort_keys=True)
+                for item in expected_items:
+                    self.assertIn(item, argv)
+                self.assertNotIn(catalog_json, serialized_argv)
+                self.assertNotIn(private_marker, serialized_argv)
+                serialized_payload = json.dumps(payload, sort_keys=True)
+                self.assertEqual(
+                    payload["catalog"]["catalog_kind"],
+                    "sanitized_caller_tool_catalog",
+                )
+                self.assertEqual(
+                    payload["catalog"]["raw_catalog_sha256"],
+                    expected_catalog_digest,
+                )
+                self.assertEqual(
+                    payload["catalog"]["required_tool_names"],
+                    sorted(ACTIVE_TOOL_IDS),
+                )
+                self.assertNotIn(catalog_json, serialized_payload)
+                self.assertNotIn(private_marker, serialized_payload)
+
+    def test_write_evidence_sanitizes_catalog_json_file_payload(self) -> None:
+        private_marker = "sk-private-file-catalog-token"
+        catalog = json.loads(json.dumps(VALID_CATALOG))
+        catalog["private_runtime_metadata"] = {
+            "token": private_marker,
+            "path": "/private/customer/runtime",
+        }
+        expected_digest = hashlib.sha256(
+            json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = os.path.join(directory, "catalog.json")
+            evidence_path = os.path.join(directory, "evidence.json")
+            with open(catalog_path, "w", encoding="utf-8") as handle:
+                json.dump(catalog, handle, sort_keys=True)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--catalog-json-file",
+                    catalog_path,
+                    "--json",
+                    "--write-evidence",
+                    evidence_path,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            with open(evidence_path, encoding="utf-8") as handle:
+                evidence_payload = json.loads(handle.read())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload, evidence_payload)
+        serialized_payload = json.dumps(payload, sort_keys=True)
+        self.assertEqual(payload["catalog"]["catalog_kind"], "sanitized_caller_tool_catalog")
+        self.assertEqual(payload["catalog"]["raw_catalog_sha256"], expected_digest)
+        self.assertEqual(payload["catalog"]["tool_entry_count"], len(VALID_CATALOG["tools"]))
+        self.assertNotIn(private_marker, serialized_payload)
+        self.assertNotIn("/private/customer/runtime", serialized_payload)
+
+    def test_write_evidence_sanitizes_mapping_catalog_payloads(self) -> None:
+        def mapping_catalog() -> dict[str, dict[str, object]]:
+            return {
+                tool["name"]: {
+                    key: json.loads(json.dumps(value))
+                    for key, value in tool.items()
+                    if key != "name"
+                }
+                for tool in VALID_CATALOG["tools"]
+            }
+
+        cases = {
+            "tools_mapping": {"tools": mapping_catalog()},
+            "root_mapping": mapping_catalog(),
+        }
+        for name, catalog in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                evidence_path = os.path.join(directory, "evidence.json")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--catalog-json",
+                        json.dumps(catalog),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with open(evidence_path, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload, evidence_payload)
+                self.assertEqual(payload["catalog"]["catalog_kind"], "sanitized_caller_tool_catalog")
+                self.assertEqual(payload["catalog"]["tool_entry_count"], len(VALID_CATALOG["tools"]))
+                self.assertEqual(
+                    payload["catalog"]["required_tool_names"],
+                    sorted(ACTIVE_TOOL_IDS),
+                )
+
+    def test_write_evidence_uses_mapping_keys_over_value_identity_aliases(self) -> None:
+        private_marker = "sk-private-mapping-alias-token"
+        preflight = load_preflight_module()
+
+        def mapping_catalog() -> dict[str, dict[str, object]]:
+            catalog: dict[str, dict[str, object]] = {}
+            for tool in VALID_CATALOG["tools"]:
+                entry = {
+                    key: json.loads(json.dumps(value))
+                    for key, value in tool.items()
+                    if key != "name"
+                }
+                entry["name"] = "sessions_list"
+                entry["id"] = "sessions_list"
+                entry["method"] = "sessions_list"
+                entry["private_runtime_metadata"] = private_marker
+                catalog[tool["name"]] = entry
+            return catalog
+
+        cases = {
+            "tools_mapping": {"tools": mapping_catalog()},
+            "root_mapping": mapping_catalog(),
+        }
+        for name, catalog in cases.items():
+            with self.subTest(name=name):
+                payload = preflight._sanitize_caller_catalog_for_evidence(catalog)
+                self.assertEqual(
+                    payload["catalog_kind"],
+                    "sanitized_caller_tool_catalog",
+                )
+                self.assertEqual(
+                    payload["raw_catalog_sha256"],
+                    hashlib.sha256(
+                        json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode(
+                            "utf-8"
+                        )
+                    ).hexdigest(),
+                )
+                self.assertEqual(
+                    payload["tool_entry_count"],
+                    len(VALID_CATALOG["tools"]),
+                )
+                self.assertEqual(
+                    payload["required_tool_names"],
+                    sorted(ACTIVE_TOOL_IDS),
+                )
+                serialized_payload = json.dumps(payload, sort_keys=True)
+                self.assertNotIn(private_marker, serialized_payload)
+                self.assertNotIn(json.dumps(catalog), serialized_payload)
+
+    def test_write_evidence_summarizes_method_only_catalog_entries(self) -> None:
+        catalog = {
+            "tools": [
+                {
+                    **{
+                        key: json.loads(json.dumps(value))
+                        for key, value in tool.items()
+                        if key != "name"
+                    },
+                    "method": tool["name"],
+                }
+                for tool in VALID_CATALOG["tools"]
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--catalog-json",
+                    json.dumps(catalog),
+                    "--json",
+                    "--write-evidence",
+                    evidence_path,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            with open(evidence_path, encoding="utf-8") as handle:
+                evidence_payload = json.loads(handle.read())
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload, evidence_payload)
+        self.assertEqual(payload["catalog"]["catalog_kind"], "sanitized_caller_tool_catalog")
+        self.assertEqual(payload["catalog"]["tool_entry_count"], len(VALID_CATALOG["tools"]))
+        self.assertEqual(
+            payload["catalog"]["required_tool_names"],
+            sorted(ACTIVE_TOOL_IDS),
+        )
+
+    def test_write_evidence_matches_adapter_string_filtered_aliases(self) -> None:
+        preflight = load_preflight_module()
+        catalog = {
+            "tools": [
+                {
+                    **{
+                        key: json.loads(json.dumps(value))
+                        for key, value in tool.items()
+                        if key != "name"
+                    },
+                    "id": ["not", "a", "string"],
+                    "name": 123,
+                    "method": tool["name"],
+                }
+                for tool in VALID_CATALOG["tools"]
+            ]
+        }
+
+        payload = preflight._sanitize_caller_catalog_for_evidence(catalog)
+
+        self.assertEqual(payload["catalog_kind"], "sanitized_caller_tool_catalog")
+        self.assertEqual(payload["tool_entry_count"], len(VALID_CATALOG["tools"]))
+        self.assertEqual(payload["required_tool_names"], sorted(ACTIVE_TOOL_IDS))
+
+    def test_write_evidence_uses_adapter_alias_precedence(self) -> None:
+        preflight = load_preflight_module()
+        catalog = {
+            "tools": [
+                {
+                    "name": "sessions_spawn",
+                    "id": "sessions_status",
+                    "inputSchema": {
+                        "properties": {
+                            "client_request_id": {"type": "string"},
+                            "idempotency_key": {"type": "string"},
+                            "metadata": {"type": "object"},
+                        }
+                    },
+                }
+            ]
+        }
+
+        payload = preflight._sanitize_caller_catalog_for_evidence(catalog)
+
+        self.assertEqual(payload["catalog_kind"], "sanitized_caller_tool_catalog")
+        self.assertEqual(payload["tool_entry_count"], 1)
+        self.assertEqual(payload["required_tool_names"], ["sessions_spawn"])
+
+    def test_evidence_binding_sanitizes_path_option_forms(self) -> None:
+        preflight = load_preflight_module()
+        root = repository_root()
+        cases = (
+            (
+                "catalog_equals",
+                "sk-private-customer-catalog-equals.json",
+                "sk-private-customer-evidence-separate.json",
+            ),
+            (
+                "write_equals",
+                "sk-private-customer-catalog-separate.json",
+                "sk-private-customer-evidence-equals.json",
+            ),
+        )
+        for name, catalog_name, evidence_name in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                private_dir = os.path.join(directory, "private-user-path")
+                os.makedirs(private_dir)
+                catalog_path = os.path.join(private_dir, catalog_name)
+                evidence_path = os.path.join(private_dir, evidence_name)
+                redacted_catalog_path = preflight._display_path(root, catalog_path)
+                redacted_evidence_path = preflight._display_path(root, evidence_path)
+                with open(catalog_path, "w", encoding="utf-8") as handle:
+                    json.dump(VALID_CATALOG, handle)
+
+                if name == "catalog_equals":
+                    args = [
+                        f"--catalog-json-file={catalog_path}",
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ]
+                    expected_catalog_arg = f"--catalog-json-file={redacted_catalog_path}"
+                    expected_evidence_items = ["--write-evidence", redacted_evidence_path]
+                else:
+                    args = [
+                        "--catalog-json-file",
+                        catalog_path,
+                        "--json",
+                        f"--write-evidence={evidence_path}",
+                    ]
+                    expected_catalog_arg = redacted_catalog_path
+                    expected_evidence_items = [f"--write-evidence={redacted_evidence_path}"]
+
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), *args],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with open(evidence_path, encoding="utf-8") as handle:
+                    evidence_payload = json.loads(handle.read())
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload, evidence_payload)
+                argv = payload["preflight_evidence_binding"]["invocation"]["argv"]
+                serialized = json.dumps(argv, sort_keys=True)
+                self.assertIn(expected_catalog_arg, argv)
+                for item in expected_evidence_items:
+                    self.assertIn(item, argv)
+                self.assertNotIn(private_dir, serialized)
+                self.assertNotIn(directory, serialized)
+                self.assertNotIn(catalog_name, serialized)
+                self.assertNotIn(evidence_name, serialized)
+
+    def test_write_evidence_rejects_abbreviated_path_options(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            private_dir = os.path.join(directory, "private-user-path")
+            os.makedirs(private_dir)
+            catalog_path = os.path.join(private_dir, "catalog.json")
+            evidence_path = os.path.join(private_dir, "evidence.json")
+            with open(catalog_path, "w", encoding="utf-8") as handle:
+                json.dump(VALID_CATALOG, handle)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    f"--catalog-json-f={catalog_path}",
+                    "--json",
+                    "--write-e",
+                    evidence_path,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unrecognized arguments", result.stderr)
+            self.assertFalse(os.path.exists(evidence_path))
+
+    def test_write_evidence_refuses_dirty_worktree_before_git_binding(self) -> None:
+        root = repository_root()
+        dirty_path = root / ".preflight-dirty-worktree-test"
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            try:
+                dirty_path.write_text("dirty\n", encoding="utf-8")
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--catalog-json",
+                        json.dumps(VALID_CATALOG),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    dirty_path.unlink()
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "refusing to write exact-head evidence from a dirty Git worktree",
+                result.stderr,
+            )
+            self.assertFalse(os.path.exists(evidence_path))
+
+    def test_write_evidence_refuses_missing_git_revisions(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            output = io.StringIO()
+
+            with mock.patch.object(
+                module,
+                "_git_rev_parse",
+                return_value=None,
+            ), mock.patch.object(
+                module,
+                "_git_status_porcelain",
+                return_value="",
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                return_value="d" * 64,
+            ), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                module.main(
+                    [
+                        "--catalog-json",
+                        json.dumps(VALID_CATALOG),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ]
+                )
+
+            self.assertIn("cannot verify Git revision HEAD", str(raised.exception))
+            self.assertFalse(os.path.exists(evidence_path))
+
+    def test_write_evidence_refuses_git_identity_change_before_write(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = os.path.join(directory, "evidence.json")
+            output = io.StringIO()
+            head_values = iter(("a" * 40, "b" * 40))
+            tree_values = iter(("c" * 40, "c" * 40))
+
+            def changed_rev_parse(_root, revision):
+                if revision == "HEAD":
+                    return next(head_values)
+                if revision == "HEAD^{tree}":
+                    return next(tree_values)
+                raise AssertionError(f"unexpected revision {revision}")
+
+            with mock.patch.object(
+                module,
+                "_git_rev_parse",
+                side_effect=changed_rev_parse,
+            ), mock.patch.object(
+                module,
+                "_git_status_porcelain",
+                return_value="",
+            ), mock.patch.object(
+                module,
+                "_file_digest",
+                return_value="d" * 64,
+            ), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+                module.main(
+                    [
+                        "--catalog-json",
+                        json.dumps(VALID_CATALOG),
+                        "--json",
+                        "--write-evidence",
+                        evidence_path,
+                    ]
+                )
+
+            self.assertIn("Git identity changed", str(raised.exception))
+            self.assertFalse(os.path.exists(evidence_path))
 
     def test_live_installed_openclaw_catalog_rejects_display_only_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:

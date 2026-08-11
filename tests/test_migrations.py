@@ -7897,8 +7897,13 @@ class MigrationTests(unittest.TestCase):
         latest_migration_digest = hashlib.sha256(
             (repository_root() / "migrations" / manifest["migrations"][-1]["file"]).read_bytes()
         ).hexdigest()
-        self.assertIn("has **not** yet passed fresh independent", readme)
-        self.assertIn("revalidation", readme)
+        self.assertIn("still required before it can be", readme)
+        self.assertIn("final exact-head", readme)
+        self.assertIn("Phase C revalidation", readme)
+        self.assertIn(
+            "docs/runtime-evidence/phase-b-revalidation-20260809.json", readme
+        )
+        self.assertNotIn("has **not** yet passed fresh independent", readme)
         self.assertIn(
             "Last independently accepted design artifact SHA-256: "
             "`fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`",
