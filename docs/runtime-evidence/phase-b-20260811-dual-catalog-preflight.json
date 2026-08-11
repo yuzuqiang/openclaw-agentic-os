@@ -1,0 +1,210 @@
+{
+  "catalog": {
+    "active_catalog": {
+      "method": "tools.catalog",
+      "raw_response_sha256": "de3a8aa7c86b93928c2d67aff3a367ab6d111a7b49b50d7a355cee74161766e6",
+      "required_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ]
+    },
+    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
+    "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
+    "catalog_kind": "sanitized_openclaw_runtime",
+    "gateway_rpc_catalog": {
+      "authority": "installed_runtime_dist_sources",
+      "catalog_kind": "source_bound_gateway_rpc_catalog",
+      "source_bound_rpc_names": [
+        "subagents.allowLease.acquire",
+        "subagents.allowLease.release",
+        "subagents.allowLease.status"
+      ],
+      "status": "registration_corroborated",
+      "status_corroboration": {
+        "allowAgents_count": 3,
+        "leases_count": 1,
+        "method": "subagents.allowLease.status",
+        "non_mutating": true,
+        "ok": true,
+        "raw_response_sha256": "916e23abb63daa727f7921b1a6138b2eca0a461cc939a071b453fb5bdc03f38d",
+        "status": "ok",
+        "writeMode": "memory"
+      },
+      "tools": [
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.acquire",
+          "parameters": [
+            "agentId",
+            "requesterAgentId",
+            "ttlMs"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.status",
+          "parameters": [
+            "requesterAgentId"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.release",
+          "parameters": [
+            "leaseId"
+          ],
+          "schema_source": "gateway_server_method_params"
+        }
+      ]
+    },
+    "install_root_basename": "openclaw",
+    "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
+    "model_tool_catalog": {
+      "authority": "tools.catalog",
+      "catalog_kind": "model_callable_tools_catalog",
+      "method": "tools.catalog",
+      "raw_response_sha256": "de3a8aa7c86b93928c2d67aff3a367ab6d111a7b49b50d7a355cee74161766e6",
+      "required_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
+      "tools": [
+        {
+          "active_parameters": [],
+          "catalog_surface": "model_tool",
+          "name": "sessions_spawn",
+          "parameters": [],
+          "schema_source": "model_tool_schema"
+        },
+        {
+          "active_parameters": [],
+          "catalog_surface": "model_tool",
+          "name": "sessions_list",
+          "parameters": [],
+          "schema_source": "declared_tool_name"
+        },
+        {
+          "active_parameters": [],
+          "catalog_surface": "model_tool",
+          "name": "sessions_history",
+          "parameters": [],
+          "schema_source": "declared_tool_name"
+        },
+        {
+          "active_parameters": [],
+          "catalog_surface": "model_tool",
+          "name": "session_status",
+          "parameters": [],
+          "schema_source": "declared_tool_name"
+        }
+      ]
+    },
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.7.1",
+    "package_json_sha256": "aa481474c58c5be5e14513e622d7720fd54f896d6c32da70250d8b6310586153",
+    "required_canonical_session_status_method": "sessions_status",
+    "runtime_target": "live_installed_openclaw",
+    "sources": [
+      {
+        "path": "dist/core-descriptors-DRUtdasO.js",
+        "sha256": "d46b52766e66bef7995275c55a87a9971c906918bade604baa931bc62b20f419"
+      },
+      {
+        "path": "dist/openclaw-tools-CIBcX9Ku.js",
+        "sha256": "a2b93887aa43e263b978edcad73151092631cea74e977358f69c600c7b2f390c"
+      },
+      {
+        "path": "dist/server-methods-C4KugcqZ.js",
+        "sha256": "d597cfe0f30c5fff5b9be54cff0538bebce19e8729375b8d9a741a922ffc3be5"
+      }
+    ],
+    "status_alias_requirement": {
+      "db_authority_requirement": "future_db_authority_requires_canonical_sessions_status",
+      "future_canonical_status_alias_available": false,
+      "future_canonical_status_method": "sessions_status",
+      "legacy_status_alias": "session_status",
+      "observed_model_status_aliases": [
+        "session_status"
+      ]
+    },
+    "tools": [
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.acquire",
+        "parameters": [
+          "agentId",
+          "requesterAgentId",
+          "ttlMs"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.status",
+        "parameters": [
+          "requesterAgentId"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.release",
+        "parameters": [
+          "leaseId"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "active_parameters": [],
+        "catalog_surface": "model_tool",
+        "name": "sessions_spawn",
+        "parameters": [],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "active_parameters": [],
+        "catalog_surface": "model_tool",
+        "name": "sessions_list",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      },
+      {
+        "active_parameters": [],
+        "catalog_surface": "model_tool",
+        "name": "sessions_history",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      },
+      {
+        "active_parameters": [],
+        "catalog_surface": "model_tool",
+        "name": "session_status",
+        "parameters": [],
+        "schema_source": "declared_tool_name"
+      }
+    ]
+  },
+  "error": "runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history is missing parameters: includeTools, limit, sessionKey",
+  "preflight_evidence_binding": {
+    "agentic_os_head_sha": "1d3f3a5270e3a3ad14d76fa5a6f70872da646a6f",
+    "agentic_os_tree_sha": "d0ce06bd076b1826a0dbdd511977cebc8d063289",
+    "generated_at_utc": "2026-08-11T12:40:34+00:00",
+    "invocation": {
+      "argv": [
+        "--live-installed-openclaw",
+        "--json",
+        "--write-evidence",
+        "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json"
+      ],
+      "script": "scripts/openclaw-tool-capability-preflight.py"
+    },
+    "preflight_script_sha256": "73bfcc3040521b42f76c18fc8a2c2f5a055662bfce9d625ac45ca1bfb8c88913"
+  },
+  "status": "fail"
+}

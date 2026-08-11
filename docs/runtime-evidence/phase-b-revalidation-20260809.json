@@ -47,8 +47,14 @@
   "runtime_evidence": {
     "fresh_installed_negative_preflight": {
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
-      "status": "fail"
+      "sha256": "7314638fefbb5089c8d46d58cb7a14a493923079d1757543228f78533ce41fa0",
+      "status": "superseded",
+      "superseded_by": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json"
+    },
+    "live_split_catalog_preflight": {
+      "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
+      "sha256": "dc4b0eab1121709bf7cc3dece729d155a55fea7ef7ceed90eaf9da0b6e36a356",
+      "status": "fail_closed_future_contract"
     },
     "installed_2026_7_1_negative_baseline": {
       "path": "docs/runtime-evidence/phase233549-round2-installed-2026-7-1-negative-baseline.json",
