@@ -341,6 +341,28 @@ def assert_preflighted_runtime_authority(payload: Mapping[str, Any]) -> None:
             or not _is_sha256(status_corroboration.get("raw_response_sha256"))
         ):
             errors.append("runtime Gateway status corroboration is not live-proven")
+        else:
+            status_live_probe: Mapping[str, Any] | None = None
+            rpc_evidence = gateway_catalog.get("rpc_evidence")
+            if isinstance(rpc_evidence, Sequence) and not isinstance(
+                rpc_evidence, (str, bytes, bytearray)
+            ):
+                for item in rpc_evidence:
+                    if (
+                        isinstance(item, Mapping)
+                        and item.get("name") == "subagents.allowLease.status"
+                        and isinstance(item.get("live_probe"), Mapping)
+                    ):
+                        status_live_probe = item["live_probe"]
+                        break
+            if (
+                status_live_probe is None
+                or dict(status_corroboration) != dict(status_live_probe)
+            ):
+                errors.append(
+                    "runtime Gateway status corroboration must exactly match the "
+                    "status RPC method-bound live probe"
+                )
 
     try:
         aggregate_entries = _tool_entries(catalog)

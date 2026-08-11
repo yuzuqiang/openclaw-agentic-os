@@ -161,6 +161,7 @@ def verified_runtime_envelope() -> dict[str, Any]:
                     "live_reachability": "reachable",
                     "method": "subagents.allowLease.status",
                     "raw_response_sha256": "b" * 64,
+                    "request_semantics": "read_only_request",
                     "status": "ok",
                 },
                 "tools": gateway_tools,
@@ -520,6 +521,17 @@ class OpenClawAdapterTests(unittest.TestCase):
         del status["live_probe"]
 
         with self.assertRaisesRegex(AdapterContractError, "method-bound live probe"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_status_corroboration_probe_mismatch(
+        self,
+    ) -> None:
+        payload = verified_runtime_envelope()
+        payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+            "raw_response_sha256"
+        ] = "e" * 64
+
+        with self.assertRaisesRegex(AdapterContractError, "must exactly match"):
             OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
 
     def test_session_tool_catalog_preflight_rejects_missing_history_parameter(self) -> None:
