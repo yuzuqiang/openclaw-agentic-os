@@ -1,22 +1,4 @@
 {
-  "historical_github_review_binding": {
-    "binding_source": "GitHub PR #38 review threads fetched before edit on 2026-08-09. This record is historical evidence for an earlier candidate and is not a final exact-head acceptance receipt for the current Draft successor.",
-    "codex_required_rework_count_before_fix": 5,
-    "review_comment_ids": [
-      3743593406,
-      3743593411,
-      3743593414,
-      3743656099,
-      3743656102
-    ],
-    "historical_candidate_parent_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
-    "historical_candidate_sha": "7f1453769fddee1ea482c6f32ef506b4d16b9733",
-    "historical_candidate_tree_sha": "30f122ae32335c51de8eb23740497468307f3fdd"
-  },
-  "current_successor_revalidation": {
-    "required_before_independent_acceptance": true,
-    "reason": "This Draft remediation changed the status/evidence contract after the historical pass; final Phase C must bind the pushed PR head externally before the design is independently accepted."
-  },
   "completion_gate_receipt": {
     "created_at": "2026-08-09T10:29:13Z",
     "independent_verifier_report_sha256": "15a4bebbcecd0354d7d6486c96a145dbf33cd4805528afbb5b09bf91a7718a87",
@@ -33,6 +15,10 @@
       "git diff --check origin/main...HEAD"
     ]
   },
+  "current_successor_revalidation": {
+    "reason": "This Draft remediation changed the status/evidence contract after the historical pass; final Phase C must bind the pushed PR head externally before the design is independently accepted.",
+    "required_before_independent_acceptance": true
+  },
   "db_authority_enabled": false,
   "design_status": "historical_revalidation_superseded_by_current_draft_remediation",
   "file_hashes": {
@@ -41,14 +27,29 @@
     "migration_manifest_sha256": "c5e193b83c7d57969297bf4f7933a97a9e5a55cdba65a6a0ebd4292ab1bd6185",
     "readme_sha256": "c09265a3095ca50297e475d62c342d43b548eb5a770f0ad76a7dd82a2abb6ac1"
   },
+  "historical_github_review_binding": {
+    "binding_source": "GitHub PR #38 review threads fetched before edit on 2026-08-09. This record is historical evidence for an earlier candidate and is not a final exact-head acceptance receipt for the current Draft successor.",
+    "codex_required_rework_count_before_fix": 5,
+    "historical_candidate_parent_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
+    "historical_candidate_sha": "7f1453769fddee1ea482c6f32ef506b4d16b9733",
+    "historical_candidate_tree_sha": "30f122ae32335c51de8eb23740497468307f3fdd",
+    "review_comment_ids": [
+      3743593406,
+      3743593411,
+      3743593414,
+      3743656099,
+      3743656102
+    ]
+  },
+  "historical_origin_main_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
   "production_behavior_proven": false,
   "revalidated_at": "2026-08-09",
-  "historical_origin_main_sha": "fa79a7ea4235a2c822e51052649f982f61c962e7",
   "runtime_evidence": {
     "fresh_installed_negative_preflight": {
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
-      "status": "fail"
+      "sha256": "9373b0c673d5e55fdabe66d609de12777158c25516dd5c59f8194643e0d30604",
+      "status": "superseded",
+      "superseded_by": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json"
     },
     "installed_2026_7_1_negative_baseline": {
       "path": "docs/runtime-evidence/phase233549-round2-installed-2026-7-1-negative-baseline.json",
@@ -66,6 +67,12 @@
       "path": "docs/runtime-evidence/issue35-live-openclaw-20260721.json",
       "status": "fail"
     },
+    "live_split_catalog_preflight": {
+      "authority_note": "committed audit evidence only; Phase C must replay exact PR head",
+      "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
+      "sha256": "fb6a4cacf52dc37d8635ede298029ccaefe5f1f8f0be40119acd8b42ff74fa1b",
+      "status": "fail_closed_future_contract"
+    },
     "real_gateway_contract": {
       "agentic_os_head_sha": "7a889ecb2f1339dcdafed9880f4c035760b208c8",
       "current_head_evidence_required": true,
@@ -76,11 +83,11 @@
   },
   "status": "superseded",
   "verification": {
-    "database_authority": "src/agentic_os/__init__.py keeps DB_AUTHORITY_ENABLED = False",
-    "focused_runtime_and_status_contracts": "pass: tests.test_current_status, tests.test_ci_contract, tests.test_openclaw_real_gateway_contract_probe, tests.test_openclaw_tool_capability_preflight, tests.test_openclaw_live_accepted_session_probe",
     "compileall": "pass: PYTHONPYCACHEPREFIX=<external-pycache> PYTHONPATH=src python3 -m compileall -q src tests",
     "completion_gate": "historical pass summarized by completion_gate_receipt; current Draft successor requires a fresh final exact-head Phase C gate",
+    "database_authority": "src/agentic_os/__init__.py keeps DB_AUTHORITY_ENABLED = False",
     "diff_check": "pass: git diff --check origin/main...HEAD",
+    "focused_runtime_and_status_contracts": "pass: tests.test_current_status, tests.test_ci_contract, tests.test_openclaw_real_gateway_contract_probe, tests.test_openclaw_tool_capability_preflight, tests.test_openclaw_live_accepted_session_probe",
     "full_unittest_discovery": "historical pass: PYTHONPATH=src python3 -m unittest discover -s tests -v (680 tests); current Draft successor must be revalidated after remediation",
     "migration_package_parity": "pass: packaged assets, package resources, manifest readability",
     "privacy_preflight": "pass",

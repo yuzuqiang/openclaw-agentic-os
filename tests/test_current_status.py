@@ -112,13 +112,24 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["runtime_evidence"]["fresh_installed_negative_preflight"]["status"],
-            "fail",
+            "superseded",
         )
         negative_preflight = payload["runtime_evidence"]["fresh_installed_negative_preflight"]
         negative_preflight_path = root / negative_preflight["path"]
         self.assertEqual(
             negative_preflight["sha256"],
             hashlib.sha256(negative_preflight_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            negative_preflight["superseded_by"],
+            "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
+        )
+        split_preflight = payload["runtime_evidence"]["live_split_catalog_preflight"]
+        split_preflight_path = root / split_preflight["path"]
+        self.assertEqual(split_preflight["status"], "fail_closed_future_contract")
+        self.assertEqual(
+            split_preflight["sha256"],
+            hashlib.sha256(split_preflight_path.read_bytes()).hexdigest(),
         )
 
     def test_installed_negative_baseline_preserves_runtime_provenance(self) -> None:
@@ -130,7 +141,17 @@ class CurrentStatusTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
-        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(payload["status"], "superseded")
+        self.assertEqual(payload["original_status"], "fail")
+        self.assertIn("false negative", payload["retraction_reason"])
+        self.assertEqual(
+            payload["superseded_by"]["path"],
+            "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
+        )
+        self.assertEqual(
+            payload["superseded_by"]["status"],
+            "fail_closed_future_contract",
+        )
         self.assertEqual(
             payload["catalog"]["runtime_target"],
             "installed_openclaw_negative_baseline",
@@ -150,6 +171,10 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertTrue(payload["catalog_failure"]["runtime_provenance_preserved"])
         self.assertEqual(payload["catalog_failure"]["returncode"], 1)
+        self.assertEqual(
+            payload["preflight_evidence_binding_status"],
+            "historical_original_capture_not_current_authority",
+        )
         binding = payload["preflight_evidence_binding"]
         self.assertRegex(binding["agentic_os_head_sha"], r"^[0-9a-f]{40}$")
         self.assertRegex(binding["agentic_os_tree_sha"], r"^[0-9a-f]{40}$")
@@ -169,6 +194,91 @@ class CurrentStatusTests(unittest.TestCase):
             "active_executable_sha256",
         ):
             self.assertRegex(payload["catalog"][key], r"^[0-9a-f]{64}$")
+
+    def test_live_split_catalog_preflight_preserves_dual_catalog_boundary(self) -> None:
+        root = repository_root()
+        payload = json.loads(
+            (
+                root
+                / "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(payload["status"], "fail")
+        self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+        self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
+        self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
+        self.assertEqual(
+            payload["catalog"]["model_tool_catalog"]["authority"],
+            "tools.catalog",
+        )
+        self.assertEqual(
+            payload["catalog"]["model_tool_catalog"]["required_tool_names"],
+            ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
+        )
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["source_bound_rpc_names"],
+            [
+                "subagents.allowLease.acquire",
+                "subagents.allowLease.release",
+                "subagents.allowLease.status",
+            ],
+        )
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status"],
+            "registration_corroborated",
+        )
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+                "method"
+            ],
+            "subagents.allowLease.status",
+        )
+        self.assertTrue(
+            payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+                "non_mutating"
+            ]
+        )
+        self.assertEqual(
+            payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+                "status"
+            ],
+            "ok",
+        )
+        self.assertEqual(
+            payload["catalog"]["status_alias_requirement"][
+                "future_canonical_status_method"
+            ],
+            "sessions_status",
+        )
+        self.assertFalse(
+            payload["catalog"]["status_alias_requirement"][
+                "future_canonical_status_alias_available"
+            ]
+        )
+        self.assertEqual(
+            payload["catalog"]["status_alias_requirement"][
+                "future_canonical_status_method_status"
+            ],
+            "missing_from_model_callable_tools_catalog",
+        )
+        self.assertFalse(
+            payload["catalog"]["future_db_authority_contract"]["db_authority_enabled"]
+        )
+        self.assertIn(
+            "accepted_session_identity_requirement",
+            payload["catalog"]["future_db_authority_contract"],
+        )
+        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertNotIn(
+            "runtime tool catalog is missing subagents.allowLease",
+            payload["error"],
+        )
+        self.assertNotIn("preflight_evidence_binding", payload)
+        binding = payload["committed_audit_evidence_binding"]
+        self.assertFalse(binding["exact_head_authority"])
+        self.assertTrue(binding["phase_c_required"])
+        self.assertIn("Phase C must replay", binding["review_head_policy"])
 
 
 if __name__ == "__main__":

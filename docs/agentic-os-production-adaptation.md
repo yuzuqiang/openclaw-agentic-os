@@ -23,8 +23,10 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-08-11: Corrected the installed-runtime preflight evidence model after Phase A found a combined-catalog false negative:
+  - Corrections: `scripts/openclaw-tool-capability-preflight.py` now separates model-callable `tools.catalog` evidence from source-bound Gateway RPC evidence, and still records source-bound Gateway evidence if the model-callable catalog is temporarily unavailable. Gateway allowLease registration is corroborated only through the non-mutating `subagents.allowLease.status` call. The 2026-08-09 installed-runtime negative baseline is retained but marked superseded/retracted as a false negative for allowLease RPC availability. New split-catalog audit evidence shows OpenClaw 2026.7.1 has source-bound `subagents.allowLease.acquire/status/release` registration and status returns `ok=true`, `writeMode=memory`; the preflight still fails closed on the future metadata/idempotency/full-owner fields, missing `sessions_spawn` metadata fields, and the future canonical `sessions_status` alias. The committed JSON is audit history, not exact-head authority; Phase C must replay the preflight against the exact PR head. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-09: Revalidated the corrected Round 11 design boundary against exact `origin/main` `fa79a7ea4235a2c822e51052649f982f61c962e7` and the merged PR #36/#37 runtime evidence:
-  - Corrections: README and this document no longer treat historical evidence as final proof for the current Draft successor head. The remediation keeps production authority unproven: committed live installed OpenClaw 2026.7.1 evidence still fails closed, the fresh installed-runtime negative preflight in `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also fails closed before a contract proof, PR #37's real-Gateway snapshot remains a non-authoritative last-run snapshot bound to an older Agentic OS head, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
+  - Corrections: README and this document no longer treat historical evidence as final proof for the current Draft successor head. The remediation keeps production authority unproven: committed live installed OpenClaw 2026.7.1 evidence still fails closed, the fresh installed-runtime negative preflight in `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also failed closed before a contract proof and is now superseded by split-catalog evidence, PR #37's real-Gateway snapshot remains a non-authoritative last-run snapshot bound to an older Agentic OS head, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-07-18: Added the local fail-closed trust promotion writer and migration v13 binding overlay:
   - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete local-writer SLO PASS audit rows at or after the bound gate clock, append-only SLO evidence events after all runtime SLO inputs, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence with immutable approval hashes, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
 - 2026-07-21: Synced the project truth boundary and added a non-vacuous CI contract:
@@ -115,9 +117,23 @@ Current-vs-proposed truth:
   session authority.
 - The 2026-08-09 installed-runtime negative preflight evidence in
   `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`
-  failed closed before a usable runtime contract proof was available. It does
-  not supersede the sanitized OpenClaw 2026.7.1 catalog evidence above and does
-  not prove production authority.
+  is retained as superseded audit history because it conflated model-callable
+  `tools.catalog` evidence with Gateway RPC registration. It must not be used as
+  current proof that allowLease RPCs are unavailable.
+- The 2026-08-11 split-catalog evidence in
+  `docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json` is the
+  current installed-runtime boundary. It treats `tools.catalog` as
+  model-callable session-tool evidence and treats allowLease as source-bound
+  Gateway RPC evidence corroborated only by non-mutating
+  `subagents.allowLease.status`. It confirms all three allowLease RPC names are
+  registered and status returns `ok=true`, `writeMode=memory`; it still fails
+  closed because acquire/release expose legacy parameters instead of the future
+  metadata/idempotency/full-owner contract, `sessions_spawn` lacks
+  `client_request_id`, `idempotency_key`, and `metadata`, and current OpenClaw
+  exposes `session_status` while future DB authority requires `sessions_status`
+  as the canonical status alias. The committed evidence file is an audit
+  snapshot; exact PR-head authority requires Phase C to replay the preflight
+  against that head before any controlled external review.
 - PR #37's real-Gateway evidence in
   `docs/runtime-evidence/openclaw-real-gateway-contract.json` remains useful as
   a historical isolated candidate snapshot, but it is explicitly
@@ -4590,13 +4606,17 @@ P0.0 - privacy and external contract preflight:
 - Done as bounded probes: injectable allowLease and sessions metadata/idempotency
   contract checks prove exact local/normalized/raw metadata shape against fake or
   injected adapters.
-- Not production-proven: live OpenClaw/Gateway/session tool capability and
-  metadata conformance. The 2026-08-09 installed-runtime negative preflight
-  failed closed before a usable contract proof. Before any real RPC is relied
-  on, the exact tool surface must be proven with
+- Not production-proven: live OpenClaw/Gateway/session metadata conformance.
+  The 2026-08-11 split-catalog preflight proves the exact current boundary:
+  model-callable tools come from `tools.catalog`; allowLease RPC registration is
+  source-bound and corroborated only with read-only
+  `subagents.allowLease.status`; DB authority still fails closed on future
+  metadata/idempotency/full-owner fields, missing `sessions_spawn` metadata, and
+  the future canonical `sessions_status` alias. Before any real RPC is relied
+  on, the exact tool/RPC surface must be proven with
   `scripts/openclaw-tool-capability-preflight.py`.
-  Run it against the captured live runtime catalog with
-  `python scripts/openclaw-tool-capability-preflight.py --catalog-json-file <catalog.json>`.
+  Run it against the installed runtime with
+  `python scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`.
 - Remaining: production accepted-session identity proof that duplicate spawn
   returns the same non-empty accepted session identity and can be persisted
   consistently as `external_rpc_intents.external_id`, `spawn_requests.session_key`,
@@ -4643,9 +4663,10 @@ P1.1 - metadata-based dispatch and reconciliation:
 
 - Done locally: an injectable metadata-capable adapter contract, DB-persisted
   pending-intent dispatcher, and fail-closed reconciliation probes exist.
-- Not production-proven: live allowLease/session tool capability and metadata
-  conformance; dispatch workflows must remain fail-closed until exact capability
-  preflight proves the production tool names and parameters.
+- Not production-proven: live allowLease/session metadata conformance; dispatch
+  workflows must remain fail-closed until exact capability preflight proves the
+  future metadata/idempotency/full-owner fields, accepted-session identity, and
+  future canonical `sessions_status` alias.
 - Remaining: production reconciliation scanner rollout after live metadata
   fixtures pass.
 
