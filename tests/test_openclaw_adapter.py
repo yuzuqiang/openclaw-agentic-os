@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
+from typing import Any
 
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
@@ -9,6 +11,7 @@ from agentic_os.openclaw_adapter import (
     assert_installed_runtime_tools,
     assert_installed_session_tools,
 )
+from tests.openclaw_adapter_test_harness import CannedOpenClawAdapter
 
 
 INSTALLED_SESSION_TOOL_CATALOG = {
@@ -80,6 +83,99 @@ INSTALLED_RUNTIME_TOOL_CATALOG = {
         *INSTALLED_SESSION_TOOL_CATALOG["tools"],
     ]
 }
+
+
+def verified_runtime_envelope() -> dict[str, Any]:
+    catalog = json.loads(json.dumps(INSTALLED_RUNTIME_TOOL_CATALOG))
+    model_tools = json.loads(
+        json.dumps(
+            [
+                tool
+                for tool in catalog["tools"]
+                if tool["name"]
+                in {
+                    "sessions_spawn",
+                    "sessions_list",
+                    "sessions_status",
+                    "sessions_history",
+                }
+            ]
+        )
+    )
+    gateway_tools = json.loads(
+        json.dumps(
+            [
+                tool
+                for tool in catalog["tools"]
+                if tool["name"].startswith("subagents.allowLease.")
+            ]
+        )
+    )
+    catalog.update(
+        {
+            "active_executable_sha256": "c" * 64,
+            "catalog_kind": "sanitized_openclaw_runtime",
+            "connected_gateway_build_evidence": {
+                "connected_executable_sha256": "c" * 64,
+                "status": "proven",
+                "verification_method": "gateway_reported_executable_sha256",
+            },
+            "connected_gateway_build_identity": "proven",
+            "gateway_rpc_catalog": {
+                "authority": "installed_runtime_dist_sources",
+                "catalog_kind": "source_bound_gateway_rpc_catalog",
+                "rpc_evidence": [
+                    {
+                        "disk_source_declaration": "observed",
+                        "live_reachability": "reachable",
+                        "live_probe": {
+                            "live_reachability": "reachable",
+                            "method": name,
+                            "raw_response_sha256": (
+                                "b" * 64
+                                if name == "subagents.allowLease.status"
+                                else "d" * 64
+                            ),
+                            "request_semantics": (
+                                "read_only_request"
+                                if name == "subagents.allowLease.status"
+                                else "bounded_contract_probe"
+                            ),
+                            "status": "ok",
+                        },
+                        "name": name,
+                    }
+                    for name in (
+                        "subagents.allowLease.acquire",
+                        "subagents.allowLease.status",
+                        "subagents.allowLease.release",
+                    )
+                ],
+                "source_bound_rpc_names": [
+                    "subagents.allowLease.acquire",
+                    "subagents.allowLease.release",
+                    "subagents.allowLease.status",
+                ],
+                "status": "disk_source_declarations_complete",
+                "status_corroboration": {
+                    "live_reachability": "reachable",
+                    "method": "subagents.allowLease.status",
+                    "raw_response_sha256": "b" * 64,
+                    "request_semantics": "read_only_request",
+                    "status": "ok",
+                },
+                "tools": gateway_tools,
+            },
+            "model_tool_catalog": {
+                "authority": "tools.catalog",
+                "catalog_kind": "model_callable_tools_catalog",
+                "raw_response_sha256": "a" * 64,
+                "tools": model_tools,
+            },
+            "runtime_target": "live_installed_openclaw",
+        }
+    )
+    return {"catalog": catalog, "runtime_ready": True, "status": "pass"}
 
 
 class CannedTransport:
@@ -223,7 +319,8 @@ class CannedTransport:
 class OpenClawAdapterTests(unittest.TestCase):
     def test_canned_allow_lease_and_spawn_responses_extract_metadata(self) -> None:
         transport = CannedTransport()
-        adapter = OpenClawAdapter(transport)
+        adapter = CannedOpenClawAdapter(transport)
+        self.assertFalse(adapter.runtime_authority_verified)
         lease = adapter.allow_lease_acquire({"client_lease_id": "client-lease"})
         self.assertEqual(lease.external_id, "lease-gateway")
         self.assertEqual(lease.metadata_contract_version, "v1")
@@ -257,13 +354,118 @@ class OpenClawAdapterTests(unittest.TestCase):
             ),
         )
 
-    def test_preflighted_adapter_requires_installed_session_tool_catalog(self) -> None:
-        transport = CannedTransport()
-        adapter = OpenClawAdapter.from_preflighted_catalog(
-            transport, INSTALLED_RUNTIME_TOOL_CATALOG
-        )
+    def test_fully_forged_valid_envelope_cannot_mint_runtime_authority(self) -> None:
+        with self.assertRaisesRegex(AdapterContractError, "unsigned preflight mapping"):
+            OpenClawAdapter.from_preflighted_catalog(
+                CannedTransport(), verified_runtime_envelope()
+            )
 
-        self.assertEqual(adapter.session_status("session-key").session_key, "session-key")
+    def test_preflighted_adapter_rejects_plain_schema_catalog(self) -> None:
+        assert_installed_runtime_tools(INSTALLED_RUNTIME_TOOL_CATALOG)
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "envelope status must be pass"
+        ):
+            OpenClawAdapter.from_preflighted_catalog(
+                CannedTransport(), INSTALLED_RUNTIME_TOOL_CATALOG
+            )
+
+    def test_direct_constructor_is_inert(self) -> None:
+        with self.assertRaisesRegex(AdapterContractError, "transport-bound.*attestor"):
+            OpenClawAdapter(CannedTransport())
+
+    def test_object_new_and_injected_state_cannot_reach_transport(self) -> None:
+        class RecordingTransport:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, Any]]] = []
+
+            def call(self, method, params):
+                self.calls.append((method, dict(params)))
+                return {}
+
+        transport = RecordingTransport()
+        adapter = object.__new__(OpenClawAdapter)
+        adapter.__dict__.update(
+            {
+                "_transport": transport,
+                "_authority_mode": "verified_runtime",
+                "_authority_capability": object(),
+                "_runtime_authority_verified": True,
+                "_verified_runtime_authority": True,
+            }
+        )
+        calls = (
+            lambda: adapter.allow_lease_acquire({}),
+            adapter.allow_lease_list,
+            lambda: adapter.allow_lease_release({}),
+            lambda: adapter.sessions_spawn({}),
+            adapter.sessions_list,
+            lambda: adapter.session_status("session-key"),
+            lambda: adapter.session_result("session-key"),
+        )
+        for call in calls:
+            with self.subTest(call=call):
+                with self.assertRaisesRegex(
+                    AdapterContractError, "no verified transport-bound"
+                ):
+                    call()
+                self.assertEqual(transport.calls, [])
+
+    def test_production_tree_has_no_authority_token_or_test_transport_factory(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        production = "\n".join(
+            path.read_text(encoding="utf-8")
+            for directory in (root / "src", root / "scripts")
+            for path in directory.rglob("*.py")
+        )
+        for forbidden in (
+            "_AdapterConstructionCapability",
+            "_RUNTIME_AUTHORITY_CAPABILITY_GUARD",
+            "_UNVERIFIED_TEST_CAPABILITY_GUARD",
+            "_from_verified_runtime_authority",
+            "_from_unverified_transport_for_tests",
+            "run_release_probe_for_offline_tests",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, production)
+
+    def test_preflighted_adapter_rejects_unproven_connected_build(self) -> None:
+        payload = verified_runtime_envelope()
+        payload["catalog"]["connected_gateway_build_identity"] = "unproven"
+
+        with self.assertRaisesRegex(AdapterContractError, "build identity is not proven"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_non_pass_or_offline_envelope(self) -> None:
+        payload = verified_runtime_envelope()
+        payload["status"] = "declared_schema_validated"
+        payload["runtime_ready"] = False
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "status must be pass.*runtime_ready=true"
+        ):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_aggregate_nested_mismatch(self) -> None:
+        payload = verified_runtime_envelope()
+        spawn = next(
+            item
+            for item in payload["catalog"]["model_tool_catalog"]["tools"]
+            if item["name"] == "sessions_spawn"
+        )
+        spawn["inputSchema"]["properties"]["unexpected"] = {"type": "string"}
+
+        with self.assertRaisesRegex(AdapterContractError, "aggregate.*disagree"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_alternate_rpc_evidence_shape(self) -> None:
+        payload = verified_runtime_envelope()
+        payload["catalog"]["gateway_rpc_catalog"]["rpc_evidence"] = {
+            "subagents.allowLease.status": {"live_reachability": "reachable"}
+        }
+
+        with self.assertRaisesRegex(AdapterContractError, "evidence must be a list"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
 
     def test_runtime_tool_catalog_preflight_rejects_missing_allow_lease_tool(
         self,
@@ -286,6 +488,51 @@ class OpenClawAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AdapterContractError, "gateway_lease_id"):
             assert_installed_runtime_tools(catalog)
+
+    def test_preflighted_adapter_rejects_source_only_gateway_rpc_authority(self) -> None:
+        payload = verified_runtime_envelope()
+        rpc_evidence = payload["catalog"]["gateway_rpc_catalog"]["rpc_evidence"]
+        for item in rpc_evidence:
+            if item["name"] != "subagents.allowLease.status":
+                item["live_reachability"] = "unproven"
+
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "acquire live reachability is unproven.*release live reachability is unproven",
+        ):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_duplicate_gateway_rpc_evidence(self) -> None:
+        payload = verified_runtime_envelope()
+        rpc_evidence = payload["catalog"]["gateway_rpc_catalog"]["rpc_evidence"]
+        rpc_evidence.append(json.loads(json.dumps(rpc_evidence[0])))
+
+        with self.assertRaisesRegex(AdapterContractError, "duplicates.*acquire"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_bare_reachability_claim(self) -> None:
+        payload = verified_runtime_envelope()
+        rpc_evidence = payload["catalog"]["gateway_rpc_catalog"]["rpc_evidence"]
+        status = next(
+            item
+            for item in rpc_evidence
+            if item["name"] == "subagents.allowLease.status"
+        )
+        del status["live_probe"]
+
+        with self.assertRaisesRegex(AdapterContractError, "method-bound live probe"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
+
+    def test_preflighted_adapter_rejects_status_corroboration_probe_mismatch(
+        self,
+    ) -> None:
+        payload = verified_runtime_envelope()
+        payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
+            "raw_response_sha256"
+        ] = "e" * 64
+
+        with self.assertRaisesRegex(AdapterContractError, "must exactly match"):
+            OpenClawAdapter.from_preflighted_catalog(CannedTransport(), payload)
 
     def test_session_tool_catalog_preflight_rejects_missing_history_parameter(self) -> None:
         catalog = {
@@ -399,7 +646,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
-            OpenClawAdapter(MissingRawResultTransport()).session_result("session-key")
+            CannedOpenClawAdapter(
+                MissingRawResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_missing_accepted_identity_fails_contract(self) -> None:
         class MissingIdentityResultTransport:
@@ -427,9 +676,9 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(
             AdapterContractError, "accepted session identity"
         ):
-            OpenClawAdapter(MissingIdentityResultTransport()).session_result(
-                "session-key"
-            )
+            CannedOpenClawAdapter(
+                MissingIdentityResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_different_history_session_fails_contract(self) -> None:
         class DifferentSessionResultTransport:
@@ -456,9 +705,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "requested session"):
-            OpenClawAdapter(DifferentSessionResultTransport()).session_result(
-                "session-key"
-            )
+            CannedOpenClawAdapter(
+                DifferentSessionResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_different_history_item_session_fails_contract(self) -> None:
         class DifferentHistoryItemResultTransport:
@@ -493,9 +742,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\]"):
-            OpenClawAdapter(DifferentHistoryItemResultTransport()).session_result(
-                "session-key"
-            )
+            CannedOpenClawAdapter(
+                DifferentHistoryItemResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_different_history_item_external_id_fails_contract(
         self,
@@ -531,7 +780,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\]"):
-            OpenClawAdapter(
+            CannedOpenClawAdapter(
                 DifferentHistoryItemExternalIdTransport()
             ).session_result("session-key")
 
@@ -565,7 +814,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
-            OpenClawAdapter(ConflictingResultTransport()).session_result("session-key")
+            CannedOpenClawAdapter(
+                ConflictingResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_malformed_response_fails_contract(self) -> None:
         class MalformedResultTransport:
@@ -573,7 +824,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 return ["not", "an", "object"]
 
         with self.assertRaisesRegex(AdapterContractError, "sessions_history response"):
-            OpenClawAdapter(MalformedResultTransport()).session_result("session-key")
+            CannedOpenClawAdapter(
+                MalformedResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_audit_serialization_failure_fails_contract(self) -> None:
         class NonSerializableResultTransport:
@@ -601,9 +854,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "JSON serializable"):
-            OpenClawAdapter(NonSerializableResultTransport()).session_result(
-                "session-key"
-            )
+            CannedOpenClawAdapter(
+                NonSerializableResultTransport()
+            ).session_result("session-key")
 
     def test_session_result_transport_failure_is_not_swallowed(self) -> None:
         class FailingResultTransport:
@@ -611,7 +864,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 raise TimeoutError("result timed out")
 
         with self.assertRaisesRegex(TimeoutError, "result timed out"):
-            OpenClawAdapter(FailingResultTransport()).session_result("session-key")
+            CannedOpenClawAdapter(
+                FailingResultTransport()
+            ).session_result("session-key")
 
     def test_missing_metadata_fails_contract(self) -> None:
         class BadTransport:
@@ -619,7 +874,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 return {"ok": True}
 
         with self.assertRaises(AdapterContractError):
-            OpenClawAdapter(BadTransport()).sessions_spawn({})
+            CannedOpenClawAdapter(
+                BadTransport()
+            ).sessions_spawn({})
 
     def test_normalized_metadata_without_raw_json_fails_contract(self) -> None:
         class MissingRawTransport:
@@ -644,7 +901,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "raw metadata JSON"):
-            OpenClawAdapter(MissingRawTransport()).sessions_spawn({})
+            CannedOpenClawAdapter(
+                MissingRawTransport()
+            ).sessions_spawn({})
 
     def test_conflicting_top_level_and_nested_session_key_fails_contract(self) -> None:
         class ConflictingSessionTransport:
@@ -675,7 +934,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
-            OpenClawAdapter(ConflictingSessionTransport()).sessions_spawn({})
+            CannedOpenClawAdapter(
+                ConflictingSessionTransport()
+            ).sessions_spawn({})
 
     def test_conflicting_nested_session_aliases_fail_contract(self) -> None:
         class ConflictingNestedAliasTransport:
@@ -705,7 +966,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 }
 
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
-            OpenClawAdapter(ConflictingNestedAliasTransport()).sessions_spawn({})
+            CannedOpenClawAdapter(
+                ConflictingNestedAliasTransport()
+            ).sessions_spawn({})
 
     def test_conflicting_spawn_request_session_aliases_fail_contract(self) -> None:
         class ConflictingSpawnRequestAliasTransport:
@@ -737,7 +1000,9 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(
             AdapterContractError, "conflicting spawn request session key"
         ):
-            OpenClawAdapter(ConflictingSpawnRequestAliasTransport()).sessions_spawn({})
+            CannedOpenClawAdapter(
+                ConflictingSpawnRequestAliasTransport()
+            ).sessions_spawn({})
 
     def test_gateway_lease_id_is_not_a_session_identity_alias(self) -> None:
         class GatewayEchoSessionTransport:
@@ -764,7 +1029,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                     },
                 }
 
-        observation = OpenClawAdapter(GatewayEchoSessionTransport()).sessions_spawn({})
+        observation = CannedOpenClawAdapter(
+            GatewayEchoSessionTransport()
+        ).sessions_spawn({})
         self.assertEqual(observation.external_id, "session-key")
         self.assertEqual(observation.session_key, "session-key")
 
@@ -831,7 +1098,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                     }
                 raise AssertionError(method)
 
-        adapter = OpenClawAdapter(LegacyListTransport())
+        adapter = CannedOpenClawAdapter(
+            LegacyListTransport()
+        )
         self.assertEqual(
             [observation.external_id for observation in adapter.allow_lease_list()],
             ["lease-gateway"],
@@ -850,7 +1119,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                     return {"sessions": {"legacy": True}}
                 raise AssertionError(method)
 
-        adapter = OpenClawAdapter(MalformedListTransport())
+        adapter = CannedOpenClawAdapter(
+            MalformedListTransport()
+        )
         with self.assertRaisesRegex(AdapterContractError, "lease response"):
             adapter.allow_lease_list()
         with self.assertRaisesRegex(AdapterContractError, "session response"):

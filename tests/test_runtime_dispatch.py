@@ -25,6 +25,7 @@ from agentic_os.runtime_dispatch import (
     spawn_metadata,
     stable_json,
 )
+from tests.openclaw_adapter_test_harness import CannedOpenClawAdapter
 
 
 class ScriptedAdapter:
@@ -511,7 +512,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "diagnostic": object(),
                 }
 
-        adapter = OpenClawAdapter(NonSerializableTransport())
+        adapter = CannedOpenClawAdapter(NonSerializableTransport())
         with self.assertRaisesRegex(RuntimeDispatchError, "allow lease"):
             dispatch_with_metadata(self.database, adapter, self.request)
         with self._connect() as connection:
@@ -1690,7 +1691,10 @@ class RuntimeDispatchTests(unittest.TestCase):
                 raise AssertionError(method)
 
         self_request = self.request
-        summary = reconcile_unknown_metadata(self.database, OpenClawAdapter(ListTransport()))
+        summary = reconcile_unknown_metadata(
+            self.database,
+            CannedOpenClawAdapter(ListTransport()),
+        )
         self.assertEqual(summary.reconciled, 0)
         self.assertEqual(summary.human_review_required, 1)
         with self._connect() as connection:

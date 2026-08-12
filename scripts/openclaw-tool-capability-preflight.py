@@ -17,8 +17,10 @@ from typing import Any, Iterable, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import agentic_os
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
+    assert_preflighted_runtime_authority,
     assert_installed_runtime_tools,
 )
 
@@ -33,15 +35,21 @@ OBJECT_SCHEMA_FIELD = re.compile(
 IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$", re.I)
 
-LIVE_TOOL_NAMES = (
+GATEWAY_RPC_METHOD_NAMES = (
     "subagents.allowLease.acquire",
     "subagents.allowLease.status",
     "subagents.allowLease.release",
+)
+MODEL_CALLABLE_TOOL_NAMES = (
     "sessions_spawn",
     "sessions_list",
     "sessions_history",
     "session_status",
     "sessions_status",
+)
+LIVE_TOOL_NAMES = (
+    *GATEWAY_RPC_METHOD_NAMES,
+    *MODEL_CALLABLE_TOOL_NAMES,
 )
 
 MODEL_TOOL_SCHEMA_MARKERS = {
@@ -55,6 +63,49 @@ RUNTIME_SOURCE_PATTERNS = (
     "openclaw-tools-*.js",
     "core-descriptors-*.js",
     "server-methods-*.js",
+)
+FUTURE_DB_AUTHORITY_CONTRACT = {
+    "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
+    "db_authority_enabled_required_for_preflight": False,
+    "allow_lease_acquire_required_metadata": [
+        "agent_id",
+        "client_lease_id",
+        "idempotency_key",
+        "phase",
+        "requester_agent_id",
+        "run_id",
+        "transition_id",
+        "ttl_ms",
+    ],
+    "allow_lease_release_required_metadata": [
+        "agent_id",
+        "client_lease_id",
+        "gateway_lease_id",
+        "phase",
+        "release_idempotency_key",
+        "requester_agent_id",
+        "run_id",
+        "transition_id",
+    ],
+    "sessions_spawn_required_metadata": [
+        "client_request_id",
+        "idempotency_key",
+        "metadata",
+    ],
+    "accepted_session_identity_requirement": (
+        "future_db_authority_requires_duplicate_spawn_to_return_the_same_non_empty_"
+        "accepted_session_identity"
+    ),
+    "future_canonical_status_method": "sessions_status",
+}
+STATUS_RPC_INCIDENTAL_MUTATIONS = (
+    "expired_lease_cleanup",
+    "cli_bootstrap_state",
+)
+EVIDENCE_CAPABILITY_SOURCE_PATHS = (
+    "scripts/openclaw-tool-capability-preflight.py",
+    "src/agentic_os/openclaw_adapter.py",
+    "src/agentic_os/__init__.py",
 )
 
 
@@ -158,6 +209,12 @@ def _path_digest(path: Path) -> str:
 def _stream_digest(value: str) -> dict[str, Any]:
     encoded = value.encode("utf-8", errors="replace")
     return {"bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def _json_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _relative_source_path(root: Path, path: Path) -> str:
@@ -602,9 +659,10 @@ def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], lis
     return methods, sources
 
 
-def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
+def _declared_core_names(root: Path) -> tuple[set[str], list[Path], set[str]]:
     names: set[str] = set()
     sources: list[Path] = []
+    gateway_names: set[str] = set()
     for pattern, scanner in (
         ("openclaw-tools-*.js", _scan_js_declared_tool_names),
         ("core-descriptors-*.js", _scan_js_declared_tool_names),
@@ -614,8 +672,10 @@ def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
             matched = scanner(text)
             if matched:
                 names.update(matched)
+                if pattern == "server-methods-*.js":
+                    gateway_names.update(matched)
                 sources.append(path)
-    return names, sources
+    return names, sources, gateway_names
 
 
 def _resolve_openclaw_executable() -> Path:
@@ -696,9 +756,7 @@ def _run_gateway_tools_catalog(
             },
         ) from exc
     if proc.returncode != 0:
-        payload_sha = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest() if isinstance(payload, Mapping) else None
+        payload_sha = _json_sha256(payload) if isinstance(payload, Mapping) else None
         message = (
             "active OpenClaw tool catalog failed "
             f"returncode={proc.returncode} "
@@ -719,6 +777,182 @@ def _run_gateway_tools_catalog(
             },
         )
     return payload
+
+
+def _gateway_rpc_validation_failure_catalog(
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str | None,
+    source_bound_rpc_names: Iterable[str],
+    status: str,
+    error: str | None = None,
+    response_sha256: str | None = None,
+    stdout: str | None = None,
+    stderr: str | None = None,
+    returncode: int | None = None,
+) -> dict[str, Any]:
+    catalog = dict(runtime_identity_catalog)
+    status_corroboration: dict[str, Any] = {
+        "method": "subagents.allowLease.status",
+        "request_semantics": "read_only_request",
+        "requested_mutation": False,
+        "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+        "status": status,
+    }
+    if error is not None:
+        status_corroboration["error"] = error
+    if response_sha256 is not None:
+        status_corroboration["raw_response_sha256"] = response_sha256
+    if stdout is not None:
+        status_corroboration["stdout"] = _stream_digest(stdout)
+    if stderr is not None:
+        status_corroboration["stderr"] = _stream_digest(stderr)
+    if returncode is not None:
+        status_corroboration["returncode"] = returncode
+    catalog["model_tool_catalog"] = {
+        "catalog_kind": "model_callable_tools_catalog",
+        "authority": "tools.catalog",
+        "method": "tools.catalog",
+    }
+    if active_catalog_sha256 is not None:
+        catalog["model_tool_catalog"]["raw_response_sha256"] = active_catalog_sha256
+    catalog["gateway_rpc_catalog"] = {
+        "catalog_kind": "source_bound_gateway_rpc_catalog",
+        "authority": "installed_runtime_dist_sources",
+        "source_bound_rpc_names": sorted(source_bound_rpc_names),
+        "status": "status_corroboration_failed",
+        "status_corroboration": status_corroboration,
+    }
+    return catalog
+
+
+def _run_gateway_allow_lease_status(
+    executable: Path,
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str | None,
+    source_bound_rpc_names: Iterable[str],
+    timeout_ms: int = 10_000,
+    scrub_env_override: bool = False,
+) -> dict[str, Any]:
+    env = None
+    if scrub_env_override:
+        env = dict(os.environ)
+        env.pop("OPENCLAW_INSTALL_ROOT", None)
+    try:
+        proc = subprocess.run(
+            [
+                str(executable),
+                "gateway",
+                "call",
+                "subagents.allowLease.status",
+                "--json",
+                "--timeout",
+                str(timeout_ms),
+                "--params",
+                "{}",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(5, timeout_ms // 1000 + 5),
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_unavailable",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC unavailable",
+            catalog=catalog,
+        ) from exc
+    try:
+        payload = json.loads((proc.stdout or "").strip() or "{}")
+    except json.JSONDecodeError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_non_json",
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            returncode=proc.returncode,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC returned non-JSON output",
+            catalog=catalog,
+        ) from exc
+    response_sha256 = _json_sha256(payload)
+    if proc.returncode != 0:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_failed",
+            response_sha256=response_sha256,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            returncode=proc.returncode,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC failed before contract validation",
+            catalog=catalog,
+        )
+    if not isinstance(payload, Mapping):
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_response_shape_invalid",
+            error=type(payload).__name__,
+            response_sha256=response_sha256,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC response must be a JSON object",
+            catalog=catalog,
+        )
+    status_payload = payload.get("result")
+    if not isinstance(status_payload, Mapping):
+        status_payload = payload
+    ok_value = status_payload.get("ok")
+    if ok_value is not True:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_returned_not_ok",
+            error=type(ok_value).__name__ if ok_value is not None else "missing_ok",
+            response_sha256=response_sha256,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC did not return ok=true",
+            catalog=catalog,
+        )
+    corroboration: dict[str, Any] = {
+        "method": "subagents.allowLease.status",
+        "request_semantics": "read_only_request",
+        "requested_mutation": False,
+        "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+        "live_reachability": "reachable",
+        "status": "ok",
+        "raw_response_sha256": response_sha256,
+        "ok": True,
+    }
+    write_mode = status_payload.get("writeMode")
+    if isinstance(write_mode, str):
+        corroboration["writeMode"] = write_mode
+    allow_agents = status_payload.get("allowAgents")
+    if isinstance(allow_agents, list):
+        corroboration["allowAgents_count"] = len(allow_agents)
+    leases = status_payload.get("leases")
+    if isinstance(leases, list):
+        corroboration["leases_count"] = len(leases)
+    return corroboration
 
 
 def _runtime_identity_catalog(
@@ -891,6 +1125,15 @@ def _active_entry_parameters(entry: Mapping[str, Any]) -> set[str]:
     return set(first_params)
 
 
+def _active_entry_has_parameter_schema(entry: Mapping[str, Any]) -> bool:
+    if any(key in entry for key in ("parameters", "input_schema", "inputSchema")):
+        return True
+    schema = entry.get("schema")
+    return isinstance(schema, Mapping) and any(
+        key in schema for key in ("parameters", "input_schema", "inputSchema")
+    )
+
+
 def _adapter_tool_name(entry: Mapping[str, Any]) -> str | None:
     for key in ("name", "method", "id"):
         value = entry.get(key)
@@ -899,15 +1142,20 @@ def _adapter_tool_name(entry: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
-    entries: dict[str, set[str]] = {}
+def _active_tool_parameter_evidence(
+    catalog: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
 
-    def add_entry(name: str, params: set[str]) -> None:
+    def add_entry(name: str, entry: Mapping[str, Any]) -> None:
         if name not in LIVE_TOOL_NAMES:
             return
         if name in entries:
             raise AdapterContractError(f"active OpenClaw tool catalog has duplicate {name} entries")
-        entries[name] = set(params)
+        entries[name] = {
+            "parameters": _active_entry_parameters(entry),
+            "schema_available": _active_entry_has_parameter_schema(entry),
+        }
 
     groups = catalog.get("groups")
     if isinstance(groups, list):
@@ -922,7 +1170,7 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
                     continue
                 name = _adapter_tool_name(tool)
                 if name is not None:
-                    add_entry(name, _active_entry_parameters(tool))
+                    add_entry(name, tool)
     tools = catalog.get("tools")
     if isinstance(tools, list):
         for tool in tools:
@@ -930,13 +1178,20 @@ def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
                 continue
             name = _adapter_tool_name(tool)
             if name is not None:
-                add_entry(name, _active_entry_parameters(tool))
+                add_entry(name, tool)
     elif isinstance(tools, Mapping):
         for name, value in tools.items():
             if isinstance(name, str) and name in LIVE_TOOL_NAMES:
-                params = _active_entry_parameters(value) if isinstance(value, Mapping) else set()
-                add_entry(name, params)
+                entry = value if isinstance(value, Mapping) else {}
+                add_entry(name, entry)
     return entries
+
+
+def _active_tool_parameters(catalog: Mapping[str, Any]) -> dict[str, set[str]]:
+    return {
+        name: set(evidence["parameters"])
+        for name, evidence in _active_tool_parameter_evidence(catalog).items()
+    }
 
 
 def _active_catalog_validation_failure_catalog(
@@ -966,7 +1221,7 @@ def _active_catalog_validation_failure_catalog(
 def _runtime_identity_binding_failure_catalog(
     *,
     runtime_identity_catalog: Mapping[str, Any],
-    active_catalog_sha256: str,
+    active_catalog_sha256: str | None,
     status: str,
     error: str | None = None,
 ) -> dict[str, Any]:
@@ -975,8 +1230,9 @@ def _runtime_identity_binding_failure_catalog(
         "method": "tools.catalog",
         "status": status,
         "validation_stage": "runtime_identity_binding",
-        "raw_response_sha256": active_catalog_sha256,
     }
+    if active_catalog_sha256 is not None:
+        catalog["active_catalog"]["raw_response_sha256"] = active_catalog_sha256
     if error is not None:
         catalog["active_catalog"]["identity_verification_error"] = error
     return catalog
@@ -1015,7 +1271,7 @@ def _require_runtime_identity_unchanged_after_catalog(
     runtime_target: str,
     include_env_override: bool,
     require_env_override: bool,
-    active_catalog_sha256: str,
+    active_catalog_sha256: str | None,
 ) -> None:
     try:
         _, _, _, current_identity, _ = _runtime_identity_snapshot(
@@ -1060,7 +1316,7 @@ def _require_runtime_identity_unchanged_after_catalog(
 def _require_runtime_sources_unchanged_after_scan(
     *,
     runtime_identity_catalog: Mapping[str, Any],
-    active_catalog_sha256: str,
+    active_catalog_sha256: str | None,
     source_digest_snapshot: Mapping[str, str],
     root: Path,
 ) -> None:
@@ -1095,7 +1351,7 @@ def _scan_runtime_source_contract(
     *,
     root: Path,
     runtime_identity_catalog: Mapping[str, Any],
-    active_catalog_sha256: str,
+    active_catalog_sha256: str | None,
 ) -> tuple[
     dict[str, set[str]],
     list[Path],
@@ -1103,11 +1359,12 @@ def _scan_runtime_source_contract(
     list[Path],
     set[str],
     list[Path],
+    set[str],
 ]:
     try:
         model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
         gateway_params, gateway_sources = _extract_gateway_method_params(root)
-        declared_names, declaration_sources = _declared_core_names(root)
+        declared_names, declaration_sources, gateway_declared_names = _declared_core_names(root)
     except OSError as exc:
         catalog = _runtime_source_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1126,7 +1383,216 @@ def _scan_runtime_source_contract(
         gateway_sources,
         declared_names,
         declaration_sources,
+        gateway_declared_names,
     )
+
+
+def _source_bound_gateway_rpc_names(
+    *,
+    gateway_params: Mapping[str, set[str]],
+    gateway_declared_names: set[str],
+) -> set[str]:
+    return {
+        name
+        for name in GATEWAY_RPC_METHOD_NAMES
+        if name in gateway_params or name in gateway_declared_names
+    }
+
+
+def _gateway_status_for_source_bound_names(
+    *,
+    executable: Path,
+    runtime_identity_catalog: Mapping[str, Any],
+    active_catalog_sha256: str | None,
+    source_bound_rpc_names: set[str],
+    scrub_env_override: bool,
+) -> dict[str, Any]:
+    if "subagents.allowLease.status" not in source_bound_rpc_names:
+        return {
+            "method": "subagents.allowLease.status",
+            "request_semantics": "read_only_request",
+            "requested_mutation": False,
+            "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+            "live_reachability": "unproven",
+            "status": "disk_source_declaration_missing",
+        }
+    return _run_gateway_allow_lease_status(
+        executable,
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+        source_bound_rpc_names=source_bound_rpc_names,
+        scrub_env_override=scrub_env_override,
+    )
+
+
+def _gateway_catalog_status(
+    source_bound_rpc_names: set[str],
+) -> str:
+    if set(GATEWAY_RPC_METHOD_NAMES).issubset(source_bound_rpc_names):
+        return "disk_source_declarations_complete"
+    return "partial_source_bound"
+
+
+def _gateway_rpc_evidence(
+    *,
+    source_bound_rpc_names: set[str],
+    gateway_status: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    status_reachable = gateway_status.get("status") == "ok"
+    evidence: list[dict[str, Any]] = []
+    for name in GATEWAY_RPC_METHOD_NAMES:
+        record: dict[str, Any] = {
+            "name": name,
+            "disk_source_declaration": (
+                "observed"
+                if name in source_bound_rpc_names
+                else "not_observed"
+            ),
+            "live_reachability": (
+                "reachable"
+                if name == "subagents.allowLease.status" and status_reachable
+                else "unproven"
+            ),
+        }
+        if name == "subagents.allowLease.status" and status_reachable:
+            record["live_probe"] = dict(gateway_status)
+        evidence.append(record)
+    return evidence
+
+
+def _gateway_tools_from_sources(
+    *,
+    gateway_params: Mapping[str, set[str]],
+    source_bound_rpc_names: set[str],
+) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    for name in GATEWAY_RPC_METHOD_NAMES:
+        if name not in source_bound_rpc_names:
+            continue
+        params = sorted(gateway_params.get(name, set()))
+        source_kind = (
+            "gateway_server_method_params"
+            if name in gateway_params
+            else "declared_gateway_rpc_name"
+        )
+        tools.append(
+            {
+                "name": name,
+                "parameters": params,
+                "catalog_surface": "gateway_rpc",
+                "schema_source": source_kind,
+            }
+        )
+    return tools
+
+
+def _status_alias_requirement(
+    *,
+    active_names: set[str],
+    model_tool_params: Mapping[str, set[str]],
+    declared_names: set[str],
+    model_catalog_available: bool,
+) -> dict[str, Any]:
+    return {
+        "future_canonical_status_method": "sessions_status",
+        "future_canonical_status_method_status": (
+            "available"
+            if "sessions_status" in active_names
+            else (
+                "unproven_model_catalog_unavailable"
+                if not model_catalog_available
+                else "missing_from_model_callable_tools_catalog"
+            )
+        ),
+        "legacy_status_alias": "session_status",
+        "observed_model_status_aliases": sorted(
+            name
+            for name in ("session_status", "sessions_status")
+            if name in active_names or name in model_tool_params or name in declared_names
+        ),
+        "future_canonical_status_alias_available": "sessions_status" in active_names,
+        "db_authority_requirement": "future_db_authority_requires_canonical_sessions_status",
+    }
+
+
+def _tools_catalog_failure_sha(catalog_failure: Mapping[str, Any] | None) -> str | None:
+    if catalog_failure is None:
+        return None
+    payload_sha = catalog_failure.get("payload_sha256")
+    return payload_sha if isinstance(payload_sha, str) else None
+
+
+def _model_catalog_unavailable_catalog(
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    catalog_failure: Mapping[str, Any] | None,
+    model_tool_params: Mapping[str, set[str]],
+    gateway_params: Mapping[str, set[str]],
+    declared_names: set[str],
+    source_bound_rpc_names: set[str],
+    gateway_status: Mapping[str, Any],
+    source_paths: Iterable[Path],
+    source_digest_snapshot: Mapping[str, str],
+    root: Path,
+) -> dict[str, Any]:
+    failure_sha = _tools_catalog_failure_sha(catalog_failure)
+    gateway_tools = _gateway_tools_from_sources(
+        gateway_params=gateway_params,
+        source_bound_rpc_names=source_bound_rpc_names,
+    )
+    model_tool_catalog: dict[str, Any] = {
+        "catalog_kind": "model_callable_tools_catalog",
+        "authority": "tools.catalog",
+        "method": "tools.catalog",
+        "status": "catalog_unavailable_before_contract_validation",
+        "validation_stage": "catalog_capture",
+        "required_tool_names": [],
+        "source_declared_tool_names": sorted(
+            name for name in MODEL_CALLABLE_TOOL_NAMES if name in declared_names
+        ),
+    }
+    if failure_sha is not None:
+        model_tool_catalog["failure_payload_sha256"] = failure_sha
+    return {
+        **runtime_identity_catalog,
+        "required_canonical_session_status_method": "sessions_status",
+        "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
+        "runtime_process_binding_limit": (
+            "installed dist source identity does not prove the connected Gateway "
+            "process is executing that exact bundle"
+        ),
+        "connected_gateway_build_identity": "unproven",
+        "status_alias_requirement": _status_alias_requirement(
+            active_names=set(),
+            model_tool_params=model_tool_params,
+            declared_names=declared_names,
+            model_catalog_available=False,
+        ),
+        "active_catalog": {
+            "method": "tools.catalog",
+            "status": "catalog_unavailable_before_contract_validation",
+            "validation_stage": "catalog_capture",
+            **({"failure_payload_sha256": failure_sha} if failure_sha else {}),
+        },
+        "model_tool_catalog": model_tool_catalog,
+        "gateway_rpc_catalog": {
+            "catalog_kind": "source_bound_gateway_rpc_catalog",
+            "authority": "installed_runtime_dist_sources",
+            "status": _gateway_catalog_status(source_bound_rpc_names),
+            "source_bound_rpc_names": sorted(source_bound_rpc_names),
+            "rpc_evidence": _gateway_rpc_evidence(
+                source_bound_rpc_names=source_bound_rpc_names,
+                gateway_status=gateway_status,
+            ),
+            "status_corroboration": gateway_status,
+            "tools": gateway_tools,
+        },
+        "sources": [
+            _source_record_from_snapshot(root, path, source_digest_snapshot)
+            for path in sorted(source_paths)
+        ],
+        "tools": gateway_tools,
+    }
 
 
 def live_installed_openclaw_catalog(
@@ -1154,14 +1620,105 @@ def live_installed_openclaw_catalog(
             "active OpenClaw runtime sources could not be snapshotted before catalog capture",
             catalog=catalog,
         ) from exc
-    active_catalog = _run_gateway_tools_catalog(
-        executable,
-        scrub_env_override=scrub_env_override,
-        failure_catalog=failure_catalog,
-    )
-    active_catalog_sha256 = hashlib.sha256(
-        json.dumps(active_catalog, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    try:
+        active_catalog = _run_gateway_tools_catalog(
+            executable,
+            scrub_env_override=scrub_env_override,
+            failure_catalog=failure_catalog,
+        )
+    except RuntimeEvidenceError as exc:
+        active_catalog_sha256 = _tools_catalog_failure_sha(exc.catalog_failure)
+        (
+            model_tool_params,
+            model_tool_sources,
+            gateway_params,
+            gateway_sources,
+            declared_names,
+            declaration_sources,
+            gateway_declared_names,
+        ) = _scan_runtime_source_contract(
+            root=root,
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+        )
+        _require_runtime_sources_unchanged_after_scan(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_digest_snapshot=source_digest_snapshot,
+            root=root,
+        )
+        source_bound_rpc_names = _source_bound_gateway_rpc_names(
+            gateway_params=gateway_params,
+            gateway_declared_names=gateway_declared_names,
+        )
+        try:
+            gateway_status = _gateway_status_for_source_bound_names(
+                executable=executable,
+                runtime_identity_catalog=runtime_identity_catalog,
+                active_catalog_sha256=active_catalog_sha256,
+                source_bound_rpc_names=source_bound_rpc_names,
+                scrub_env_override=scrub_env_override,
+            )
+        except RuntimeEvidenceError as status_exc:
+            status_catalog = status_exc.catalog or {}
+            gateway_catalog = status_catalog.get("gateway_rpc_catalog", {})
+            if isinstance(gateway_catalog, Mapping):
+                corroboration = gateway_catalog.get("status_corroboration", {})
+            else:
+                corroboration = {}
+            gateway_status = (
+                dict(corroboration)
+                if isinstance(corroboration, Mapping)
+                else {
+                    "method": "subagents.allowLease.status",
+                    "request_semantics": "read_only_request",
+                    "requested_mutation": False,
+                    "incidental_mutations_possible": list(
+                        STATUS_RPC_INCIDENTAL_MUTATIONS
+                    ),
+                    "live_reachability": "unproven",
+                    "status": "status_corroboration_failed",
+                }
+            )
+        _require_runtime_sources_unchanged_after_scan(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_digest_snapshot=source_digest_snapshot,
+            root=root,
+        )
+        _require_runtime_identity_unchanged_after_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            runtime_target=runtime_target,
+            include_env_override=include_env_override,
+            require_env_override=require_env_override,
+            active_catalog_sha256=active_catalog_sha256,
+        )
+        source_paths = {
+            *model_tool_sources,
+            *gateway_sources,
+            *declaration_sources,
+        }
+        split_catalog = _model_catalog_unavailable_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            catalog_failure=exc.catalog_failure,
+            model_tool_params=model_tool_params,
+            gateway_params=gateway_params,
+            declared_names=declared_names,
+            source_bound_rpc_names=source_bound_rpc_names,
+            gateway_status=gateway_status,
+            source_paths=source_paths,
+            source_digest_snapshot=source_digest_snapshot,
+            root=root,
+        )
+        raise RuntimeEvidenceError(
+            str(exc)
+            + "; model-callable tools.catalog is unavailable, so future "
+            "DB-authority metadata/idempotency/accepted-session/status-alias "
+            "requirements remain unproven",
+            catalog=split_catalog,
+            catalog_failure=exc.catalog_failure,
+        ) from exc
+    active_catalog_sha256 = _json_sha256(active_catalog)
     _require_runtime_identity_unchanged_after_catalog(
         runtime_identity_catalog=runtime_identity_catalog,
         runtime_target=runtime_target,
@@ -1183,15 +1740,15 @@ def live_installed_openclaw_catalog(
             catalog=validation_catalog,
         )
     try:
-        active_params = _active_tool_parameters(active_catalog)
+        active_parameter_evidence = _active_tool_parameter_evidence(active_catalog)
     except AdapterContractError as exc:
         validation_catalog = _active_catalog_validation_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
             active_catalog_sha256=active_catalog_sha256,
         )
         raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
-    active_names = set(active_params)
-    if not active_params:
+    active_names = set(active_parameter_evidence)
+    if not active_parameter_evidence:
         exc = AdapterContractError("active OpenClaw tool catalog did not expose required tools")
         validation_catalog = _active_catalog_validation_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1206,6 +1763,7 @@ def live_installed_openclaw_catalog(
         gateway_sources,
         declared_names,
         declaration_sources,
+        gateway_declared_names,
     ) = _scan_runtime_source_contract(
         root=root,
         runtime_identity_catalog=runtime_identity_catalog,
@@ -1230,39 +1788,140 @@ def live_installed_openclaw_catalog(
         source_digest_snapshot=source_digest_snapshot,
         root=root,
     )
+    source_bound_rpc_names = _source_bound_gateway_rpc_names(
+        gateway_params=gateway_params,
+        gateway_declared_names=gateway_declared_names,
+    )
+    gateway_status = _gateway_status_for_source_bound_names(
+        executable=executable,
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+        source_bound_rpc_names=source_bound_rpc_names,
+        scrub_env_override=scrub_env_override,
+    )
+    _require_runtime_identity_unchanged_after_catalog(
+        runtime_identity_catalog=runtime_identity_catalog,
+        runtime_target=runtime_target,
+        include_env_override=include_env_override,
+        require_env_override=require_env_override,
+        active_catalog_sha256=active_catalog_sha256,
+    )
+    _require_runtime_sources_unchanged_after_scan(
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+        source_digest_snapshot=source_digest_snapshot,
+        root=root,
+    )
     tools: list[dict[str, Any]] = []
-    for name in LIVE_TOOL_NAMES:
-        source_params = set()
-        source_kind = "absent"
+    gateway_tools = _gateway_tools_from_sources(
+        gateway_params=gateway_params,
+        source_bound_rpc_names=source_bound_rpc_names,
+    )
+    model_tools: list[dict[str, Any]] = []
+    tools.extend(gateway_tools)
+    for name in MODEL_CALLABLE_TOOL_NAMES:
         declared = name in declared_names
         active = name in active_names
-        if name in gateway_params:
-            source_params.update(gateway_params[name])
-            source_kind = "gateway_server_method_params"
-        if declared and name in model_tool_params:
-            source_params.update(model_tool_params[name])
-            if source_kind == "absent":
-                source_kind = "model_tool_schema"
+        source_params = set(model_tool_params.get(name, set()))
+        source_kind = "model_tool_schema" if declared and name in model_tool_params else "absent"
         if declared and active and source_kind == "absent":
             source_kind = "declared_tool_name"
-        if active and (declared or name in gateway_params):
-            params = sorted(active_params[name] & source_params)
-            tools.append(
-                {
-                    "name": name,
-                    "parameters": params,
-                    "active_parameters": sorted(active_params[name]),
-                    "schema_source": source_kind,
-                }
+        if active and declared:
+            catalog_params = set(active_parameter_evidence[name]["parameters"])
+            catalog_schema_available = bool(
+                active_parameter_evidence[name]["schema_available"]
             )
+            if catalog_schema_available:
+                params = sorted(catalog_params & source_params)
+                parameter_evidence = {
+                    "status": "catalog_schema_intersected_with_installed_source",
+                    "catalog_schema_available": True,
+                    "catalog_parameters": sorted(catalog_params),
+                    "parameter_authority": [
+                        "tools.catalog",
+                        "installed_runtime_dist_sources",
+                    ],
+                }
+            elif name in model_tool_params:
+                params = sorted(source_params)
+                parameter_evidence = {
+                    "status": "installed_source_bound_catalog_schema_unavailable",
+                    "catalog_schema_available": False,
+                    "parameter_authority": "installed_runtime_dist_sources",
+                }
+            else:
+                params = []
+                parameter_evidence = {
+                    "status": "unproven_from_catalog_and_installed_sources",
+                    "catalog_schema_available": False,
+                    "parameter_authority": "unproven",
+                }
+            tool = {
+                "name": name,
+                "parameters": params,
+                "catalog_surface": "model_tool",
+                "schema_source": source_kind,
+                "parameter_evidence": parameter_evidence,
+            }
+            model_tools.append(tool)
+            tools.append(tool)
     source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
+    model_tool_names = sorted(active_names & set(MODEL_CALLABLE_TOOL_NAMES))
+    model_tools_with_catalog_schema = sorted(
+        name
+        for name in model_tool_names
+        if active_parameter_evidence[name]["schema_available"]
+    )
+    model_tools_without_catalog_schema = sorted(
+        set(model_tool_names) - set(model_tools_with_catalog_schema)
+    )
     return {
         **runtime_identity_catalog,
         "required_canonical_session_status_method": "sessions_status",
+        "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
+        "runtime_process_binding_limit": (
+            "installed dist source identity does not prove the connected Gateway "
+            "process is executing that exact bundle"
+        ),
+        "connected_gateway_build_identity": "unproven",
+        "status_alias_requirement": _status_alias_requirement(
+            active_names=active_names,
+            model_tool_params=model_tool_params,
+            declared_names=declared_names,
+            model_catalog_available=True,
+        ),
         "active_catalog": {
             "method": "tools.catalog",
             "raw_response_sha256": active_catalog_sha256,
             "required_tool_names": sorted(active_names),
+            "parameter_schema_tool_names": model_tools_with_catalog_schema,
+            "parameter_schema_unavailable_tool_names": (
+                model_tools_without_catalog_schema
+            ),
+        },
+        "model_tool_catalog": {
+            "catalog_kind": "model_callable_tools_catalog",
+            "authority": "tools.catalog",
+            "method": "tools.catalog",
+            "raw_response_sha256": active_catalog_sha256,
+            "required_tool_names": model_tool_names,
+            "parameter_schema_tool_names": model_tools_with_catalog_schema,
+            "parameter_schema_unavailable_tool_names": (
+                model_tools_without_catalog_schema
+            ),
+            "tools": model_tools,
+        },
+        "gateway_rpc_catalog": {
+            "catalog_kind": "source_bound_gateway_rpc_catalog",
+            "authority": "installed_runtime_dist_sources",
+            "status": _gateway_catalog_status(source_bound_rpc_names),
+            "source_bound_rpc_names": sorted(source_bound_rpc_names),
+            "rpc_evidence": _gateway_rpc_evidence(
+                source_bound_rpc_names=source_bound_rpc_names,
+                gateway_status=gateway_status,
+            ),
+            "status_corroboration": gateway_status,
+            "tools": gateway_tools,
         },
         "sources": [
             _source_record_from_snapshot(root, path, source_digest_snapshot)
@@ -1436,6 +2095,19 @@ def _catalog_for_payload(args: argparse.Namespace, catalog: dict[str, Any]) -> d
     return catalog
 
 
+def _assert_preflight_runtime_tools(
+    catalog: Mapping[str, Any], *, runtime_target: bool
+) -> None:
+    """Keep offline schema validation separate from online runtime authority."""
+
+    if runtime_target:
+        assert_preflighted_runtime_authority(
+            {"catalog": catalog, "runtime_ready": True, "status": "pass"}
+        )
+        return
+    assert_installed_runtime_tools(catalog)
+
+
 def _write_evidence(path: str | None, payload: dict[str, Any]) -> None:
     if path is None:
         return
@@ -1565,8 +2237,11 @@ def _capture_evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict
         {"--catalog-json"},
     )
     return {
+        "binding_kind": "generator_revision",
         "agentic_os_head_sha": _require_valid_git_revision(root, "HEAD"),
         "agentic_os_tree_sha": _require_valid_git_revision(root, "HEAD^{tree}"),
+        "capability_source_paths": list(EVIDENCE_CAPABILITY_SOURCE_PATHS),
+        "containing_commit_self_binding": False,
         "generated_at_utc": dt.datetime.now(dt.timezone.utc)
         .replace(microsecond=0)
         .isoformat(),
@@ -1615,8 +2290,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
         description=(
-            "Fail closed unless an OpenClaw runtime tool catalog exposes the "
-            "allowLease and session tool surface required by the Agentic OS adapter."
+            "Fail closed unless OpenClaw runtime evidence exposes the model-callable "
+            "session tools and source-bound Gateway allowLease RPC surface required "
+            "by the Agentic OS adapter."
         )
     )
     parser.add_argument(
@@ -1647,8 +2323,11 @@ def main(argv: list[str] | None = None) -> int:
         "--installed-openclaw-negative-baseline",
         action="store_true",
         help=(
-            "Build a sanitized catalog from the active installed OpenClaw baseline, "
-            "ignoring OPENCLAW_INSTALL_ROOT, so incompatible installs fail closed."
+            "Build a sanitized historical compatibility baseline from the active "
+            "installed OpenClaw runtime, ignoring OPENCLAW_INSTALL_ROOT. The "
+            "2026-08-09 installed-runtime negative baseline is retracted as a "
+            "combined-catalog false negative; use live split-catalog evidence for "
+            "current decisions."
         ),
     )
     parser.add_argument(
@@ -1689,7 +2368,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 catalog = live_installed_openclaw_catalog()
         except RuntimeEvidenceError as exc:
-            payload = {"error": str(exc), "status": "fail"}
+            payload = {
+                "classification": "fail_closed_future_contract",
+                "error": str(exc),
+                "runtime_ready": False,
+                "status": "fail",
+            }
             if exc.catalog_failure is not None:
                 payload["catalog_failure"] = exc.catalog_failure
             failure_catalog = exc.catalog or _runtime_failure_catalog_for_args(args)
@@ -1700,7 +2384,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, sort_keys=True))
             return 1
         except AdapterContractError as exc:
-            payload = {"error": str(exc), "status": "fail"}
+            payload = {
+                "classification": "fail_closed_future_contract",
+                "error": str(exc),
+                "runtime_ready": False,
+                "status": "fail",
+            }
             failure_catalog = _runtime_failure_catalog_for_args(args)
             if failure_catalog is not None:
                 payload["catalog"] = failure_catalog
@@ -1713,9 +2402,16 @@ def main(argv: list[str] | None = None) -> int:
 
     payload: dict[str, Any]
     try:
-        assert_installed_runtime_tools(catalog)
+        _assert_preflight_runtime_tools(
+            catalog,
+            runtime_target=_runtime_target_requested(args),
+        )
     except AdapterContractError as exc:
-        payload = {"error": str(exc), "status": "fail"}
+        payload = {"error": str(exc), "runtime_ready": False, "status": "fail"}
+        if _runtime_target_requested(args):
+            payload["classification"] = "fail_closed_future_contract"
+        else:
+            payload["classification"] = "offline_schema_validation_failed"
         if (
             args.live_installed_openclaw
             or args.isolated_candidate_openclaw
@@ -1729,7 +2425,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, sort_keys=True))
         return 1
 
-    payload = {"status": "pass"}
+    if _runtime_target_requested(args):
+        payload = {"runtime_ready": True, "status": "pass"}
+    else:
+        payload = {
+            "classification": "offline_schema_validation_only",
+            "runtime_ready": False,
+            "status": "declared_schema_validated",
+        }
     if (
         args.live_installed_openclaw
         or args.isolated_candidate_openclaw
@@ -1743,7 +2446,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(payload, sort_keys=True))
     else:
-        print(json.dumps({"status": "pass"}, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "runtime_ready": payload["runtime_ready"],
+                    "status": payload["status"],
+                },
+                sort_keys=True,
+            )
+        )
     return 0
 
 

@@ -15,10 +15,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
-ADAPTER_PROBE = "scripts/openclaw-real-adapter-release-probe.py"
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
-    ADAPTER_PROBE,
     "src/agentic_os/openclaw_adapter.py",
     "src/agentic_os/metadata.py",
 )
@@ -65,12 +63,14 @@ REQUIRED_RUNTIME_PROOFS = (
     "duplicate_lease_identity_parity",
     "duplicate_spawn_identity_parity",
     "duplicate_release_identity_parity",
+    "child_completed",
+)
+DISABLED_FUTURE_RUNTIME_PROOFS = (
     "agentic_adapter_live_catalog",
     "agentic_adapter_release_succeeded",
     "agentic_adapter_duplicate_release_parity",
     "agentic_adapter_release_metadata_parity",
     "agentic_adapter_post_release_absent",
-    "child_completed",
 )
 REQUIRED_CHILD_HASH_PROOFS = (
     "child_result_sha256",
@@ -205,6 +205,19 @@ def _validate_sha256_field(payload: Mapping[str, Any], key: str) -> None:
         raise ProbeError(f"evidence {key} must be a lowercase SHA-256 hex digest")
 
 
+def _validate_disabled_future_proofs(payload: Mapping[str, Any]) -> None:
+    advertised = [
+        key
+        for key in DISABLED_FUTURE_RUNTIME_PROOFS
+        if key in payload and payload.get(key) is not False
+    ]
+    if advertised:
+        raise ProbeError(
+            "disabled future runtime proofs are not authoritative evidence: "
+            + ", ".join(sorted(advertised))
+        )
+
+
 def validate_evidence(
     payload: dict[str, Any], *, openclaw_root: Path, agentic_root: Path, head: str
 ) -> None:
@@ -213,6 +226,7 @@ def validate_evidence(
     agentic_head = _git(agentic_root, "rev-parse", "HEAD")
     if payload.get("agentic_os_head_sha") != agentic_head:
         raise ProbeError("evidence Agentic OS head binding is invalid")
+    _validate_disabled_future_proofs(payload)
     if not all(payload.get(key) is True for key in REQUIRED_RUNTIME_PROOFS):
         raise ProbeError("evidence is missing a required runtime proof")
     if payload.get("static_allow_agents_wildcard") is not False:
@@ -248,7 +262,6 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
         {
             "AGENTIC_OS_EXPECTED_OPENCLAW_HEAD": head,
             "AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE": str(temporary_evidence_file),
-            "AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT": str(ROOT / ADAPTER_PROBE),
         }
     )
     command = [

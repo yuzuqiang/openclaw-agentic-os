@@ -21,24 +21,19 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("lifecycle_completed_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
         self.assertIn("lifecycle_failure_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
         self.assertIn("duplicate_release_identity_parity", MODULE.REQUIRED_RUNTIME_PROOFS)
-        self.assertIn("agentic_adapter_live_catalog", MODULE.REQUIRED_RUNTIME_PROOFS)
+
+    def test_disabled_adapter_probe_is_not_an_authoritative_requirement(self) -> None:
+        for proof in MODULE.DISABLED_FUTURE_RUNTIME_PROOFS:
+            self.assertNotIn(proof, MODULE.REQUIRED_RUNTIME_PROOFS)
         self.assertIn(
-            "agentic_adapter_duplicate_release_parity", MODULE.REQUIRED_RUNTIME_PROOFS
-        )
-        self.assertIn(
-            "agentic_adapter_release_metadata_parity", MODULE.REQUIRED_RUNTIME_PROOFS
-        )
-        self.assertIn(
-            "agentic_adapter_post_release_absent", MODULE.REQUIRED_RUNTIME_PROOFS
+            "agentic_adapter_release_succeeded",
+            MODULE.DISABLED_FUTURE_RUNTIME_PROOFS,
         )
 
-    def test_binds_merged_adapter_and_composed_probe_sources(self) -> None:
-        self.assertIn(
-            "scripts/openclaw-real-adapter-release-probe.py",
-            MODULE.AGENTIC_SOURCE_PATHS,
-        )
+    def test_binds_current_gateway_and_adapter_sources_without_disabled_probe(self) -> None:
         self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
+        self.assertFalse(hasattr(MODULE, "ADAPTER_PROBE"))
 
     def test_rejects_raw_session_identity(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
@@ -75,6 +70,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_run = MODULE._run
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_source_binding = MODULE._source_binding
+            original_validate_sources = MODULE._validate_sources
             original_git = MODULE._git
 
             class Proc:
@@ -156,6 +152,75 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "non_authoritative_last_run_snapshot",
             )
 
+    def test_runner_does_not_advertise_disabled_adapter_probe_to_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "evidence.json"
+            original_run = MODULE._run
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_source_binding = MODULE._source_binding
+            original_validate_sources = MODULE._validate_sources
+            original_git = MODULE._git
+
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(command, *, cwd, env=None, timeout=240):
+                self.assertIsNotNone(env)
+                self.assertNotIn("AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT", env)
+                temp_path = Path(env["AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE"])
+                payload = {
+                    "status": "pass",
+                    "openclaw_head_sha": "openclaw-head",
+                    "authenticated_gateway": True,
+                    "effective_allow_lease": True,
+                    "runtime_catalog_discovered": True,
+                    "read_only_acquire_rejected": True,
+                    "wrong_lease_rejected": True,
+                    "cross_principal_lease_hidden": True,
+                    "cross_principal_spawn_rejected": True,
+                    "cross_principal_sessions_hidden": True,
+                    "cross_principal_status_rejected": True,
+                    "released_lease_spawn_rejected": True,
+                    "canonical_session_observed": True,
+                    "lifecycle_running_observed": True,
+                    "lifecycle_completed_observed": True,
+                    "lifecycle_failure_observed": True,
+                    "duplicate_lease_identity_parity": True,
+                    "duplicate_spawn_identity_parity": True,
+                    "duplicate_release_identity_parity": True,
+                    "child_completed": True,
+                    "child_result_sha256": "0" * 64,
+                    "child_run_id_sha256": "1" * 64,
+                    "child_session_key_sha256": "2" * 64,
+                    "task_marker_sha256": "3" * 64,
+                    "static_allow_agents_wildcard": False,
+                    "model_request_count": 2,
+                    "sources": [],
+                }
+                temp_path.write_text(json.dumps(payload), encoding="utf-8")
+                return Proc()
+
+            try:
+                MODULE._run = fake_run
+                MODULE.validate_candidate_root = lambda root: "openclaw-head"
+                MODULE._source_binding = lambda root, relative: {
+                    "path": relative,
+                    "sha256": "0" * 64,
+                }
+                MODULE._validate_sources = lambda value, *, root, label: None
+                MODULE._git = lambda root, *args: "agentic-head"
+                payload = MODULE.run_probe(Path(directory), output, timeout=1)
+                self.assertEqual(payload["status"], "pass")
+                self.assertEqual(payload["agentic_os_head_sha"], "agentic-head")
+            finally:
+                MODULE._run = original_run
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._source_binding = original_source_binding
+                MODULE._validate_sources = original_validate_sources
+                MODULE._git = original_git
+
     def test_evidence_requires_non_authoritative_snapshot_annotations(self) -> None:
         payload = {
             "status": "pass",
@@ -167,6 +232,28 @@ class RealGatewayProbeTests(unittest.TestCase):
         for proof in MODULE.REQUIRED_RUNTIME_PROOFS:
             payload[proof] = True
         with self.assertRaisesRegex(MODULE.ProbeError, "non-authoritative"):
+            MODULE.validate_evidence(
+                payload,
+                openclaw_root=MODULE.ROOT,
+                agentic_root=MODULE.ROOT,
+                head="openclaw-head",
+            )
+
+    def test_disabled_future_adapter_proofs_are_rejected_as_authoritative(self) -> None:
+        payload = {
+            "status": "pass",
+            "openclaw_head_sha": "openclaw-head",
+            "agentic_os_head_sha": MODULE._git(MODULE.ROOT, "rev-parse", "HEAD"),
+            "static_allow_agents_wildcard": False,
+            "model_request_count": 2,
+            "committed_snapshot_authority": "non_authoritative_last_run_snapshot",
+            "current_head_evidence_required": True,
+            "child_completed": False,
+            "agentic_adapter_release_succeeded": True,
+        }
+        for proof in MODULE.REQUIRED_RUNTIME_PROOFS:
+            payload[proof] = True
+        with self.assertRaisesRegex(MODULE.ProbeError, "disabled future runtime proofs"):
             MODULE.validate_evidence(
                 payload,
                 openclaw_root=MODULE.ROOT,

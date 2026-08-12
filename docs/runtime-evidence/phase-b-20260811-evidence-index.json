@@ -1,0 +1,54 @@
+{
+  "classification": "evidence_lineage_correction",
+  "current_evidence": {
+    "classification": "pending_exact_head_capture",
+    "generator_binding_requirements": {
+      "bound_head_is_ancestor_of_containing_revision": true,
+      "bound_tree_matches_bound_head_tree": true,
+      "capability_source_paths": [
+        "scripts/openclaw-tool-capability-preflight.py",
+        "src/agentic_os/openclaw_adapter.py",
+        "src/agentic_os/__init__.py"
+      ],
+      "no_capability_source_drift_after_bound_head": true,
+      "script_digest_matches_bound_head_blob": true
+    },
+    "generator_revision": {
+      "head_sha": null,
+      "script_sha256": null,
+      "tree_sha": null
+    },
+    "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
+    "raw_status": null,
+    "reviewed_head_sha": null,
+    "sha256": null,
+    "status": "pending_clean_generator_revision_capture",
+    "status_reason": "Previous current evidence was generated from a PR-internal revision that is not an ancestor of GitHub Codex's squash-style reviewed commit lineage. It is no longer advertised as current authority until recaptured from the exact reviewed lineage."
+  },
+  "historical_artifacts": [
+    {
+      "binding_assessment": {
+        "actual_script_sha256_at_bound_head": "b975eafaa3b2769fd10b48a2dddabaec1b5129ba49792ad0a5a642b48fd5693a",
+        "bound_head": "b850fd85c79c3310774355fd906766d1adca8533",
+        "reason": "stored script digest does not match the script blob at the stored bound head",
+        "status": "invalid_mixed_revision_binding",
+        "stored_script_sha256": "712ae4fbecdad72071de3657980c85937342591683a768df0d480721d466afc9"
+      },
+      "immutable_historical_bytes": true,
+      "interpretation": "superseded false negative: tools.catalog was incorrectly treated as the Gateway RPC registry",
+      "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
+      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
+      "raw_status": "fail"
+    },
+    {
+      "epoch_policy": "frozen historical record; current evidence is namespaced only in this sidecar",
+      "immutable_historical_bytes": true,
+      "interpretation": "historical revalidation only; not current-head authority",
+      "path": "docs/runtime-evidence/phase-b-revalidation-20260809.json",
+      "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3",
+      "raw_status": "superseded"
+    }
+  ],
+  "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
+  "status": "pending_current_evidence"
+}
