@@ -1,0 +1,62 @@
+{
+  "repository_artifact_acceptance": {
+    "accepted_head_sha": "53c9555cacb8e1906bc7cb6e252c0b91a73a8141",
+    "accepted_head_tree_sha": "609ea2995b6d1113b1952a34f26bbc35f82e1592",
+    "accepted_via": "pull_request_39",
+    "base_start_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",
+    "codex_review": {
+      "comment_url": "https://github.com/yuzuqiang/openclaw-agentic-os/pull/39#issuecomment-5265795161",
+      "reviewed_head_prefix_from_comment": "53c9555cac",
+      "reviewed_head_sha": "53c9555cacb8e1906bc7cb6e252c0b91a73a8141",
+      "verdict": "clean"
+    },
+    "accepted_head_design_artifact": {
+      "path": "docs/agentic-os-production-adaptation.md",
+      "head_sha": "53c9555cacb8e1906bc7cb6e252c0b91a73a8141",
+      "sha256": "c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997"
+    },
+    "current_corrected_design_artifact": {
+      "path": "docs/agentic-os-production-adaptation.md",
+      "sha256": "f8aeb38a74d8cf3d3c0703f0ff54511ecf23bfc34b3c9274ecf69e554b1247b5",
+      "status": "current_successor_artifact_not_pr39_acceptance"
+    },
+    "merged_at": "2026-08-12T10:59:18Z",
+    "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",
+    "merge_commit_tree_sha": "609ea2995b6d1113b1952a34f26bbc35f82e1592",
+    "phase_c": {
+      "pass_comment_url": "https://github.com/yuzuqiang/openclaw-agentic-os/pull/39#issuecomment-5265633447",
+      "reviewed_head_sha": "53c9555cacb8e1906bc7cb6e252c0b91a73a8141",
+      "run_id": "phase-20260812-053854-run-20260812-053854",
+      "verdict": "PASS"
+    },
+    "pull_request_number": 39,
+    "pull_request_url": "https://github.com/yuzuqiang/openclaw-agentic-os/pull/39",
+    "repository": "yuzuqiang/openclaw-agentic-os",
+    "status": "accepted_and_merged",
+    "status_check": {
+      "details_url": "https://github.com/yuzuqiang/openclaw-agentic-os/actions/runs/31585158691/job/94077173548",
+      "head_sha": "53c9555cacb8e1906bc7cb6e252c0b91a73a8141",
+      "name": "agentic-os-ci",
+      "status": "SUCCESS"
+    }
+  },
+  "live_runtime_evidence": {
+    "evidence_index": {
+      "current_evidence_status": "pending_clean_generator_revision_capture",
+      "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
+      "status": "pending_current_evidence"
+    },
+    "production_behavior_proven": false,
+    "runtime_ready": false,
+    "status": "pending_non_authoritative"
+  },
+  "production_authority": {
+    "db_authority_enabled": false,
+    "file_artifacts_remain_authority": true,
+    "module_flag": "agentic_os.DB_AUTHORITY_ENABLED",
+    "production_agentic_os_control_db_authority": false,
+    "production_agentic_os_daemon": false,
+    "production_session_authority": false,
+    "status": "disabled"
+  }
+}

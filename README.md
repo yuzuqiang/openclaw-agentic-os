@@ -4,22 +4,25 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 
 ## Current status
 
-The initial design artifact passed dual independent design acceptance. The
-current corrected design artifact is a Draft PR successor after Codex review
-remediation; final exact-head Phase C revalidation for the successor head is
-still required before it can be treated as independently accepted. Neither
-artifact proves production runtime
-behavior. Since that design pass, the repository has accumulated bounded
-local/synthetic P0/P1/P2 implementation slices with executable tests; those
-slices are evidence of local control-plane contracts, not evidence of
-production OpenClaw authority.
+The accepted repository design artifact is the PR #39 artifact at head
+`53c9555cacb8e1906bc7cb6e252c0b91a73a8141`. That accepted repository state
+passed exact-head Phase C, received a clean Codex review for that head, and
+merged to `main` as
+`b48a7cba8c6671b5dd33a369fb4f59f57d159739`. This is repository/design
+acceptance only; later documentation corrections are recorded separately in
+`docs/project-status.json`. It does not prove production runtime behavior. The
+repository has accumulated bounded local/synthetic P0/P1/P2 implementation slices with
+executable tests; those slices are evidence of local control-plane contracts,
+not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
-- Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Historical revalidation evidence, superseded by the current Draft remediation:
+- Project status contract: [`docs/project-status.json`](docs/project-status.json)
+- Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
+- Current corrected design artifact SHA-256: `f8aeb38a74d8cf3d3c0703f0ff54511ecf23bfc34b3c9274ecf69e554b1247b5`
+- Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
+- Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
-- Current installed-runtime evidence lineage and capture state:
+- Current installed-runtime evidence lineage and pending capture state:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Historical installed-runtime negative baseline, retained byte-for-byte:
   [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
@@ -445,9 +448,10 @@ acquire/release parameters, acquire/release were not live-probed,
 and `metadata`, and the current model tool alias is `session_status` while
 future DB authority requires `sessions_status` as the canonical status alias.
 The split-catalog JSON path in the forward index is pending exact-lineage
-recapture rather than current authority; Phase C must replay
+recapture rather than current authority. Future runtime-evidence authority must
+recapture
 `python3 scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`
-against the exact PR head before any controlled external review. The
+from an exact clean head before any production-runtime claim. The
 plain-catalog path is deliberately offline-only: it reports
 `classification=offline_schema_validation_only` and can never set
 `runtime_ready=true`. An unsigned catalog mapping cannot mint

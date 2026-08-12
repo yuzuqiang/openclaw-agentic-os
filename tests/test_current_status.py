@@ -6,19 +6,139 @@ import re
 import subprocess
 import unittest
 
+import agentic_os
 from agentic_os.migrations import repository_root
 
 
-class CurrentStatusTests(unittest.TestCase):
-    def test_readme_current_design_hash_matches_design_document(self) -> None:
-        root = repository_root()
-        readme = (root / "README.md").read_text(encoding="utf-8")
-        design = root / "docs/agentic-os-production-adaptation.md"
-        digest = hashlib.sha256(design.read_bytes()).hexdigest()
-        match = re.search(r"Current design artifact SHA-256: `([0-9a-f]{64})`", readme)
+STATUS_DOMAINS = {
+    "repository_artifact_acceptance",
+    "live_runtime_evidence",
+    "production_authority",
+}
 
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), digest)
+
+def _git_output(root, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _git_bytes(root, *args: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+class CurrentStatusTests(unittest.TestCase):
+    def test_project_status_binds_accepted_repository_design(self) -> None:
+        root = repository_root()
+        status = json.loads((root / "docs/project-status.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(status), STATUS_DOMAINS)
+
+        repository = status["repository_artifact_acceptance"]
+        accepted_head = "53c9555cacb8e1906bc7cb6e252c0b91a73a8141"
+        merge_commit = "b48a7cba8c6671b5dd33a369fb4f59f57d159739"
+        accepted_tree = "609ea2995b6d1113b1952a34f26bbc35f82e1592"
+
+        self.assertEqual(repository["status"], "accepted_and_merged")
+        self.assertEqual(repository["repository"], "yuzuqiang/openclaw-agentic-os")
+        self.assertEqual(repository["pull_request_number"], 39)
+        self.assertEqual(
+            repository["pull_request_url"],
+            "https://github.com/yuzuqiang/openclaw-agentic-os/pull/39",
+        )
+        self.assertEqual(repository["accepted_head_sha"], accepted_head)
+        self.assertEqual(repository["merge_commit_sha"], merge_commit)
+        self.assertEqual(repository["base_start_sha"], merge_commit)
+        self.assertEqual(repository["accepted_head_tree_sha"], accepted_tree)
+        self.assertEqual(repository["merge_commit_tree_sha"], accepted_tree)
+        self.assertEqual(repository["merged_at"], "2026-08-12T10:59:18Z")
+        self.assertEqual(repository["phase_c"]["verdict"], "PASS")
+        self.assertEqual(repository["phase_c"]["reviewed_head_sha"], accepted_head)
+        self.assertEqual(repository["codex_review"]["verdict"], "clean")
+        self.assertEqual(repository["codex_review"]["reviewed_head_sha"], accepted_head)
+        self.assertTrue(
+            accepted_head.startswith(
+                repository["codex_review"]["reviewed_head_prefix_from_comment"]
+            )
+        )
+        self.assertEqual(repository["status_check"]["name"], "agentic-os-ci")
+        self.assertEqual(repository["status_check"]["status"], "SUCCESS")
+        self.assertEqual(repository["status_check"]["head_sha"], accepted_head)
+
+        self.assertEqual(_git_output(root, "rev-parse", f"{accepted_head}^{{tree}}"), accepted_tree)
+        self.assertEqual(_git_output(root, "rev-parse", f"{merge_commit}^{{tree}}"), accepted_tree)
+        self.assertIn(accepted_head, _git_output(root, "show", "-s", "--format=%P", merge_commit))
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", accepted_head, merge_commit],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", merge_commit, "HEAD"],
+            check=True,
+        )
+
+        accepted_artifact = repository["accepted_head_design_artifact"]
+        self.assertEqual(accepted_artifact["path"], "docs/agentic-os-production-adaptation.md")
+        self.assertEqual(accepted_artifact["head_sha"], accepted_head)
+        accepted_design = _git_bytes(
+            root,
+            "show",
+            f"{accepted_head}:{accepted_artifact['path']}",
+        )
+        self.assertEqual(
+            accepted_artifact["sha256"],
+            hashlib.sha256(accepted_design).hexdigest(),
+        )
+
+        current_artifact = repository["current_corrected_design_artifact"]
+        self.assertEqual(current_artifact["path"], accepted_artifact["path"])
+        self.assertEqual(
+            current_artifact["status"],
+            "current_successor_artifact_not_pr39_acceptance",
+        )
+        self.assertEqual(
+            current_artifact["sha256"],
+            hashlib.sha256((root / current_artifact["path"]).read_bytes()).hexdigest(),
+        )
+        self.assertNotEqual(
+            current_artifact["sha256"],
+            accepted_artifact["sha256"],
+        )
+
+    def test_readme_current_design_hash_matches_status_contract(self) -> None:
+        root = repository_root()
+        status = json.loads((root / "docs/project-status.json").read_text(encoding="utf-8"))
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        repository = status["repository_artifact_acceptance"]
+        accepted_digest = repository["accepted_head_design_artifact"]["sha256"]
+        current_digest = repository["current_corrected_design_artifact"]["sha256"]
+        accepted_match = re.search(
+            r"Accepted-head repository design artifact SHA-256: `([0-9a-f]{64})`",
+            readme,
+        )
+        current_match = re.search(
+            r"Current corrected design artifact SHA-256: `([0-9a-f]{64})`",
+            readme,
+        )
+
+        self.assertIsNotNone(accepted_match)
+        self.assertIsNotNone(current_match)
+        self.assertEqual(accepted_match.group(1), accepted_digest)
+        self.assertEqual(current_match.group(1), current_digest)
+        self.assertEqual(
+            current_digest,
+            hashlib.sha256(
+                (root / "docs/agentic-os-production-adaptation.md").read_bytes()
+            ).hexdigest(),
+        )
+        self.assertNotEqual(current_digest, accepted_digest)
+        self.assertIn("docs/project-status.json", readme)
 
     def test_current_status_keeps_revalidation_status_consistent(self) -> None:
         root = repository_root()
@@ -28,24 +148,67 @@ class CurrentStatusTests(unittest.TestCase):
         design_current_status = (
             root / "docs/agentic-os-production-adaptation.md"
         ).read_text(encoding="utf-8")
+        normalized_readme_status = re.sub(r"\s+", " ", readme_status)
+        normalized_design_current_status = re.sub(r"\s+", " ", design_current_status)
 
-        current_required_claim = (
-            "current Draft successor head still requires final exact-head Phase C "
-            "revalidation"
+        accepted_claims = (
+            "accepted repository state",
+            "passed exact-head Phase C",
+            "clean Codex review",
+            "This is repository/design acceptance only",
         )
-        self.assertIn("final exact-head", readme_status)
-        self.assertIn("Phase C revalidation", readme_status)
-        self.assertIn(current_required_claim, design_current_status)
+        for claim in accepted_claims:
+            with self.subTest(claim=claim):
+                self.assertIn(claim, normalized_readme_status)
+                self.assertIn(claim, normalized_design_current_status)
 
         stale_claims = (
+            "Draft PR successor",
+            "current Draft remediation",
+            "current Draft successor head",
+            "final exact-head Phase C revalidation",
+            "still required before it can be treated as independently accepted",
+            "Phase C must replay against the exact PR head",
             "has **not** yet passed fresh independent revalidation",
             "still requires fresh independent revalidation",
             "Runtime behavior remains unproven and fresh independent revalidation is required.",
         )
         for claim in stale_claims:
             with self.subTest(claim=claim):
-                self.assertNotIn(claim, readme_status)
-                self.assertNotIn(claim, design_current_status)
+                self.assertNotIn(claim, normalized_readme_status)
+                self.assertNotIn(claim, normalized_design_current_status)
+
+    def test_project_status_keeps_runtime_and_authority_boundaries_separate(self) -> None:
+        root = repository_root()
+        status = json.loads((root / "docs/project-status.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(status), STATUS_DOMAINS)
+
+        live = status["live_runtime_evidence"]
+        self.assertEqual(live["status"], "pending_non_authoritative")
+        self.assertFalse(live["runtime_ready"])
+        self.assertFalse(live["production_behavior_proven"])
+
+        index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(live["evidence_index"]["status"], index["status"])
+        self.assertEqual(index["status"], "pending_current_evidence")
+        self.assertEqual(
+            live["evidence_index"]["current_evidence_status"],
+            index["current_evidence"]["status"],
+        )
+        self.assertEqual(
+            index["current_evidence"]["status"],
+            "pending_clean_generator_revision_capture",
+        )
+        self.assertFalse((root / index["current_evidence"]["path"]).exists())
+
+        authority = status["production_authority"]
+        self.assertEqual(authority["status"], "disabled")
+        self.assertTrue(authority["file_artifacts_remain_authority"])
+        self.assertFalse(authority["db_authority_enabled"])
+        self.assertFalse(authority["production_agentic_os_control_db_authority"])
+        self.assertFalse(authority["production_agentic_os_daemon"])
+        self.assertFalse(authority["production_session_authority"])
+        self.assertFalse(agentic_os.DB_AUTHORITY_ENABLED)
 
     def test_current_vs_proposed_truth_claims_are_independently_present(self) -> None:
         root = repository_root()
