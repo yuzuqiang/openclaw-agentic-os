@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fail-closed release-probe entry point pending runtime attestation."""
+"""Disabled future-contract release probe pending runtime attestation.
+
+This entry point is deliberately not an authoritative proof source until a
+verified in-process adapter handoff exists.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,9 @@ class ProbeError(RuntimeError):
     pass
 
 
+DISABLED_PROOF_STATUS = "disabled_future_contract_not_authoritative"
+
+
 def run_release_probe(
     *,
     adapter: OpenClawAdapter,
@@ -40,7 +47,9 @@ def run_release_probe(
         raise ProbeError(
             "release probe requires verified in-process runtime authority"
         ) from exc
-    raise ProbeError("verified release probing is not implemented")
+    raise ProbeError(
+        "adapter release proof is disabled_future_contract_not_authoritative"
+    )
 
 
 def _object(value: Any, label: str) -> Mapping[str, Any]:
@@ -60,10 +69,12 @@ def main() -> int:
     request = _object(request, "probe initialization")
     if "catalog" in request:
         raise ProbeError(
-            "unsigned cross-process catalog cannot create live adapter authority"
+            "unsigned cross-process catalog cannot create live adapter authority; "
+            "adapter release proof is disabled_future_contract_not_authoritative"
         )
     raise ProbeError(
-        "cross-process release probe requires a verified in-process adapter capability"
+        "cross-process release probe requires a verified in-process adapter "
+        "capability; adapter release proof is disabled_future_contract_not_authoritative"
     )
 
 

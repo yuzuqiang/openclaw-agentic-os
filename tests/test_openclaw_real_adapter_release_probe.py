@@ -386,7 +386,32 @@ class RealAdapterReleaseProbeTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["type"], "error")
         self.assertIn("unsigned cross-process catalog", messages[0]["error"])
+        self.assertIn(MODULE.DISABLED_PROOF_STATUS, messages[0]["error"])
         self.assertNotIn('"type": "rpc"', result.stdout)
+
+    def test_production_probe_declares_disabled_future_contract_status(self) -> None:
+        self.assertEqual(
+            MODULE.DISABLED_PROOF_STATUS,
+            "disabled_future_contract_not_authoritative",
+        )
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            input=json.dumps(
+                {
+                    "acquire_params": {"idempotency_key": "acquire-key"},
+                    "release_params": RELEASE_PARAMS,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line]
+        self.assertEqual(len(messages), 1)
+        self.assertIn(MODULE.DISABLED_PROOF_STATUS, messages[0]["error"])
 
     def test_canonical_release_replays_and_disappears(self) -> None:
         transport = FakeTransport()

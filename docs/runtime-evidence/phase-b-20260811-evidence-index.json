@@ -20,7 +20,7 @@
     },
     "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "8c02586c36d07ecfe48c576decd7aa31ac2b16e8",
+    "reviewed_head_sha": "9b13674a8050ec58fd94f8ce1553ffb57f685654",
     "sha256": "699491b60f72f50671abeb05fcc79cf5ed63c34a4c4e8d377175a57014e71e7f",
     "status": "captured_from_clean_generator_revision"
   },
