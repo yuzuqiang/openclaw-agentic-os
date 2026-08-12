@@ -1,21 +1,10 @@
 {
   "catalog": {
     "active_catalog": {
+      "failure_payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
       "method": "tools.catalog",
-      "parameter_schema_tool_names": [],
-      "parameter_schema_unavailable_tool_names": [
-        "session_status",
-        "sessions_history",
-        "sessions_list",
-        "sessions_spawn"
-      ],
-      "raw_response_sha256": "de3a8aa7c86b93928c2d67aff3a367ab6d111a7b49b50d7a355cee74161766e6",
-      "required_tool_names": [
-        "session_status",
-        "sessions_history",
-        "sessions_list",
-        "sessions_spawn"
-      ]
+      "status": "catalog_unavailable_before_contract_validation",
+      "validation_stage": "catalog_capture"
     },
     "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
     "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
@@ -63,23 +52,7 @@
         },
         {
           "disk_source_declaration": "observed",
-          "live_probe": {
-            "allowAgents_count": 2,
-            "incidental_mutations_possible": [
-              "expired_lease_cleanup",
-              "cli_bootstrap_state"
-            ],
-            "leases_count": 0,
-            "live_reachability": "reachable",
-            "method": "subagents.allowLease.status",
-            "ok": true,
-            "raw_response_sha256": "e6d87b02b2525b3da0d4ce712493c44411afeb15d07953fb065a71c22883e741",
-            "request_semantics": "read_only_request",
-            "requested_mutation": false,
-            "status": "ok",
-            "writeMode": "memory"
-          },
-          "live_reachability": "reachable",
+          "live_reachability": "unproven",
           "name": "subagents.allowLease.status"
         },
         {
@@ -95,20 +68,24 @@
       ],
       "status": "disk_source_declarations_complete",
       "status_corroboration": {
-        "allowAgents_count": 2,
         "incidental_mutations_possible": [
           "expired_lease_cleanup",
           "cli_bootstrap_state"
         ],
-        "leases_count": 0,
-        "live_reachability": "reachable",
         "method": "subagents.allowLease.status",
-        "ok": true,
-        "raw_response_sha256": "e6d87b02b2525b3da0d4ce712493c44411afeb15d07953fb065a71c22883e741",
+        "raw_response_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
         "request_semantics": "read_only_request",
         "requested_mutation": false,
-        "status": "ok",
-        "writeMode": "memory"
+        "returncode": 1,
+        "status": "status_rpc_failed",
+        "stderr": {
+          "bytes": 982,
+          "sha256": "99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d"
+        },
+        "stdout": {
+          "bytes": 363,
+          "sha256": "f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95"
+        }
       },
       "tools": [
         {
@@ -144,83 +121,17 @@
     "model_tool_catalog": {
       "authority": "tools.catalog",
       "catalog_kind": "model_callable_tools_catalog",
+      "failure_payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
       "method": "tools.catalog",
-      "parameter_schema_tool_names": [],
-      "parameter_schema_unavailable_tool_names": [
+      "required_tool_names": [],
+      "source_declared_tool_names": [
         "session_status",
         "sessions_history",
         "sessions_list",
         "sessions_spawn"
       ],
-      "raw_response_sha256": "de3a8aa7c86b93928c2d67aff3a367ab6d111a7b49b50d7a355cee74161766e6",
-      "required_tool_names": [
-        "session_status",
-        "sessions_history",
-        "sessions_list",
-        "sessions_spawn"
-      ],
-      "tools": [
-        {
-          "catalog_surface": "model_tool",
-          "name": "sessions_spawn",
-          "parameter_evidence": {
-            "catalog_schema_available": false,
-            "parameter_authority": "installed_runtime_dist_sources",
-            "status": "installed_source_bound_catalog_schema_unavailable"
-          },
-          "parameters": [
-            "agentId",
-            "attachAs",
-            "attachments",
-            "cleanup",
-            "context",
-            "cwd",
-            "label",
-            "lightContext",
-            "mode",
-            "model",
-            "runtime",
-            "sandbox",
-            "task",
-            "taskName",
-            "thinking"
-          ],
-          "schema_source": "model_tool_schema"
-        },
-        {
-          "catalog_surface": "model_tool",
-          "name": "sessions_list",
-          "parameter_evidence": {
-            "catalog_schema_available": false,
-            "parameter_authority": "unproven",
-            "status": "unproven_from_catalog_and_installed_sources"
-          },
-          "parameters": [],
-          "schema_source": "declared_tool_name"
-        },
-        {
-          "catalog_surface": "model_tool",
-          "name": "sessions_history",
-          "parameter_evidence": {
-            "catalog_schema_available": false,
-            "parameter_authority": "unproven",
-            "status": "unproven_from_catalog_and_installed_sources"
-          },
-          "parameters": [],
-          "schema_source": "declared_tool_name"
-        },
-        {
-          "catalog_surface": "model_tool",
-          "name": "session_status",
-          "parameter_evidence": {
-            "catalog_schema_available": false,
-            "parameter_authority": "unproven",
-            "status": "unproven_from_catalog_and_installed_sources"
-          },
-          "parameters": [],
-          "schema_source": "declared_tool_name"
-        }
-      ]
+      "status": "catalog_unavailable_before_contract_validation",
+      "validation_stage": "catalog_capture"
     },
     "openclaw_package_name": "openclaw",
     "openclaw_version": "2026.7.1",
@@ -246,7 +157,7 @@
       "db_authority_requirement": "future_db_authority_requires_canonical_sessions_status",
       "future_canonical_status_alias_available": false,
       "future_canonical_status_method": "sessions_status",
-      "future_canonical_status_method_status": "missing_from_model_callable_tools_catalog",
+      "future_canonical_status_method_status": "unproven_model_catalog_unavailable",
       "legacy_status_alias": "session_status",
       "observed_model_status_aliases": [
         "session_status"
@@ -278,74 +189,28 @@
           "leaseId"
         ],
         "schema_source": "gateway_server_method_params"
-      },
-      {
-        "catalog_surface": "model_tool",
-        "name": "sessions_spawn",
-        "parameter_evidence": {
-          "catalog_schema_available": false,
-          "parameter_authority": "installed_runtime_dist_sources",
-          "status": "installed_source_bound_catalog_schema_unavailable"
-        },
-        "parameters": [
-          "agentId",
-          "attachAs",
-          "attachments",
-          "cleanup",
-          "context",
-          "cwd",
-          "label",
-          "lightContext",
-          "mode",
-          "model",
-          "runtime",
-          "sandbox",
-          "task",
-          "taskName",
-          "thinking"
-        ],
-        "schema_source": "model_tool_schema"
-      },
-      {
-        "catalog_surface": "model_tool",
-        "name": "sessions_list",
-        "parameter_evidence": {
-          "catalog_schema_available": false,
-          "parameter_authority": "unproven",
-          "status": "unproven_from_catalog_and_installed_sources"
-        },
-        "parameters": [],
-        "schema_source": "declared_tool_name"
-      },
-      {
-        "catalog_surface": "model_tool",
-        "name": "sessions_history",
-        "parameter_evidence": {
-          "catalog_schema_available": false,
-          "parameter_authority": "unproven",
-          "status": "unproven_from_catalog_and_installed_sources"
-        },
-        "parameters": [],
-        "schema_source": "declared_tool_name"
-      },
-      {
-        "catalog_surface": "model_tool",
-        "name": "session_status",
-        "parameter_evidence": {
-          "catalog_schema_available": false,
-          "parameter_authority": "unproven",
-          "status": "unproven_from_catalog_and_installed_sources"
-        },
-        "parameters": [],
-        "schema_source": "declared_tool_name"
       }
     ]
   },
+  "catalog_failure": {
+    "message": "active OpenClaw tool catalog failed before contract validation",
+    "payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
+    "returncode": 1,
+    "runtime_provenance_preserved": true,
+    "stderr": {
+      "bytes": 982,
+      "sha256": "99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d"
+    },
+    "stdout": {
+      "bytes": 363,
+      "sha256": "f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95"
+    }
+  },
   "classification": "fail_closed_future_contract",
-  "error": "runtime Gateway RPC subagents.allowLease.acquire live reachability is unproven; installed source declaration is not runtime reachability proof; runtime Gateway RPC subagents.allowLease.release live reachability is unproven; installed source declaration is not runtime reachability proof; runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history required parameter schema is unproven by tools.catalog and installed runtime source evidence; runtime model tool authority is incomplete: runtime tool catalog sessions_spawn is missing parameters: client_request_id, idempotency_key, metadata; runtime tool catalog is missing sessions_status; runtime tool catalog sessions_history required parameter schema is unproven by tools.catalog and installed runtime source evidence; runtime Gateway RPC source authority is incomplete: runtime tool catalog subagents.allowLease.acquire is missing parameters: agent_id, client_lease_id, idempotency_key, phase, requester_agent_id, run_id, transition_id, ttl_ms; runtime tool catalog subagents.allowLease.release is missing parameters: agent_id, client_lease_id, gateway_lease_id, phase, release_idempotency_key, requester_agent_id, run_id, transition_id; connected Gateway build identity is not proven; connected Gateway build evidence is missing",
+  "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}; model-callable tools.catalog is unavailable, so future DB-authority metadata/idempotency/accepted-session/status-alias requirements remain unproven",
   "preflight_evidence_binding": {
-    "agentic_os_head_sha": "db48be3b733f5c49e35129fe306930804a429b16",
-    "agentic_os_tree_sha": "091083734ccd0aa95cf8ccb944b156c266f6b7a8",
+    "agentic_os_head_sha": "65402f6dbfb564f2e5dd5b45e6773cda39849771",
+    "agentic_os_tree_sha": "cb1d0c7c375becc3e2706d0e59a352dbd9ef5ff1",
     "binding_kind": "generator_revision",
     "capability_source_paths": [
       "scripts/openclaw-tool-capability-preflight.py",
@@ -353,7 +218,7 @@
       "src/agentic_os/__init__.py"
     ],
     "containing_commit_self_binding": false,
-    "generated_at_utc": "2026-08-12T07:17:11+00:00",
+    "generated_at_utc": "2026-08-12T09:19:31+00:00",
     "invocation": {
       "argv": [
         "--live-installed-openclaw",
@@ -363,7 +228,7 @@
       ],
       "script": "scripts/openclaw-tool-capability-preflight.py"
     },
-    "preflight_script_sha256": "5e83b011d9cd10b7e6a2b7e916d83a4273efb7f6cb8a1d50fd0eaa0f27f39429"
+    "preflight_script_sha256": "258b4390e9e512bfa1dfb2fe0f7e96caf7930a543f07cd82568e65c69102adb8"
   },
   "runtime_ready": false,
   "status": "fail"
