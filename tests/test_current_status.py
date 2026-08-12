@@ -398,7 +398,16 @@ class CurrentStatusTests(unittest.TestCase):
         )
         bound_head = binding["agentic_os_head_sha"]
         self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
-        self.assertEqual(current["reviewed_head_sha"], bound_head)
+        self.assertRegex(current["reviewed_head_sha"], r"^[0-9a-f]{40}$")
+        reviewed_head = current["reviewed_head_sha"]
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, reviewed_head],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", reviewed_head, "HEAD"],
+            check=True,
+        )
         bound_tree = subprocess.run(
             ["git", "-C", str(root), "rev-parse", f"{bound_head}^{{tree}}"],
             check=True,

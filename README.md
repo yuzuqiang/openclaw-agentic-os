@@ -16,7 +16,7 @@ production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `9534173ae359f3330dae5bfbc03cb35b99dd244cc8d2e222afaef627687cba40`
+- Current design artifact SHA-256: `2972f4bdcbfe9c88d5e960ca7b81fe58ea3d80df2699c6d6b7e65f052d952e1f`
 - Historical revalidation evidence, superseded by the current Draft remediation:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and capture state:
@@ -472,10 +472,11 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-The authoritative candidate proof is now the isolated real-Gateway probe. It
-refuses dirty candidate worktrees, starts the candidate's token-authenticated
-Gateway with isolated test state and a loopback OpenAI Responses fixture, and
-requires an actual child result before writing hash-only evidence:
+The authoritative candidate proof for the currently implemented runtime surface
+is the isolated real-Gateway probe. It refuses dirty candidate worktrees, starts
+the candidate's token-authenticated Gateway with isolated test state and a
+loopback OpenAI Responses fixture, and requires an actual child result before
+writing hash-only evidence:
 
 ```bash
 python3 scripts/openclaw-real-gateway-contract-probe.py \
@@ -492,13 +493,13 @@ writing the file.
 The probe exercises the runtime-discovered `tools.catalog` RPC methods,
 principal-bound allowLease acquire/duplicate/status/release, concurrent spawn
 deduplication, canonical session reads, canonical child lifecycle transitions,
-fail-closed authorization, and the real `spawnSubagentDirect` child runner. It
-also executes the exact committed merged `OpenClawAdapter` against that live
-catalog and authenticated Gateway, requiring canonical
-`release_idempotency_key` metadata, identical duplicate-release observations,
-and post-release lease disappearance. Direct handler imports, hand-written
-catalogs, mocked Gateway calls, and dirty exact-head evidence are rejected as
-non-authoritative.
+fail-closed authorization, and the real `spawnSubagentDirect` child runner.
+`agentic_adapter_*` release proofs are explicitly disabled future-contract
+proofs in this repository state: the cross-process adapter release entry point
+rejects unsigned input and is not injected into the candidate E2E until a
+verified in-process adapter handoff exists. Direct handler imports, hand-written
+catalogs, mocked Gateway calls, disabled adapter proofs, and dirty exact-head
+evidence are rejected as non-authoritative.
 
 ## Version-management policy
 

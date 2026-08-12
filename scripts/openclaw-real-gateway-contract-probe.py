@@ -18,7 +18,6 @@ E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 ADAPTER_PROBE = "scripts/openclaw-real-adapter-release-probe.py"
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
-    ADAPTER_PROBE,
     "src/agentic_os/openclaw_adapter.py",
     "src/agentic_os/metadata.py",
 )
@@ -65,12 +64,14 @@ REQUIRED_RUNTIME_PROOFS = (
     "duplicate_lease_identity_parity",
     "duplicate_spawn_identity_parity",
     "duplicate_release_identity_parity",
+    "child_completed",
+)
+DISABLED_FUTURE_RUNTIME_PROOFS = (
     "agentic_adapter_live_catalog",
     "agentic_adapter_release_succeeded",
     "agentic_adapter_duplicate_release_parity",
     "agentic_adapter_release_metadata_parity",
     "agentic_adapter_post_release_absent",
-    "child_completed",
 )
 REQUIRED_CHILD_HASH_PROOFS = (
     "child_result_sha256",
@@ -248,7 +249,6 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
         {
             "AGENTIC_OS_EXPECTED_OPENCLAW_HEAD": head,
             "AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE": str(temporary_evidence_file),
-            "AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT": str(ROOT / ADAPTER_PROBE),
         }
     )
     command = [

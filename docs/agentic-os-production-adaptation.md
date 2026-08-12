@@ -4617,7 +4617,10 @@ P0.0 - privacy and external contract preflight:
   mappings cannot mint runtime adapter authority. The production adapter has no
   authority-minting path today: all seven RPCs reject before transport until a
   transport-bound attestor exists, and the cross-process release probe rejects
-  unsigned input before transport. DB authority still fails closed on
+  unsigned input before transport. The `agentic_adapter_*` release observations
+  are not current authoritative proof requirements; they remain disabled
+  future-contract checks until a verified in-process adapter handoff can run
+  without minting authority from an unsigned catalog. DB authority still fails closed on
   future metadata/idempotency/full-owner fields, missing `sessions_spawn`
   metadata, and the future canonical `sessions_status` alias. Before any real
   RPC is relied on, the exact tool/RPC surface must be proven with
