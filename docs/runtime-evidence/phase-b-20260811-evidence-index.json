@@ -14,14 +14,14 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "63fd653c06aa085741558f5b367238277b595613",
+      "head_sha": "db48be3b733f5c49e35129fe306930804a429b16",
       "script_sha256": "5e83b011d9cd10b7e6a2b7e916d83a4273efb7f6cb8a1d50fd0eaa0f27f39429",
-      "tree_sha": "435ba814adbd5ebae076b943ef6bce1c989a6e76"
+      "tree_sha": "091083734ccd0aa95cf8ccb944b156c266f6b7a8"
     },
     "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "9b13674a8050ec58fd94f8ce1553ffb57f685654",
-    "sha256": "699491b60f72f50671abeb05fcc79cf5ed63c34a4c4e8d377175a57014e71e7f",
+    "reviewed_head_sha": "db48be3b733f5c49e35129fe306930804a429b16",
+    "sha256": "3fc64e86b831db9779015779818fa2638662bcb31480e722aea73c652761a928",
     "status": "captured_from_clean_generator_revision"
   },
   "historical_artifacts": [

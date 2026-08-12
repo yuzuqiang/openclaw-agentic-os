@@ -31,9 +31,9 @@ class RealGatewayProbeTests(unittest.TestCase):
         )
 
     def test_binds_current_gateway_and_adapter_sources_without_disabled_probe(self) -> None:
-        self.assertNotIn(MODULE.ADAPTER_PROBE, MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
+        self.assertFalse(hasattr(MODULE, "ADAPTER_PROBE"))
 
     def test_rejects_raw_session_identity(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
@@ -232,6 +232,28 @@ class RealGatewayProbeTests(unittest.TestCase):
         for proof in MODULE.REQUIRED_RUNTIME_PROOFS:
             payload[proof] = True
         with self.assertRaisesRegex(MODULE.ProbeError, "non-authoritative"):
+            MODULE.validate_evidence(
+                payload,
+                openclaw_root=MODULE.ROOT,
+                agentic_root=MODULE.ROOT,
+                head="openclaw-head",
+            )
+
+    def test_disabled_future_adapter_proofs_are_rejected_as_authoritative(self) -> None:
+        payload = {
+            "status": "pass",
+            "openclaw_head_sha": "openclaw-head",
+            "agentic_os_head_sha": MODULE._git(MODULE.ROOT, "rev-parse", "HEAD"),
+            "static_allow_agents_wildcard": False,
+            "model_request_count": 2,
+            "committed_snapshot_authority": "non_authoritative_last_run_snapshot",
+            "current_head_evidence_required": True,
+            "child_completed": False,
+            "agentic_adapter_release_succeeded": True,
+        }
+        for proof in MODULE.REQUIRED_RUNTIME_PROOFS:
+            payload[proof] = True
+        with self.assertRaisesRegex(MODULE.ProbeError, "disabled future runtime proofs"):
             MODULE.validate_evidence(
                 payload,
                 openclaw_root=MODULE.ROOT,

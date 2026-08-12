@@ -659,9 +659,10 @@ def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], lis
     return methods, sources
 
 
-def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
+def _declared_core_names(root: Path) -> tuple[set[str], list[Path], set[str]]:
     names: set[str] = set()
     sources: list[Path] = []
+    gateway_names: set[str] = set()
     for pattern, scanner in (
         ("openclaw-tools-*.js", _scan_js_declared_tool_names),
         ("core-descriptors-*.js", _scan_js_declared_tool_names),
@@ -671,8 +672,10 @@ def _declared_core_names(root: Path) -> tuple[set[str], list[Path]]:
             matched = scanner(text)
             if matched:
                 names.update(matched)
+                if pattern == "server-methods-*.js":
+                    gateway_names.update(matched)
                 sources.append(path)
-    return names, sources
+    return names, sources, gateway_names
 
 
 def _resolve_openclaw_executable() -> Path:
@@ -1356,11 +1359,12 @@ def _scan_runtime_source_contract(
     list[Path],
     set[str],
     list[Path],
+    set[str],
 ]:
     try:
         model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
         gateway_params, gateway_sources = _extract_gateway_method_params(root)
-        declared_names, declaration_sources = _declared_core_names(root)
+        declared_names, declaration_sources, gateway_declared_names = _declared_core_names(root)
     except OSError as exc:
         catalog = _runtime_source_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1379,18 +1383,19 @@ def _scan_runtime_source_contract(
         gateway_sources,
         declared_names,
         declaration_sources,
+        gateway_declared_names,
     )
 
 
 def _source_bound_gateway_rpc_names(
     *,
     gateway_params: Mapping[str, set[str]],
-    declared_names: set[str],
+    gateway_declared_names: set[str],
 ) -> set[str]:
     return {
         name
         for name in GATEWAY_RPC_METHOD_NAMES
-        if name in gateway_params or name in declared_names
+        if name in gateway_params or name in gateway_declared_names
     }
 
 
@@ -1630,6 +1635,7 @@ def live_installed_openclaw_catalog(
             gateway_sources,
             declared_names,
             declaration_sources,
+            gateway_declared_names,
         ) = _scan_runtime_source_contract(
             root=root,
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1643,7 +1649,7 @@ def live_installed_openclaw_catalog(
         )
         source_bound_rpc_names = _source_bound_gateway_rpc_names(
             gateway_params=gateway_params,
-            declared_names=declared_names,
+            gateway_declared_names=gateway_declared_names,
         )
         try:
             gateway_status = _gateway_status_for_source_bound_names(
@@ -1679,6 +1685,13 @@ def live_installed_openclaw_catalog(
             active_catalog_sha256=active_catalog_sha256,
             source_digest_snapshot=source_digest_snapshot,
             root=root,
+        )
+        _require_runtime_identity_unchanged_after_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            runtime_target=runtime_target,
+            include_env_override=include_env_override,
+            require_env_override=require_env_override,
+            active_catalog_sha256=active_catalog_sha256,
         )
         source_paths = {
             *model_tool_sources,
@@ -1750,6 +1763,7 @@ def live_installed_openclaw_catalog(
         gateway_sources,
         declared_names,
         declaration_sources,
+        gateway_declared_names,
     ) = _scan_runtime_source_contract(
         root=root,
         runtime_identity_catalog=runtime_identity_catalog,
@@ -1776,7 +1790,7 @@ def live_installed_openclaw_catalog(
     )
     source_bound_rpc_names = _source_bound_gateway_rpc_names(
         gateway_params=gateway_params,
-        declared_names=declared_names,
+        gateway_declared_names=gateway_declared_names,
     )
     gateway_status = _gateway_status_for_source_bound_names(
         executable=executable,

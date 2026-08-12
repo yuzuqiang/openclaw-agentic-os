@@ -658,6 +658,72 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("model-callable tools.catalog is unavailable", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
 
+    def test_catalog_failure_does_not_promote_model_declarations_to_gateway_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    'name: "subagents.allowLease.status", '
+                    'name: "subagents.allowLease.acquire", '
+                    'name: "subagents.allowLease.release", '
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                )
+            with open(os.path.join(dist, "core-descriptors-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    'name: "subagents.allowLease.status", '
+                    'name: "subagents.allowLease.acquire", '
+                    'name: "subagents.allowLease.release"'
+                )
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    "import sys\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                    "    print(json.dumps({'ok': False, 'error': 'catalog unavailable'}, sort_keys=True))\n"
+                    "    raise SystemExit(1)\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    "    raise SystemExit(99)\n"
+                    "raise SystemExit(2)\n"
+                )
+            os.chmod(executable, 0o755)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(gateway_catalog["source_bound_rpc_names"], [])
+        self.assertEqual(gateway_catalog["status"], "partial_source_bound")
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "disk_source_declaration_missing",
+        )
+
     def test_isolated_candidate_records_target_but_rejects_unproven_gateway_reachability(self) -> None:
         with tempfile.TemporaryDirectory() as install_root:
             write_contract_candidate_dist(install_root)
@@ -1162,8 +1228,73 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             catalog = raised.exception.catalog
 
         self.assertIsNotNone(catalog)
-        self.assertEqual(executable_digest_reads, 1)
+        self.assertEqual(executable_digest_reads, 2)
         self.assertEqual(catalog["active_executable_sha256"], expected_executable_sha256)
+
+    def test_catalog_failure_rejects_runtime_identity_change_after_status_probe(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir)
+            executable = os.path.join(bin_dir, "openclaw")
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write("#!/usr/bin/env python3\nraise SystemExit(1)\n")
+            executable_path = module.Path(executable).resolve()
+            expected_initial_executable_sha256 = module._file_digest(executable_path)
+
+            def fail_catalog(*_args, **kwargs):
+                raise module.RuntimeEvidenceError(
+                    "catalog failed",
+                    catalog=kwargs.get("failure_catalog"),
+                    catalog_failure={"runtime_provenance_preserved": True},
+                )
+
+            def replace_launcher_after_status(*_args, **_kwargs):
+                with open(executable, "w", encoding="utf-8") as handle:
+                    handle.write("#!/usr/bin/env python3\nraise SystemExit(42)\n")
+                return {
+                    "method": "subagents.allowLease.status",
+                    "request_semantics": "read_only_request",
+                    "requested_mutation": False,
+                    "incidental_mutations_possible": [],
+                    "live_reachability": "reachable",
+                    "status": "ok",
+                }
+
+            with mock.patch.object(
+                module,
+                "_resolve_install_root",
+                return_value=module.Path(install_root),
+            ), mock.patch.object(
+                module,
+                "_resolve_openclaw_executable",
+                return_value=executable_path,
+            ), mock.patch.object(
+                module,
+                "_run_gateway_tools_catalog",
+                side_effect=fail_catalog,
+            ), mock.patch.object(
+                module,
+                "_run_gateway_allow_lease_status",
+                side_effect=replace_launcher_after_status,
+            ), self.assertRaises(module.RuntimeEvidenceError) as raised:
+                module.live_installed_openclaw_catalog()
+
+            catalog = raised.exception.catalog
+
+        self.assertIsNotNone(catalog)
+        self.assertEqual(catalog["active_executable_sha256"], expected_initial_executable_sha256)
+        self.assertEqual(
+            catalog["active_catalog"]["status"],
+            "runtime_identity_changed_after_catalog_capture",
+        )
+        self.assertEqual(
+            catalog["active_catalog"]["validation_stage"],
+            "runtime_identity_binding",
+        )
 
     def test_live_positive_evidence_rejects_unreadable_executable_digest(self) -> None:
         module = load_preflight_module()
