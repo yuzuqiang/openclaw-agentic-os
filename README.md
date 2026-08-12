@@ -16,7 +16,7 @@ production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Last independently accepted design artifact SHA-256: `fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`
-- Current design artifact SHA-256: `2972f4bdcbfe9c88d5e960ca7b81fe58ea3d80df2699c6d6b7e65f052d952e1f`
+- Current design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
 - Historical revalidation evidence, superseded by the current Draft remediation:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and capture state:
@@ -444,8 +444,8 @@ acquire/release parameters, acquire/release were not live-probed,
 `sessions_spawn` source evidence lacks `client_request_id`, `idempotency_key`,
 and `metadata`, and the current model tool alias is `session_status` while
 future DB authority requires `sessions_status` as the canonical status alias.
-The split-catalog JSON is generator-revision-bound audit evidence, not exact
-PR-head authority; Phase C must replay
+The split-catalog JSON path in the forward index is pending exact-lineage
+recapture rather than current authority; Phase C must replay
 `python3 scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`
 against the exact PR head before any controlled external review. The
 plain-catalog path is deliberately offline-only: it reports

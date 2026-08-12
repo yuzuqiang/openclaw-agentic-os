@@ -121,8 +121,9 @@ Current-vs-proposed truth:
   `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks its stored
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
-- The 2026-08-11 split-catalog evidence path is the current installed-runtime
-  boundary named by that index. `tools.catalog` proves model-callable tool
+- The 2026-08-11 split-catalog evidence path is named by that index but is
+  pending exact-lineage recapture before it can be current installed-runtime
+  authority. `tools.catalog` proves model-callable tool
   names, but absent parameter schemas are not treated as empty schemas:
   parameters are explicitly source-bound or marked unproven. Hashed installed
   sources declare all three allowLease names; only

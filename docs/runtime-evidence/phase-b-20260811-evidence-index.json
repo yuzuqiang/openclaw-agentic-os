@@ -1,7 +1,7 @@
 {
   "classification": "evidence_lineage_correction",
   "current_evidence": {
-    "classification": "fail_closed_future_contract",
+    "classification": "pending_exact_head_capture",
     "generator_binding_requirements": {
       "bound_head_is_ancestor_of_containing_revision": true,
       "bound_tree_matches_bound_head_tree": true,
@@ -14,15 +14,16 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "3222668b4fc687a3d3172c382d5b1eb575a4bb4d",
-      "script_sha256": "258b4390e9e512bfa1dfb2fe0f7e96caf7930a543f07cd82568e65c69102adb8",
-      "tree_sha": "ff3ebb420aef933bb47e195cc973c7fda50aff92"
+      "head_sha": null,
+      "script_sha256": null,
+      "tree_sha": null
     },
     "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
-    "raw_status": "fail",
-    "reviewed_head_sha": "3222668b4fc687a3d3172c382d5b1eb575a4bb4d",
-    "sha256": "59cd39bc8007f51b0fb3fa3e3dd9e4c0fa0981190a543c182b3dc33af3a197c7",
-    "status": "captured_from_clean_generator_revision"
+    "raw_status": null,
+    "reviewed_head_sha": null,
+    "sha256": null,
+    "status": "pending_clean_generator_revision_capture",
+    "status_reason": "Previous current evidence was generated from a PR-internal revision that is not an ancestor of GitHub Codex's squash-style reviewed commit lineage. It is no longer advertised as current authority until recaptured from the exact reviewed lineage."
   },
   "historical_artifacts": [
     {
@@ -49,5 +50,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "current_evidence_captured"
+  "status": "pending_current_evidence"
 }
