@@ -4,19 +4,21 @@ Production-oriented control-plane design and implementation workspace for OpenCl
 
 ## Current status
 
-The current corrected design artifact is accepted repository state: PR #39
-passed exact-head Phase C for head
-`53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, received a clean Codex review
-for that head, and merged to `main` as
+The accepted repository design artifact is the PR #39 artifact at head
+`53c9555cacb8e1906bc7cb6e252c0b91a73a8141`. That accepted repository state
+passed exact-head Phase C, received a clean Codex review for that head, and
+merged to `main` as
 `b48a7cba8c6671b5dd33a369fb4f59f57d159739`. This is repository/design
-acceptance only. It does not prove production runtime behavior. The repository
-has accumulated bounded local/synthetic P0/P1/P2 implementation slices with
+acceptance only; later documentation corrections are recorded separately in
+`docs/project-status.json`. It does not prove production runtime behavior. The
+repository has accumulated bounded local/synthetic P0/P1/P2 implementation slices with
 executable tests; those slices are evidence of local control-plane contracts,
 not evidence of production OpenClaw authority.
 
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
-- Accepted repository design artifact SHA-256: `99bdf50d99a0dbf2ffca0592c51ca1417d5f5fb880058629c26c22eb1e9f58f2`
+- Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
+- Current corrected design artifact SHA-256: `f8aeb38a74d8cf3d3c0703f0ff54511ecf23bfc34b3c9274ecf69e554b1247b5`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)

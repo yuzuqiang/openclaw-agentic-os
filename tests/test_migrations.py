@@ -7900,9 +7900,9 @@ class MigrationTests(unittest.TestCase):
         project_status = json.loads(
             (repository_root() / "docs/project-status.json").read_text(encoding="utf-8")
         )
-        accepted_design_digest = project_status["repository_artifact_acceptance"][
-            "design_artifact"
-        ]["sha256"]
+        acceptance = project_status["repository_artifact_acceptance"]
+        accepted_design_digest = acceptance["accepted_head_design_artifact"]["sha256"]
+        current_design_digest = acceptance["current_corrected_design_artifact"]["sha256"]
         self.assertEqual(set(project_status), {
             "repository_artifact_acceptance",
             "live_runtime_evidence",
@@ -7929,11 +7929,17 @@ class MigrationTests(unittest.TestCase):
         self.assertNotIn("Draft PR successor", readme)
         self.assertNotIn("still required before it can be", readme)
         self.assertIn(
-            "Accepted repository design artifact SHA-256: "
+            "Accepted-head repository design artifact SHA-256: "
             f"`{accepted_design_digest}`",
             readme,
         )
-        self.assertEqual(accepted_design_digest, design_digest)
+        self.assertIn(
+            "Current corrected design artifact SHA-256: "
+            f"`{current_design_digest}`",
+            readme,
+        )
+        self.assertEqual(current_design_digest, design_digest)
+        self.assertNotEqual(accepted_design_digest, current_design_digest)
         self.assertIn(f"Base DDL migration SHA-256: `{base_migration_digest}`", readme)
         self.assertIn(
             f"Current latest migration SHA-256: `{latest_migration_digest}`", readme

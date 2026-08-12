@@ -26,6 +26,14 @@ def _git_output(root, *args: str) -> str:
     ).stdout.strip()
 
 
+def _git_bytes(root, *args: str) -> bytes:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
 class CurrentStatusTests(unittest.TestCase):
     def test_project_status_binds_accepted_repository_design(self) -> None:
         root = repository_root()
@@ -75,28 +83,61 @@ class CurrentStatusTests(unittest.TestCase):
             check=True,
         )
 
-        design = root / repository["design_artifact"]["path"]
-        design_digest = hashlib.sha256(design.read_bytes()).hexdigest()
-        self.assertEqual(repository["design_artifact"]["sha256"], design_digest)
+        accepted_artifact = repository["accepted_head_design_artifact"]
+        self.assertEqual(accepted_artifact["path"], "docs/agentic-os-production-adaptation.md")
+        self.assertEqual(accepted_artifact["head_sha"], accepted_head)
+        accepted_design = _git_bytes(
+            root,
+            "show",
+            f"{accepted_head}:{accepted_artifact['path']}",
+        )
+        self.assertEqual(
+            accepted_artifact["sha256"],
+            hashlib.sha256(accepted_design).hexdigest(),
+        )
+
+        current_artifact = repository["current_corrected_design_artifact"]
+        self.assertEqual(current_artifact["path"], accepted_artifact["path"])
+        self.assertEqual(
+            current_artifact["status"],
+            "current_successor_artifact_not_pr39_acceptance",
+        )
+        self.assertEqual(
+            current_artifact["sha256"],
+            hashlib.sha256((root / current_artifact["path"]).read_bytes()).hexdigest(),
+        )
+        self.assertNotEqual(
+            current_artifact["sha256"],
+            accepted_artifact["sha256"],
+        )
 
     def test_readme_current_design_hash_matches_status_contract(self) -> None:
         root = repository_root()
         status = json.loads((root / "docs/project-status.json").read_text(encoding="utf-8"))
         readme = (root / "README.md").read_text(encoding="utf-8")
-        digest = status["repository_artifact_acceptance"]["design_artifact"]["sha256"]
-        match = re.search(
-            r"Accepted repository design artifact SHA-256: `([0-9a-f]{64})`",
+        repository = status["repository_artifact_acceptance"]
+        accepted_digest = repository["accepted_head_design_artifact"]["sha256"]
+        current_digest = repository["current_corrected_design_artifact"]["sha256"]
+        accepted_match = re.search(
+            r"Accepted-head repository design artifact SHA-256: `([0-9a-f]{64})`",
+            readme,
+        )
+        current_match = re.search(
+            r"Current corrected design artifact SHA-256: `([0-9a-f]{64})`",
             readme,
         )
 
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), digest)
+        self.assertIsNotNone(accepted_match)
+        self.assertIsNotNone(current_match)
+        self.assertEqual(accepted_match.group(1), accepted_digest)
+        self.assertEqual(current_match.group(1), current_digest)
         self.assertEqual(
-            digest,
+            current_digest,
             hashlib.sha256(
                 (root / "docs/agentic-os-production-adaptation.md").read_bytes()
             ).hexdigest(),
         )
+        self.assertNotEqual(current_digest, accepted_digest)
         self.assertIn("docs/project-status.json", readme)
 
     def test_current_status_keeps_revalidation_status_consistent(self) -> None:
