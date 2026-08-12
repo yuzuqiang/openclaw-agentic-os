@@ -397,6 +397,8 @@ class CurrentStatusTests(unittest.TestCase):
             },
         )
         bound_head = binding["agentic_os_head_sha"]
+        self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
+        self.assertEqual(current["reviewed_head_sha"], bound_head)
         bound_tree = subprocess.run(
             ["git", "-C", str(root), "rev-parse", f"{bound_head}^{{tree}}"],
             check=True,
