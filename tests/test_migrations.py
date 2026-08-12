@@ -7897,19 +7897,43 @@ class MigrationTests(unittest.TestCase):
         latest_migration_digest = hashlib.sha256(
             (repository_root() / "migrations" / manifest["migrations"][-1]["file"]).read_bytes()
         ).hexdigest()
-        self.assertIn("still required before it can be", readme)
-        self.assertIn("final exact-head", readme)
-        self.assertIn("Phase C revalidation", readme)
+        project_status = json.loads(
+            (repository_root() / "docs/project-status.json").read_text(encoding="utf-8")
+        )
+        accepted_design_digest = project_status["repository_artifact_acceptance"][
+            "design_artifact"
+        ]["sha256"]
+        self.assertEqual(set(project_status), {
+            "repository_artifact_acceptance",
+            "live_runtime_evidence",
+            "production_authority",
+        })
+        self.assertEqual(
+            project_status["repository_artifact_acceptance"]["status"],
+            "accepted_and_merged",
+        )
+        self.assertEqual(
+            project_status["live_runtime_evidence"]["status"],
+            "pending_non_authoritative",
+        )
+        self.assertEqual(project_status["production_authority"]["status"], "disabled")
+        self.assertFalse(DB_AUTHORITY_ENABLED)
+        self.assertIn("accepted repository state", readme)
+        self.assertIn("passed exact-head Phase C", readme)
+        self.assertIn("clean Codex review", readme)
         self.assertIn(
             "docs/runtime-evidence/phase-b-revalidation-20260809.json", readme
         )
+        self.assertIn("docs/project-status.json", readme)
         self.assertNotIn("has **not** yet passed fresh independent", readme)
+        self.assertNotIn("Draft PR successor", readme)
+        self.assertNotIn("still required before it can be", readme)
         self.assertIn(
-            "Last independently accepted design artifact SHA-256: "
-            "`fdbc432dc8ce7bcbc5ced08291503bbd171417fe63217a2b565f5ae31c0f458d`",
+            "Accepted repository design artifact SHA-256: "
+            f"`{accepted_design_digest}`",
             readme,
         )
-        self.assertIn(f"Current design artifact SHA-256: `{design_digest}`", readme)
+        self.assertEqual(accepted_design_digest, design_digest)
         self.assertIn(f"Base DDL migration SHA-256: `{base_migration_digest}`", readme)
         self.assertIn(
             f"Current latest migration SHA-256: `{latest_migration_digest}`", readme

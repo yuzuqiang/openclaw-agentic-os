@@ -4,7 +4,7 @@
 
 Decision: adapt the nine Agentic OS workflows as an OpenClaw control-plane layer through a compatibility migration. Current OpenClaw file artifacts remain operational authority until each workflow is cut over. The target end state is repo-local SQLite at `/Users/zuqiangyu/clawd/state/agentic-os/control.db` as the single desired-state authority, with JSON, JSONL, Markdown, and run bundles becoming projections and evidence only after the cutover for that workflow.
 
-The previous big-bang authority claim is withdrawn. This document is a corrected production design, not a production runtime receipt. Bounded local/synthetic P0/P1/P2 slices now exist in the repository and are called out below, but they prove only local control-plane contracts and fixture behavior. They do not prove production OpenClaw/Gateway/Cron/session RPC behavior, production `control.db` authority, or steady DB-authority operation. Round 10 independent review found unresolved High design gaps; the Round 11 single-writer correction is now a Draft PR successor after Codex review remediation. The historical revalidation evidence in `docs/runtime-evidence/phase-b-revalidation-20260809.json` is superseded by the current remediation, and final exact-head Phase C revalidation is still required for the successor head before independent acceptance.
+The previous big-bang authority claim is withdrawn. This document is a corrected production design, not a production runtime receipt. Bounded local/synthetic P0/P1/P2 slices now exist in the repository and are called out below, but they prove only local control-plane contracts and fixture behavior. They do not prove production OpenClaw/Gateway/Cron/session RPC behavior, production `control.db` authority, or steady DB-authority operation. The PR #39 successor passed exact-head Phase C for head `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, received a clean Codex review for that head, and merged to `main` as `b48a7cba8c6671b5dd33a369fb4f59f57d159739`. That is accepted repository state and accepts the repository design artifact recorded in `docs/project-status.json`. This is repository/design acceptance only; it is not production runtime proof. The historical revalidation evidence in `docs/runtime-evidence/phase-b-revalidation-20260809.json` is superseded by the accepted PR #39 successor, while the current runtime evidence index remains pending and non-authoritative.
 
 Scope:
 
@@ -23,10 +23,12 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-08-12: Recorded the PR #39 post-merge repository/design acceptance boundary:
+  - Corrections: `docs/project-status.json` separates repository artifact acceptance from live runtime evidence and production authority. Repository acceptance is bound to PR #39, exact accepted head `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, accepted/merge tree `609ea2995b6d1113b1952a34f26bbc35f82e1592`, exact-head Phase C PASS, the clean Codex review comment, merge commit `b48a7cba8c6671b5dd33a369fb4f59f57d159739`, and this design artifact digest. Live runtime evidence remains `pending_non_authoritative` through `docs/runtime-evidence/phase-b-20260811-evidence-index.json`, production authority remains disabled, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-11: Corrected the installed-runtime preflight evidence model after Phase A found a combined-catalog false negative:
-  - Corrections: `scripts/openclaw-tool-capability-preflight.py` separates model-callable `tools.catalog` names from hashed installed-source parameter evidence and disk-only Gateway declarations. Missing catalog schemas are source-bound or marked unproven rather than treated as empty. Only `subagents.allowLease.status` has method-bound live reachability evidence; acquire/release and the connected Gateway build identity remain unproven, so source-only declarations cannot pass the adapter gate. The status request asks for no mutation but can trigger expired-lease cleanup and CLI bootstrap state writes. Plain caller catalogs are offline-only and cannot report runtime readiness; unsigned mappings cannot mint runtime adapter authority. No production authority-minting path exists today: construction is disabled and every production adapter RPC rejects before transport until a real transport-bound attestor marks the exact instance verified. Cross-process release-probe input also fails before transport. Both 2026-08-09 JSONs remain byte-for-byte frozen; retraction, invalid historical binding, and current capture state live only in the forward evidence index. Current evidence uses raw `status=fail` plus `classification=fail_closed_future_contract`; Phase C must replay against the exact PR head. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
+  - Corrections: `scripts/openclaw-tool-capability-preflight.py` separates model-callable `tools.catalog` names from hashed installed-source parameter evidence and disk-only Gateway declarations. Missing catalog schemas are source-bound or marked unproven rather than treated as empty. Only `subagents.allowLease.status` has method-bound live reachability evidence; acquire/release and the connected Gateway build identity remain unproven, so source-only declarations cannot pass the adapter gate. The status request asks for no mutation but can trigger expired-lease cleanup and CLI bootstrap state writes. Plain caller catalogs are offline-only and cannot report runtime readiness; unsigned mappings cannot mint runtime adapter authority. No production authority-minting path exists today: construction is disabled and every production adapter RPC rejects before transport until a real transport-bound attestor marks the exact instance verified. Cross-process release-probe input also fails before transport. Both 2026-08-09 JSONs remain byte-for-byte frozen; retraction, invalid historical binding, and current capture state live only in the forward evidence index. Current evidence uses raw `status=fail` plus `classification=fail_closed_future_contract`; future runtime-evidence authority requires exact clean-head recapture and independent validation. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-09: Revalidated the corrected Round 11 design boundary against exact `origin/main` `fa79a7ea4235a2c822e51052649f982f61c962e7` and the merged PR #36/#37 runtime evidence:
-  - Corrections: README and this document no longer treat historical evidence as final proof for the current Draft successor head. The remediation keeps production authority unproven: committed live installed OpenClaw 2026.7.1 evidence still fails closed, the fresh installed-runtime negative preflight in `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also failed closed before a contract proof and is now superseded by split-catalog evidence, PR #37's real-Gateway snapshot remains a non-authoritative last-run snapshot bound to an older Agentic OS head, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
+  - Corrections: README and this document no longer treat historical evidence as final proof for the then-current unaccepted successor head. The remediation keeps production authority unproven: committed live installed OpenClaw 2026.7.1 evidence still fails closed, the fresh installed-runtime negative preflight in `docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json` also failed closed before a contract proof and is now superseded by split-catalog evidence, PR #37's real-Gateway snapshot remains a non-authoritative last-run snapshot bound to an older Agentic OS head, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-07-18: Added the local fail-closed trust promotion writer and migration v13 binding overlay:
   - Corrections: active `trust_observations` now require known usage/cost across the trusted workflow, complete local-writer SLO PASS audit rows at or after the bound gate clock, append-only SLO evidence events after all runtime SLO inputs, same-run goal evidence, current risk-assessment binding, approval-bound PASS-gate evidence with immutable approval hashes, an independent verifier, trusted gate clock, immutable referenced goal-manifest and predicate-plugin metadata, gate-time file-authority snapshots, and deterministic trust binding hash equality. Active legacy unbound trust rows abort migration, and raw direct SQL without the registered local functions fails closed instead of granting trust. Runtime production behavior remains unproven.
 - 2026-07-21: Synced the project truth boundary and added a non-vacuous CI contract:
@@ -78,7 +80,7 @@ Non-goals:
   - `/Users/zuqiangyu/clawd/artifacts/agentic-os-dual-review/round1-ai-engineer-remediation.md`, SHA-256 `0a04afeca99af5d705131b0776bb76719bf76d8f872f5e70ea8afd5d4ccde971`.
   - `/Users/zuqiangyu/clawd/artifacts/agentic-os-dual-review/round1-software-architect-remediation.md`, SHA-256 `9d7eac1d84cf163598159395a6d4dbe9a0da05bd901765235a14cc68509fe3d6`.
 - Round 1 baseline document SHA-256 before remediation: `1a68cfd42563d984dc7057cf3354351809e3b194c488ec6f9fec78e3491cc0c7`.
-- Delivery status: design-only Round 11 correction applied after Round 10 failed, then Codex review remediation kept the PR in Draft. Final exact-head Phase C revalidation for the successor head is still required. Runtime production behavior remains unproven.
+- Delivery status: the PR #39 successor is accepted and merged after exact-head Phase C PASS and a clean Codex review for `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`. Repository/design acceptance remains separate from runtime proof. Runtime production behavior remains unproven.
 
 ## Current-State Evidence Boundary
 
@@ -136,8 +138,9 @@ Current-vs-proposed truth:
   declared schema; unsigned mappings cannot mint production adapter authority.
   The production adapter is intentionally inert until a real transport-bound
   attestor exists, and every RPC fails before transport today. Cross-process
-  release-probe input is also refused before transport. Exact PR-head authority
-  requires Phase C replay before controlled review.
+  release-probe input is also refused before transport. Future
+  runtime-evidence authority requires exact clean-head recapture and independent
+  validation before any production-runtime claim.
 - PR #37's real-Gateway evidence in
   `docs/runtime-evidence/openclaw-real-gateway-contract.json` remains useful as
   a historical isolated candidate snapshot, but it is explicitly
@@ -169,10 +172,10 @@ Principles:
 
 Operational design gate:
 
-- This document has passed an exact-head static design/local-fixture
-  revalidation for the historical corrected Round 11 boundary. That evidence is
-  superseded by the current Draft remediation and is not a final exact-head
-  acceptance receipt for the successor head.
+- This document has repository/design acceptance recorded in
+  `docs/project-status.json` for the PR #39 successor after exact-head Phase C
+  PASS, clean Codex review, and merge. That acceptance is not production runtime
+  proof.
 - Production proof requires implemented migrations, contract probes, crash fixtures, privacy guards, SQL SLO fixtures, reconciliation scanner, budget importer, predicate runner, gates, and rollout drills.
 
 ## Unified Target Architecture and External Runtime Metadata Contract
@@ -4716,4 +4719,4 @@ This document is a corrected design artifact. It applies the two mandatory Round
 
 Those implementations do not prove production behavior. Current production OpenClaw is not proven to satisfy the external metadata contract until exact live tool capability and metadata preflights pass. There is no production Agentic OS daemon, no production Agentic OS control database, and no production session authority. `agentic_os.DB_AUTHORITY_ENABLED` remains `False`; DB-authority canary and steady authority must stay blocked for production until live metadata proof, workflow drain, crash fixtures, parity, rollback, and production smoke tests pass.
 
-Production behavior proven: not yet. Local/synthetic fixture behavior proven: bounded slices only. Design status: Round 11 corrective revision applied; current Draft successor head still requires final exact-head Phase C revalidation before independent acceptance.
+Production behavior proven: not yet. Local/synthetic fixture behavior proven: bounded slices only. Repository/design status: accepted and merged through PR #39 after exact-head Phase C PASS and a clean Codex review for `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`.
