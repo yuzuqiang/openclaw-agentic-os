@@ -40,6 +40,13 @@ GATEWAY_RPC_METHOD_NAMES = (
     "subagents.allowLease.status",
     "subagents.allowLease.release",
 )
+ATTESTATION_RPC_METHOD_NAME = "agenticOs.runtime.attest"
+ATTESTATION_REQUEST_PARAMETERS = (
+    "challenge",
+    "client_process_id",
+    "expected_executable_sha256",
+    "expected_catalog_sha256",
+)
 MODEL_CALLABLE_TOOL_NAMES = (
     "sessions_spawn",
     "sessions_list",
@@ -61,6 +68,15 @@ RUNTIME_SOURCE_PATTERNS = (
     "openclaw-tools-*.js",
     "core-descriptors-*.js",
     "server-methods-*.js",
+    "agentic-os-runtime-contract-descriptors-*.js",
+    "agentic-os-runtime-attestation-*.js",
+)
+RUNTIME_SOURCE_FILES = (
+    "src/gateway/agentic-os-runtime-contract-descriptors.ts",
+    "src/gateway/agentic-os-runtime-attestation.ts",
+    "src/gateway/agentic-os-runtime-contract.ts",
+    "src/gateway/methods/core-descriptors.ts",
+    "src/agents/tools/sessions-spawn-tool.ts",
 )
 FUTURE_DB_AUTHORITY_CONTRACT = {
     "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
@@ -85,10 +101,18 @@ FUTURE_DB_AUTHORITY_CONTRACT = {
         "run_id",
         "transition_id",
     ],
-    "sessions_spawn_required_metadata": [
+    "sessions_spawn_required_parameters": [
+        "task",
+        "taskName",
+        "runtime",
+        "mode",
+        "agentId",
+        "cleanup",
+        "context",
+        "lightContext",
         "client_request_id",
-        "gateway_lease_id",
         "idempotency_key",
+        "gateway_lease_id",
         "metadata",
     ],
     "accepted_session_identity_requirement": (
@@ -242,6 +266,10 @@ def _runtime_source_digest_snapshot(root: Path) -> dict[str, str]:
     for pattern in RUNTIME_SOURCE_PATTERNS:
         for path in sorted((root / "dist").glob(pattern)):
             snapshot[_relative_source_path(root, path)] = _file_digest(path)
+    for relative in RUNTIME_SOURCE_FILES:
+        path = root / relative
+        if path.exists():
+            snapshot[_relative_source_path(root, path)] = _file_digest(path)
     return snapshot
 
 
@@ -249,6 +277,25 @@ def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
     return [
         (path, path.read_text(encoding="utf-8", errors="ignore"))
         for path in sorted((root / "dist").glob(pattern))
+    ]
+
+
+def _read_runtime_files(
+    root: Path,
+    *,
+    dist_pattern: str | None = None,
+    source_files: Iterable[str] = (),
+) -> list[tuple[Path, str]]:
+    files: list[Path] = []
+    if dist_pattern is not None:
+        files.extend(sorted((root / "dist").glob(dist_pattern)))
+    for relative in source_files:
+        path = root / relative
+        if path.exists():
+            files.append(path)
+    return [
+        (path, path.read_text(encoding="utf-8", errors="ignore"))
+        for path in files
     ]
 
 
@@ -632,6 +679,99 @@ def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[P
     return discovered, sources
 
 
+def _extract_js_string_array_items(text: str) -> list[str]:
+    items: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] in {"'", '"', "`"}:
+            parsed = _parse_js_string_literal(text, index)
+            if parsed is None:
+                index += 1
+                continue
+            value, index = parsed
+            items.append(value)
+            continue
+        index += 1
+    return items
+
+
+def _extract_runtime_method_params(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
+    candidates: dict[str, list[tuple[Path, set[str]]]] = {}
+    source_candidates: dict[str, list[tuple[Path, set[str]]]] = {}
+    files = _read_runtime_files(
+        root,
+        dist_pattern="agentic-os-runtime-contract-descriptors-*.js",
+        source_files=("src/gateway/agentic-os-runtime-contract-descriptors.ts",),
+    )
+    for path, text in files:
+        for match in re.finditer(
+            r"\bname\s*:\s*[\"']([A-Za-z][A-Za-z0-9_.-]*)[\"']",
+            text,
+        ):
+            name = match.group(1)
+            if name not in LIVE_TOOL_NAMES:
+                continue
+            parameters_key = text.find("parameters", match.end())
+            if parameters_key < 0:
+                continue
+            next_name = text.find("name", match.end())
+            if next_name > 0 and next_name < parameters_key:
+                continue
+            bracket = text.find("[", parameters_key)
+            if bracket < 0:
+                continue
+            array_text = _balanced_slice(text, bracket, "[", "]")
+            if array_text is None:
+                continue
+            target = (
+                source_candidates
+                if _relative_source_path(root, path).startswith("src/")
+                else candidates
+            )
+            target.setdefault(name, []).append((path, set(_extract_js_string_array_items(array_text))))
+    preferred = source_candidates if source_candidates else candidates
+    discovered: dict[str, set[str]] = {}
+    sources: list[Path] = []
+    for name, items in preferred.items():
+        if len(items) == 1:
+            path, names = items[0]
+            discovered[name] = set(names)
+            sources.append(path)
+        else:
+            sources.extend(path for path, _ in items)
+    return discovered, sources
+
+
+def _extract_attestation_request_params(root: Path) -> tuple[set[str], list[Path]]:
+    files = _read_runtime_files(
+        root,
+        dist_pattern="agentic-os-runtime-attestation-*.js",
+        source_files=("src/gateway/agentic-os-runtime-attestation.ts",),
+    )
+    source_items: list[tuple[Path, set[str]]] = []
+    dist_items: list[tuple[Path, set[str]]] = []
+    for path, text in files:
+        marker = text.find("REQUEST_FIELDS")
+        if marker < 0:
+            continue
+        bracket = text.find("[", marker)
+        if bracket < 0:
+            continue
+        array_text = _balanced_slice(text, bracket, "[", "]")
+        if array_text is None:
+            continue
+        item = (path, set(_extract_js_string_array_items(array_text)))
+        if _relative_source_path(root, path).startswith("src/"):
+            source_items.append(item)
+        else:
+            dist_items.append(item)
+    items = source_items or dist_items
+    if len(items) != 1:
+        return set(), [path for path, _ in items]
+    path, params = items[0]
+    return set(params), [path]
+
+
 def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     methods: dict[str, set[str]] = {}
     sources: list[Path] = []
@@ -822,7 +962,7 @@ def _gateway_rpc_validation_failure_catalog(
         catalog["model_tool_catalog"]["raw_response_sha256"] = active_catalog_sha256
     catalog["gateway_rpc_catalog"] = {
         "catalog_kind": "source_bound_gateway_rpc_catalog",
-        "authority": "installed_runtime_dist_sources",
+        "authority": "installed_runtime_sources",
         "source_bound_rpc_names": sorted(source_bound_rpc_names),
         "status": "status_corroboration_failed",
         "status_corroboration": status_corroboration,
@@ -1364,11 +1504,15 @@ def _scan_runtime_source_contract(
     set[str],
     list[Path],
     set[str],
+    set[str],
+    list[Path],
 ]:
     try:
         model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
         gateway_params, gateway_sources = _extract_gateway_method_params(root)
         declared_names, declaration_sources, gateway_declared_names = _declared_core_names(root)
+        runtime_method_params, runtime_method_sources = _extract_runtime_method_params(root)
+        attestation_params, attestation_sources = _extract_attestation_request_params(root)
     except OSError as exc:
         catalog = _runtime_source_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1380,6 +1524,14 @@ def _scan_runtime_source_contract(
             "active OpenClaw runtime sources could not be scanned after catalog capture",
             catalog=catalog,
         ) from exc
+    for name, params in runtime_method_params.items():
+        declared_names.add(name)
+        if name in GATEWAY_RPC_METHOD_NAMES:
+            gateway_params[name] = set(params)
+            gateway_declared_names.add(name)
+        if name in MODEL_CALLABLE_TOOL_NAMES:
+            model_tool_params[name] = set(params)
+    declaration_sources.extend(runtime_method_sources)
     return (
         model_tool_params,
         model_tool_sources,
@@ -1388,6 +1540,8 @@ def _scan_runtime_source_contract(
         declared_names,
         declaration_sources,
         gateway_declared_names,
+        attestation_params,
+        attestation_sources,
     )
 
 
@@ -1490,6 +1644,19 @@ def _gateway_tools_from_sources(
     return tools
 
 
+def _attestation_rpc_catalog(attestation_params: set[str]) -> dict[str, Any]:
+    expected = set(ATTESTATION_REQUEST_PARAMETERS)
+    observed = set(attestation_params)
+    return {
+        "catalog_kind": "source_bound_runtime_attestation_rpc",
+        "authority": "installed_runtime_sources",
+        "method": ATTESTATION_RPC_METHOD_NAME,
+        "parameters": sorted(observed),
+        "expected_parameters": list(ATTESTATION_REQUEST_PARAMETERS),
+        "status": "source_bound_exact" if observed == expected else "source_bound_mismatch",
+    }
+
+
 def _status_alias_requirement(
     *,
     active_names: set[str],
@@ -1535,6 +1702,7 @@ def _model_catalog_unavailable_catalog(
     declared_names: set[str],
     source_bound_rpc_names: set[str],
     gateway_status: Mapping[str, Any],
+    attestation_params: set[str],
     source_paths: Iterable[Path],
     source_digest_snapshot: Mapping[str, str],
     root: Path,
@@ -1562,7 +1730,7 @@ def _model_catalog_unavailable_catalog(
         "required_canonical_session_status_method": "session_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
         "runtime_process_binding_limit": (
-            "installed dist source identity does not prove the connected Gateway "
+            "installed runtime source identity does not prove the connected Gateway "
             "process is executing that exact bundle"
         ),
         "connected_gateway_build_identity": "unproven",
@@ -1581,7 +1749,7 @@ def _model_catalog_unavailable_catalog(
         "model_tool_catalog": model_tool_catalog,
         "gateway_rpc_catalog": {
             "catalog_kind": "source_bound_gateway_rpc_catalog",
-            "authority": "installed_runtime_dist_sources",
+            "authority": "installed_runtime_sources",
             "status": _gateway_catalog_status(source_bound_rpc_names),
             "source_bound_rpc_names": sorted(source_bound_rpc_names),
             "rpc_evidence": _gateway_rpc_evidence(
@@ -1591,6 +1759,7 @@ def _model_catalog_unavailable_catalog(
             "status_corroboration": gateway_status,
             "tools": gateway_tools,
         },
+        "attestation_rpc_catalog": _attestation_rpc_catalog(attestation_params),
         "sources": [
             _source_record_from_snapshot(root, path, source_digest_snapshot)
             for path in sorted(source_paths)
@@ -1640,6 +1809,8 @@ def live_installed_openclaw_catalog(
             declared_names,
             declaration_sources,
             gateway_declared_names,
+            attestation_params,
+            attestation_sources,
         ) = _scan_runtime_source_contract(
             root=root,
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1701,6 +1872,7 @@ def live_installed_openclaw_catalog(
             *model_tool_sources,
             *gateway_sources,
             *declaration_sources,
+            *attestation_sources,
         }
         split_catalog = _model_catalog_unavailable_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1710,6 +1882,7 @@ def live_installed_openclaw_catalog(
             declared_names=declared_names,
             source_bound_rpc_names=source_bound_rpc_names,
             gateway_status=gateway_status,
+            attestation_params=attestation_params,
             source_paths=source_paths,
             source_digest_snapshot=source_digest_snapshot,
             root=root,
@@ -1765,13 +1938,15 @@ def live_installed_openclaw_catalog(
         model_tool_sources,
         gateway_params,
         gateway_sources,
-        declared_names,
-        declaration_sources,
-        gateway_declared_names,
-    ) = _scan_runtime_source_contract(
-        root=root,
-        runtime_identity_catalog=runtime_identity_catalog,
-        active_catalog_sha256=active_catalog_sha256,
+            declared_names,
+            declaration_sources,
+            gateway_declared_names,
+            attestation_params,
+            attestation_sources,
+        ) = _scan_runtime_source_contract(
+            root=root,
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
     )
     _require_runtime_sources_unchanged_after_scan(
         runtime_identity_catalog=runtime_identity_catalog,
@@ -1843,7 +2018,7 @@ def live_installed_openclaw_catalog(
                     "catalog_parameters": sorted(catalog_params),
                     "parameter_authority": [
                         "tools.catalog",
-                        "installed_runtime_dist_sources",
+                        "installed_runtime_sources",
                     ],
                 }
             elif name in model_tool_params:
@@ -1851,7 +2026,7 @@ def live_installed_openclaw_catalog(
                 parameter_evidence = {
                     "status": "installed_source_bound_catalog_schema_unavailable",
                     "catalog_schema_available": False,
-                    "parameter_authority": "installed_runtime_dist_sources",
+                    "parameter_authority": "installed_runtime_sources",
                 }
             else:
                 params = []
@@ -1869,7 +2044,12 @@ def live_installed_openclaw_catalog(
             }
             model_tools.append(tool)
             tools.append(tool)
-    source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
+    source_paths = sorted({
+        *model_tool_sources,
+        *gateway_sources,
+        *declaration_sources,
+        *attestation_sources,
+    })
     model_tool_names = sorted(active_names & set(MODEL_CALLABLE_TOOL_NAMES))
     model_tools_with_catalog_schema = sorted(
         name
@@ -1884,7 +2064,7 @@ def live_installed_openclaw_catalog(
         "required_canonical_session_status_method": "session_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
         "runtime_process_binding_limit": (
-            "installed dist source identity does not prove the connected Gateway "
+            "installed runtime source identity does not prove the connected Gateway "
             "process is executing that exact bundle"
         ),
         "connected_gateway_build_identity": "unproven",
@@ -1917,7 +2097,7 @@ def live_installed_openclaw_catalog(
         },
         "gateway_rpc_catalog": {
             "catalog_kind": "source_bound_gateway_rpc_catalog",
-            "authority": "installed_runtime_dist_sources",
+            "authority": "installed_runtime_sources",
             "status": _gateway_catalog_status(source_bound_rpc_names),
             "source_bound_rpc_names": sorted(source_bound_rpc_names),
             "rpc_evidence": _gateway_rpc_evidence(
@@ -1927,6 +2107,7 @@ def live_installed_openclaw_catalog(
             "status_corroboration": gateway_status,
             "tools": gateway_tools,
         },
+        "attestation_rpc_catalog": _attestation_rpc_catalog(attestation_params),
         "sources": [
             _source_record_from_snapshot(root, path, source_digest_snapshot)
             for path in source_paths

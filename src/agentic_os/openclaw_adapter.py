@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import weakref
 from collections.abc import Iterable, Mapping, Sequence
@@ -69,10 +70,25 @@ class OpenClawTransport(Protocol):
         ...
 
 
+SESSIONS_SPAWN_PUBLIC_RPC_PARAMS = frozenset(
+    (
+        "task",
+        "taskName",
+        "runtime",
+        "mode",
+        "agentId",
+        "cleanup",
+        "context",
+        "lightContext",
+        "client_request_id",
+        "idempotency_key",
+        "gateway_lease_id",
+        "metadata",
+    )
+)
+
 _REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
-    "sessions_spawn": frozenset(
-        ("client_request_id", "idempotency_key", "metadata", "gateway_lease_id")
-    ),
+    "sessions_spawn": SESSIONS_SPAWN_PUBLIC_RPC_PARAMS,
     "sessions_list": frozenset(),
     "session_status": frozenset(("sessionKey",)),
     "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
@@ -329,7 +345,7 @@ def assert_preflighted_runtime_authority(payload: Mapping[str, Any]) -> None:
     else:
         if gateway_catalog.get("catalog_kind") != "source_bound_gateway_rpc_catalog":
             errors.append("runtime Gateway RPC catalog kind is invalid")
-        if gateway_catalog.get("authority") != "installed_runtime_dist_sources":
+        if gateway_catalog.get("authority") != "installed_runtime_sources":
             errors.append(
                 "runtime Gateway RPC catalog authority must be installed runtime sources"
             )
@@ -450,10 +466,16 @@ def _assert_installed_tools(
             )
             continue
         missing_params = sorted(required_params - entries[method])
+        extra_params = sorted(entries[method] - required_params)
         if missing_params:
             missing = ", ".join(missing_params)
             errors.append(
                 f"runtime tool catalog {method} is missing parameters: {missing}"
+            )
+        if extra_params:
+            extra = ", ".join(extra_params)
+            errors.append(
+                f"runtime tool catalog {method} has unexpected parameters: {extra}"
             )
     if errors:
         raise AdapterContractError("; ".join(errors))
@@ -969,7 +991,23 @@ class OpenClawAdapter:
         return observation
 
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
-        self._require_verified_runtime_authority()
+        authority = self._require_verified_runtime_authority()
+        expected_parameters = set(
+            authority.attestation.method_bindings["sessions_spawn"].parameter_names
+        )
+        actual_parameters = set(params)
+        if actual_parameters != expected_parameters:
+            missing = sorted(expected_parameters - actual_parameters)
+            extra = sorted(actual_parameters - expected_parameters)
+            details = []
+            if missing:
+                details.append(f"missing: {', '.join(missing)}")
+            if extra:
+                details.append(f"extra: {', '.join(extra)}")
+            raise AdapterContractError(
+                "sessions_spawn request must contain the exact attested parameter set "
+                f"({'; '.join(details)})"
+            )
         metadata = params.get("metadata")
         if not isinstance(metadata, Mapping):
             raise AdapterContractError("sessions_spawn metadata must be an object")
@@ -979,6 +1017,42 @@ class OpenClawAdapter:
         ):
             raise AdapterContractError(
                 "sessions_spawn top-level request identity must match metadata"
+            )
+        task = params.get("task")
+        if not isinstance(task, str) or not task:
+            raise AdapterContractError("sessions_spawn task must be a non-empty string")
+        if hashlib.sha256(task.encode("utf-8")).hexdigest() != metadata.get(
+            "task_digest"
+        ):
+            raise AdapterContractError(
+                "sessions_spawn metadata task_digest must match task"
+            )
+        for field in (
+            "taskName",
+            "runtime",
+            "mode",
+            "agentId",
+            "cleanup",
+            "context",
+            "gateway_lease_id",
+        ):
+            if not isinstance(params.get(field), str) or not params.get(field):
+                raise AdapterContractError(
+                    f"sessions_spawn {field} must be a non-empty string"
+                )
+        if params.get("runtime") != "subagent":
+            raise AdapterContractError('sessions_spawn runtime must be "subagent"')
+        if params.get("mode") != "run":
+            raise AdapterContractError('sessions_spawn mode must be "run"')
+        if params.get("cleanup") not in {"delete", "keep"}:
+            raise AdapterContractError("sessions_spawn cleanup is invalid")
+        if params.get("context") not in {"fork", "isolated"}:
+            raise AdapterContractError("sessions_spawn context is invalid")
+        if type(params.get("lightContext")) is not bool:
+            raise AdapterContractError("sessions_spawn lightContext must be a boolean")
+        if metadata.get("agent_id") != params.get("agentId"):
+            raise AdapterContractError(
+                "sessions_spawn agentId must match metadata agent_id"
             )
         request_identity = self._request_identity(
             params, "client_request_id", "idempotency_key", "sessions_spawn"

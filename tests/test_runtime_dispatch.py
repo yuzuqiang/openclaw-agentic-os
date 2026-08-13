@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -22,6 +23,7 @@ from agentic_os.runtime_dispatch import (
     dispatch_with_metadata,
     lease_metadata,
     release_metadata,
+    spawn_rpc_params,
     spawn_metadata,
     stable_json,
 )
@@ -136,6 +138,10 @@ def observation(metadata: dict[str, object], *, external_id: str) -> MetadataObs
     )
 
 
+TASK = "task body"
+TASK_DIGEST = hashlib.sha256(TASK.encode("utf-8")).hexdigest()
+
+
 class RuntimeDispatchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(dir=Path.cwd())
@@ -147,7 +153,7 @@ class RuntimeDispatchTests(unittest.TestCase):
             phase="phase",
             agent_id="agent",
             requester_agent_id="requester",
-            task_digest="task",
+            task_digest=TASK_DIGEST,
             spawn_request_id="spawn",
             reserve_budget_event_id="reserve",
             client_lease_id="client-lease",
@@ -156,6 +162,8 @@ class RuntimeDispatchTests(unittest.TestCase):
             ttl_ms=60_000,
             spawn_client_request_id="client",
             spawn_idempotency_key="spawn-idem",
+            spawn_task=TASK,
+            spawn_task_name="runtime-contract",
         )
         self._seed_run_and_budget()
 
@@ -196,7 +204,8 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "INSERT INTO spawn_requests(spawn_request_id,run_id,phase,agent_id,"
                 "transition_id,client_request_id,spawn_idempotency_key,task_digest,state,"
                 "created_at,updated_at) VALUES('spawn','run','phase','agent','transition',"
-                "'client','spawn-idem','task','pending','now','now')"
+                "'client','spawn-idem',?,'pending','now','now')",
+                (TASK_DIGEST,),
             )
             connection.execute(
                 "INSERT INTO run_budgets(run_id,workflow,capability_class,selected_provider,"
@@ -254,7 +263,9 @@ class RuntimeDispatchTests(unittest.TestCase):
             **{
                 **self.request.__dict__,
                 "agent_id": agent_id,
-                "task_digest": f"task-{suffix}",
+                "task_digest": hashlib.sha256(
+                    f"{TASK}-{suffix}".encode("utf-8")
+                ).hexdigest(),
                 "spawn_request_id": f"spawn-{suffix}",
                 "reserve_budget_event_id": f"reserve-{suffix}",
                 "client_lease_id": f"client-lease-{suffix}",
@@ -262,6 +273,8 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "release_idempotency_key": f"release-idem-{suffix}",
                 "spawn_client_request_id": f"client-{suffix}",
                 "spawn_idempotency_key": f"spawn-idem-{suffix}",
+                "spawn_task": f"{TASK}-{suffix}",
+                "spawn_task_name": f"runtime-contract-{suffix}",
             }
         )
         with self._connect() as connection:
@@ -307,14 +320,7 @@ class RuntimeDispatchTests(unittest.TestCase):
         ]
         self.assertEqual(
             spawn_params,
-            [
-                {
-                    "metadata": spawn_metadata(self.request),
-                    "gateway_lease_id": "lease-gateway",
-                    "client_request_id": "client",
-                    "idempotency_key": "spawn-idem",
-                }
-            ],
+            [spawn_rpc_params(self.request, "lease-gateway")],
         )
         self.assertNotIn("gateway_lease_id", spawn_params[0]["metadata"])
         with self._connect() as connection:
@@ -779,10 +785,10 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "metadata_contract_version='v1',external_metadata_json=?,"
                 "external_run_id='run',external_transition_id='transition',"
                 "external_client_request_id='client',external_idempotency_key='spawn-idem',"
-                "external_phase='phase',external_agent_id='agent',external_task_digest='task',"
+                "external_phase='phase',external_agent_id='agent',external_task_digest=?,"
                 "external_id='session-key',accepted_at='now',accepted_at_epoch_ms=1800000000004 "
                 "WHERE rpc_kind='sessions_spawn'",
-                (stable_json(spawn),),
+                (stable_json(spawn), TASK_DIGEST),
             )
         adapter = ScriptedAdapter()
         with self.assertRaisesRegex(RuntimeDispatchError, "local session proof"):
@@ -1125,8 +1131,9 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "transition_id,phase,agent_id,requester_agent_id,task_digest,client_lease_id,"
                 "acquire_idempotency_key,release_idempotency_key,spawn_client_request_id,"
                 "spawn_idempotency_key,reserve_budget_event_id,created_at) VALUES('spawn','client-lease','run',"
-                "'transition','phase','agent','requester','task','client-lease',"
-                "'acquire-idem','release-idem','client','spawn-idem','reserve','now')"
+                "'transition','phase','agent','requester',?,'client-lease',"
+                "'acquire-idem','release-idem','client','spawn-idem','reserve','now')",
+                (TASK_DIGEST,),
             )
             connection.execute(
                 "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
@@ -1134,8 +1141,8 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "phase,agent_id,task_digest,metadata_json,state,requested_at,"
                 "requested_at_epoch_ms) VALUES('spawn:spawn-idem','run','transition',"
                 "'sessions_spawn','spawn','reserve','client','spawn-idem','phase','agent',"
-                "'task',?,'unknown','now',1800000000003)",
-                (stable_json(spawn_metadata(self.request)),),
+                "? ,?,'unknown','now',1800000000003)",
+                (TASK_DIGEST, stable_json(spawn_metadata(self.request))),
             )
 
     def test_reconcile_unknown_spawn_from_session_list_without_retry(self) -> None:

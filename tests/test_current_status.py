@@ -195,13 +195,16 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             local_p03["agentic_os_runtime_attest_rpc"],
-            "future_only_unproven",
+            "candidate_source_bound_unproven_live_gateway",
         )
         self.assertEqual(
             local_p03["agentic_os_runtime_identity_rpc"],
-            "future_only_unproven",
+            "not_required_nonexistent_removed_current_enforcement_is_connection_bound_attestation",
         )
-        self.assertEqual(local_p03["signed_json_contract"], "ascii_only_fail_closed")
+        self.assertEqual(
+            local_p03["signed_json_contract"],
+            "canonical_json_utf8_escaped_cross_language_validated",
+        )
         self.assertFalse(local_p03["live_gateway_session_or_lease_mutation"])
         self.assertFalse(local_p03["production_authority_enabled"])
 

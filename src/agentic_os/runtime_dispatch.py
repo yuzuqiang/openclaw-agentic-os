@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -59,6 +60,13 @@ class DispatchRequest:
     ttl_ms: int
     spawn_client_request_id: str
     spawn_idempotency_key: str
+    spawn_task: str | None = None
+    spawn_task_name: str | None = None
+    spawn_runtime: str = "subagent"
+    spawn_mode: str = "run"
+    spawn_cleanup: str = "keep"
+    spawn_context: str = "isolated"
+    spawn_light_context: bool = False
     lease_id: str | None = None
 
 
@@ -196,6 +204,55 @@ def spawn_metadata(request: DispatchRequest) -> dict[str, str]:
         "phase": request.phase,
         "agent_id": request.agent_id,
         "task_digest": request.task_digest,
+    }
+
+
+def _required_spawn_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeDispatchError(
+            f"sessions_spawn transient {label} must be a non-empty string"
+        )
+    return value
+
+
+def validate_transient_spawn_descriptor(request: DispatchRequest) -> None:
+    task = _required_spawn_string(request.spawn_task, "task")
+    _required_spawn_string(request.spawn_task_name, "taskName")
+    if hashlib.sha256(task.encode("utf-8")).hexdigest() != request.task_digest:
+        raise RuntimeDispatchError(
+            "sessions_spawn transient task must match persisted task_digest"
+        )
+    if request.spawn_runtime != "subagent":
+        raise RuntimeDispatchError('sessions_spawn transient runtime must be "subagent"')
+    if request.spawn_mode != "run":
+        raise RuntimeDispatchError('sessions_spawn transient mode must be "run"')
+    if request.spawn_cleanup not in {"delete", "keep"}:
+        raise RuntimeDispatchError("sessions_spawn transient cleanup is invalid")
+    if request.spawn_context not in {"fork", "isolated"}:
+        raise RuntimeDispatchError("sessions_spawn transient context is invalid")
+    if type(request.spawn_light_context) is not bool:
+        raise RuntimeDispatchError(
+            "sessions_spawn transient lightContext must be a boolean"
+        )
+
+
+def spawn_rpc_params(
+    request: DispatchRequest, gateway_lease_id: str
+) -> dict[str, Any]:
+    validate_transient_spawn_descriptor(request)
+    return {
+        "task": request.spawn_task,
+        "taskName": request.spawn_task_name,
+        "runtime": request.spawn_runtime,
+        "mode": request.spawn_mode,
+        "agentId": request.agent_id,
+        "cleanup": request.spawn_cleanup,
+        "context": request.spawn_context,
+        "lightContext": request.spawn_light_context,
+        "client_request_id": request.spawn_client_request_id,
+        "idempotency_key": request.spawn_idempotency_key,
+        "gateway_lease_id": gateway_lease_id,
+        "metadata": spawn_metadata(request),
     }
 
 
@@ -1198,14 +1255,8 @@ def dispatch_with_metadata(
             raise RuntimeDispatchError("allow lease metadata validation failed") from exc
 
         try:
-            session_metadata = spawn_metadata(request)
             spawn_observation = adapter.sessions_spawn(
-                {
-                    "metadata": session_metadata,
-                    "gateway_lease_id": gateway_lease_id,
-                    "client_request_id": request.spawn_client_request_id,
-                    "idempotency_key": request.spawn_idempotency_key,
-                }
+                spawn_rpc_params(request, gateway_lease_id)
             )
             session_key = validate_accepted_session_identity(
                 external_id=spawn_observation.external_id,

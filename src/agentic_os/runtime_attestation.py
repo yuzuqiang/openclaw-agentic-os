@@ -27,7 +27,7 @@ class RuntimeAttestationError(ValueError):
 
 
 class AttestableOpenClawTransport(Protocol):
-    """Application transport plus its non-RPC identity/challenge surface."""
+    """Application transport plus its challenge-bound identity snapshot."""
 
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
@@ -150,37 +150,7 @@ class GatewayCliAttestedTransport:
             raise RuntimeAttestationError("runtime identity snapshot is unavailable before challenge")
         if hashlib.sha256(Path(self.executable).read_bytes()).hexdigest() != self.executable_sha256:
             raise RuntimeAttestationError("OpenClaw executable drifted after runtime challenge")
-        observed = self._gateway_call(
-            "agenticOs.runtime.identity",
-            {
-                "expected_executable_sha256": self.executable_sha256,
-                "expected_catalog_sha256": self.catalog_sha256,
-            },
-        )
-        payload = observed.get("signed_payload", observed)
-        payload = _mapping(payload, "runtime identity observation")
-        snapshot = {
-            "binding": payload.get("binding"),
-            "method_bindings": payload.get("method_bindings"),
-        }
-        binding = _mapping(snapshot["binding"], "runtime identity binding")
-        executable = _mapping(
-            binding.get("executable"), "runtime identity executable binding"
-        )
-        catalog = _mapping(binding.get("catalog"), "runtime identity catalog binding")
-        if (
-            executable.get("content_sha256") != self.executable_sha256
-            or executable.get("path_sha256") != self.executable_path_sha256
-            or catalog.get("sha256") != self.catalog_sha256
-        ):
-            raise RuntimeAttestationError(
-                "runtime identity observation does not match the local executable/catalog target"
-            )
-        if canonical_json_bytes(snapshot) != canonical_json_bytes(self._attested_snapshot):
-            raise RuntimeAttestationError(
-                "runtime identity observation drifted from the signed challenge"
-            )
-        return snapshot
+        return self._attested_snapshot
 
 
 @dataclass(frozen=True)
@@ -205,58 +175,67 @@ class VerifiedRuntimeAttestation:
     method_bindings: Mapping[str, TransportMethodBinding]
 
 
-_REQUIRED_LOGICAL_METHODS: Mapping[str, tuple[str, frozenset[str]]] = {
+_REQUIRED_LOGICAL_METHODS: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "allow_lease_acquire": (
         "subagents.allowLease.acquire",
-        frozenset(
-            (
-                "client_lease_id",
-                "idempotency_key",
-                "run_id",
-                "phase",
-                "transition_id",
-                "agent_id",
-                "requester_agent_id",
-                "ttl_ms",
-            )
+        (
+            "client_lease_id",
+            "idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "ttl_ms",
         ),
     ),
-    "allow_lease_status": ("subagents.allowLease.status", frozenset()),
+    "allow_lease_status": ("subagents.allowLease.status", ()),
     "allow_lease_release": (
         "subagents.allowLease.release",
-        frozenset(
-            (
-                "client_lease_id",
-                "release_idempotency_key",
-                "run_id",
-                "phase",
-                "transition_id",
-                "agent_id",
-                "requester_agent_id",
-                "gateway_lease_id",
-            )
+        (
+            "client_lease_id",
+            "release_idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "gateway_lease_id",
         ),
     ),
     "sessions_spawn": (
         "sessions_spawn",
-        frozenset(
-            ("client_request_id", "idempotency_key", "metadata", "gateway_lease_id")
+        (
+            "task",
+            "taskName",
+            "runtime",
+            "mode",
+            "agentId",
+            "cleanup",
+            "context",
+            "lightContext",
+            "client_request_id",
+            "idempotency_key",
+            "gateway_lease_id",
+            "metadata",
         ),
     ),
-    "sessions_list": ("sessions_list", frozenset()),
+    "sessions_list": ("sessions_list", ()),
     # This is the installed 2026.7.1 model-callable surface.  A plural alias is
     # neither inferred nor accepted: a later runtime needs a new reviewed contract.
-    "session_status": ("session_status", frozenset(("sessionKey",))),
+    "session_status": ("session_status", ("sessionKey",)),
     "sessions_history": (
         "sessions_history",
-        frozenset(("sessionKey", "limit", "includeTools")),
+        ("sessionKey", "limit", "includeTools"),
     ),
 }
 
 _BINDING_KEYS = frozenset(
     ("executable", "install", "sources", "catalog", "gateway", "transport")
 )
-_ENVELOPE_KEYS = frozenset(("signature_algorithm", "signature", "signed_payload"))
+_ENVELOPE_KEYS = frozenset(
+    ("runtime_identity_token", "signature_algorithm", "signature", "signed_payload")
+)
 _SIGNED_KEYS = frozenset(
     (
         "schema_version",
@@ -266,6 +245,8 @@ _SIGNED_KEYS = frozenset(
         "issued_at_epoch_ms",
         "expires_at_epoch_ms",
         "client_process_id",
+        "runtime_identity_token_sha256",
+        "owner_scope_id",
         "binding",
         "method_bindings",
     )
@@ -274,7 +255,7 @@ _SIGNED_KEYS = frozenset(
 
 def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
     try:
-        _assert_ascii_json_value(value, "runtime attestation")
+        _assert_json_object_keys(value, "runtime attestation")
         return json.dumps(
             dict(value),
             ensure_ascii=True,
@@ -290,27 +271,20 @@ def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
         ) from exc
 
 
-def _assert_ascii_json_value(value: Any, label: str) -> None:
-    if isinstance(value, str):
-        try:
-            value.encode("ascii")
-        except UnicodeEncodeError as exc:
-            raise RuntimeAttestationError(
-                f"{label} signed fields must be ASCII-only"
-            ) from exc
-        return
+def _assert_json_object_keys(value: Any, label: str) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise RuntimeAttestationError(
                     f"{label} object keys must be strings"
                 )
-            _assert_ascii_json_value(key, f"{label} key")
-            _assert_ascii_json_value(item, f"{label}.{key}")
+            _assert_json_object_keys(item, f"{label}.{key}")
         return
-    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
         for index, item in enumerate(value):
-            _assert_ascii_json_value(item, f"{label}[{index}]")
+            _assert_json_object_keys(item, f"{label}[{index}]")
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -339,7 +313,7 @@ def _sha256(value: Any, label: str) -> str:
     return text
 
 
-def _validate_binding(value: Any) -> tuple[Mapping[str, Any], str, str, str]:
+def _validate_binding(value: Any) -> tuple[Mapping[str, Any], str, str, str, str]:
     binding = _mapping(value, "runtime binding")
     _exact_keys(binding, _BINDING_KEYS, "runtime binding")
 
@@ -375,9 +349,16 @@ def _validate_binding(value: Any) -> tuple[Mapping[str, Any], str, str, str]:
         _sha256(source["sha256"], f"runtime source binding {index} digest")
 
     catalog = _mapping(binding["catalog"], "runtime catalog binding")
-    _exact_keys(catalog, frozenset(("authority", "sha256")), "runtime catalog binding")
+    _exact_keys(
+        catalog,
+        frozenset(("authority", "sha256", "contract_vector_sha256")),
+        "runtime catalog binding",
+    )
     _nonempty(catalog["authority"], "runtime catalog authority")
     _sha256(catalog["sha256"], "runtime catalog digest")
+    contract_vector_sha256 = _sha256(
+        catalog["contract_vector_sha256"], "runtime contract vector digest"
+    )
 
     gateway = _mapping(binding["gateway"], "Gateway binding")
     _exact_keys(
@@ -394,7 +375,41 @@ def _validate_binding(value: Any) -> tuple[Mapping[str, Any], str, str, str]:
     _exact_keys(transport, frozenset(("kind", "identity")), "transport binding")
     _nonempty(transport["kind"], "transport kind")
     transport_identity = _nonempty(transport["identity"], "transport identity")
-    return binding, transport_identity, gateway_endpoint, gateway_build_id
+    return (
+        binding,
+        transport_identity,
+        gateway_endpoint,
+        gateway_build_id,
+        contract_vector_sha256,
+    )
+
+
+def _contract_vector_sha256(
+    methods: Mapping[str, TransportMethodBinding],
+) -> str:
+    runtime_methods = [
+        {
+            "name": methods[logical_name].method,
+            "parameters": list(methods[logical_name].parameter_names),
+        }
+        for logical_name in _REQUIRED_LOGICAL_METHODS
+    ]
+    method_bindings = {
+        logical_name: {
+            "method": methods[logical_name].method,
+            "parameter_names": list(methods[logical_name].parameter_names),
+        }
+        for logical_name in _REQUIRED_LOGICAL_METHODS
+    }
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_version": "agentic-os.runtime-contract-vector.v1",
+                "runtime_methods": runtime_methods,
+                "method_bindings": method_bindings,
+            }
+        )
+    ).hexdigest()
 
 
 def _validate_method_bindings(value: Any) -> Mapping[str, TransportMethodBinding]:
@@ -427,7 +442,7 @@ def _validate_method_bindings(value: Any) -> Mapping[str, TransportMethodBinding
             raise RuntimeAttestationError(
                 f"runtime method binding {logical_name} must use {required_method}"
             )
-        if set(parameters) != required_parameters:
+        if tuple(parameters) != required_parameters:
             raise RuntimeAttestationError(
                 f"runtime method binding {logical_name} parameter schema must match the exact reviewed set"
             )
@@ -475,6 +490,9 @@ class TransportBoundRuntimeAttestor:
             "runtime attestation envelope",
         )
         _exact_keys(envelope, _ENVELOPE_KEYS, "runtime attestation envelope")
+        runtime_identity_token = _nonempty(
+            envelope["runtime_identity_token"], "runtime identity token"
+        )
         algorithm = _nonempty(
             envelope["signature_algorithm"], "runtime signature algorithm"
         )
@@ -495,6 +513,13 @@ class TransportBoundRuntimeAttestor:
             raise RuntimeAttestationError("runtime challenge/nonce does not match")
         if signed_payload["client_process_id"] != str(local_pid):
             raise RuntimeAttestationError("runtime attestation was issued to another process")
+        token_sha256 = _sha256(
+            signed_payload["runtime_identity_token_sha256"],
+            "runtime identity token digest",
+        )
+        if hashlib.sha256(runtime_identity_token.encode("utf-8")).hexdigest() != token_sha256:
+            raise RuntimeAttestationError("runtime identity token digest does not match")
+        _sha256(signed_payload["owner_scope_id"], "runtime owner scope")
 
         issued = signed_payload["issued_at_epoch_ms"]
         expires = signed_payload["expires_at_epoch_ms"]
@@ -508,10 +533,20 @@ class TransportBoundRuntimeAttestor:
         if expires <= issued or expires - issued > self._max_lifetime_ms:
             raise RuntimeAttestationError("runtime attestation lifetime is invalid")
 
-        binding, transport_identity, endpoint, build_id = _validate_binding(
+        (
+            binding,
+            transport_identity,
+            endpoint,
+            build_id,
+            contract_vector_sha256,
+        ) = _validate_binding(
             signed_payload["binding"]
         )
         methods = _validate_method_bindings(signed_payload["method_bindings"])
+        if _contract_vector_sha256(methods) != contract_vector_sha256:
+            raise RuntimeAttestationError(
+                "runtime contract vector digest does not match signed method bindings"
+            )
         expected_snapshot = {
             "binding": binding,
             "method_bindings": signed_payload["method_bindings"],

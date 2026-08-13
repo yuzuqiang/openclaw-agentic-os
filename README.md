@@ -18,7 +18,7 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `1b553e868fd090b448ce72e7ef9901a8896a20573db1e3f8355de116f74690da`
+- Current corrected design artifact SHA-256: `e18c39e3805c1c27abef8e76567b1ea9236b7ce32333e561f8b03d9deaeeec19`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -471,12 +471,13 @@ files declare all three allowLease RPC names, while the read-only-request
 `subagents.allowLease.status` call proves reachability only for `status`.
 Acquire/release reachability and the connected Gateway build identity remain
 unproven; `status` may clean expired leases and CLI bootstrap may write local
-state. The runtime still fails closed because source evidence exposes legacy
-acquire/release parameters, acquire/release were not live-probed,
-`sessions_spawn` source evidence lacks `client_request_id`, `idempotency_key`,
-`gateway_lease_id`, and `metadata`. The installed singular
-`session_status(sessionKey)` surface is
-the canonical status contract; it is not a readiness blocker by itself.
+state. The corrected local candidate binds the TypeScript runtime contract as
+provider authority: `subagents.allowLease.status` is an exact empty-parameter
+RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
+(`task`, `taskName`, `runtime`, `mode`, `agentId`, `cleanup`, `context`,
+`lightContext`, `client_request_id`, `idempotency_key`, `gateway_lease_id`, and
+`metadata`). The installed singular `session_status(sessionKey)` surface is the
+canonical status contract; it is not a readiness blocker by itself.
 The split-catalog JSON path in the forward index is pending exact-lineage
 recapture rather than current authority. Future runtime-evidence authority must
 recapture
@@ -488,12 +489,12 @@ plain-catalog path is deliberately offline-only: it reports
 `OpenClawAdapter` runtime authority. Direct construction remains disabled; the
 local P0.3 factory requires a fresh signed transport-bound attestation and
 rejects missing or extra parameters before every application RPC. The future
-CLI transport must additionally refresh `agenticOs.runtime.identity` before
-each application RPC; if that future live identity surface is unavailable, the
-adapter fails closed instead of reusing the challenge payload as live proof.
-That contract is covered only by synthetic local tests until the local
-downstream OpenClaw candidate provides the signed runtime and identity surfaces,
-so it is not current live evidence or production authority. The
+CLI subprocess transport remains non-authoritative unless it gains a persistent
+attested connection or a follow-up token authorization path; there is no
+`agenticOs.runtime.identity` RPC to refresh. That contract is covered only by
+synthetic local tests and source-bound local candidate proof until the local
+downstream OpenClaw candidate is exercised through a live attested Gateway
+connection, so it is not current live evidence or production authority. The
 cross-process release-probe entry point likewise rejects unsigned stdin before
 invoking transport. The bounded accepted-session
 probe in

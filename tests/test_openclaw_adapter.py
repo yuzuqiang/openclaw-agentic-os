@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -14,17 +15,30 @@ from agentic_os.openclaw_adapter import (
 from tests.openclaw_adapter_test_harness import CannedOpenClawAdapter
 
 
+TASK = "task body"
+TASK_DIGEST = hashlib.sha256(TASK.encode("utf-8")).hexdigest()
+SPAWN_RPC_PROPERTIES = {
+    "task": {"type": "string"},
+    "taskName": {"type": "string"},
+    "runtime": {"type": "string"},
+    "mode": {"type": "string"},
+    "agentId": {"type": "string"},
+    "cleanup": {"type": "string"},
+    "context": {"type": "string"},
+    "lightContext": {"type": "boolean"},
+    "client_request_id": {"type": "string"},
+    "idempotency_key": {"type": "string"},
+    "gateway_lease_id": {"type": "string"},
+    "metadata": {"type": "object"},
+}
+
+
 INSTALLED_SESSION_TOOL_CATALOG = {
     "tools": [
         {
             "name": "sessions_spawn",
             "inputSchema": {
-                "properties": {
-                    "client_request_id": {"type": "string"},
-                    "idempotency_key": {"type": "string"},
-                    "metadata": {"type": "object"},
-                    "gateway_lease_id": {"type": "string"},
-                }
+                "properties": dict(SPAWN_RPC_PROPERTIES)
             },
         },
         {"name": "sessions_list", "inputSchema": {"properties": {}}},
@@ -123,7 +137,7 @@ def verified_runtime_envelope() -> dict[str, Any]:
             },
             "connected_gateway_build_identity": "proven",
             "gateway_rpc_catalog": {
-                "authority": "installed_runtime_dist_sources",
+                "authority": "installed_runtime_sources",
                 "catalog_kind": "source_bound_gateway_rpc_catalog",
                 "rpc_evidence": [
                     {
@@ -215,7 +229,7 @@ class CannedTransport:
                 "idempotency_key": "spawn-idem",
                 "phase": "phase",
                 "agent_id": "agent",
-                "task_digest": "task",
+                "task_digest": TASK_DIGEST,
             }
             return {
                 "session": {
@@ -242,7 +256,7 @@ class CannedTransport:
                                 "idempotency_key": "spawn-idem",
                                 "phase": "phase",
                                 "agent_id": "agent",
-                                "task_digest": "task",
+                                "task_digest": TASK_DIGEST,
                             },
                             "raw_metadata_json": json.dumps(
                                 {
@@ -252,7 +266,7 @@ class CannedTransport:
                                     "idempotency_key": "spawn-idem",
                                     "phase": "phase",
                                     "agent_id": "agent",
-                                    "task_digest": "task",
+                                    "task_digest": TASK_DIGEST,
                                 },
                                 sort_keys=True,
                                 separators=(",", ":"),
@@ -269,7 +283,7 @@ class CannedTransport:
                 "idempotency_key": "spawn-idem",
                 "phase": "phase",
                 "agent_id": "agent",
-                "task_digest": "task",
+                "task_digest": TASK_DIGEST,
             }
             return {
                 "session_key": params["sessionKey"],
@@ -293,7 +307,7 @@ class CannedTransport:
                 "idempotency_key": "spawn-idem",
                 "phase": "phase",
                 "agent_id": "agent",
-                "task_digest": "task",
+                "task_digest": TASK_DIGEST,
             }
             return {
                 "sessionKey": params["sessionKey"],
@@ -540,9 +554,7 @@ class OpenClawAdapterTests(unittest.TestCase):
             "tools": {
                 "sessions_spawn": {
                     "parameters": {
-                        "client_request_id": {},
-                        "idempotency_key": {},
-                        "metadata": {},
+                        **{key: {} for key in SPAWN_RPC_PROPERTIES},
                     }
                 },
                 "sessions_list": {"parameters": {}},
@@ -597,9 +609,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                     "name": "sessions_spawn",
                     "inputSchema": {
                         "properties": {
-                            "client_request_id": {"type": "string"},
-                            "idempotency_key": {"type": "string"},
-                            "metadata": {"type": "object"},
+                            **SPAWN_RPC_PROPERTIES,
                         }
                     },
                 },

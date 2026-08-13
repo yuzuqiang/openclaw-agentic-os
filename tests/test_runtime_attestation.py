@@ -18,6 +18,22 @@ from tests.test_openclaw_adapter import verified_runtime_envelope
 
 
 NOW_MS = 1_800_000_000_000
+TASK = "task body"
+TASK_DIGEST = hashlib.sha256(TASK.encode("utf-8")).hexdigest()
+SPAWN_PARAMETER_NAMES = [
+    "task",
+    "taskName",
+    "runtime",
+    "mode",
+    "agentId",
+    "cleanup",
+    "context",
+    "lightContext",
+    "client_request_id",
+    "idempotency_key",
+    "gateway_lease_id",
+    "metadata",
+]
 
 
 def method_bindings() -> dict[str, dict[str, object]]:
@@ -54,12 +70,7 @@ def method_bindings() -> dict[str, dict[str, object]]:
         },
         "sessions_spawn": {
             "method": "sessions_spawn",
-            "parameter_names": [
-                "client_request_id",
-                "idempotency_key",
-                "metadata",
-                "gateway_lease_id",
-            ],
+            "parameter_names": list(SPAWN_PARAMETER_NAMES),
         },
         "sessions_list": {"method": "sessions_list", "parameter_names": []},
         "session_status": {
@@ -74,6 +85,17 @@ def method_bindings() -> dict[str, dict[str, object]]:
 
 
 def binding() -> dict[str, object]:
+    vector = {
+        "schema_version": "agentic-os.runtime-contract-vector.v1",
+        "runtime_methods": [
+            {
+                "name": value["method"],
+                "parameters": value["parameter_names"],
+            }
+            for value in method_bindings().values()
+        ],
+        "method_bindings": method_bindings(),
+    }
     return {
         "executable": {"path_sha256": "0" * 64, "content_sha256": "1" * 64},
         "install": {
@@ -86,7 +108,13 @@ def binding() -> dict[str, object]:
             {"path": "dist/openclaw-tools.js", "sha256": "3" * 64},
             {"path": "dist/server-methods.js", "sha256": "4" * 64},
         ],
-        "catalog": {"authority": "tools.catalog", "sha256": "5" * 64},
+        "catalog": {
+            "authority": "tools.catalog",
+            "sha256": "5" * 64,
+            "contract_vector_sha256": hashlib.sha256(
+                canonical_json_bytes(vector)
+            ).hexdigest(),
+        },
         "gateway": {
             "endpoint": "ws://127.0.0.1:18789",
             "version": "2026.7.1",
@@ -125,6 +153,7 @@ class FakeAttestedTransport:
         }
 
     def request_runtime_attestation(self, *, challenge, client_process_id):
+        token = "runtime-token"
         payload = {
             "schema_version": "agentic-os.openclaw-attestation.v1",
             "online": True,
@@ -133,6 +162,10 @@ class FakeAttestedTransport:
             "issued_at_epoch_ms": NOW_MS - 1_000,
             "expires_at_epoch_ms": NOW_MS + 60_000,
             "client_process_id": client_process_id,
+            "runtime_identity_token_sha256": hashlib.sha256(
+                token.encode("utf-8")
+            ).hexdigest(),
+            "owner_scope_id": "7" * 64,
             "binding": deepcopy(self.binding),
             "method_bindings": deepcopy(self.methods),
         }
@@ -143,6 +176,7 @@ class FakeAttestedTransport:
         if self.mutate_signed_payload is not None:
             self.mutate_signed_payload(payload)
         return {
+            "runtime_identity_token": token,
             "signature_algorithm": "ed25519",
             "signature": signature,
             "signed_payload": payload,
@@ -220,7 +254,25 @@ def session_metadata() -> dict[str, str]:
         "idempotency_key": "spawn-idem",
         "phase": "phase",
         "agent_id": "agent",
-        "task_digest": "task",
+        "task_digest": TASK_DIGEST,
+    }
+
+
+def spawn_params(metadata: dict[str, str] | None = None) -> dict[str, object]:
+    metadata = metadata or session_metadata()
+    return {
+        "task": TASK,
+        "taskName": "runtime-contract",
+        "runtime": "subagent",
+        "mode": "run",
+        "agentId": metadata["agent_id"],
+        "cleanup": "keep",
+        "context": "isolated",
+        "lightContext": False,
+        "client_request_id": metadata["client_request_id"],
+        "idempotency_key": metadata["idempotency_key"],
+        "gateway_lease_id": "lease-1",
+        "metadata": metadata,
     }
 
 
@@ -257,14 +309,7 @@ class RuntimeAttestationTests(unittest.TestCase):
         lease = adapter.allow_lease_acquire(lease_params())
         self.assertEqual(lease.external_id, "lease-1")
         metadata = session_metadata()
-        session = adapter.sessions_spawn(
-            {
-                "client_request_id": metadata["client_request_id"],
-                "idempotency_key": metadata["idempotency_key"],
-                "metadata": metadata,
-                "gateway_lease_id": "lease-1",
-            }
-        )
+        session = adapter.sessions_spawn(spawn_params(metadata))
         self.assertEqual(session.external_id, "session-1")
         adapter.session_status("session-1")
         self.assertEqual(
@@ -351,28 +396,14 @@ class RuntimeAttestationTests(unittest.TestCase):
                 transport.spawn_raw_override = raw
                 adapter = self._adapter(transport)
                 with self.assertRaisesRegex(AdapterContractError, message):
-                    adapter.sessions_spawn(
-                        {
-                            "client_request_id": "client",
-                            "idempotency_key": "spawn-idem",
-                            "metadata": metadata,
-                            "gateway_lease_id": "lease-1",
-                        }
-                    )
+                    adapter.sessions_spawn(spawn_params(metadata))
 
     def test_unknown_spawn_outcome_is_never_retried(self) -> None:
         transport = FakeAttestedTransport()
         transport.spawn_error = TimeoutError("unknown outcome")
         adapter = self._adapter(transport)
         with self.assertRaisesRegex(TimeoutError, "unknown outcome"):
-            adapter.sessions_spawn(
-                {
-                    "client_request_id": "client",
-                    "idempotency_key": "spawn-idem",
-                    "metadata": session_metadata(),
-                    "gateway_lease_id": "lease-1",
-                }
-            )
+            adapter.sessions_spawn(spawn_params())
         self.assertEqual(
             [method for method, _params in transport.calls], ["sessions_spawn"]
         )
@@ -383,25 +414,13 @@ class RuntimeAttestationTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "ttl_ms"):
             adapter.allow_lease_acquire({**lease_params(), "ttl_ms": 0})
         with self.assertRaisesRegex(AdapterContractError, "local intent"):
-            adapter.sessions_spawn(
-                {
-                    "client_request_id": "client",
-                    "idempotency_key": "spawn-idem",
-                    "metadata": {**session_metadata(), "unexpected": "field"},
-                    "gateway_lease_id": "lease-1",
-                }
-            )
+            adapter.sessions_spawn(spawn_params({**session_metadata(), "unexpected": "field"}))
         self.assertEqual(transport.calls, [])
 
     def test_application_rpc_parameters_must_match_signed_binding_exactly(self) -> None:
         transport = FakeAttestedTransport()
         adapter = self._adapter(transport)
-        request = {
-            "client_request_id": "client",
-            "idempotency_key": "spawn-idem",
-            "metadata": session_metadata(),
-            "gateway_lease_id": "lease-1",
-        }
+        request = spawn_params()
         missing_gateway = dict(request)
         missing_gateway.pop("gateway_lease_id")
         with self.assertRaisesRegex(
@@ -417,25 +436,11 @@ class RuntimeAttestationTests(unittest.TestCase):
     def test_duplicate_request_identity_must_return_same_external_identity(self) -> None:
         transport = FakeAttestedTransport()
         adapter = self._adapter(transport)
-        first = adapter.sessions_spawn(
-            {
-                "client_request_id": "client",
-                "idempotency_key": "spawn-idem",
-                "metadata": session_metadata(),
-                "gateway_lease_id": "lease-1",
-            }
-        )
+        first = adapter.sessions_spawn(spawn_params())
         self.assertEqual(first.external_id, "session-1")
         transport.spawn_session_key = "session-2"
         with self.assertRaisesRegex(AdapterContractError, "different session identity"):
-            adapter.sessions_spawn(
-                {
-                    "client_request_id": "client",
-                    "idempotency_key": "spawn-idem",
-                    "metadata": session_metadata(),
-                    "gateway_lease_id": "lease-1",
-                }
-            )
+            adapter.sessions_spawn(spawn_params())
 
     def test_cli_transport_binds_signed_payload_to_local_executable_and_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -457,6 +462,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             candidate_binding["catalog"] = {
                 "authority": "tools.catalog",
                 "sha256": catalog_sha,
+                "contract_vector_sha256": binding()["catalog"]["contract_vector_sha256"],
             }
             transport._gateway_call = lambda method, params: {
                 "signed_payload": {
@@ -474,7 +480,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeAttestationError, "drifted"):
                 transport.runtime_identity_snapshot()
 
-    def test_cli_transport_requires_fresh_identity_observation_after_challenge(self) -> None:
+    def test_cli_transport_uses_signed_challenge_snapshot_without_identity_rpc(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "openclaw"
             executable.write_bytes(b"candidate")
@@ -494,9 +500,12 @@ class RuntimeAttestationTests(unittest.TestCase):
             candidate_binding["catalog"] = {
                 "authority": "tools.catalog",
                 "sha256": catalog_sha,
+                "contract_vector_sha256": binding()["catalog"]["contract_vector_sha256"],
             }
+            calls = []
 
             def fake_gateway_call(method, params):
+                calls.append(method)
                 if method == "agenticOs.runtime.attest":
                     return {
                         "signed_payload": {
@@ -504,20 +513,18 @@ class RuntimeAttestationTests(unittest.TestCase):
                             "method_bindings": method_bindings(),
                         }
                     }
-                if method == "agenticOs.runtime.identity":
-                    raise RuntimeAttestationError("runtime identity unavailable")
                 raise AssertionError(method)
 
             transport._gateway_call = fake_gateway_call
             transport.request_runtime_attestation(
                 challenge="challenge", client_process_id="1"
             )
-            with self.assertRaisesRegex(
-                RuntimeAttestationError, "runtime identity unavailable"
-            ):
-                transport.runtime_identity_snapshot()
+            self.assertEqual(
+                transport.runtime_identity_snapshot()["binding"], candidate_binding
+            )
+            self.assertEqual(calls, ["agenticOs.runtime.attest"])
 
-    def test_signed_canonical_json_is_ascii_only_cross_language_vector(self) -> None:
+    def test_signed_canonical_json_matches_typescript_escape_vector(self) -> None:
         ascii_payload = {"a": "AZaz09_./:-", "z": ["~", True, None, 7]}
         javascript_stringify_ascii_sorted = b'{"a":"AZaz09_./:-","z":["~",true,null,7]}'
         self.assertEqual(
@@ -530,10 +537,10 @@ class RuntimeAttestationTests(unittest.TestCase):
             separators=(",", ":"),
             ensure_ascii=True,
         ).encode("utf-8")
-        javascript_stringify_non_ascii = '{"value":"cafe\u0301"}'.encode("utf-8")
-        self.assertNotEqual(python_ensure_ascii_non_ascii, javascript_stringify_non_ascii)
-        with self.assertRaisesRegex(RuntimeAttestationError, "ASCII-only"):
-            canonical_json_bytes({"value": "cafe\u0301"})
+        self.assertEqual(
+            canonical_json_bytes({"value": "cafe\u0301"}),
+            python_ensure_ascii_non_ascii,
+        )
 
 
 if __name__ == "__main__":
