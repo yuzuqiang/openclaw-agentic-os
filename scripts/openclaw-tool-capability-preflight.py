@@ -45,7 +45,6 @@ MODEL_CALLABLE_TOOL_NAMES = (
     "sessions_list",
     "sessions_history",
     "session_status",
-    "sessions_status",
 )
 LIVE_TOOL_NAMES = (
     *GATEWAY_RPC_METHOD_NAMES,
@@ -57,7 +56,6 @@ MODEL_TOOL_SCHEMA_MARKERS = {
     "sessions_list": "function createSessionsListToolSchema",
     "sessions_history": "function createSessionsHistoryToolSchema",
     "session_status": "function createSessionStatusToolSchema",
-    "sessions_status": "function createSessionsStatusToolSchema",
 }
 RUNTIME_SOURCE_PATTERNS = (
     "openclaw-tools-*.js",
@@ -96,7 +94,7 @@ FUTURE_DB_AUTHORITY_CONTRACT = {
         "future_db_authority_requires_duplicate_spawn_to_return_the_same_non_empty_"
         "accepted_session_identity"
     ),
-    "future_canonical_status_method": "sessions_status",
+    "canonical_status_method": "session_status",
 }
 STATUS_RPC_INCIDENTAL_MUTATIONS = (
     "expired_lease_cleanup",
@@ -104,7 +102,12 @@ STATUS_RPC_INCIDENTAL_MUTATIONS = (
 )
 EVIDENCE_CAPABILITY_SOURCE_PATHS = (
     "scripts/openclaw-tool-capability-preflight.py",
+    "scripts/openclaw-live-accepted-session-probe.py",
+    "scripts/openclaw-real-gateway-contract-probe.py",
     "src/agentic_os/openclaw_adapter.py",
+    "src/agentic_os/runtime_attestation.py",
+    "src/agentic_os/metadata.py",
+    "src/agentic_os/heartbeat_shadow.py",
     "src/agentic_os/__init__.py",
 )
 
@@ -1204,7 +1207,7 @@ def _active_catalog_validation_failure_catalog(
     catalog = dict(runtime_identity_catalog)
     catalog.update(
         {
-            "required_canonical_session_status_method": "sessions_status",
+            "required_canonical_session_status_method": "session_status",
             "active_catalog": {
                 "method": "tools.catalog",
                 "status": "contract_validation_failed",
@@ -1494,24 +1497,24 @@ def _status_alias_requirement(
     model_catalog_available: bool,
 ) -> dict[str, Any]:
     return {
-        "future_canonical_status_method": "sessions_status",
-        "future_canonical_status_method_status": (
+        "canonical_status_method": "session_status",
+        "canonical_status_method_status": (
             "available"
-            if "sessions_status" in active_names
+            if "session_status" in active_names
             else (
                 "unproven_model_catalog_unavailable"
                 if not model_catalog_available
                 else "missing_from_model_callable_tools_catalog"
             )
         ),
-        "legacy_status_alias": "session_status",
-        "observed_model_status_aliases": sorted(
+        "unsupported_plural_status_alias": "sessions_status",
+        "observed_model_status_names": sorted(
             name
             for name in ("session_status", "sessions_status")
             if name in active_names or name in model_tool_params or name in declared_names
         ),
-        "future_canonical_status_alias_available": "sessions_status" in active_names,
-        "db_authority_requirement": "future_db_authority_requires_canonical_sessions_status",
+        "canonical_status_method_available": "session_status" in active_names,
+        "db_authority_requirement": "db_authority_requires_singular_session_status",
     }
 
 
@@ -1555,7 +1558,7 @@ def _model_catalog_unavailable_catalog(
         model_tool_catalog["failure_payload_sha256"] = failure_sha
     return {
         **runtime_identity_catalog,
-        "required_canonical_session_status_method": "sessions_status",
+        "required_canonical_session_status_method": "session_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
         "runtime_process_binding_limit": (
             "installed dist source identity does not prove the connected Gateway "
@@ -1877,7 +1880,7 @@ def live_installed_openclaw_catalog(
     )
     return {
         **runtime_identity_catalog,
-        "required_canonical_session_status_method": "sessions_status",
+        "required_canonical_session_status_method": "session_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
         "runtime_process_binding_limit": (
             "installed dist source identity does not prove the connected Gateway "

@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import agentic_os
+from agentic_os.heartbeat_shadow import (
+    HeartbeatShadowError,
+    append_heartbeat_soak_sample,
+    force_heartbeat_file_authority_rollback,
+    heartbeat_authority_manifest,
+    heartbeat_parity_sample,
+    new_heartbeat_soak_receipt,
+    persist_heartbeat_soak_receipt,
+    run_heartbeat_dual_write_projection,
+    run_heartbeat_file_shadow_cycle,
+    validate_heartbeat_soak_receipt,
+)
+
+
+def _canonical_json(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+class HeartbeatShadowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        subprocess.run(
+            ["git", "init", "-q"],
+            cwd=self.root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        (self.root / ".gitignore").write_text(
+            "state/agentic-os/\n", encoding="utf-8"
+        )
+        self.heartbeat_file = self.root / "HEARTBEAT.md"
+        self.heartbeat_file.write_text(
+            "# Heartbeat\n\n- Check one bounded maintenance item.\n",
+            encoding="utf-8",
+        )
+        self.baseline_path = self.root / "evidence/heartbeat-baseline.json"
+        self.manifest_path = self.root / "artifacts/heartbeat-authority.json"
+        self.projection_path = self.root / "artifacts/heartbeat-dual-write.json"
+        self.database = self.root / "state/agentic-os/control.db"
+        self._write_baseline()
+
+    def _baseline(self, *, every: str = "30m") -> dict[str, object]:
+        scheduler = {"every": every, "target": "main"}
+        scheduler_digest = hashlib.sha256(
+            _canonical_json(scheduler).rstrip(b"\n")
+        ).hexdigest()
+        return {
+            "schema_version": "p03-heartbeat-authority-baseline.v1",
+            "captured_at": "2026-08-13T07:00:00Z",
+            "classification": "sanitized_read_only_projection",
+            "file_authority": {
+                "path": str(self.heartbeat_file),
+                "sha256": hashlib.sha256(self.heartbeat_file.read_bytes()).hexdigest(),
+                "active_periodic_tasks": 1,
+            },
+            "scheduler_projection": {
+                "source": "agents.defaults.heartbeat",
+                "value": scheduler,
+                "canonical_json_sha256": scheduler_digest,
+            },
+            "privacy_boundary": {
+                "allowed_config_path": "agents.defaults.heartbeat",
+                "full_openclaw_config_persisted": False,
+                "secrets_persisted": False,
+            },
+            "runtime_interpretation": {
+                "db_authority_enabled": False,
+                "file_artifacts_remain_authority": True,
+                "production_dispatch_controlled_by_shadow_db": False,
+            },
+        }
+
+    def _write_baseline(self, *, every: str = "30m") -> None:
+        self.baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        self.baseline_path.write_bytes(_canonical_json(self._baseline(every=every)))
+
+    def _file_shadow_cycle(self, run_id: str = "heartbeat-file-shadow") -> dict[str, object]:
+        return run_heartbeat_file_shadow_cycle(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            manifest_path=self.manifest_path,
+            run_id=run_id,
+            database=self.database,
+            repo_root_path=self.root,
+            observed_at_epoch_ms=1_700_000_000_000,
+        )
+
+    def test_file_authority_cycle_projects_only_shadow_and_receipts_100_percent(self) -> None:
+        receipt = self._file_shadow_cycle()
+
+        self.assertFalse(agentic_os.DB_AUTHORITY_ENABLED)
+        self.assertEqual(receipt["authority"], "file_artifacts")
+        self.assertIs(receipt["db_authority_enabled"], False)
+        self.assertEqual(receipt["parity"]["percent"], 100)
+        self.assertEqual(receipt["parity"]["mismatch_count"], 0)
+        self.assertEqual(set(receipt["runtime_authority_counts"].values()), {0})
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("file_authority_shadow",),
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM leases").fetchone(), (0,)
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM spawn_requests").fetchone(),
+                (0,),
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM sessions").fetchone(), (0,)
+            )
+
+    def test_manifest_rejects_authority_drift_privacy_weakening_and_db_authority(self) -> None:
+        self.heartbeat_file.write_text("# drift\n", encoding="utf-8")
+        with self.assertRaisesRegex(HeartbeatShadowError, "drifted"):
+            heartbeat_authority_manifest(self.baseline_path, self.heartbeat_file)
+
+        self.heartbeat_file.write_text(
+            "# Heartbeat\n\n- Check one bounded maintenance item.\n",
+            encoding="utf-8",
+        )
+        unsafe = self._baseline()
+        unsafe["privacy_boundary"]["secrets_persisted"] = True
+        self.baseline_path.write_bytes(_canonical_json(unsafe))
+        with self.assertRaisesRegex(HeartbeatShadowError, "privacy boundary"):
+            heartbeat_authority_manifest(self.baseline_path, self.heartbeat_file)
+
+        self._write_baseline()
+        with mock.patch.object(agentic_os, "DB_AUTHORITY_ENABLED", True):
+            with self.assertRaisesRegex(HeartbeatShadowError, "authority must remain disabled"):
+                heartbeat_authority_manifest(self.baseline_path, self.heartbeat_file)
+
+    def test_cycle_rejects_artifacts_and_database_outside_checked_root(self) -> None:
+        outside = Path(self.temporary.name).parent / "heartbeat-outside.json"
+        self.addCleanup(outside.unlink, missing_ok=True)
+        with self.assertRaisesRegex(HeartbeatShadowError, "inside the checked worktree"):
+            run_heartbeat_file_shadow_cycle(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                manifest_path=outside,
+                run_id="outside-manifest",
+                database=self.database,
+                repo_root_path=self.root,
+            )
+        self.assertFalse(outside.exists())
+
+        wrong_database = self.root / "state/agentic-os/not-control.db"
+        with self.assertRaisesRegex(HeartbeatShadowError, "must use ignored"):
+            run_heartbeat_file_shadow_cycle(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                manifest_path=self.manifest_path,
+                run_id="wrong-db",
+                database=wrong_database,
+                repo_root_path=self.root,
+            )
+
+    def test_dual_write_requires_exact_prior_parity_and_remains_non_authoritative(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt = run_heartbeat_dual_write_projection(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projection_receipt_path=self.projection_path,
+            run_id="heartbeat-dual-write",
+            prior_file_shadow_receipt=prior,
+            database=self.database,
+            repo_root_path=self.root,
+            observed_at_epoch_ms=1_700_000_060_000,
+        )
+
+        self.assertEqual(receipt["parity"]["percent"], 100)
+        self.assertIs(receipt["db_authority_enabled"], False)
+        self.assertEqual(set(receipt["runtime_authority_counts"].values()), {0})
+        projection = json.loads(self.projection_path.read_text(encoding="utf-8"))
+        self.assertEqual(projection["authority"], "file_artifacts")
+        self.assertIs(projection["db_authority_enabled"], False)
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT mode FROM workflow_authority WHERE workflow='heartbeat'"
+                ).fetchone(),
+                ("dual_write_shadow",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM workflow_authority "
+                    "WHERE mode IN ('db_authority_canary','db_authority')"
+                ).fetchone(),
+                (0,),
+            )
+
+        tampered = {**prior, "parity": {**prior["parity"], "percent": 99}}
+        with self.assertRaisesRegex(HeartbeatShadowError, "100% parity PASS"):
+            run_heartbeat_dual_write_projection(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                projection_receipt_path=self.root / "artifacts/rejected.json",
+                run_id="heartbeat-rejected",
+                prior_file_shadow_receipt=tampered,
+                database=self.database,
+                repo_root_path=self.root,
+            )
+
+    def test_parity_samples_complete_only_after_bounded_24_hour_window(self) -> None:
+        prior = self._file_shadow_cycle()
+        started = 1_700_000_000_000
+        receipt = new_heartbeat_soak_receipt(
+            run_id="heartbeat-soak",
+            authority_input_digest=prior["authority_input_digest"],
+            started_at_epoch_ms=started,
+            duration_hours=24,
+            sample_interval_seconds=3600,
+        )
+        first = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=started,
+            repo_root_path=self.root,
+        )
+        self.assertEqual(first["parity_percent"], 100)
+        receipt = append_heartbeat_soak_sample(receipt, first)
+        self.assertEqual(receipt["status"], "in_progress")
+
+        final = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=started + 3_600_000,
+            repo_root_path=self.root,
+        )
+        receipt = append_heartbeat_soak_sample(receipt, final)
+        for sampled_at in range(
+            started + 7_200_000,
+            receipt["deadline_epoch_ms"] + 1,
+            3_600_000,
+        ):
+            receipt = append_heartbeat_soak_sample(
+                receipt,
+                heartbeat_parity_sample(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    projected_artifact=self.manifest_path,
+                    run_id=prior["run_id"],
+                    authority_input_digest=prior["authority_input_digest"],
+                    authority_mode="file_authority_shadow",
+                    database=self.database,
+                    sampled_at_epoch_ms=sampled_at,
+                    repo_root_path=self.root,
+                ),
+            )
+        self.assertEqual(receipt["status"], "complete")
+        self.assertEqual(set(receipt["aggregate_counters"].values()), {0})
+
+        receipt_path = self.root / "artifacts/heartbeat-soak.json"
+        digest = persist_heartbeat_soak_receipt(
+            receipt_path, receipt, repo_root_path=self.root
+        )
+        self.assertEqual(digest, hashlib.sha256(receipt_path.read_bytes()).hexdigest())
+        validate_heartbeat_soak_receipt(
+            json.loads(receipt_path.read_text(encoding="utf-8"))
+        )
+
+    def test_parity_sample_records_file_drift_as_failed_sample(self) -> None:
+        prior = self._file_shadow_cycle()
+        self.heartbeat_file.write_text("# changed authority\n", encoding="utf-8")
+        sample = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=1_700_000_060_000,
+            repo_root_path=self.root,
+        )
+
+        self.assertEqual(sample["status"], "fail")
+        self.assertEqual(sample["observation_error"], "authority_manifest_invalid")
+        self.assertEqual(sample["counters"]["projection_drift"], 1)
+        receipt = new_heartbeat_soak_receipt(
+            run_id="heartbeat-soak-fail",
+            authority_input_digest=prior["authority_input_digest"],
+            started_at_epoch_ms=1_700_000_000_000,
+            duration_hours=24,
+            sample_interval_seconds=60,
+        )
+        receipt = append_heartbeat_soak_sample(receipt, sample)
+        self.assertEqual(receipt["status"], "failed")
+
+    def test_soak_rejects_tampered_samples_aggregates_and_early_completion(self) -> None:
+        prior = self._file_shadow_cycle()
+        started = 1_700_000_000_000
+        receipt = new_heartbeat_soak_receipt(
+            run_id="heartbeat-soak",
+            authority_input_digest=prior["authority_input_digest"],
+            started_at_epoch_ms=started,
+            duration_hours=24,
+            sample_interval_seconds=60,
+        )
+        sample = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=started,
+            repo_root_path=self.root,
+        )
+        tampered_sample = {
+            **sample,
+            "expected_authority_input_digest": "0" * 64,
+        }
+        with self.assertRaisesRegex(HeartbeatShadowError, "sample contract"):
+            append_heartbeat_soak_sample(receipt, tampered_sample)
+
+        receipt = append_heartbeat_soak_sample(receipt, sample)
+        tampered_receipt = {
+            **receipt,
+            "aggregate_counters": {
+                **receipt["aggregate_counters"],
+                "projection_drift": 1,
+            },
+        }
+        with self.assertRaisesRegex(HeartbeatShadowError, "do not match samples"):
+            validate_heartbeat_soak_receipt(tampered_receipt)
+
+        early_complete = {**receipt, "status": "complete"}
+        with self.assertRaisesRegex(HeartbeatShadowError, "cannot complete before"):
+            validate_heartbeat_soak_receipt(early_complete)
+
+        gap = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=started + 180_000,
+            repo_root_path=self.root,
+        )
+        with self.assertRaisesRegex(HeartbeatShadowError, "coverage gap"):
+            append_heartbeat_soak_sample(receipt, gap)
+
+    def test_soak_classifies_privacy_and_runtime_observation_failures(self) -> None:
+        prior = self._file_shadow_cycle()
+        unsafe = self._baseline()
+        unsafe["privacy_boundary"]["secrets_persisted"] = True
+        self.baseline_path.write_bytes(_canonical_json(unsafe))
+        privacy = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=1_700_000_060_000,
+            repo_root_path=self.root,
+        )
+        self.assertEqual(privacy["counters"]["privacy_violation"], 1)
+        self.assertEqual(
+            privacy["observation_error"],
+            "authority_manifest_privacy_violation",
+        )
+
+        self._write_baseline()
+        with mock.patch(
+            "agentic_os.heartbeat_shadow._runtime_authority_counts",
+            side_effect=HeartbeatShadowError("unreadable"),
+        ):
+            unknown = heartbeat_parity_sample(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                projected_artifact=self.manifest_path,
+                run_id=prior["run_id"],
+                authority_input_digest=prior["authority_input_digest"],
+                authority_mode="file_authority_shadow",
+                database=self.database,
+                sampled_at_epoch_ms=1_700_000_060_000,
+                repo_root_path=self.root,
+            )
+        self.assertIs(unknown["runtime_authority_counts_observed"], False)
+        self.assertEqual(unknown["observation_error"], "runtime_authority_audit_error")
+        self.assertEqual(unknown["counters"]["unknown_or_unowned_session"], 1)
+
+    def test_forced_rollback_removes_shadow_db_and_preserves_exact_file_view(self) -> None:
+        prior = self._file_shadow_cycle()
+        heartbeat_digest = hashlib.sha256(self.heartbeat_file.read_bytes()).hexdigest()
+        receipt_path = self.root / "artifacts/heartbeat-rollback.json"
+        receipt = force_heartbeat_file_authority_rollback(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            database=self.database,
+            authority_input_digest=prior["authority_input_digest"],
+            rollback_id="drill-1",
+            receipt_path=receipt_path,
+            observed_at_epoch_ms=1_700_000_120_000,
+            repo_root_path=self.root,
+        )
+
+        self.assertFalse(self.database.exists())
+        self.assertTrue(
+            self.database.with_name("control.db.backup.drill-1").is_file()
+        )
+        self.assertEqual(receipt["parity_percent"], 100)
+        self.assertIs(receipt["file_authority_view_recreated"], True)
+        self.assertIs(receipt["production_session_or_lease_authority_left"], False)
+        self.assertEqual(
+            hashlib.sha256(self.heartbeat_file.read_bytes()).hexdigest(),
+            heartbeat_digest,
+        )
+        self.assertTrue(receipt_path.is_file())
+
+    def test_forced_rollback_fails_closed_on_runtime_authority_rows(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/rejected-rollback.json"
+        contaminated_counts = {
+            "lease_rows": 1,
+            "spawn_request_rows": 0,
+            "session_rows": 0,
+            "lifecycle_rpc_intent_rows": 0,
+            "duplicate_spawn_identity_groups": 0,
+        }
+        with mock.patch(
+            "agentic_os.heartbeat_shadow._runtime_authority_counts",
+            return_value=contaminated_counts,
+        ):
+            with self.assertRaisesRegex(HeartbeatShadowError, "runtime authority rows"):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="blocked",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(receipt_path.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

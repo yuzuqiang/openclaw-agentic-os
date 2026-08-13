@@ -75,8 +75,8 @@ VALID_CATALOG = {
         },
         {"name": "sessions_list", "inputSchema": {"properties": {}}},
         {
-            "name": "sessions_status",
-            "inputSchema": {"properties": {"session_key": {"type": "string"}}},
+            "name": "session_status",
+            "inputSchema": {"properties": {"sessionKey": {"type": "string"}}},
         },
         {
             "name": "sessions_history",
@@ -99,7 +99,7 @@ ACTIVE_TOOL_IDS = [
     "sessions_spawn",
     "sessions_list",
     "sessions_history",
-    "sessions_status",
+    "session_status",
 ]
 
 
@@ -121,9 +121,9 @@ def write_contract_candidate_dist(install_root):
             "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
             "function createSessionsListToolSchema(){return Type.Object({});}\n"
             "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-            "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+            "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
             'name: "sessions_spawn", name: "sessions_list", '
-            'name: "sessions_history", name: "sessions_status"'
+            'name: "sessions_history", name: "session_status"'
         )
     with open(os.path.join(dist, "server-methods-candidate.js"), "w", encoding="utf-8") as handle:
         handle.write(
@@ -183,7 +183,7 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
     baseline_entries = [
         active_tool_entry(tool_id)
         for tool_id in ACTIVE_TOOL_IDS
-        if tool_id != "sessions_status"
+        if tool_id != "session_status"
     ]
     candidate_entries = [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]
     with open(executable, "w", encoding="utf-8") as handle:
@@ -361,7 +361,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("client_lease_id", payload["error"])
         self.assertIn("idempotency_key", payload["error"])
         self.assertIn("release_idempotency_key", payload["error"])
-        self.assertIn("sessions_status", payload["error"])
+        self.assertNotIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertIn("metadata", payload["error"])
 
     def test_live_installed_openclaw_catalog_is_sanitized_and_fail_closed(self) -> None:
@@ -497,12 +497,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("connected Gateway build identity is not proven", payload["error"])
         self.assertEqual(
             catalog["model_tool_catalog"]["required_tool_names"],
-            [
-                "sessions_history",
-                "sessions_list",
-                "sessions_spawn",
-                "sessions_status",
-            ],
+            ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
         )
         self.assertNotIn(
             "subagents.allowLease.acquire",
@@ -652,7 +647,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertFalse(catalog["future_db_authority_contract"]["db_authority_enabled"])
         self.assertEqual(
-            catalog["status_alias_requirement"]["future_canonical_status_method_status"],
+            catalog["status_alias_requirement"]["canonical_status_method_status"],
             "unproven_model_catalog_unavailable",
         )
         self.assertIn("model-callable tools.catalog is unavailable", payload["error"])
@@ -674,7 +669,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                 )
             with open(os.path.join(dist, "core-descriptors-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -750,12 +745,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
         self.assertEqual(
             payload["catalog"]["required_canonical_session_status_method"],
-            "sessions_status",
+            "session_status",
         )
         status_tool = next(
-            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_status"
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "session_status"
         )
-        self.assertEqual(status_tool["parameters"], ["session_key"])
+        self.assertEqual(status_tool["parameters"], ["sessionKey"])
 
     def test_isolated_candidate_openclaw_requires_explicit_install_root(self) -> None:
         env = dict(os.environ)
@@ -907,7 +902,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 env,
                 package_root,
                 active_tool_ids=[
-                    tool_id for tool_id in ACTIVE_TOOL_IDS if tool_id != "sessions_status"
+                    tool_id for tool_id in ACTIVE_TOOL_IDS if tool_id != "session_status"
                 ],
             )
             result = subprocess.run(
@@ -931,7 +926,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "installed_openclaw_negative_baseline",
         )
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
-        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
@@ -973,7 +968,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             payload["catalog"]["runtime_target"],
             "installed_openclaw_negative_baseline",
         )
-        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
@@ -2227,7 +2222,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "tools": [
                 {
                     "name": "sessions_spawn",
-                    "id": "sessions_status",
+                    "id": "session_status",
                     "inputSchema": {
                         "properties": {
                             "client_request_id": {"type": "string"},
@@ -2491,9 +2486,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2576,9 +2571,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2638,9 +2633,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({\"client_request_id\": Type.String(), \"idempotency_key\": Type.String(), \"metadata\": Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({\"sessionKey\": Type.String(), \"limit\": Type.Number(), \"includeTools\": Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({\"session_key\": Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({\"sessionKey\": Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2703,9 +2698,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2762,9 +2757,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "openclaw-tools-stale.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2824,9 +2819,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2877,8 +2872,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
-                    'name: "sessions_list", name: "sessions_history", name: "sessions_status"'
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
+                    'name: "sessions_list", name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2928,9 +2923,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2986,9 +2981,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-current.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3048,9 +3043,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3105,10 +3100,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 handle.write(
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     "// name: \"sessions_list\"\n"
                     "const stale = 'name: \"sessions_list\"';\n"
-                    'name: "sessions_spawn", name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_spawn", name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3169,8 +3164,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 handle.write(
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
-                    'name: "sessions_spawn", name: "sessions_history", name: "sessions_status"'
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "core-descriptors-test.js"), "w", encoding="utf-8") as handle:
                 handle.write('name: "sessions_list"')

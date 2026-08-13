@@ -17,7 +17,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "f8aeb38a74d8cf3d3c0703f0ff54511ecf23bfc34b3c9274ecf69e554b1247b5",
+      "sha256": "69c0b945ec2b18e31a8f9bc3dac0a06909e91541f7931faa5e799f8251d5fe25",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merged_at": "2026-08-12T10:59:18Z",
@@ -52,6 +52,15 @@
       "implementation_focused_tests": "pass",
       "deterministic_production_path_proof": "pass",
       "live_blacksmith_status": "unavailable_personal_repository",
+      "production_authority_enabled": false
+    },
+    "local_p03_runtime_heartbeat_shadow": {
+      "status": "local_only_non_authoritative",
+      "transport_attestation_contract": "implemented_with_synthetic_challenge_tests",
+      "agentic_os_runtime_attest_rpc": "future_only_unproven",
+      "ambiguous_sessions_spawn": "human_review_required_no_retry",
+      "heartbeat_shadow_mechanism": "implemented_with_file_shadow_dual_write_rollback_soak_tests",
+      "live_gateway_session_or_lease_mutation": false,
       "production_authority_enabled": false
     },
     "production_behavior_proven": false,

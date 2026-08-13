@@ -63,7 +63,7 @@ CATALOG = {
             "parameters": ["client_request_id", "idempotency_key", "metadata"],
         },
         {"name": "sessions_list", "parameters": []},
-        {"name": "sessions_status", "parameters": ["session_key"]},
+        {"name": "session_status", "parameters": ["sessionKey"]},
         {
             "name": "sessions_history",
             "parameters": ["sessionKey", "limit", "includeTools"],

@@ -1073,11 +1073,9 @@ def _session_status_method(preflight_payload: dict[str, Any]) -> str:
                 name = item.get("name")
                 if isinstance(name, str):
                     names.add(name)
-    if "sessions_status" in names:
-        return "sessions_status"
-    if not names:
-        return "sessions_status"
-    raise RuntimeError("isolated candidate catalog did not prove sessions_status")
+    if "session_status" in names:
+        return "session_status"
+    raise RuntimeError("isolated candidate catalog did not prove session_status")
 
 
 def _release_lease(
@@ -1130,7 +1128,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "probe": "openclaw-live-accepted-session-identity",
         "preflight_runtime_target": "isolated_candidate",
-        "required_canonical_session_status_method": "sessions_status",
+        "required_canonical_session_status_method": "session_status",
         "started_epoch_ms": started,
         "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         "rpc_attempted": [],
@@ -1195,6 +1193,19 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "fail_closed",
                 "reason": reason,
                 **sanitized,
+                "spawn_attempted": False,
+                "lease_acquired": False,
+                "released": "not_required",
+            }
+        )
+        return evidence
+
+    if not args.execute_lifecycle:
+        evidence.update(
+            {
+                "status": "fail_closed",
+                "mode": "preflight_only",
+                "reason": "lifecycle_not_authorized",
                 "spawn_attempted": False,
                 "lease_acquired": False,
                 "released": "not_required",
@@ -1287,17 +1298,6 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
             lease_ids_to_release=lease_ids_to_release,
         )
-        if not args.execute_session_spawn:
-            evidence.update(
-                {
-                    "status": "fail_closed",
-                    "reason": "session_spawn_execution_disabled",
-                    "spawn_attempted": False,
-                    "lease_acquired": True,
-                }
-            )
-            return evidence
-
         spawn_args = {
             "task": "Return exactly: issue35 identity probe complete",
             "taskName": f"issue35probe{args.probe_id.replace('-', '')[:24]}",
@@ -1359,7 +1359,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         session_status = _gateway_call(
             openclaw_executable,
             status_method,
-            {"session_key": session_identity},
+            {"sessionKey": session_identity},
             timeout_ms=args.gateway_timeout_ms,
         )
         session_read_evidence[status_method] = _validate_session_api_observes_session(
@@ -1490,9 +1490,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Upper bound for each direct structured sessions_spawn RPC.",
     )
     parser.add_argument(
-        "--execute-session-spawn",
+        "--execute-lifecycle",
         action="store_true",
-        help="Actually spawn duplicate accepted-session probes after exact preflight and allowLease proof pass.",
+        help="Authorize the full mutating acquire/duplicate/spawn/duplicate/read/release lifecycle.",
     )
     parser.add_argument("--evidence-file", help="Path for sanitized JSON evidence.")
     args = parser.parse_args(argv)

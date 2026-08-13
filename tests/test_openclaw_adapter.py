@@ -28,8 +28,8 @@ INSTALLED_SESSION_TOOL_CATALOG = {
         },
         {"name": "sessions_list", "inputSchema": {"properties": {}}},
         {
-            "name": "sessions_status",
-            "inputSchema": {"properties": {"session_key": {"type": "string"}}},
+            "name": "session_status",
+            "inputSchema": {"properties": {"sessionKey": {"type": "string"}}},
         },
         {
             "name": "sessions_history",
@@ -96,7 +96,7 @@ def verified_runtime_envelope() -> dict[str, Any]:
                 in {
                     "sessions_spawn",
                     "sessions_list",
-                    "sessions_status",
+                    "session_status",
                     "sessions_history",
                 }
             ]
@@ -260,7 +260,7 @@ class CannedTransport:
                     }
                 ]
             }
-        if method == "sessions_status":
+        if method == "session_status":
             metadata = {
                 "run_id": "run",
                 "transition_id": "transition",
@@ -271,10 +271,10 @@ class CannedTransport:
                 "task_digest": "task",
             }
             return {
-                "session_key": params["session_key"],
+                "session_key": params["sessionKey"],
                 "session": {
-                    "session_key": params["session_key"],
-                    "spawn_request_session_key": params["session_key"],
+                    "session_key": params["sessionKey"],
+                    "spawn_request_session_key": params["sessionKey"],
                 },
                 "metadata": {
                     "metadata_contract_version": "v1",
@@ -338,7 +338,7 @@ class OpenClawAdapterTests(unittest.TestCase):
         self.assertEqual(status.external_id, "session-key")
         self.assertEqual(status.session_key, "session-key")
         self.assertEqual(
-            transport.calls[-1], ("sessions_status", {"session_key": "session-key"})
+            transport.calls[-1], ("session_status", {"sessionKey": "session-key"})
         )
 
         result = adapter.session_result("session-key")
@@ -545,7 +545,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                     }
                 },
                 "sessions_list": {"parameters": {}},
-                "sessions_status": {"parameters": {"session_key": {}}},
+                "session_status": {"parameters": {"sessionKey": {}}},
                 "sessions_history": {
                     "parameters": {"sessionKey": {}, "limit": {}}
                 },
@@ -564,7 +564,7 @@ class OpenClawAdapterTests(unittest.TestCase):
                     "parameters": {"client_request_id": {}, "idempotency_key": {}}
                 },
                 "sessions_list": {"parameters": {}},
-                "sessions_status": {"parameters": {"session_key": {}}},
+                "session_status": {"parameters": {"sessionKey": {}}},
                 "sessions_history": {
                     "parameters": {
                         "sessionKey": {},
@@ -604,9 +604,9 @@ class OpenClawAdapterTests(unittest.TestCase):
                 },
                 {"name": "sessions_list", "inputSchema": {"properties": {}}},
                 {
-                    "name": "sessions_status",
+                    "name": "session_status",
                     "inputSchema": {
-                        "properties": {"session_key": {"type": "string"}}
+                        "properties": {"sessionKey": {"type": "string"}}
                     },
                 },
                 {

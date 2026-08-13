@@ -885,7 +885,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "human_review_required",
             )
 
-    def test_sessions_spawn_transport_failure_marks_unknown_without_releasing_lease(
+    def test_sessions_spawn_transport_failure_requires_human_review_without_retrying_or_releasing_lease(
         self,
     ) -> None:
         adapter = TransportFailingAdapter(
@@ -897,7 +897,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                 )
             ],
         )
-        with self.assertRaisesRegex(RuntimeDispatchError, "reconciliation required"):
+        with self.assertRaisesRegex(RuntimeDispatchError, "human review required"):
             dispatch_with_metadata(self.database, adapter, self.request)
         self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
         with self._connect() as connection:
@@ -906,13 +906,20 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "SELECT state FROM external_rpc_intents "
                     "WHERE rpc_kind='sessions_spawn'"
                 ).fetchone()[0],
-                "unknown",
+                "human_review_required",
             )
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
                 ).fetchone()[0],
-                "unknown",
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT ambiguity_reason FROM spawn_requests "
+                    "WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "spawn timed out",
             )
             self.assertEqual(
                 connection.execute(
@@ -928,6 +935,10 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ).fetchone()[0],
                 0,
             )
+        replay = ScriptedAdapter()
+        with self.assertRaisesRegex(RuntimeDispatchError, "will not be retried"):
+            dispatch_with_metadata(self.database, replay, self.request)
+        self.assertEqual(replay.calls, [])
 
     def test_late_acquire_acceptance_cannot_override_human_review(self) -> None:
         database = self.database
@@ -1438,7 +1449,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                 )
             ],
         )
-        with self.assertRaisesRegex(RuntimeDispatchError, "reconciliation required"):
+        with self.assertRaisesRegex(RuntimeDispatchError, "human review required"):
             dispatch_with_metadata(self.database, first, self.request)
         self.assertEqual(first.calls, ["allow_lease_acquire", "sessions_spawn"])
 
@@ -1452,7 +1463,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "SELECT state FROM external_rpc_intents "
                     "WHERE rpc_kind='sessions_spawn' AND spawn_request_id='spawn'"
                 ).fetchone()[0],
-                "unknown",
+                "human_review_required",
             )
             self.assertEqual(
                 connection.execute(

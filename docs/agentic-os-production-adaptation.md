@@ -23,6 +23,8 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-08-13: Added the local-only P0.3 runtime-attestation and Heartbeat shadow batch:
+  - Corrections: `agentic_os.runtime_attestation` defines a transport/object/process/expiry-bound attestor contract and rejects offline, unsigned, stale, drifted, or cross-process attestations; `OpenClawAdapter` remains inert unless created through that fresh attestation and rechecks identity before every RPC. The named `agenticOs.runtime.attest` surface is future-only here and is not current Gateway capability evidence. `agentic_os.runtime_dispatch` now persists ambiguous `sessions_spawn` transport outcomes as `human_review_required` with no automatic retry while retaining the owned lease for review. `agentic_os.heartbeat_shadow` adds a Heartbeat-only file-authority shadow/parity/forced-rollback/bounded-soak mechanism over ignored local `state/agentic-os/control.db`; no production authority, Gateway config, Cron, service, session, or lease state is changed, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-12: Recorded the PR #39 post-merge repository/design acceptance boundary:
   - Corrections: `docs/project-status.json` separates repository artifact acceptance from live runtime evidence and production authority. Repository acceptance is bound to PR #39, exact accepted head `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, accepted/merge tree `609ea2995b6d1113b1952a34f26bbc35f82e1592`, exact-head Phase C PASS, the clean Codex review comment, merge commit `b48a7cba8c6671b5dd33a369fb4f59f57d159739`, and the accepted-head design artifact digest. The current corrected design artifact digest is recorded separately and is not reused as PR #39 acceptance proof. Live runtime evidence remains `pending_non_authoritative` through `docs/runtime-evidence/phase-b-20260811-evidence-index.json`, production authority remains disabled, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-11: Corrected the installed-runtime preflight evidence model after Phase A found a combined-catalog false negative:
@@ -4202,7 +4204,7 @@ Spawn:
 2. Transaction A commits before the external boundary. External runtime execution is not transactional with SQLite; the only durable ordering proof is the committed reserve row plus committed intent row before the call.
 3. External boundary calls metadata-capable `sessions_spawn`.
 4. Transaction B records accepted session and transition to `dispatched` only when the accepted runtime session identity is non-empty and consistent across `external_rpc_intents.external_id`, `spawn_requests.session_key`, and one exact `sessions` row bound to the full spawn tuple.
-5. Unknown result becomes `spawn_unknown`. The adapter must not retry spawn automatically. Reconciliation may bind only when the external session exposes exact normalized metadata matching `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest`, and the raw `external_metadata_json` paths for those seven fields match the same normalized/local values.
+5. Ambiguous `sessions_spawn` transport outcomes become `human_review_required`; the adapter must not retry spawn automatically. Legacy or crash-left `spawn_unknown` rows may be reconciled only by the scanner when the external session exposes exact normalized metadata matching `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest`, and the raw `external_metadata_json` paths for those seven fields match the same normalized/local values.
 6. Missing `spawn_request_id`, orphan or mismatched spawn request binding, missing accepted session identity, missing exact sessions row, sessions same-row identity mismatch, missing reserve pointer, malformed epoch authority, reserve from the wrong run/transition/provider/model/endpoint/capability/cost row, equal-millisecond ambiguity, reserve created after the intent, NULL/free-form-only/version-only external metadata, invalid external metadata JSON, raw-JSON/normalized/local metadata mismatch, or mismatched external metadata becomes `human_review_required` with no automatic retry or bind.
 
 First-output handshake:
@@ -4625,8 +4627,8 @@ P0.0 - privacy and external contract preflight:
   are not current authoritative proof requirements; they remain disabled
   future-contract checks until a verified in-process adapter handoff can run
   without minting authority from an unsigned catalog. DB authority still fails closed on
-  future metadata/idempotency/full-owner fields, missing `sessions_spawn`
-  metadata, and the future canonical `sessions_status` alias. Before any real
+  future metadata/idempotency/full-owner fields and missing `sessions_spawn`
+  metadata. The canonical status surface is singular `session_status(sessionKey)`. Before any real
   RPC is relied on, the exact tool/RPC surface must be proven with
   `scripts/openclaw-tool-capability-preflight.py`.
   Run it against the installed runtime with
@@ -4679,8 +4681,8 @@ P1.1 - metadata-based dispatch and reconciliation:
   pending-intent dispatcher, and fail-closed reconciliation probes exist.
 - Not production-proven: live allowLease/session metadata conformance; dispatch
   workflows must remain fail-closed until exact capability preflight proves the
-  future metadata/idempotency/full-owner fields, accepted-session identity, and
-  future canonical `sessions_status` alias.
+  future metadata/idempotency/full-owner fields and accepted-session identity;
+  singular `session_status(sessionKey)` is the canonical status surface.
 - Remaining: production reconciliation scanner rollout after live metadata
   fixtures pass.
 

@@ -67,8 +67,8 @@ class CannedOpenClawAdapter:
     def session_status(self, session_key: str) -> MetadataObservation:
         return observation_from_openclaw_response(
             _transport_response(
-                self._transport.call("sessions_status", {"session_key": session_key}),
-                "sessions_status",
+                self._transport.call("session_status", {"sessionKey": session_key}),
+                "session_status",
             )
         )
 

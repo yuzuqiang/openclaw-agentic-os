@@ -47,9 +47,9 @@ Connect `openclaw-agentic-os` to the currently installed OpenClaw/Gateway throug
 
 ## Phase 2 — Transport-bound Runtime Contract
 
-- [ ] Implement a transport-bound attestor that binds one exact OpenClaw executable/install root, connected Gateway identity, catalog/source evidence, and live challenge result.
-- [ ] Permit `OpenClawAdapter` construction only from a verified, unexpired attestation for the same exact transport target.
-- [ ] Prove round-trip support for:
+- [x] Implement a transport-bound attestor that binds one exact OpenClaw executable/install root, connected Gateway identity, catalog/source evidence, and live challenge result.
+- [x] Permit `OpenClawAdapter` construction only from a verified, unexpired attestation for the same exact transport target.
+- [x] Prove round-trip support for:
   - `client_request_id`
   - `idempotency_key`
   - `run_id`
@@ -58,8 +58,8 @@ Connect `openclaw-agentic-os` to the currently installed OpenClaw/Gateway throug
   - `agent_id`
   - `requester_agent_id` where applicable
   - `task_digest`
-- [ ] Require accepted lease/session responses and list/status/history observations to echo the same normalized and raw metadata plus a non-empty external identity.
-- [ ] Add focused negative tests for stale build, source drift, endpoint drift, unsigned mapping, missing metadata, mismatched metadata, expired attestation, and cross-process replay.
+- [x] Require accepted lease/session responses and list/status/history observations to echo the same normalized and raw metadata plus a non-empty external identity.
+- [x] Add focused negative tests for stale build, source drift, endpoint drift, unsigned mapping, missing metadata, mismatched metadata, expired attestation, and cross-process replay.
 
 ### Gate 2
 
@@ -81,7 +81,7 @@ Connect `openclaw-agentic-os` to the currently installed OpenClaw/Gateway throug
 - [ ] Prove duplicate spawn returns the same session and creates no additional child.
 - [ ] Prove release ownership and post-release absence.
 - [ ] Exercise post-RPC/pre-DB and post-DB/pre-ack crash windows.
-- [ ] Route unknown spawn outcomes to `human_review_required` with no automatic retry.
+- [x] Route unknown spawn outcomes to `human_review_required` with no automatic retry.
 - [ ] Persist sanitized receipts, timings, hashes, and cleanup evidence.
 
 ### Gate 3
@@ -93,12 +93,12 @@ Connect `openclaw-agentic-os` to the currently installed OpenClaw/Gateway throug
 
 ## Phase 4 — Heartbeat File-authority Shadow Pilot
 
-- [ ] Select only the Heartbeat workflow as the pilot.
-- [ ] Keep existing Heartbeat files as the sole operational authority.
-- [ ] Backfill a local ignored shadow `control.db` from the file artifacts.
-- [ ] Record DB projections and parity evidence without allowing DB rows to control dispatch or decisions.
-- [ ] Run Heartbeat through `file_authority_shadow`, then `dual_write_shadow` only after parity preflight passes.
-- [ ] Prove forced rollback recreates the exact file-authority view and leaves no production session/lease authority behind.
+- [x] Select only the Heartbeat workflow as the pilot.
+- [x] Keep existing Heartbeat files as the sole operational authority.
+- [x] Backfill a local ignored shadow `control.db` from the file artifacts.
+- [x] Record DB projections and parity evidence without allowing DB rows to control dispatch or decisions.
+- [x] Run Heartbeat through `file_authority_shadow`, then `dual_write_shadow` only after parity preflight passes.
+- [x] Prove forced rollback recreates the exact file-authority view and leaves no production session/lease authority behind.
 - [ ] Start a bounded 24–72 hour soak with periodic parity/SLO receipts.
 
 ### Gate 4

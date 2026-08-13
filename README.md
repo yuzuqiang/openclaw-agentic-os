@@ -18,7 +18,7 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `f8aeb38a74d8cf3d3c0703f0ff54511ecf23bfc34b3c9274ecf69e554b1247b5`
+- Current corrected design artifact SHA-256: `69c0b945ec2b18e31a8f9bc3dac0a06909e91541f7931faa5e799f8251d5fe25`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -38,9 +38,12 @@ not evidence of production OpenClaw authority.
   DB-authority canary and rollback, one controlled synthetic expansion path,
   read-only predicate evaluation, approval/pass-gate/SLO audit/goal-run/trust
   binding writers, budget fixture/runtime slices, and injectable metadata
-  dispatch/reconciliation probes.
+  dispatch/reconciliation probes, a transport/object/process/expiry-bound
+  OpenClaw attestor contract, and a Heartbeat-only file-authority shadow pilot
+  with deterministic parity, forced rollback, and bounded soak receipts.
 - Remaining unproven production scope: live OpenClaw/Gateway/Cron/session RPC
-  metadata contracts, production `control.db` or daemon operation, real
+  metadata/attestation contracts against the local downstream OpenClaw
+  candidate, production `control.db` or daemon operation, real
   end-to-end session authority, workflow cutover drills, production smoke tests,
   and steady DB-authority operation.
 
@@ -77,6 +80,27 @@ explicit file artifacts into `file_authority_shadow` rows and compare current
 file hashes, prepare identity, workflow mode, and deterministic projection IDs
 back to those rows; they do not enable database authority or feed dispatch
 decisions.
+
+P0.3 adds a local contract, not runtime authority. `OpenClawAdapter` can be
+constructed only from a fresh signed challenge bound to the exact transport
+object, client process, executable/catalog/source identity, Gateway endpoint
+and build, and reviewed singular `session_status(sessionKey)` surface. Invalid
+or expired attestations, identity drift, unsigned mappings, cross-process
+replay, incomplete metadata, and duplicate acquire/spawn identity drift fail
+closed. The default accepted-session probe mode is non-mutating and returns
+`status=fail_closed` with `reason=lifecycle_not_authorized`; only explicit
+`--execute-lifecycle` permits the bounded acquire/spawn/read/release drill. No
+live PASS is current until the local downstream OpenClaw candidate implements
+and passes that exact contract.
+
+`src/agentic_os/heartbeat_shadow.py` is Heartbeat-only. It derives one
+sanitized manifest from `HEARTBEAT.md` plus `agents.defaults.heartbeat`, writes
+only to ignored `state/agentic-os/control.db`, requires 100% file-shadow parity
+before `dual_write_shadow`, records zero lease/session authority, rejects soak
+coverage gaps and privacy/runtime-observation ambiguity, and moves the shadow
+DB to an ignored recoverable backup during forced rollback while re-proving the
+exact file-authority digest. The 24-72 hour soak is supported but has not been
+run here; file artifacts remain the sole authority throughout.
 
 `dual-write-shadow` is the first executable P1.0 shadow-mode slice. It writes a
 single file-authority artifact and records matching `dual_write_shadow` SQLite
@@ -382,8 +406,9 @@ lease/session persistence, owned-lease cleanup on
 spawn metadata failure, and a fail-closed scanner that reconciles unknown
 or crash-left pending outcomes only from list/status metadata. Normalized
 metadata is never promoted to raw evidence; OpenClaw responses must expose raw
-metadata JSON from the external boundary. Ambiguous transport failures become
-recoverable outcomes for reconciliation instead of adapter retries, and prior
+metadata JSON from the external boundary. Ambiguous `sessions_spawn` transport
+failures are persisted as `human_review_required` instead of adapter retries;
+pre-existing crash-left unknown rows remain scanner inputs only. Prior
 `pending`, `unknown`, `failed`, or `human_review_required` spawn attempts are
 preserved without crossing `sessions_spawn` again. Release-pending leases are
 reconciled from exact release metadata. Acquire-only leases are released with
@@ -448,8 +473,8 @@ unproven; `status` may clean expired leases and CLI bootstrap may write local
 state. The runtime still fails closed because source evidence exposes legacy
 acquire/release parameters, acquire/release were not live-probed,
 `sessions_spawn` source evidence lacks `client_request_id`, `idempotency_key`,
-and `metadata`, and the current model tool alias is `session_status` while
-future DB authority requires `sessions_status` as the canonical status alias.
+and `metadata`. The installed singular `session_status(sessionKey)` surface is
+the canonical status contract; it is not a readiness blocker by itself.
 The split-catalog JSON path in the forward index is pending exact-lineage
 recapture rather than current authority. Future runtime-evidence authority must
 recapture
@@ -458,11 +483,14 @@ from an exact clean head before any production-runtime claim. The
 plain-catalog path is deliberately offline-only: it reports
 `classification=offline_schema_validation_only` and can never set
 `runtime_ready=true`. An unsigned catalog mapping cannot mint
-`OpenClawAdapter` runtime authority. No production authority-minting path exists
-today: direct construction is disabled and every production adapter RPC rejects
-before `transport.call` until a real transport-bound attestor can mark the exact
-adapter instance verified. The cross-process release-probe entry point likewise
-rejects unsigned stdin before invoking transport. The bounded accepted-session
+`OpenClawAdapter` runtime authority. Direct construction remains disabled; the
+local P0.3 factory requires a fresh signed transport-bound attestation and
+rechecks process, expiry, source/catalog, endpoint, build, and transport identity
+before every application RPC. That contract is covered only by synthetic local
+tests until the local downstream OpenClaw candidate provides the signed runtime
+surface, so it is not current live evidence or production authority. The
+cross-process release-probe entry point likewise rejects unsigned stdin before
+invoking transport. The bounded accepted-session
 probe in
 `docs/runtime-evidence/issue35-live-accepted-session-probe-20260721.json`
 therefore fails closed before any Gateway lease or session RPC is attempted.

@@ -1216,14 +1216,14 @@ def dispatch_with_metadata(
                 persist_spawn_acceptance(connection, request, spawn_observation, session_key)
         except AMBIGUOUS_TRANSPORT_ERRORS as exc:
             with immediate_transaction(connection):
-                mark_unknown(
+                mark_human_review(
                     connection,
                     request,
                     rpc_kind="sessions_spawn",
                     reason=str(exc),
                 )
             raise RuntimeDispatchError(
-                "sessions_spawn transport outcome unknown; reconciliation required"
+                "sessions_spawn transport outcome unknown; human review required"
             ) from exc
         except (AdapterContractError, MetadataContractError) as exc:
             with immediate_transaction(connection):
