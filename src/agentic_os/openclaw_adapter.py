@@ -70,7 +70,9 @@ class OpenClawTransport(Protocol):
 
 
 _REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
-    "sessions_spawn": frozenset(("client_request_id", "idempotency_key", "metadata")),
+    "sessions_spawn": frozenset(
+        ("client_request_id", "idempotency_key", "metadata", "gateway_lease_id")
+    ),
     "sessions_list": frozenset(),
     "session_status": frozenset(("sessionKey",)),
     "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
@@ -848,10 +850,19 @@ class OpenClawAdapter:
     ) -> tuple[str, Mapping[str, Any]]:
         state = self._require_verified_runtime_authority()
         binding = state.attestation.method_bindings[logical_name]
-        missing = sorted(set(binding.parameter_names) - set(params))
-        if missing:
+        expected_parameters = set(binding.parameter_names)
+        actual_parameters = set(params)
+        missing = sorted(expected_parameters - actual_parameters)
+        extra = sorted(actual_parameters - expected_parameters)
+        if missing or extra:
+            details = []
+            if missing:
+                details.append(f"missing: {', '.join(missing)}")
+            if extra:
+                details.append(f"extra: {', '.join(extra)}")
             raise AdapterContractError(
-                f"{binding.method} request is missing attested parameters: {', '.join(missing)}"
+                f"{binding.method} request must contain the exact attested parameter set "
+                f"({'; '.join(details)})"
             )
         return binding.method, _transport_response(
             self._transport.call(binding.method, params), binding.method

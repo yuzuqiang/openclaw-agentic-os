@@ -17,7 +17,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "69c0b945ec2b18e31a8f9bc3dac0a06909e91541f7931faa5e799f8251d5fe25",
+      "sha256": "1b553e868fd090b448ce72e7ef9901a8896a20573db1e3f8355de116f74690da",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merged_at": "2026-08-12T10:59:18Z",
@@ -56,8 +56,10 @@
     },
     "local_p03_runtime_heartbeat_shadow": {
       "status": "local_only_non_authoritative",
-      "transport_attestation_contract": "implemented_with_synthetic_challenge_tests",
+      "transport_attestation_contract": "synthetic_tests_only_requires_future_attest_and_identity_surfaces",
       "agentic_os_runtime_attest_rpc": "future_only_unproven",
+      "agentic_os_runtime_identity_rpc": "future_only_unproven",
+      "signed_json_contract": "ascii_only_fail_closed",
       "ambiguous_sessions_spawn": "human_review_required_no_retry",
       "heartbeat_shadow_mechanism": "implemented_with_file_shadow_dual_write_rollback_soak_tests",
       "live_gateway_session_or_lease_mutation": false,

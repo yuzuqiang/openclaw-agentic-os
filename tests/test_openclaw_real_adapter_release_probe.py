@@ -60,7 +60,12 @@ CATALOG = {
         },
         {
             "name": "sessions_spawn",
-            "parameters": ["client_request_id", "idempotency_key", "metadata"],
+            "parameters": [
+                "client_request_id",
+                "idempotency_key",
+                "metadata",
+                "gateway_lease_id",
+            ],
         },
         {"name": "sessions_list", "parameters": []},
         {"name": "session_status", "parameters": ["sessionKey"]},

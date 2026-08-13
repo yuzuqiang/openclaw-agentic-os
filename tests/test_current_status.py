@@ -197,6 +197,11 @@ class CurrentStatusTests(unittest.TestCase):
             local_p03["agentic_os_runtime_attest_rpc"],
             "future_only_unproven",
         )
+        self.assertEqual(
+            local_p03["agentic_os_runtime_identity_rpc"],
+            "future_only_unproven",
+        )
+        self.assertEqual(local_p03["signed_json_contract"], "ascii_only_fail_closed")
         self.assertFalse(local_p03["live_gateway_session_or_lease_mutation"])
         self.assertFalse(local_p03["production_authority_enabled"])
 

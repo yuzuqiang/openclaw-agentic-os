@@ -18,7 +18,7 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `69c0b945ec2b18e31a8f9bc3dac0a06909e91541f7931faa5e799f8251d5fe25`
+- Current corrected design artifact SHA-256: `1b553e868fd090b448ce72e7ef9901a8896a20573db1e3f8355de116f74690da`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -424,9 +424,10 @@ identity; otherwise the spawn is moved to human review even when `sessions_list`
 contains matching session metadata. Runtime tool catalog preflight fails closed
 unless allowLease acquire/status/release are present with owner metadata and
 `sessions_spawn` declares the caller `metadata` parameter as well as
-`client_request_id` and `idempotency_key`; history-backed result responses must
-match the requested session at the top level and in any history item identity
-they expose. Live run/phase/agent arbitration occurs in the initial intent
+`client_request_id`, `idempotency_key`, and `gateway_lease_id`; history-backed
+result responses must match the requested session at the top level and in any
+history item identity they expose. Live run/phase/agent arbitration occurs in
+the initial intent
 transaction: prior pending, unknown,
 accepted, reconciled, or unresolved human-review attempts block a competing
 dispatch before another lease or spawn RPC, while terminal pre-spawn failures do
@@ -473,7 +474,8 @@ unproven; `status` may clean expired leases and CLI bootstrap may write local
 state. The runtime still fails closed because source evidence exposes legacy
 acquire/release parameters, acquire/release were not live-probed,
 `sessions_spawn` source evidence lacks `client_request_id`, `idempotency_key`,
-and `metadata`. The installed singular `session_status(sessionKey)` surface is
+`gateway_lease_id`, and `metadata`. The installed singular
+`session_status(sessionKey)` surface is
 the canonical status contract; it is not a readiness blocker by itself.
 The split-catalog JSON path in the forward index is pending exact-lineage
 recapture rather than current authority. Future runtime-evidence authority must
@@ -485,10 +487,13 @@ plain-catalog path is deliberately offline-only: it reports
 `runtime_ready=true`. An unsigned catalog mapping cannot mint
 `OpenClawAdapter` runtime authority. Direct construction remains disabled; the
 local P0.3 factory requires a fresh signed transport-bound attestation and
-rechecks process, expiry, source/catalog, endpoint, build, and transport identity
-before every application RPC. That contract is covered only by synthetic local
-tests until the local downstream OpenClaw candidate provides the signed runtime
-surface, so it is not current live evidence or production authority. The
+rejects missing or extra parameters before every application RPC. The future
+CLI transport must additionally refresh `agenticOs.runtime.identity` before
+each application RPC; if that future live identity surface is unavailable, the
+adapter fails closed instead of reusing the challenge payload as live proof.
+That contract is covered only by synthetic local tests until the local
+downstream OpenClaw candidate provides the signed runtime and identity surfaces,
+so it is not current live evidence or production authority. The
 cross-process release-probe entry point likewise rejects unsigned stdin before
 invoking transport. The bounded accepted-session
 probe in

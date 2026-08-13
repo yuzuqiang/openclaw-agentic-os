@@ -87,6 +87,7 @@ FUTURE_DB_AUTHORITY_CONTRACT = {
     ],
     "sessions_spawn_required_metadata": [
         "client_request_id",
+        "gateway_lease_id",
         "idempotency_key",
         "metadata",
     ],

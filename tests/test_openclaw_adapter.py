@@ -23,6 +23,7 @@ INSTALLED_SESSION_TOOL_CATALOG = {
                     "client_request_id": {"type": "string"},
                     "idempotency_key": {"type": "string"},
                     "metadata": {"type": "object"},
+                    "gateway_lease_id": {"type": "string"},
                 }
             },
         },

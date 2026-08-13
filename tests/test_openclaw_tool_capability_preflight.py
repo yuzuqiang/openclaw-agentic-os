@@ -70,6 +70,7 @@ VALID_CATALOG = {
                     "client_request_id": {"type": "string"},
                     "idempotency_key": {"type": "string"},
                     "metadata": {"type": "object"},
+                    "gateway_lease_id": {"type": "string"},
                 }
             },
         },
@@ -118,7 +119,7 @@ def write_contract_candidate_dist(install_root):
         json.dump({"name": "openclaw", "version": "2026.candidate"}, handle)
     with open(os.path.join(dist, "openclaw-tools-candidate.js"), "w", encoding="utf-8") as handle:
         handle.write(
-            "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+            "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
             "function createSessionsListToolSchema(){return Type.Object({});}\n"
             "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
             "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -666,7 +667,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     'name: "subagents.allowLease.status", '
                     'name: "subagents.allowLease.acquire", '
                     'name: "subagents.allowLease.release", '
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -879,7 +880,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.7.1"}, handle)
             with open(os.path.join(dist, "openclaw-tools-baseline.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", name: "sessions_history"'
@@ -2483,7 +2484,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -2568,7 +2569,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -2630,7 +2631,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({\"client_request_id\": Type.String(), \"idempotency_key\": Type.String(), \"metadata\": Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({\"client_request_id\": Type.String(), \"idempotency_key\": Type.String(), \"metadata\": Type.Object({}), \"gateway_lease_id\": Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({\"sessionKey\": Type.String(), \"limit\": Type.Number(), \"includeTools\": Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({\"sessionKey\": Type.String()});}\n"
@@ -2673,7 +2674,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             spawn_tool["parameters"],
-            ["client_request_id", "idempotency_key", "metadata"],
+            ["client_request_id", "gateway_lease_id", "idempotency_key", "metadata"],
         )
         self.assertIn("live reachability is unproven", payload["error"])
 
@@ -2814,8 +2815,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "// function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
-                    "const stale = `function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}`;\n"
+                    "// function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
+                    "const stale = `function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}`;\n"
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
@@ -2869,7 +2870,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -2920,7 +2921,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -2978,7 +2979,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -3040,7 +3041,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
@@ -3098,7 +3099,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     "// name: \"sessions_list\"\n"
@@ -3162,7 +3163,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({}), gateway_lease_id: Type.String()});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_history", name: "session_status"'

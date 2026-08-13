@@ -96,7 +96,7 @@ class GatewayCliAttestedTransport:
             catalog_sha256, "expected OpenClaw catalog digest"
         )
         self.timeout_ms = timeout_ms
-        self._snapshot: Mapping[str, Any] | None = None
+        self._attested_snapshot: Mapping[str, Any] | None = None
 
     def _gateway_call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         proc = subprocess.run(
@@ -139,15 +139,48 @@ class GatewayCliAttestedTransport:
                 raise RuntimeAttestationError(
                     "signed runtime binding does not match the local executable/catalog target"
                 )
-            self._snapshot = {"binding": payload.get("binding"), "method_bindings": payload.get("method_bindings")}
+            self._attested_snapshot = {
+                "binding": payload.get("binding"),
+                "method_bindings": payload.get("method_bindings"),
+            }
         return envelope
 
     def runtime_identity_snapshot(self) -> Mapping[str, Any]:
-        if self._snapshot is None:
+        if self._attested_snapshot is None:
             raise RuntimeAttestationError("runtime identity snapshot is unavailable before challenge")
         if hashlib.sha256(Path(self.executable).read_bytes()).hexdigest() != self.executable_sha256:
             raise RuntimeAttestationError("OpenClaw executable drifted after runtime challenge")
-        return self._snapshot
+        observed = self._gateway_call(
+            "agenticOs.runtime.identity",
+            {
+                "expected_executable_sha256": self.executable_sha256,
+                "expected_catalog_sha256": self.catalog_sha256,
+            },
+        )
+        payload = observed.get("signed_payload", observed)
+        payload = _mapping(payload, "runtime identity observation")
+        snapshot = {
+            "binding": payload.get("binding"),
+            "method_bindings": payload.get("method_bindings"),
+        }
+        binding = _mapping(snapshot["binding"], "runtime identity binding")
+        executable = _mapping(
+            binding.get("executable"), "runtime identity executable binding"
+        )
+        catalog = _mapping(binding.get("catalog"), "runtime identity catalog binding")
+        if (
+            executable.get("content_sha256") != self.executable_sha256
+            or executable.get("path_sha256") != self.executable_path_sha256
+            or catalog.get("sha256") != self.catalog_sha256
+        ):
+            raise RuntimeAttestationError(
+                "runtime identity observation does not match the local executable/catalog target"
+            )
+        if canonical_json_bytes(snapshot) != canonical_json_bytes(self._attested_snapshot):
+            raise RuntimeAttestationError(
+                "runtime identity observation drifted from the signed challenge"
+            )
+        return snapshot
 
 
 @dataclass(frozen=True)
@@ -206,7 +239,9 @@ _REQUIRED_LOGICAL_METHODS: Mapping[str, tuple[str, frozenset[str]]] = {
     ),
     "sessions_spawn": (
         "sessions_spawn",
-        frozenset(("client_request_id", "idempotency_key", "metadata")),
+        frozenset(
+            ("client_request_id", "idempotency_key", "metadata", "gateway_lease_id")
+        ),
     ),
     "sessions_list": ("sessions_list", frozenset()),
     # This is the installed 2026.7.1 model-callable surface.  A plural alias is
@@ -239,6 +274,7 @@ _SIGNED_KEYS = frozenset(
 
 def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
     try:
+        _assert_ascii_json_value(value, "runtime attestation")
         return json.dumps(
             dict(value),
             ensure_ascii=True,
@@ -246,10 +282,35 @@ def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
+    except RuntimeAttestationError:
+        raise
     except (TypeError, ValueError) as exc:
         raise RuntimeAttestationError(
             "runtime attestation must be canonical JSON"
         ) from exc
+
+
+def _assert_ascii_json_value(value: Any, label: str) -> None:
+    if isinstance(value, str):
+        try:
+            value.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise RuntimeAttestationError(
+                f"{label} signed fields must be ASCII-only"
+            ) from exc
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise RuntimeAttestationError(
+                    f"{label} object keys must be strings"
+                )
+            _assert_ascii_json_value(key, f"{label} key")
+            _assert_ascii_json_value(item, f"{label}.{key}")
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        for index, item in enumerate(value):
+            _assert_ascii_json_value(item, f"{label}[{index}]")
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -368,7 +429,7 @@ def _validate_method_bindings(value: Any) -> Mapping[str, TransportMethodBinding
             )
         if set(parameters) != required_parameters:
             raise RuntimeAttestationError(
-                f"runtime method binding {logical_name} parameter schema is incomplete"
+                f"runtime method binding {logical_name} parameter schema must match the exact reviewed set"
             )
         result[logical_name] = TransportMethodBinding(
             method=method, parameter_names=tuple(parameters)
