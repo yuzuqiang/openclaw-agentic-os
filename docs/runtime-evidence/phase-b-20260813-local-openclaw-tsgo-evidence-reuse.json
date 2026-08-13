@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "evidence_kind": "local_openclaw_dependency_evidence_contract",
+  "captured_at": "2026-08-13T05:09:05.961Z",
+  "repository": "yuzuqiang/openclaw-agentic-os",
+  "phase_run": {
+    "run_id": "phase-20260812-232653-run-20260812-232653",
+    "validation_status_artifact": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/results/phase-b-validation-status.json",
+    "validation_status_sha256": "bc6133f796183ecfb5909ea17f14ab48686469abbbe25b52fcea607119b5a575"
+  },
+  "scope_boundary": {
+    "included_scope": [
+      "public OpenClaw source",
+      "local-only OpenClaw adaptation patch",
+      "this phase run's receipt and timing proof artifacts"
+    ],
+    "excluded_scope": [
+      "secrets",
+      ".git credentials",
+      "OpenClaw private config/state",
+      "unrelated private artifacts",
+      "official openclaw/openclaw repository writes",
+      "OpenClaw remote pushes"
+    ]
+  },
+  "local_openclaw_dependency": {
+    "source_repository": "openclaw/openclaw",
+    "local_only": true,
+    "branch": "local/agentic-os-tsgo-evidence-reuse-20260812",
+    "head_sha": "5ed61193b685e6d038621ed8985b67c5eaf6718d",
+    "archive_ref": "refs/archive/openclaw-pr-122793",
+    "archive_head_sha": "45cd11b118d1db353d6c5d4c5200bf9a43994ec7",
+    "upstream_configured": false,
+    "remote_push_allowed": false,
+    "sync_payload_manifest": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/testbox/sync-payload-manifest.json",
+    "sync_payload_manifest_sha256": "8331cd28b959b19ea6e73b23f70bd1cb74a4e0b333573784a8cfbeb2f4aa057a"
+  },
+  "implementation_focused_tests": {
+    "status": "pass",
+    "command": [
+      "node",
+      "--import",
+      "tsx",
+      "scripts/test-projects-serial.mts",
+      "test/scripts/changed-lanes.test.ts",
+      "--",
+      "-t",
+      "persists delegated remote proof and forwards it to the next Testbox without a duplicate native child"
+    ],
+    "log_artifact": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/testbox/deterministic-openclaw-proof-test-projects-focused.log",
+    "log_sha256": "993df692c2f8dc9c80954d298e7acf5a063d06dca077a2908c7eae227b2d2f55",
+    "timing_artifact": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/testbox/deterministic-openclaw-proof-test-projects-focused.timing.json",
+    "timing_sha256": "7395933602769b60382b034209df7fef0b48ed69bbc963c0591c0eb751189b5b"
+  },
+  "deterministic_production_path_proof": {
+    "status": "pass",
+    "mechanism": "production check-changed code path -> deterministic fake Crabbox remote-clone harness -> receipt import/reuse -> affected descendant rerun",
+    "harness": "deterministic_test_harness_not_live_blacksmith",
+    "remote_executor": "fake_crabbox_runner",
+    "live_remote_execution_claimed": false,
+    "regression_test": "persists delegated remote proof and forwards it to the next Testbox without a duplicate native child",
+    "asserted_behaviors": [
+      "first run imports one remote changed-check proof receipt",
+      "second fresh invocation imports prior receipts and reuses changed-check evidence",
+      "second fresh invocation launches zero duplicate native heavy children",
+      "affected descendant commit reruns the correct native lane"
+    ],
+    "prior_selector_attempt": {
+      "status": "failed_no_tests_due_wrong_config",
+      "log_artifact": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/testbox/deterministic-openclaw-proof-focused.log",
+      "log_sha256": "fe14f8f418a64d5262c158d6c58c6204edcfeae88e9d224c557a4be533980407"
+    }
+  },
+  "live_blacksmith": {
+    "live_blacksmith_status": "unavailable_personal_repository",
+    "classification": "not_applicable_environment_limit_not_validation_pass",
+    "claimed_live_testbox_run": false,
+    "claimed_live_blacksmith_pass": false,
+    "status_artifact": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/testbox/live-blacksmith-status.json",
+    "status_artifact_sha256": "ed26c970608940595eb66faeaae4628d0d9a6e0dd9e80fd185b44c2ca81531cc",
+    "official_limitation_artifact": "artifacts/phase-runs/phase-20260812-232653-run-20260812-232653/testbox/blacksmith-official-quickstart-limitation.json",
+    "official_limitation_sha256": "5606c5ba614c2a4b12ccfde8eea305a172a53b53221e829522fea5cd184da228",
+    "official_limitation_statement": "Blacksmith is limited to GitHub organizations and is not available for personal repositories.",
+    "attempt_artifacts": {
+      "first_run_log_sha256": "bf35e3f28dc7cdb4f82a1395109d97fa69cfb7d9ed995d71e1095162183179eb",
+      "crabbox_doctor_blacksmith_sha256": "6a225b528ea12227689fe8b1551fa143f211206b04d4855bad8597f5e62498ae",
+      "blacksmith_auth_status_sha256": "be209883ccf57ee0a76ec0e7707f485d1fa3023923d845ffb98bfcec96e47d0b",
+      "blacksmith_version_sha256": "191699c0dbcd0c9fe322056f81446b18d23d9116891fdd70ddfa67614bce77a1",
+      "crabbox_version_sha256": "20f936a02665b3807e0eac0b5d1b9c9262535f297e41eeee12c9b31cbbd98af5"
+    }
+  },
+  "authority_boundary": {
+    "db_authority_enabled": false,
+    "production_authority_enabled": false,
+    "runtime_ready": false,
+    "production_openclaw_write": false,
+    "official_openclaw_repository_write": false,
+    "openclaw_remote_push": false,
+    "mocked_live_testbox_substitute": false
+  }
+}

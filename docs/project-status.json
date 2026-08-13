@@ -46,6 +46,14 @@
       "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
       "status": "pending_current_evidence"
     },
+    "local_openclaw_dependency_evidence": {
+      "path": "docs/runtime-evidence/phase-b-20260813-local-openclaw-tsgo-evidence-reuse.json",
+      "status": "local_deterministic_harness_pass_live_blacksmith_not_applicable",
+      "implementation_focused_tests": "pass",
+      "deterministic_production_path_proof": "pass",
+      "live_blacksmith_status": "unavailable_personal_repository",
+      "production_authority_enabled": false
+    },
     "production_behavior_proven": false,
     "runtime_ready": false,
     "status": "pending_non_authoritative"

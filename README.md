@@ -24,6 +24,9 @@ not evidence of production OpenClaw authority.
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and pending capture state:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
+- Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
+  adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
+  [`docs/runtime-evidence/phase-b-20260813-local-openclaw-tsgo-evidence-reuse.json`](docs/runtime-evidence/phase-b-20260813-local-openclaw-tsgo-evidence-reuse.json)
 - Historical installed-runtime negative baseline, retained byte-for-byte:
   [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
