@@ -1,0 +1,431 @@
+{
+  "catalog": {
+    "active_catalog": {
+      "method": "tools.catalog",
+      "parameter_schema_tool_names": [],
+      "parameter_schema_unavailable_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
+      "raw_response_sha256": "7cebba17b699a6dc7168c5e9bcc58f3e22055b2e98a20183133b46f1361e5b2c",
+      "required_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn",
+        "subagents.allowLease.acquire",
+        "subagents.allowLease.release",
+        "subagents.allowLease.status"
+      ]
+    },
+    "active_executable_path_sha256": "22d6f2ed788be958585599801a8a51e3486083fca71c2d6fbee4fce77505a359",
+    "active_executable_sha256": "f48b866056d45173851ce7659e4d2ef69205e3f0fe953030287c00c95d409555",
+    "attestation_rpc_catalog": {
+      "authority": "installed_runtime_sources",
+      "catalog_kind": "source_bound_runtime_attestation_rpc",
+      "expected_parameters": [
+        "challenge",
+        "client_process_id",
+        "expected_executable_sha256",
+        "expected_catalog_sha256"
+      ],
+      "method": "agenticOs.runtime.attest",
+      "parameters": [
+        "challenge",
+        "client_process_id",
+        "expected_catalog_sha256",
+        "expected_executable_sha256"
+      ],
+      "status": "source_bound_exact"
+    },
+    "catalog_kind": "sanitized_openclaw_runtime",
+    "connected_gateway_build_identity": "unproven",
+    "future_db_authority_contract": {
+      "accepted_session_identity_requirement": "future_db_authority_requires_duplicate_spawn_to_return_the_same_non_empty_accepted_session_identity",
+      "allow_lease_acquire_required_metadata": [
+        "agent_id",
+        "client_lease_id",
+        "idempotency_key",
+        "phase",
+        "requester_agent_id",
+        "run_id",
+        "transition_id",
+        "ttl_ms"
+      ],
+      "allow_lease_release_required_metadata": [
+        "agent_id",
+        "client_lease_id",
+        "gateway_lease_id",
+        "phase",
+        "release_idempotency_key",
+        "requester_agent_id",
+        "run_id",
+        "transition_id"
+      ],
+      "canonical_status_method": "session_status",
+      "db_authority_enabled": false,
+      "db_authority_enabled_required_for_preflight": false,
+      "sessions_spawn_required_parameters": [
+        "task",
+        "taskName",
+        "runtime",
+        "mode",
+        "agentId",
+        "cleanup",
+        "context",
+        "lightContext",
+        "client_request_id",
+        "idempotency_key",
+        "gateway_lease_id",
+        "metadata"
+      ]
+    },
+    "gateway_rpc_catalog": {
+      "authority": "installed_runtime_sources",
+      "catalog_kind": "source_bound_gateway_rpc_catalog",
+      "rpc_evidence": [
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "unproven",
+          "name": "subagents.allowLease.acquire"
+        },
+        {
+          "disk_source_declaration": "observed",
+          "live_probe": {
+            "allowAgents_count": 0,
+            "incidental_mutations_possible": [
+              "expired_lease_cleanup",
+              "cli_bootstrap_state"
+            ],
+            "leases_count": 0,
+            "live_reachability": "reachable",
+            "method": "subagents.allowLease.status",
+            "ok": true,
+            "raw_response_sha256": "5a30d87c8864c82e9bf4a3658f0c95f1fd1a05e2609b8aceda71f790b2a2cb26",
+            "request_semantics": "read_only_request",
+            "requested_mutation": false,
+            "status": "ok",
+            "writeMode": "memory"
+          },
+          "live_reachability": "reachable",
+          "name": "subagents.allowLease.status"
+        },
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "unproven",
+          "name": "subagents.allowLease.release"
+        }
+      ],
+      "source_bound_rpc_names": [
+        "subagents.allowLease.acquire",
+        "subagents.allowLease.release",
+        "subagents.allowLease.status"
+      ],
+      "status": "disk_source_declarations_complete",
+      "status_corroboration": {
+        "allowAgents_count": 0,
+        "incidental_mutations_possible": [
+          "expired_lease_cleanup",
+          "cli_bootstrap_state"
+        ],
+        "leases_count": 0,
+        "live_reachability": "reachable",
+        "method": "subagents.allowLease.status",
+        "ok": true,
+        "raw_response_sha256": "5a30d87c8864c82e9bf4a3658f0c95f1fd1a05e2609b8aceda71f790b2a2cb26",
+        "request_semantics": "read_only_request",
+        "requested_mutation": false,
+        "status": "ok",
+        "writeMode": "memory"
+      },
+      "tools": [
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.acquire",
+          "parameters": [
+            "agent_id",
+            "client_lease_id",
+            "idempotency_key",
+            "phase",
+            "requester_agent_id",
+            "run_id",
+            "transition_id",
+            "ttl_ms"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.status",
+          "parameters": [],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.release",
+          "parameters": [
+            "agent_id",
+            "client_lease_id",
+            "gateway_lease_id",
+            "phase",
+            "release_idempotency_key",
+            "requester_agent_id",
+            "run_id",
+            "transition_id"
+          ],
+          "schema_source": "gateway_server_method_params"
+        }
+      ]
+    },
+    "install_root_basename": "p03-runtime-contract-20260813",
+    "install_root_path_sha256": "3e01248e20c6f681454f67a0ab1bd467c62276012559deab1138dcfc54a6cfc4",
+    "model_tool_catalog": {
+      "authority": "tools.catalog",
+      "catalog_kind": "model_callable_tools_catalog",
+      "method": "tools.catalog",
+      "parameter_schema_tool_names": [],
+      "parameter_schema_unavailable_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
+      "raw_response_sha256": "7cebba17b699a6dc7168c5e9bcc58f3e22055b2e98a20183133b46f1361e5b2c",
+      "required_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
+      "tools": [
+        {
+          "catalog_surface": "model_tool",
+          "name": "sessions_spawn",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "installed_runtime_sources",
+            "status": "installed_source_bound_catalog_schema_unavailable"
+          },
+          "parameters": [
+            "agentId",
+            "cleanup",
+            "client_request_id",
+            "context",
+            "gateway_lease_id",
+            "idempotency_key",
+            "lightContext",
+            "metadata",
+            "mode",
+            "runtime",
+            "task",
+            "taskName"
+          ],
+          "schema_source": "model_tool_schema"
+        },
+        {
+          "catalog_surface": "model_tool",
+          "name": "sessions_list",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "installed_runtime_sources",
+            "status": "installed_source_bound_catalog_schema_unavailable"
+          },
+          "parameters": [],
+          "schema_source": "model_tool_schema"
+        },
+        {
+          "catalog_surface": "model_tool",
+          "name": "sessions_history",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "installed_runtime_sources",
+            "status": "installed_source_bound_catalog_schema_unavailable"
+          },
+          "parameters": [
+            "includeTools",
+            "limit",
+            "sessionKey"
+          ],
+          "schema_source": "model_tool_schema"
+        },
+        {
+          "catalog_surface": "model_tool",
+          "name": "session_status",
+          "parameter_evidence": {
+            "catalog_schema_available": false,
+            "parameter_authority": "installed_runtime_sources",
+            "status": "installed_source_bound_catalog_schema_unavailable"
+          },
+          "parameters": [
+            "sessionKey"
+          ],
+          "schema_source": "model_tool_schema"
+        }
+      ]
+    },
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.8.1",
+    "package_json_sha256": "51c0a69bea92e8bf3f8db58b503e26343116b078f4821b2ebdfb83a70a51021c",
+    "required_canonical_session_status_method": "session_status",
+    "runtime_process_binding_limit": "installed runtime source identity does not prove the connected Gateway process is executing that exact bundle",
+    "runtime_target": "isolated_candidate",
+    "sources": [
+      {
+        "path": "dist/openclaw-tools-05DI_0yn.js",
+        "sha256": "9483cf94bf82c0c08a92c1a0f152e824268b50f6f82987fd5fa0583bc2cbe2d0"
+      },
+      {
+        "path": "src/gateway/agentic-os-runtime-attestation.ts",
+        "sha256": "3dcd5bd76155cfca11b14065ee03047538a4a7b9cad3f5218f7eb81d578f140e"
+      },
+      {
+        "path": "src/gateway/agentic-os-runtime-contract-descriptors.ts",
+        "sha256": "83d8a73ff50894ed7254b79816d150800715ad1140c1900cdee8407517b7db50"
+      }
+    ],
+    "status_alias_requirement": {
+      "canonical_status_method": "session_status",
+      "canonical_status_method_available": true,
+      "canonical_status_method_status": "available",
+      "db_authority_requirement": "db_authority_requires_singular_session_status",
+      "observed_model_status_names": [
+        "session_status"
+      ],
+      "unsupported_plural_status_alias": "sessions_status"
+    },
+    "tools": [
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.acquire",
+        "parameters": [
+          "agent_id",
+          "client_lease_id",
+          "idempotency_key",
+          "phase",
+          "requester_agent_id",
+          "run_id",
+          "transition_id",
+          "ttl_ms"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.status",
+        "parameters": [],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.release",
+        "parameters": [
+          "agent_id",
+          "client_lease_id",
+          "gateway_lease_id",
+          "phase",
+          "release_idempotency_key",
+          "requester_agent_id",
+          "run_id",
+          "transition_id"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "model_tool",
+        "name": "sessions_spawn",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "installed_runtime_sources",
+          "status": "installed_source_bound_catalog_schema_unavailable"
+        },
+        "parameters": [
+          "agentId",
+          "cleanup",
+          "client_request_id",
+          "context",
+          "gateway_lease_id",
+          "idempotency_key",
+          "lightContext",
+          "metadata",
+          "mode",
+          "runtime",
+          "task",
+          "taskName"
+        ],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "catalog_surface": "model_tool",
+        "name": "sessions_list",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "installed_runtime_sources",
+          "status": "installed_source_bound_catalog_schema_unavailable"
+        },
+        "parameters": [],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "catalog_surface": "model_tool",
+        "name": "sessions_history",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "installed_runtime_sources",
+          "status": "installed_source_bound_catalog_schema_unavailable"
+        },
+        "parameters": [
+          "includeTools",
+          "limit",
+          "sessionKey"
+        ],
+        "schema_source": "model_tool_schema"
+      },
+      {
+        "catalog_surface": "model_tool",
+        "name": "session_status",
+        "parameter_evidence": {
+          "catalog_schema_available": false,
+          "parameter_authority": "installed_runtime_sources",
+          "status": "installed_source_bound_catalog_schema_unavailable"
+        },
+        "parameters": [
+          "sessionKey"
+        ],
+        "schema_source": "model_tool_schema"
+      }
+    ]
+  },
+  "classification": "fail_closed_future_contract",
+  "error": "runtime Gateway RPC subagents.allowLease.acquire live reachability is unproven; installed source declaration is not runtime reachability proof; runtime Gateway RPC subagents.allowLease.release live reachability is unproven; installed source declaration is not runtime reachability proof; connected Gateway build identity is not proven; connected Gateway build evidence is missing",
+  "preflight_evidence_binding": {
+    "agentic_os_head_sha": "3fd97f4317bee977bab8ec065539cc90bfa2ad78",
+    "agentic_os_tree_sha": "25847c49e8c1f533cf923674380aac07b410e8df",
+    "binding_kind": "generator_revision",
+    "capability_source_paths": [
+      "scripts/openclaw-tool-capability-preflight.py",
+      "scripts/openclaw-live-accepted-session-probe.py",
+      "scripts/openclaw-real-gateway-contract-probe.py",
+      "src/agentic_os/openclaw_adapter.py",
+      "src/agentic_os/runtime_attestation.py",
+      "src/agentic_os/metadata.py",
+      "src/agentic_os/heartbeat_shadow.py",
+      "src/agentic_os/__init__.py"
+    ],
+    "containing_commit_self_binding": false,
+    "generated_at_utc": "2026-08-13T18:12:12+00:00",
+    "invocation": {
+      "argv": [
+        "--isolated-candidate-openclaw",
+        "--json",
+        "--write-evidence",
+        "docs/runtime-evidence/phase-b-20260813-p03-source-bound-candidate-preflight.json"
+      ],
+      "script": "scripts/openclaw-tool-capability-preflight.py"
+    },
+    "preflight_script_sha256": "575420fec1a6dc594b2e4b0ff08c0e21c19c0913eef30bb22dc8d1b1169eb670"
+  },
+  "runtime_ready": false,
+  "status": "fail"
+}

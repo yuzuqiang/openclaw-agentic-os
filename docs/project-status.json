@@ -54,6 +54,14 @@
       "live_blacksmith_status": "unavailable_personal_repository",
       "production_authority_enabled": false
     },
+    "local_p03_source_bound_candidate_preflight": {
+      "path": "docs/runtime-evidence/phase-b-20260813-p03-source-bound-candidate-preflight.json",
+      "sha256": "168c17c8b01ec0da0ab5b16fa58765646d825dfa7e63e20585d540943b01eec8",
+      "status": "fail_closed_future_contract",
+      "runtime_ready": false,
+      "source_bound_contract": "exact_local_runtime_sources_include_attest_and_spawn_12_field_surface",
+      "production_authority_enabled": false
+    },
     "local_p03_runtime_heartbeat_shadow": {
       "status": "local_only_non_authoritative",
       "transport_attestation_contract": "local_candidate_attest_contract_validated_synthetic_cli_transport_non_authoritative",

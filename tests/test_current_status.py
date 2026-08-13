@@ -207,6 +207,25 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertFalse(local_p03["live_gateway_session_or_lease_mutation"])
         self.assertFalse(local_p03["production_authority_enabled"])
+        source_bound = live["local_p03_source_bound_candidate_preflight"]
+        source_bound_path = root / source_bound["path"]
+        self.assertEqual(
+            source_bound["sha256"],
+            hashlib.sha256(source_bound_path.read_bytes()).hexdigest(),
+        )
+        source_bound_payload = json.loads(source_bound_path.read_text(encoding="utf-8"))
+        self.assertEqual(source_bound_payload["status"], "fail")
+        self.assertFalse(source_bound_payload["runtime_ready"])
+        self.assertEqual(
+            source_bound_payload["catalog"]["attestation_rpc_catalog"]["status"],
+            "source_bound_exact",
+        )
+        spawn_tool = next(
+            tool
+            for tool in source_bound_payload["catalog"]["model_tool_catalog"]["tools"]
+            if tool["name"] == "sessions_spawn"
+        )
+        self.assertEqual(len(spawn_tool["parameters"]), 12)
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
