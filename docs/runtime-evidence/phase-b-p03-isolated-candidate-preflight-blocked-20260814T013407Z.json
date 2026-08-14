@@ -1,0 +1,124 @@
+{
+  "status": "blocked",
+  "classification": "preflight_failed_fail_closed",
+  "generated_at_utc": "2026-08-14T01:34:07Z",
+  "immutable_inputs": {
+    "runtime_head": "59c1174d371ede953b4fcd64e5b84cdb89093542",
+    "runtime_base_head": "8a152f0ae4c60ec88b769d34ca6dd08e7efd8b92",
+    "agentic_os_head": "cf69ea38293b4dd08782400dea735f73171fbf12",
+    "contract_vector_sha256": "8a8e637d1eb37dde1d65f493b8d6bac90be518a8d0ab93d8269ba90bdabedc74",
+    "unicode_canonical_digest": "634245a3803caf5048c7aa31bc012e4091e043cb1345998393accbf29b13abc5",
+    "runtime_unicode_escape_vector_sha256": "f2467ceae4e5d982e469324a4452d9d844e4c16d80d50be1003442c68d324722"
+  },
+  "blocker": {
+    "summary": "scripts/openclaw-tool-capability-preflight.py failed before any lifecycle mutation",
+    "exact_error": "active OpenClaw Gateway status RPC failed before contract validation",
+    "reason": "The isolated candidate enforced the connection-bound Agentic OS runtime contract; the preflight script probes subagents.allowLease.status through a fresh per-call CLI WebSocket, which is not the persistent attested connection required by the server-side contract."
+  },
+  "candidate": {
+    "port": 20189,
+    "pid": 30937,
+    "shutdown": {
+      "signal": "SIGTERM",
+      "exit_code": 0,
+      "signal_code": null,
+      "port_closed": true,
+      "shutdown_ms": 982
+    },
+    "port_closed": true,
+    "logs": {
+      "stdout_sha256": "4ca58f7f79fee11f7e14dcaebde27a9fcd30ad88e46aa3c15c9d120609d75583",
+      "stderr_sha256": "9013af45dc96bfc4ff5dbfa7411b666c507fbe527ebe6e5f8577d1c954a07a68"
+    }
+  },
+  "preflight": {
+    "status": "fail",
+    "runtime_ready": false,
+    "classification": "fail_closed_future_contract",
+    "error": "active OpenClaw Gateway status RPC failed before contract validation",
+    "evidence_sha256": "6f98fe978285e875e0c15963fff1419d96d56e09d04147818d952ff6f4d20d98",
+    "model_catalog_raw_response_sha256": "e68bd1a779f24aec9a17e18246e3d2a5474fc97334ba18b19e2dfd5721a6a9fa",
+    "gateway_status_corroboration": {
+      "incidental_mutations_possible": [
+        "expired_lease_cleanup",
+        "cli_bootstrap_state"
+      ],
+      "method": "subagents.allowLease.status",
+      "raw_response_sha256": "1c15a1d84ae736fda25aed1db525f67e53b3e673d31feb269681c4c4f507f8b7",
+      "request_semantics": "read_only_request",
+      "requested_mutation": false,
+      "returncode": 1,
+      "status": "status_rpc_failed",
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 221,
+        "sha256": "a3d520889b26d87c057be2ff18c73915d7ff6ef92297abfacf84818574a84a1a"
+      }
+    },
+    "required_source_bound_rpc_names": [
+      "subagents.allowLease.acquire",
+      "subagents.allowLease.release",
+      "subagents.allowLease.status"
+    ]
+  },
+  "lifecycle": {
+    "mutating_lifecycle_attempted": false,
+    "acquire_attempted": false,
+    "spawn_attempted": false,
+    "duplicate_spawn_attempted": false,
+    "release_attempted": false,
+    "agentic_os_runtime_contract_rows": 0
+  },
+  "rollback": {
+    "status": "pass",
+    "candidate_shutdown": {
+      "signal": "SIGTERM",
+      "exit_code": 0,
+      "signal_code": null,
+      "port_closed": true,
+      "shutdown_ms": 982
+    },
+    "production_config_hash_unchanged": true,
+    "production_before": {
+      "config_exists": true,
+      "config_path_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+      "config_realpath_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+      "config_sha256": "8610f7a30c205f9a41739c5a7f660771953d20e48cd5311ee33884f34c13c41f",
+      "gateway_port": 18789,
+      "health": {
+        "reachable": true,
+        "status_code": 200,
+        "body_sha256": "6191c1f860b8a0225c697e46ebce756193dfb18c189218cfe742037501da05eb"
+      }
+    },
+    "production_after": {
+      "config_exists": true,
+      "config_path_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+      "config_realpath_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+      "config_sha256": "8610f7a30c205f9a41739c5a7f660771953d20e48cd5311ee33884f34c13c41f",
+      "gateway_port": 18789,
+      "health": {
+        "reachable": true,
+        "status_code": 200,
+        "body_sha256": "6191c1f860b8a0225c697e46ebce756193dfb18c189218cfe742037501da05eb"
+      }
+    },
+    "db_authority": {
+      "DB_AUTHORITY_ENABLED": false
+    }
+  },
+  "receipts": {
+    "run_root_sha256": "473a42be3a6075b31289c0466cf2e86492779e1efc8ea0be68f5aec2be0faebe",
+    "failure_cleanup_sha256": "22b384c8939f148d7d9f624e670de6f7188470e0735dd2fb129c0e0e6a26add0",
+    "failure_receipt_sha256": "81ff5cc87455d6caa50b590afc21d16d46f94cabac265c7aa78791d995dd2ff4",
+    "capability_preflight_sha256": "6f98fe978285e875e0c15963fff1419d96d56e09d04147818d952ff6f4d20d98"
+  },
+  "soak": {
+    "status": "not_started",
+    "reason": "preflight failed; lifecycle and rollback gates did not all pass",
+    "production_cron_mutated": false
+  }
+}
