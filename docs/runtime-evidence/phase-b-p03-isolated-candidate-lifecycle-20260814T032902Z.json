@@ -1,0 +1,221 @@
+{
+  "status": "pass",
+  "generated_at_utc": "2026-08-14T03:29:02Z",
+  "immutable_inputs": {
+    "runtime_head": "ff180d08bde60ff42bd39147f339d3a590639778",
+    "agentic_os_head": "7e285f405edf9c3aa008ce555fefc1e2640cc2f4",
+    "contract_vector_sha256": "8a8e637d1eb37dde1d65f493b8d6bac90be518a8d0ab93d8269ba90bdabedc74",
+    "unicode_canonical_digest": "634245a3803caf5048c7aa31bc012e4091e043cb1345998393accbf29b13abc5",
+    "runtime_unicode_escape_vector_sha256": "f2467ceae4e5d982e469324a4452d9d844e4c16d80d50be1003442c68d324722",
+    "db_authority_enabled_required": false
+  },
+  "paths": {
+    "run_root": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1",
+      "realpath_sha256": "a1c5aa3bb3396d56d11d1d7f94b959f9411825f58ec5701edfbe4a0159b7c4c5"
+    },
+    "home": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/home",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/home",
+      "realpath_sha256": "f602f8619fb680d5bd324ec37aa7ae5f77a1b2ecf46e2577739dd63fd5f0cffb"
+    },
+    "state_dir": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/state",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/state",
+      "realpath_sha256": "9e3aaa0f6093d1544c9fe7cf1a387e73487ee2ae2fafa59d1259d61798ffbcb6"
+    },
+    "config_path": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/config/openclaw.json",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/config/openclaw.json",
+      "realpath_sha256": "e104208cedc059f68d78b7a8daaa1879b968337a009fbdea189b660e7e5488a6"
+    },
+    "agent_dir": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/agents",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/agents",
+      "realpath_sha256": "4b2512da7121c8e777b6203c348fee5d7cb0a75d4c978756b7542ed66a8a1b6f"
+    },
+    "workspace": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/workspace",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/workspace",
+      "realpath_sha256": "def7b6498f44b1ed99842f63ff73083911a06457c7846b3fbe565d2be1e55d3b"
+    },
+    "key_path": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/keys/agentic-os-attestation.key",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/keys/agentic-os-attestation.key",
+      "realpath_sha256": "c4c84cf446b5e2f2d130f6001181ea0f2b897db8c16abf352702ecc5c7341c9c"
+    },
+    "evidence_dir": {
+      "path": "/Users/zuqiangyu/clawd/artifacts/openclaw-agentic-os-worktrees/p03-runtime-heartbeat-shadow-20260813/docs/runtime-evidence",
+      "realpath": "/Users/zuqiangyu/clawd/artifacts/openclaw-agentic-os-worktrees/p03-runtime-heartbeat-shadow-20260813/docs/runtime-evidence",
+      "realpath_sha256": "f9c2a7fc39b70f64a7d15a7340823ebeb715ffa95d9c846665bf775ec7ec6b7f"
+    }
+  },
+  "production_before": {
+    "config_exists": true,
+    "config_path_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+    "config_realpath_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+    "config_sha256": "8610f7a30c205f9a41739c5a7f660771953d20e48cd5311ee33884f34c13c41f",
+    "gateway_port": 18789,
+    "health": {
+      "reachable": true,
+      "status_code": 200,
+      "body_sha256": "6191c1f860b8a0225c697e46ebce756193dfb18c189218cfe742037501da05eb"
+    }
+  },
+  "production_after": {
+    "config_exists": true,
+    "config_path_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+    "config_realpath_sha256": "6807a22df05aab11e6e6d3a5eada16b4f4e7bce4709d56c368c90a8c375ec577",
+    "config_sha256": "8610f7a30c205f9a41739c5a7f660771953d20e48cd5311ee33884f34c13c41f",
+    "gateway_port": 18789,
+    "health": {
+      "reachable": true,
+      "status_code": 200,
+      "body_sha256": "6191c1f860b8a0225c697e46ebce756193dfb18c189218cfe742037501da05eb"
+    }
+  },
+  "staging": {
+    "stagedRoot": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/staged-runtime",
+    "executable": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/staged-runtime/openclaw.mjs",
+    "token": "lHGEQ9fAbDwugODX_UNeI1nhwXQW8u98",
+    "executable_sha256": "0f6f5f70cfcfae01bda117d02139ed9159219659076d8d2eb0d005b266ffde7d",
+    "package_json_sha256": "51c0a69bea92e8bf3f8db58b503e26343116b078f4821b2ebdfb83a70a51021c",
+    "dist_entry_sha256": "adc30b2fe9e67c4725334cc5089e81cc2de89e7bb8409e97e517b476abf86358",
+    "staged_root_sha256": "c4f4d2cfa98986993a783a015ffaaedb7e3f6237fe10d64d693aa6d057b1a609",
+    "wrapper_sha256": "14761fb9dfd45f004def2d19ec902b74130ac5a175a04eb2b305912ad115041d"
+  },
+  "candidate": {
+    "port": 20189,
+    "url": "ws://127.0.0.1:20189",
+    "pid": 48250,
+    "env": {
+      "env_key_count": 19,
+      "provider_key_names_present": [
+        "OPENCLAW_GATEWAY_TOKEN"
+      ],
+      "unexpected_provider_key_count": 0
+    },
+    "logs": {
+      "stdout_sha256": "ced4ee80fa6913fa75968cec160fbf48a4cd3e45811e12385a2215dffa7efc13",
+      "stderr_sha256": "72a4e0c6583c17c2298487c4c07cf507299d4836f5c12d815252ade5ee38f8fa"
+    }
+  },
+  "preflight": {
+    "status": "pass",
+    "stdout_sha256": "a57121c2a9321c0ca714bb3a5a4aa057798556d10be31278816b9afcfc1cff14",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "persistent_evidence_file": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/receipts/persistent-attested-preflight-input-attempt-1.json",
+    "persistent_evidence_sha256": "de6f275e94e195c255251ae84ea53a9c64dde3d6f3af518af4e6e661efc53197",
+    "evidence_file": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/receipts/capability-preflight-attempt-1.json",
+    "evidence_sha256": "ca97ec0d32c686b85d748bebd21adc7b22b4be0f223ab57cbb95362803a38aaa",
+    "runtime_ready": true,
+    "required_tool_names": [
+      "agenticOs.runtime.attest",
+      "subagents.allowLease.acquire",
+      "subagents.allowLease.status",
+      "subagents.allowLease.release",
+      "sessions_spawn",
+      "sessions_list",
+      "session_status",
+      "sessions_history"
+    ],
+    "attestation_ttl_remaining_ms_after_validation": 58508,
+    "attestation_attempt": 1,
+    "hello": {
+      "status": "pass",
+      "required_methods": [
+        "agenticOs.runtime.attest",
+        "subagents.allowLease.acquire",
+        "subagents.allowLease.status",
+        "subagents.allowLease.release",
+        "sessions_spawn",
+        "sessions_list",
+        "session_status",
+        "sessions_history"
+      ],
+      "advertised_count": 349
+    }
+  },
+  "attestation": {
+    "status": "pass",
+    "signature_sha256": "b2ec3648743df7b5e58b7bd8543c7549febaf629c3bbf7a1212f6e941815bee6",
+    "signed_payload_sha256": "343460390a0be7cc71343c4e22f3b3bc5d90472d80ce3271610df0e6a9040e3e",
+    "runtime_identity_token_sha256": "8dd7885401a76783753d2f02441d048c439c6a040631ed30f0dd5afe25f15730",
+    "owner_scope_id": "380f1942c8eb1ca7f8b45c4a5d7ff391a37f67176b6e14e2c7df16bf315da611",
+    "expires_at_epoch_ms": 1786678211481,
+    "executable_content_sha256": "0f6f5f70cfcfae01bda117d02139ed9159219659076d8d2eb0d005b266ffde7d",
+    "catalog_sha256": "4880ad7bb72fcd0ac3a90b6cf3fbe79b780bbaf5390e37b000e2231fc880f177",
+    "contract_vector_sha256": "8a8e637d1eb37dde1d65f493b8d6bac90be518a8d0ab93d8269ba90bdabedc74",
+    "gateway_endpoint": "ws://127.0.0.1:20189",
+    "gateway_build_id": "ff180d0",
+    "transport_kind": "gateway-websocket",
+    "transport_identity_sha256": "bb120f281bc247a0516942801ec64e5938bd9077a6db329ccce2c3386fff3384",
+    "ttl_remaining_ms_after_validation": 58508,
+    "attempt": 1
+  },
+  "lifecycle": {
+    "status": "pass",
+    "gateway_lease_id_sha256": "ac67c9d44d93deeb29ea238412e0e34b63ba2bba355e41b229553eaedc49ca3f",
+    "acquire_status": "active",
+    "duplicate_acquire_same_lease": true,
+    "pre_spawn_lease_count": 1,
+    "first_spawn_status": "accepted",
+    "duplicate_spawn_same_session": true,
+    "session_key_sha256": "076737e1468ebead7a76b3b05678c9914f4a7db0c3786a2b5c28263091448e63",
+    "child_run_id_sha256": "33f0487289c1e6ce60045b77071c65847d06b5d39ffadc48c3c922cf1af83e17",
+    "sessions_list_count": 1,
+    "matching_session_count": 1,
+    "session_status_sha256": "b71d81cbff4ee333785e74a23ca817c4f02cdac1c0038fa3afcf76dde44ed6b8",
+    "sessions_history_sha256": "7c645feb93f67016d1bed91a5b2a22d233ede263b4621c1902b5309ecda66aa0",
+    "release_status": "released",
+    "duplicate_release_sha256": "dbc219138ada3ae93a0b4cbef52a7e5e7d88a275f2727d759632fd5b2192da11",
+    "post_release_lease_count": 0,
+    "duplicate_group_count": 0
+  },
+  "rollback": {
+    "status": "pass",
+    "candidate_shutdown": {
+      "signal": "SIGTERM",
+      "exit_code": 0,
+      "signal_code": null,
+      "port_closed": true,
+      "shutdown_ms": 940
+    },
+    "candidate_port_closed": true,
+    "production_config_hash_unchanged": true,
+    "production_health_before_sha256": "5dce52c10eb7a97b146518388273ca1998156f7c623abba67b1b764267172a2c",
+    "production_health_after_sha256": "5dce52c10eb7a97b146518388273ca1998156f7c623abba67b1b764267172a2c",
+    "db_authority": {
+      "DB_AUTHORITY_ENABLED": false
+    }
+  },
+  "soak": {
+    "status": "prepared_not_started",
+    "started": false,
+    "production_cron_mutated": false,
+    "monitor_design": {
+      "scope": "workspace-artifact",
+      "state_dir": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/heartbeat-soak-monitor-state",
+      "evidence_input": "/Users/zuqiangyu/clawd/artifacts/openclaw-agentic-os-worktrees/p03-runtime-heartbeat-shadow-20260813/docs/runtime-evidence/phase-b-p03-isolated-candidate-lifecycle-20260814T032902Z.json",
+      "retention": "recoverable",
+      "authority_required_before_start": [
+        "candidate lifecycle receipt pass",
+        "candidate shutdown and port closure pass",
+        "production config hash unchanged",
+        "DB_AUTHORITY_ENABLED False"
+      ]
+    },
+    "exact_heads": {
+      "runtime_head": "ff180d08bde60ff42bd39147f339d3a590639778",
+      "agentic_os_head": "7e285f405edf9c3aa008ce555fefc1e2640cc2f4"
+    }
+  },
+  "historical_probe_audit": {
+    "historical_probe_path": "scripts/openclaw-live-accepted-session-probe.py",
+    "exists": true,
+    "sha256": "2ffafa4891429205d0eb220aa4c57765f4ff944c78a855eb38c2177ce236f091",
+    "verdict": "not_authority_for_phase_b",
+    "reason": "historical probe shells out per RPC and cannot preserve connection-bound runtime attestation"
+  }
+}
