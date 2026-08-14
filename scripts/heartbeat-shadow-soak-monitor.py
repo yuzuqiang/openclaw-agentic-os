@@ -32,12 +32,14 @@ from agentic_os.heartbeat_shadow import (  # noqa: E402
     new_heartbeat_soak_receipt,
     persist_heartbeat_soak_receipt,
     run_heartbeat_file_shadow_cycle,
+    snapshot_heartbeat_runtime_authority_database,
     validate_heartbeat_soak_receipt,
 )
 
 
 SCHEMA_CONFIG = "p03-heartbeat-shadow-monitor-config.v1"
 SCHEMA_ENVELOPE = "p03-heartbeat-shadow-monitor-envelope.v1"
+SCHEMA_SNAPSHOTS = "p03-heartbeat-shadow-runtime-snapshot-receipts.v1"
 SCHEMA_STOP = "p03-heartbeat-shadow-monitor-stop-request.v1"
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
@@ -268,12 +270,19 @@ def _envelope(
     script_path = _path_from_config(config, "script_path")
     pidfile = _path_from_config(config, "pidfile_path")
     core_receipt_path = _path_from_config(config, "core_soak_receipt_path")
+    snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
     receipt: dict[str, Any] | None = None
     if core_receipt_path.exists():
         receipt = _read_json(core_receipt_path)
         validate_heartbeat_soak_receipt(receipt)
+    snapshot_doc: dict[str, Any] | None = None
+    if snapshot_receipts_path.exists():
+        snapshot_doc = _read_json(snapshot_receipts_path)
+        if snapshot_doc.get("schema_version") != SCHEMA_SNAPSHOTS:
+            raise MonitorError("unsupported runtime snapshot receipt schema")
 
     samples = receipt.get("samples", []) if receipt else []
+    snapshots = snapshot_doc.get("snapshots", []) if snapshot_doc else []
     first_sample = samples[0] if samples else None
     latest_sample = sample if sample is not None else (samples[-1] if samples else None)
     last_sampled_at = (
@@ -288,6 +297,10 @@ def _envelope(
     )
     current_pid = os.getpid()
     pid = _load_pid(pidfile) or current_pid
+    terminal_status = status in {"complete", "failed_closed", "rolled_back", "stopped"}
+    process_alive = _pid_alive(pid)
+    if terminal_status and pid == current_pid:
+        process_alive = False
     argv = list(config.get("run_argv", [])) or _command(script_path, "run", state_dir)
     stop_argv = _command(script_path, "stop", state_dir)
     rollback_argv = _command(script_path, "rollback", state_dir)
@@ -310,7 +323,9 @@ def _envelope(
         "monitor": {
             "pid": pid,
             "pidfile": str(pidfile),
-            "process_alive": _pid_alive(pid),
+            "process_alive": process_alive,
+            "process_identity_observed_at": _utc_now(),
+            "terminal_status_expected_after_write": terminal_status,
             "script_path": str(script_path),
             "script_sha256": _sha256_file(script_path),
             "argv": argv,
@@ -333,8 +348,16 @@ def _envelope(
             "core_soak_receipt_path": config["core_soak_receipt_path"],
             "first_sample_path": config["first_sample_path"],
             "monitor_envelope_path": config["monitor_envelope_path"],
+            "runtime_snapshot_receipts_path": config["runtime_snapshot_receipts_path"],
             "stop_request_path": config["stop_request_path"],
             "rollback_receipt_path": config["rollback_receipt_path"],
+        },
+        "runtime_snapshots": {
+            "receipts_path": str(snapshot_receipts_path),
+            "snapshots_count": len(snapshots),
+            "latest_snapshot": snapshots[-1] if snapshots else None,
+            "local_recovery_only": True,
+            "packaging_retrieval_denied": True,
         },
         "coverage": {
             "samples_count": len(samples),
@@ -345,6 +368,13 @@ def _envelope(
         },
         "first_sample": first_sample,
         "latest_sample": latest_sample,
+        "stop_rollback_contract": {
+            "pre_phase_c_contract": "command_availability_only_while_soak_running",
+            "stop_request_receipt_required_after_explicit_stop": True,
+            "rollback_receipt_required_after_monitor_stopped": True,
+            "stop_request_exists": _path_from_config(config, "stop_request_path").exists(),
+            "rollback_receipt_exists": _path_from_config(config, "rollback_receipt_path").exists(),
+        },
         "violations": [] if violation is None else [violation],
         "note": note,
     }
@@ -436,6 +466,10 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         "pidfile_path": str(state_dir / "monitor.pid"),
         "daemon_log_path": str(state_dir / "monitor-daemon.log"),
         "sample_dir": str(state_dir / "samples"),
+        "runtime_snapshot_dir": str(
+            repo_root / "state/agentic-os/backups/heartbeat-shadow-soak" / args.run_id
+        ),
+        "runtime_snapshot_receipts_path": str(state_dir / "runtime-snapshot-receipts.json"),
         "duration_hours": duration,
         "sample_interval_seconds": interval,
         "file_shadow_run_id": f"{args.run_id}-file-shadow",
@@ -458,6 +492,16 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, Any]:
+    snapshot_path = _runtime_snapshot_path(config, sampled_at_epoch_ms)
+    try:
+        snapshot = snapshot_heartbeat_runtime_authority_database(
+            source_database=_path_from_config(config, "database_path"),
+            snapshot_database=snapshot_path,
+            repo_root_path=REPO_ROOT,
+        )
+        _append_runtime_snapshot_receipt(config, snapshot)
+    except (HeartbeatShadowError, MonitorError, OSError):
+        return _failed_runtime_observation_sample(config, sampled_at_epoch_ms)
     return heartbeat_parity_sample(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
@@ -466,9 +510,72 @@ def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, An
         authority_input_digest=str(config["authority_input_digest"]),
         authority_mode="file_authority_shadow",
         database=_path_from_config(config, "database_path"),
+        runtime_audit_database=snapshot_path,
         sampled_at_epoch_ms=sampled_at_epoch_ms,
         repo_root_path=REPO_ROOT,
     )
+
+
+def _runtime_snapshot_path(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> Path:
+    snapshot_dir = _path_from_config(config, "runtime_snapshot_dir")
+    return snapshot_dir / f"sample-{sampled_at_epoch_ms}.db"
+
+
+def _append_runtime_snapshot_receipt(
+    config: Mapping[str, Any], snapshot: Mapping[str, Any]
+) -> None:
+    path = _path_from_config(config, "runtime_snapshot_receipts_path")
+    if path.exists():
+        document = _read_json(path)
+        if document.get("schema_version") != SCHEMA_SNAPSHOTS:
+            raise MonitorError("unsupported runtime snapshot receipt schema")
+        snapshots = document.get("snapshots")
+        if not isinstance(snapshots, list):
+            raise MonitorError("runtime snapshot receipts must be a list")
+    else:
+        document = {
+            "schema_version": SCHEMA_SNAPSHOTS,
+            "run_id": config["run_id"],
+            "scope": "local_recovery_only",
+            "snapshots": [],
+        }
+        snapshots = document["snapshots"]
+    snapshots.append(dict(snapshot))
+    document["snapshots"] = snapshots
+    document["updated_at"] = _utc_now()
+    _atomic_write_json(path, document)
+
+
+def _failed_runtime_observation_sample(
+    config: Mapping[str, Any], sampled_at_epoch_ms: int
+) -> dict[str, Any]:
+    counts = {
+        "lease_rows": 0,
+        "spawn_request_rows": 0,
+        "session_rows": 0,
+        "lifecycle_rpc_intent_rows": 0,
+        "duplicate_spawn_identity_groups": 0,
+    }
+    return {
+        "sampled_at_epoch_ms": sampled_at_epoch_ms,
+        "status": "fail",
+        "authority_mode": "file_authority_shadow",
+        "expected_authority_input_digest": str(config["authority_input_digest"]),
+        "observed_authority_input_digest": str(config["authority_input_digest"]),
+        "parity_status": "fail",
+        "parity_percent": 0,
+        "db_authority_enabled": False,
+        "runtime_authority_counts": counts,
+        "runtime_authority_counts_observed": False,
+        "observation_error": "runtime_authority_audit_error",
+        "counters": {
+            "duplicate_spawn": 0,
+            "orphan_lease": 0,
+            "unknown_or_unowned_session": 1,
+            "privacy_violation": 0,
+            "projection_drift": 0,
+        },
+    }
 
 
 def _persist_sample(config: Mapping[str, Any], index: int, sample: Mapping[str, Any]) -> None:
@@ -670,6 +777,13 @@ def stop(args: argparse.Namespace) -> int:
 def status(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     envelope = _read_json(state_dir / "monitor-envelope.json")
+    try:
+        config = _load_config(state_dir)
+        refreshed_status = str(envelope.get("status", "unknown"))
+        envelope = _envelope(config=config, status=refreshed_status)
+        _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
+    except MonitorError:
+        pass
     print(json.dumps(envelope, sort_keys=True, indent=2))
     return 0
 

@@ -121,6 +121,29 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "authority_input_digest": digest,
                 },
             ), mock.patch.object(
+                monitor,
+                "snapshot_heartbeat_runtime_authority_database",
+                return_value={
+                    "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
+                    "status": "pass",
+                    "authority": "file_artifacts",
+                    "db_authority_enabled": False,
+                    "source_database": "state/agentic-os/control.db",
+                    "source_sidecars_observed": ["control.db-wal"],
+                    "snapshot_database": "state/agentic-os/backups/test/sample.db",
+                    "snapshot_sha256": "b" * 64,
+                    "snapshot_sidecars_present": False,
+                    "local_recovery_only": True,
+                    "packaging_retrieval_denied": True,
+                    "runtime_authority_counts": {
+                        "lease_rows": 0,
+                        "spawn_request_rows": 0,
+                        "session_rows": 0,
+                        "lifecycle_rpc_intent_rows": 0,
+                        "duplicate_spawn_identity_groups": 0,
+                    },
+                },
+            ), mock.patch.object(
                 monitor, "heartbeat_parity_sample", side_effect=sample_side_effect
             ):
                 first = monitor._first_sample(config)
@@ -141,6 +164,12 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(len(core["samples"]), 1)
         self.assertEqual(envelope["status"], "running")
         self.assertEqual(envelope["first_sample"]["status"], "pass")
+        self.assertEqual(envelope["runtime_snapshots"]["snapshots_count"], 1)
+        self.assertIs(envelope["runtime_snapshots"]["local_recovery_only"], True)
+        self.assertEqual(
+            envelope["stop_rollback_contract"]["pre_phase_c_contract"],
+            "command_availability_only_while_soak_running",
+        )
         self.assertFalse(
             json.dumps(envelope, sort_keys=True).lower().count("token")
             and "token_material_copied\":true" in json.dumps(envelope, sort_keys=True).lower()
@@ -197,6 +226,23 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             with self.assertRaisesRegex(monitor.MonitorError, "interval"):
                 monitor._build_config(self.args)
+
+    def test_snapshot_failure_becomes_failed_runtime_observation_sample(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            with mock.patch.object(
+                monitor,
+                "snapshot_heartbeat_runtime_authority_database",
+                side_effect=monitor.HeartbeatShadowError("snapshot unavailable"),
+            ):
+                sample = monitor._sample(config, 1_700_000_000_000)
+
+        self.assertEqual(sample["status"], "fail")
+        self.assertIs(sample["runtime_authority_counts_observed"], False)
+        self.assertEqual(sample["observation_error"], "runtime_authority_audit_error")
+        self.assertEqual(sample["counters"]["unknown_or_unowned_session"], 1)
 
 
 if __name__ == "__main__":

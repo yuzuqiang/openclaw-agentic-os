@@ -18,6 +18,7 @@ from agentic_os.privacy import (
     PrivacyPreflightError,
     assert_paths_retrievable,
     assert_privacy_preflight,
+    is_raw_state_denied,
 )
 from agentic_os.shadow import (
     ShadowBackfillError,
@@ -50,6 +51,7 @@ RUNTIME_AUTHORITY_COUNT_KEYS = (
     "lifecycle_rpc_intent_rows",
     "duplicate_spawn_identity_groups",
 )
+SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 SOAK_SAMPLE_FIELDS = {
     "authority_mode",
     "counters",
@@ -116,6 +118,21 @@ def _repo_artifact_path(root: Path, path: Path, label: str) -> Path:
         assert_paths_retrievable(target.relative_to(root))
     except PrivacyPreflightError as exc:
         raise HeartbeatShadowError(f"{label} cannot be raw database state") from exc
+    return target
+
+
+def _repo_local_recovery_database_path(root: Path, path: Path, label: str) -> Path:
+    target = path.expanduser().resolve()
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        raise HeartbeatShadowError(f"{label} must stay inside the checked worktree") from None
+    parts = relative.parts
+    if parts[:3] != ("state", "agentic-os", "backups"):
+        raise HeartbeatShadowError(f"{label} must stay under state/agentic-os/backups")
+    assert_paths_retrievable((relative, target), local_recovery=True)
+    if not is_raw_state_denied(relative):
+        raise HeartbeatShadowError(f"{label} must remain denied to packaging/retrieval")
     return target
 
 
@@ -330,15 +347,25 @@ def _manifest_authority_digest(manifest: Mapping[str, Any]) -> str:
     return _sha256_bytes(_canonical_json(authority_view).encode("utf-8"))
 
 
+def _sqlite_sidecars(database: Path) -> list[Path]:
+    return [
+        Path(f"{database}{suffix}")
+        for suffix in SQLITE_SIDECAR_SUFFIXES
+        if Path(f"{database}{suffix}").exists()
+    ]
+
+
+def _remove_checkpointed_snapshot_sidecars(database: Path) -> None:
+    for sidecar in _sqlite_sidecars(database):
+        if sidecar.name.endswith("-wal") and sidecar.stat().st_size != 0:
+            raise HeartbeatShadowError("Heartbeat runtime snapshot has live WAL content")
+        sidecar.unlink()
+
+
 def _runtime_authority_counts(database: Path) -> dict[str, int]:
     _assert_db_authority_disabled()
     database_path = database.expanduser().resolve()
-    sidecars = [
-        Path(f"{database_path}{suffix}")
-        for suffix in ("-wal", "-shm", "-journal")
-        if Path(f"{database_path}{suffix}").exists()
-    ]
-    if sidecars:
+    if _sqlite_sidecars(database_path):
         raise HeartbeatShadowError("Heartbeat shadow DB is not an offline snapshot")
     with sqlite3.connect(
         f"{database_path.as_uri()}?mode=ro&immutable=1", uri=True
@@ -374,6 +401,74 @@ def _runtime_authority_counts(database: Path) -> dict[str, int]:
     if any(type(value) is not int or value < 0 for value in counts.values()):
         raise HeartbeatShadowError("Heartbeat runtime authority counts are invalid")
     return counts
+
+
+def snapshot_heartbeat_runtime_authority_database(
+    *,
+    source_database: Path,
+    snapshot_database: Path,
+    repo_root_path: Path | None = None,
+) -> dict[str, Any]:
+    """Create a sidecar-free local-only SQLite snapshot for immutable sampling."""
+
+    _assert_db_authority_disabled()
+    root = Path(repo_root_path or repository_root()).resolve()
+    expected_database = heartbeat_control_database(root)
+    source = source_database.expanduser().resolve()
+    if source != expected_database:
+        raise HeartbeatShadowError("Heartbeat snapshot source is not the ignored control DB")
+    if not source.is_file() or source.is_symlink():
+        raise HeartbeatShadowError("Heartbeat snapshot source DB is missing or unsafe")
+    target = _repo_local_recovery_database_path(
+        root, snapshot_database, "Heartbeat runtime authority snapshot"
+    )
+    if target.exists() or any(Path(f"{target}{suffix}").exists() for suffix in SQLITE_SIDECAR_SUFFIXES):
+        raise HeartbeatShadowError("Heartbeat runtime authority snapshot target already exists")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source_sidecars = _sqlite_sidecars(source)
+    try:
+        with sqlite3.connect(source, isolation_level=None) as source_connection:
+            source_connection.execute("PRAGMA query_only=ON")
+            with sqlite3.connect(target) as target_connection:
+                source_connection.backup(target_connection)
+                target_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                target_connection.execute("PRAGMA journal_mode=DELETE")
+                quick_check = target_connection.execute("PRAGMA quick_check").fetchone()
+                if quick_check != ("ok",):
+                    raise HeartbeatShadowError("Heartbeat runtime snapshot failed integrity check")
+    except HeartbeatShadowError:
+        target.unlink(missing_ok=True)
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            Path(f"{target}{suffix}").unlink(missing_ok=True)
+        raise
+    except sqlite3.Error as exc:
+        target.unlink(missing_ok=True)
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            Path(f"{target}{suffix}").unlink(missing_ok=True)
+        raise HeartbeatShadowError("Heartbeat runtime snapshot could not be created") from exc
+    target.chmod(0o600)
+    _remove_checkpointed_snapshot_sidecars(target)
+    if _sqlite_sidecars(target):
+        raise HeartbeatShadowError("Heartbeat runtime snapshot is not sidecar-free")
+    with sqlite3.connect(f"{target.as_uri()}?mode=ro&immutable=1", uri=True) as connection:
+        quick_check = connection.execute("PRAGMA quick_check").fetchone()
+        if quick_check != ("ok",):
+            raise HeartbeatShadowError("Heartbeat runtime snapshot immutable check failed")
+    counts = _runtime_authority_counts(target)
+    return {
+        "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
+        "status": "pass",
+        "authority": "file_artifacts",
+        "db_authority_enabled": False,
+        "source_database": source.relative_to(root).as_posix(),
+        "source_sidecars_observed": [sidecar.name for sidecar in source_sidecars],
+        "snapshot_database": target.relative_to(root).as_posix(),
+        "snapshot_sha256": _sha256_file(target),
+        "snapshot_sidecars_present": False,
+        "local_recovery_only": True,
+        "packaging_retrieval_denied": True,
+        "runtime_authority_counts": counts,
+    }
 
 
 def run_heartbeat_file_shadow_cycle(
@@ -624,6 +719,7 @@ def heartbeat_parity_sample(
     authority_input_digest: str,
     authority_mode: str,
     database: Path,
+    runtime_audit_database: Path | None = None,
     sampled_at_epoch_ms: int,
     repo_root_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -637,6 +733,13 @@ def heartbeat_parity_sample(
     target_database = database.expanduser().resolve()
     if target_database != expected_database:
         raise HeartbeatShadowError("Heartbeat sample DB placement is invalid")
+    audit_database = target_database
+    if runtime_audit_database is not None:
+        audit_database = _repo_local_recovery_database_path(
+            root,
+            runtime_audit_database,
+            "Heartbeat sample runtime audit database",
+        )
     audit_function = (
         audit_file_authority_shadow
         if authority_mode == "file_authority_shadow"
@@ -670,7 +773,7 @@ def heartbeat_parity_sample(
         )
     try:
         audit = audit_function(
-            target_database,
+            audit_database,
             (target_projection,),
             workflow=HEARTBEAT_WORKFLOW,
             run_id=run_id,
@@ -682,7 +785,7 @@ def heartbeat_parity_sample(
         observation_error = observation_error or "projection_audit_error"
     counts_observed = True
     try:
-        counts = _runtime_authority_counts(target_database)
+        counts = _runtime_authority_counts(audit_database)
     except (HeartbeatShadowError, sqlite3.Error):
         counts_observed = False
         counts = {key: 0 for key in RUNTIME_AUTHORITY_COUNT_KEYS}

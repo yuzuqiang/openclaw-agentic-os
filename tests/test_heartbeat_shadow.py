@@ -20,6 +20,7 @@ from agentic_os.heartbeat_shadow import (
     persist_heartbeat_soak_receipt,
     run_heartbeat_dual_write_projection,
     run_heartbeat_file_shadow_cycle,
+    snapshot_heartbeat_runtime_authority_database,
     validate_heartbeat_soak_receipt,
 )
 
@@ -294,6 +295,63 @@ class HeartbeatShadowTests(unittest.TestCase):
         validate_heartbeat_soak_receipt(
             json.loads(receipt_path.read_text(encoding="utf-8"))
         )
+
+    def test_parity_sample_can_audit_sidecar_free_runtime_snapshot(self) -> None:
+        prior = self._file_shadow_cycle()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                "UPDATE workflow_authority SET updated_at=updated_at WHERE workflow='heartbeat'"
+            )
+            connection.commit()
+            self.assertTrue(
+                self.database.with_name("control.db-wal").exists()
+                or self.database.with_name("control.db-shm").exists()
+            )
+            direct = heartbeat_parity_sample(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                projected_artifact=self.manifest_path,
+                run_id=prior["run_id"],
+                authority_input_digest=prior["authority_input_digest"],
+                authority_mode="file_authority_shadow",
+                database=self.database,
+                sampled_at_epoch_ms=1_700_000_060_000,
+                repo_root_path=self.root,
+            )
+            self.assertEqual(direct["status"], "fail")
+            self.assertEqual(direct["observation_error"], "runtime_authority_audit_error")
+
+            snapshot_path = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/test/sample.db"
+            )
+            snapshot = snapshot_heartbeat_runtime_authority_database(
+                source_database=self.database,
+                snapshot_database=snapshot_path,
+                repo_root_path=self.root,
+            )
+
+        self.assertTrue(snapshot_path.is_file())
+        self.assertFalse(snapshot_path.with_name("sample.db-wal").exists())
+        self.assertFalse(snapshot_path.with_name("sample.db-shm").exists())
+        self.assertIs(snapshot["local_recovery_only"], True)
+        self.assertIs(snapshot["packaging_retrieval_denied"], True)
+        self.assertEqual(set(snapshot["runtime_authority_counts"].values()), {0})
+        sample = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            runtime_audit_database=snapshot_path,
+            sampled_at_epoch_ms=1_700_000_060_000,
+            repo_root_path=self.root,
+        )
+        self.assertEqual(sample["status"], "pass")
+        self.assertIs(sample["runtime_authority_counts_observed"], True)
 
     def test_parity_sample_records_file_drift_as_failed_sample(self) -> None:
         prior = self._file_shadow_cycle()
