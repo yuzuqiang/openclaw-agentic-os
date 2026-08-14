@@ -260,6 +260,10 @@ def _split_evidence_authority_errors(
                     f"runtime Gateway RPC {method} is missing authority-aware live "
                     "reachability evidence"
                 )
+            elif method != "subagents.allowLease.status" and _signed_method_binding_evidence_valid(
+                evidence, method
+            ):
+                continue
             elif evidence.get("live_reachability") != "reachable":
                 errors.append(
                     f"runtime Gateway RPC {method} live reachability is unproven; "
@@ -288,6 +292,26 @@ def _is_sha256(value: Any) -> bool:
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _signed_method_binding_evidence_valid(
+    evidence: Mapping[str, Any], method: str
+) -> bool:
+    binding = evidence.get("method_binding")
+    if not isinstance(binding, Mapping):
+        return False
+    parameter_names = binding.get("parameter_names")
+    if not isinstance(parameter_names, Sequence) or isinstance(
+        parameter_names, (str, bytes, bytearray)
+    ):
+        return False
+    return (
+        evidence.get("live_reachability") == "signed_method_binding"
+        and binding.get("status") == "signed_exact"
+        and binding.get("method") == method
+        and frozenset(str(name) for name in parameter_names)
+        == _REQUIRED_ALLOW_LEASE_TOOL_PARAMS[method]
     )
 
 

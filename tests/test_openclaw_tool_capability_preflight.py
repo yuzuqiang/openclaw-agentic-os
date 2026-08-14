@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hmac
 import hashlib
 import importlib.util
 import io
@@ -9,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -170,6 +172,246 @@ def write_contract_candidate_dist(install_root):
             'const REQUEST_FIELDS = ["challenge", "client_process_id", '
             '"expected_executable_sha256", "expected_catalog_sha256"];'
         )
+
+
+def canonical_json_bytes(value):
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def canonical_sha256(value):
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def file_sha256(path):
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def path_sha256(path):
+    return hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()
+
+
+def git_head(path):
+    return subprocess.check_output(
+        ["git", "-C", path, "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+
+
+def init_git_repo(path):
+    subprocess.run(["git", "-C", path, "init"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", path, "config", "user.email", "tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", path, "config", "user.name", "Tests"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", path, "add", "."], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", path, "commit", "-m", "fixture"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def write_persistent_runtime_fixture(root):
+    write_contract_candidate_dist(root)
+    scripts_dir = os.path.join(root, "scripts")
+    bin_dir = os.path.join(root, "bin")
+    os.makedirs(scripts_dir, exist_ok=True)
+    os.makedirs(bin_dir, exist_ok=True)
+    runner = os.path.join(scripts_dir, "agentic-os-persistent-lifecycle-runner.mts")
+    with open(runner, "w", encoding="utf-8") as handle:
+        handle.write("export const runner = true;\n")
+    launcher = os.path.join(root, "openclaw.mjs")
+    with open(launcher, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env node\nconsole.log('fixture launcher');\n")
+    os.chmod(launcher, 0o755)
+    executable = os.path.join(bin_dir, "openclaw")
+    with open(executable, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env sh\nexit 97\n")
+    os.chmod(executable, 0o755)
+    init_git_repo(root)
+    return {
+        "runner": runner,
+        "launcher": launcher,
+        "executable": executable,
+    }
+
+
+def persistent_status_receipt(signed_payload):
+    binding = signed_payload["binding"]
+    return {
+        "schema_version": signed_payload["schema_version"],
+        "runtime_identity_token_sha256": signed_payload[
+            "runtime_identity_token_sha256"
+        ],
+        "owner_scope_id": signed_payload["owner_scope_id"],
+        "client_process_id": signed_payload["client_process_id"],
+        "expires_at_epoch_ms": signed_payload["expires_at_epoch_ms"],
+        "executable_content_sha256": binding["executable"]["content_sha256"],
+        "catalog_sha256": binding["catalog"]["sha256"],
+        "contract_vector_sha256": binding["catalog"]["contract_vector_sha256"],
+        "sources_sha256": binding["sources_sha256"],
+        "endpoint": binding["gateway"]["endpoint"],
+        "build_id": binding["gateway"]["build_id"],
+        "process_identity": binding["gateway"]["process_identity"],
+        "transport_kind": binding["transport"]["kind"],
+        "transport_identity": binding["transport"]["identity"],
+    }
+
+
+def build_persistent_evidence(module, root, fixture, key):
+    now_ms = int(time.time() * 1000)
+    method_bindings = module._expected_method_bindings_payload()
+    runtime_methods = module._expected_runtime_methods_catalog()
+    package_path = os.path.join(root, "package.json")
+    launcher_sha = file_sha256(fixture["launcher"])
+    sources = [
+        {"path": "openclaw.mjs", "sha256": launcher_sha},
+    ]
+    signed_payload = {
+        "schema_version": "agentic-os.openclaw-attestation.v1",
+        "online": True,
+        "challenge": "challenge-1",
+        "nonce": "challenge-1",
+        "issued_at_epoch_ms": now_ms,
+        "expires_at_epoch_ms": now_ms + 60_000,
+        "client_process_id": "p03-persistent-runner:test",
+        "runtime_identity_token_sha256": hashlib.sha256(b"token").hexdigest(),
+        "owner_scope_id": hashlib.sha256(b"owner").hexdigest(),
+        "binding": {
+            "executable": {
+                "path_sha256": path_sha256(fixture["launcher"]),
+                "content_sha256": launcher_sha,
+            },
+            "install": {
+                "root_sha256": path_sha256(root),
+                "package_json_sha256": file_sha256(package_path),
+                "package_name": "openclaw",
+                "version": "2026.candidate",
+            },
+            "sources": sources,
+            "sources_sha256": canonical_sha256(sources),
+            "catalog": {
+                "authority": "tools.catalog.runtimeMethods",
+                "sha256": canonical_sha256(runtime_methods),
+                "contract_vector_sha256": module._expected_contract_vector_sha256(),
+            },
+            "gateway": {
+                "endpoint": "ws://127.0.0.1:20189",
+                "version": "2026.candidate",
+                "build_id": "fixture-build",
+                "process_identity": "fixture-process",
+            },
+            "transport": {
+                "kind": "gateway-websocket",
+                "identity": "fixture-transport",
+            },
+        },
+        "method_bindings": method_bindings,
+    }
+    signature = hmac.new(key, canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
+    attestation_response = {
+        "signature_algorithm": "hmac-sha256",
+        "signature": signature,
+        "signed_payload": signed_payload,
+    }
+    tools_catalog = {
+        "groups": [
+            {
+                "id": "unit",
+                "tools": [
+                    active_tool_entry(tool_id, include_schema=True)
+                    for tool_id in ACTIVE_TOOL_IDS
+                ],
+            }
+        ]
+    }
+    status_response = {
+        "status": "ok",
+        "leases": [],
+        "runtime_attestation": persistent_status_receipt(signed_payload),
+    }
+    return {
+        "schema_version": module.PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION,
+        "captured_at_epoch_ms": now_ms,
+        "expected_runtime_head": git_head(root),
+        "expected_agentic_os_head": git_head(repository_root()),
+        "runtime": {
+            "worktree": root,
+            "staged_root": root,
+            "executable_sha256": launcher_sha,
+            "package_json_sha256": file_sha256(package_path),
+            "dist_entry_sha256": None,
+            "expected_catalog_sha256": canonical_sha256(runtime_methods),
+        },
+        "agentic_os": {"worktree": str(repository_root())},
+        "runner": {
+            "script_path": fixture["runner"],
+            "script_sha256": file_sha256(fixture["runner"]),
+        },
+        "gateway": {"endpoint": "ws://127.0.0.1:20189", "port": 20189},
+        "attestation": {
+            "method": "agenticOs.runtime.attest",
+            "request_params": {
+                "challenge": "challenge-1",
+                "client_process_id": "p03-persistent-runner:test",
+                "expected_executable_sha256": launcher_sha,
+                "expected_catalog_sha256": canonical_sha256(runtime_methods),
+            },
+            "response": attestation_response,
+            "response_sha256": canonical_sha256(attestation_response),
+            "runtime_identity_token_sha256": signed_payload[
+                "runtime_identity_token_sha256"
+            ],
+        },
+        "rpc_evidence": {
+            "tools_catalog": {
+                "method": "tools.catalog",
+                "request_params": {},
+                "response": tools_catalog,
+                "raw_response_sha256": canonical_sha256(tools_catalog),
+            },
+            "allow_lease_status": {
+                "method": "subagents.allowLease.status",
+                "request_params": {},
+                "response": status_response,
+                "raw_response_sha256": canonical_sha256(status_response),
+            },
+        },
+    }
+
+
+def run_persistent_preflight(evidence, root, key_path):
+    evidence_path = os.path.join(root, "persistent-evidence.json")
+    with open(evidence_path, "w", encoding="utf-8") as handle:
+        json.dump(evidence, handle, sort_keys=True)
+    env = os.environ.copy()
+    env["OPENCLAW_INSTALL_ROOT"] = root
+    env["OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE"] = key_path
+    env["PATH"] = os.path.join(root, "bin") + os.pathsep + env.get("PATH", "")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--persistent-attested-preflight-json-file",
+            evidence_path,
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def add_fake_openclaw_to_env(
@@ -903,6 +1145,16 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 catalog = payload.get("catalog")
                 if catalog is None:
                     catalog = payload.get("preflight", {}).get("catalog")
+                if catalog is None and payload.get("classification") == "preflight_failed_fail_closed":
+                    self.assertEqual(payload.get("candidate", {}).get("port"), 20189)
+                    self.assertFalse(
+                        payload.get("lifecycle", {}).get("mutating_lifecycle_attempted")
+                    )
+                    self.assertIn(
+                        "subagents.allowLease.status",
+                        payload.get("preflight", {}).get("required_source_bound_rpc_names", []),
+                    )
+                    continue
                 self.assertIsInstance(catalog, dict)
                 self.assertEqual(catalog.get("runtime_target"), "isolated_candidate")
                 if payload.get("status") == "pass":
@@ -3262,6 +3514,145 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_list"
         )
         self.assertEqual(sessions_list["parameters"], [])
+
+    def test_persistent_attested_preflight_accepts_same_connection_evidence(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "pass")
+        catalog = payload["catalog"]
+        self.assertEqual(catalog["connected_gateway_build_identity"], "proven")
+        rpc_evidence = {
+            item["name"]: item
+            for item in catalog["gateway_rpc_catalog"]["rpc_evidence"]
+        }
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.acquire"]["live_reachability"],
+            "signed_method_binding",
+        )
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.status"]["live_reachability"],
+            "reachable",
+        )
+
+    def test_persistent_attested_preflight_rejects_forged_hmac_despite_status_pass(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["status"] = "pass"
+            evidence["attestation"]["response"]["signature"] = "0" * 64
+            evidence["attestation"]["response_sha256"] = canonical_sha256(
+                evidence["attestation"]["response"]
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("HMAC mismatch", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_stale_attestation(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            signed_payload = evidence["attestation"]["response"]["signed_payload"]
+            signed_payload["issued_at_epoch_ms"] = int(time.time() * 1000) - 60_000
+            signed_payload["expires_at_epoch_ms"] = int(time.time() * 1000) - 1
+            evidence["rpc_evidence"]["allow_lease_status"]["response"][
+                "runtime_attestation"
+            ] = persistent_status_receipt(signed_payload)
+            evidence["rpc_evidence"]["allow_lease_status"][
+                "raw_response_sha256"
+            ] = canonical_sha256(
+                evidence["rpc_evidence"]["allow_lease_status"]["response"]
+            )
+            response = evidence["attestation"]["response"]
+            response["signature"] = hmac.new(
+                key, canonical_json_bytes(signed_payload), hashlib.sha256
+            ).hexdigest()
+            evidence["attestation"]["response_sha256"] = canonical_sha256(response)
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("stale or expired", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_status_receipt_mismatch(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["rpc_evidence"]["allow_lease_status"]["response"][
+                "runtime_attestation"
+            ]["endpoint"] = "ws://127.0.0.1:29999"
+            evidence["rpc_evidence"]["allow_lease_status"][
+                "raw_response_sha256"
+            ] = canonical_sha256(
+                evidence["rpc_evidence"]["allow_lease_status"]["response"]
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("status runtime_attestation receipt", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_non_empty_status_params(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["rpc_evidence"]["allow_lease_status"]["request_params"] = {
+                "requesterAgentId": "main"
+            }
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("request params must be empty", payload["error"])
 
 
 if __name__ == "__main__":
