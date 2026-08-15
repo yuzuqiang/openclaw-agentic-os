@@ -110,6 +110,49 @@ class HeartbeatShadowTests(unittest.TestCase):
             observed_at_epoch_ms=1_700_000_000_000,
         )
 
+    def _insert_runtime_authority_lease(self, run_id: str) -> None:
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "INSERT INTO transitions(transition_id,run_id,state_before,state_after,"
+                "transition_type,action_type,risk_dominance,idempotency_key,"
+                "guard_version_before,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "runtime-authority-transition",
+                    run_id,
+                    "before",
+                    "after",
+                    "dispatch",
+                    "allow_lease_acquire",
+                    "R1",
+                    "runtime-authority-transition-key",
+                    1,
+                    "now",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO leases(lease_id,run_id,phase,transition_id,agent_id,"
+                "requester_agent_id,state,client_lease_id,acquire_idempotency_key,"
+                "release_idempotency_key,ttl_ms,acquire_requested_at,expires_at,"
+                "expires_at_epoch_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "runtime-authority-lease",
+                    run_id,
+                    "phase",
+                    "runtime-authority-transition",
+                    "worker",
+                    "requester",
+                    "acquire_pending",
+                    "runtime-authority-client-lease",
+                    "runtime-authority-acquire-key",
+                    "runtime-authority-release-key",
+                    60_000,
+                    "now",
+                    "later",
+                    1_700_000_000_000,
+                ),
+            )
+
     def test_file_authority_cycle_projects_only_shadow_and_receipts_100_percent(self) -> None:
         receipt = self._file_shadow_cycle()
 
@@ -480,10 +523,19 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertEqual(unknown["observation_error"], "runtime_authority_audit_error")
         self.assertEqual(unknown["counters"]["unknown_or_unowned_session"], 1)
 
-    def test_forced_rollback_removes_shadow_db_and_preserves_exact_file_view(self) -> None:
+    def test_forced_rollback_handles_zero_wal_shm_and_preserves_file_view(self) -> None:
         prior = self._file_shadow_cycle()
         heartbeat_digest = hashlib.sha256(self.heartbeat_file.read_bytes()).hexdigest()
         receipt_path = self.root / "artifacts/heartbeat-rollback.json"
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                "UPDATE workflow_authority SET updated_at=updated_at WHERE workflow='heartbeat'"
+            )
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.assertTrue(self.database.with_name("control.db-wal").exists())
+            self.assertTrue(self.database.with_name("control.db-shm").exists())
         receipt = force_heartbeat_file_authority_rollback(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
@@ -495,13 +547,31 @@ class HeartbeatShadowTests(unittest.TestCase):
             repo_root_path=self.root,
         )
 
-        self.assertFalse(self.database.exists())
-        self.assertTrue(
-            self.database.with_name("control.db.backup.drill-1").is_file()
+        backup = (
+            self.root
+            / "state/agentic-os/backups/heartbeat-shadow-rollback/drill-1/control.db"
         )
+        self.assertFalse(self.database.exists())
+        self.assertTrue(backup.is_file())
+        self.assertTrue(backup.with_name("control.db-wal").is_file())
+        self.assertTrue(backup.with_name("control.db-shm").is_file())
         self.assertEqual(receipt["parity_percent"], 100)
+        self.assertEqual(receipt["parity"]["status"], "pass")
+        self.assertEqual(receipt["recoverable_local_backup_path"], backup.relative_to(self.root).as_posix())
+        self.assertEqual(receipt["recoverable_local_backup_sha256"], hashlib.sha256(backup.read_bytes()).hexdigest())
+        self.assertTrue(
+            (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/drill-1/audit-snapshot.db"
+            ).is_file()
+        )
         self.assertIs(receipt["file_authority_view_recreated"], True)
         self.assertIs(receipt["production_session_or_lease_authority_left"], False)
+        self.assertIs(receipt["production_gateway_mutated"], False)
+        self.assertIs(receipt["production_config_mutated"], False)
+        self.assertIs(receipt["production_service_mutated"], False)
+        self.assertIs(receipt["production_cron_mutated"], False)
+        self.assertIs(receipt["production_authority_mutated"], False)
         self.assertEqual(
             hashlib.sha256(self.heartbeat_file.read_bytes()).hexdigest(),
             heartbeat_digest,
@@ -511,27 +581,94 @@ class HeartbeatShadowTests(unittest.TestCase):
     def test_forced_rollback_fails_closed_on_runtime_authority_rows(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/rejected-rollback.json"
-        contaminated_counts = {
-            "lease_rows": 1,
-            "spawn_request_rows": 0,
-            "session_rows": 0,
-            "lifecycle_rpc_intent_rows": 0,
-            "duplicate_spawn_identity_groups": 0,
-        }
-        with mock.patch(
-            "agentic_os.heartbeat_shadow._runtime_authority_counts",
-            return_value=contaminated_counts,
-        ):
-            with self.assertRaisesRegex(HeartbeatShadowError, "runtime authority rows"):
+        self._insert_runtime_authority_lease(str(prior["run_id"]))
+        with self.assertRaisesRegex(HeartbeatShadowError, "runtime authority rows"):
+            force_heartbeat_file_authority_rollback(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                database=self.database,
+                authority_input_digest=prior["authority_input_digest"],
+                rollback_id="blocked",
+                receipt_path=receipt_path,
+                repo_root_path=self.root,
+            )
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(receipt_path.exists())
+
+    def test_forced_rollback_rejects_non_empty_wal_before_source_mutation(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/rejected-live-wal.json"
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                "UPDATE workflow_authority SET updated_at='live-wal' WHERE workflow='heartbeat'"
+            )
+            connection.commit()
+            self.assertGreater(self.database.with_name("control.db-wal").stat().st_size, 0)
+            with self.assertRaisesRegex(HeartbeatShadowError, "live WAL"):
                 force_heartbeat_file_authority_rollback(
                     baseline_path=self.baseline_path,
                     heartbeat_file=self.heartbeat_file,
                     database=self.database,
                     authority_input_digest=prior["authority_input_digest"],
-                    rollback_id="blocked",
+                    rollback_id="live-wal",
                     receipt_path=receipt_path,
                     repo_root_path=self.root,
                 )
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(receipt_path.exists())
+        self.assertFalse(
+            (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/live-wal/control.db"
+            ).exists()
+        )
+
+    def test_forced_rollback_rejects_busy_source_before_source_mutation(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/rejected-busy.json"
+        locker = sqlite3.connect(self.database, timeout=0.1)
+        try:
+            locker.execute("BEGIN EXCLUSIVE")
+            with self.assertRaisesRegex(
+                HeartbeatShadowError,
+                "snapshot could not be created|idle/checkpointable",
+            ):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="busy-source",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+        finally:
+            locker.rollback()
+            locker.close()
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(receipt_path.exists())
+        self.assertFalse(
+            (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/busy-source/control.db"
+            ).exists()
+        )
+
+    def test_forced_rollback_rejects_shadow_parity_drift(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/rejected-parity.json"
+        self.manifest_path.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(HeartbeatShadowError, "parity"):
+            force_heartbeat_file_authority_rollback(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                database=self.database,
+                authority_input_digest=prior["authority_input_digest"],
+                rollback_id="parity-drift",
+                receipt_path=receipt_path,
+                repo_root_path=self.root,
+            )
         self.assertTrue(self.database.is_file())
         self.assertFalse(receipt_path.exists())
 

@@ -244,6 +244,27 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(sample["observation_error"], "runtime_authority_audit_error")
         self.assertEqual(sample["counters"]["unknown_or_unowned_session"], 1)
 
+    def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            (self.state_dir / "monitor.pid").write_text("12345\n", encoding="utf-8")
+            with mock.patch.object(monitor, "_pid_alive", return_value=True):
+                with mock.patch.object(
+                    monitor, "force_heartbeat_file_authority_rollback"
+                ) as rollback:
+                    with self.assertRaisesRegex(monitor.MonitorError, "active"):
+                        monitor.rollback(
+                            Namespace(
+                                state_dir=self.state_dir,
+                                rollback_id="active-monitor",
+                                allow_running=False,
+                            )
+                        )
+
+        rollback.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

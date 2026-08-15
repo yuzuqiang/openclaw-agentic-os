@@ -471,6 +471,154 @@ def snapshot_heartbeat_runtime_authority_database(
     }
 
 
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _rollback_recovery_database(root: Path, rollback_id: str, name: str) -> Path:
+    return _repo_local_recovery_database_path(
+        root,
+        root
+        / "state/agentic-os/backups/heartbeat-shadow-rollback"
+        / rollback_id
+        / name,
+        "Heartbeat rollback local recovery database",
+    )
+
+
+def _sidecar_receipts(database: Path) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for sidecar in _sqlite_sidecars(database):
+        receipts.append(
+            {
+                "name": sidecar.name,
+                "size_bytes": sidecar.stat().st_size,
+                "sha256": _sha256_file(sidecar),
+            }
+        )
+    return receipts
+
+
+def _assert_rollback_source_idle(database: Path) -> dict[str, Any]:
+    for sidecar in _sqlite_sidecars(database):
+        size = sidecar.stat().st_size
+        if sidecar.name.endswith("-wal") and size != 0:
+            raise HeartbeatShadowError("Heartbeat shadow DB has live WAL content")
+        if sidecar.name.endswith("-journal") and size != 0:
+            raise HeartbeatShadowError(
+                "Heartbeat shadow DB has live rollback journal content"
+            )
+    try:
+        with sqlite3.connect(
+            database, isolation_level=None, timeout=0.1
+        ) as connection:
+            connection.execute("PRAGMA busy_timeout=100")
+            connection.execute("BEGIN EXCLUSIVE")
+            connection.execute("ROLLBACK")
+            quick_check = connection.execute("PRAGMA quick_check").fetchone()
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    except sqlite3.Error as exc:
+        raise HeartbeatShadowError(
+            "Heartbeat shadow DB is not idle/checkpointable"
+        ) from exc
+    if quick_check != ("ok",):
+        raise HeartbeatShadowError("Heartbeat shadow DB failed read-only integrity check")
+    if not checkpoint or checkpoint[0] != 0:
+        raise HeartbeatShadowError("Heartbeat shadow DB checkpoint is busy")
+    return {
+        "quick_check": "ok",
+        "checkpoint": list(checkpoint),
+        "source_sidecars": _sidecar_receipts(database),
+    }
+
+
+def _rollback_shadow_parity(audit_database: Path, *, repo_root_path: Path) -> dict[str, Any]:
+    mode_to_audit = {
+        "file_authority_shadow": (audit_file_authority_shadow, "file_authority_shadow"),
+        "dual_write_shadow": (audit_dual_write_shadow, "dual_write_shadow"),
+    }
+    with sqlite3.connect(
+        f"{audit_database.as_uri()}?mode=ro&immutable=1", uri=True
+    ) as connection:
+        modes = connection.execute(
+            "SELECT mode FROM workflow_authority WHERE workflow=?",
+            (HEARTBEAT_WORKFLOW,),
+        ).fetchall()
+        if len(modes) != 1 or modes[0][0] not in mode_to_audit:
+            raise HeartbeatShadowError("Heartbeat rollback lacks shadow parity mode")
+        mode = modes[0][0]
+        candidates = connection.execute(
+            "SELECT run_id FROM runs WHERE workflow=? AND authority_mode=? "
+            "AND state='finalized' ORDER BY finalized_at_epoch_ms DESC, run_id DESC",
+            (HEARTBEAT_WORKFLOW, mode),
+        ).fetchall()
+        if not candidates:
+            raise HeartbeatShadowError("Heartbeat rollback lacks finalized parity run")
+        run_id = candidates[0][0]
+        projections = connection.execute(
+            "SELECT path FROM artifact_projections WHERE run_id=? "
+            "AND source_authority=? ORDER BY path",
+            (run_id, mode_to_audit[mode][1]),
+        ).fetchall()
+    if not isinstance(run_id, str) or not run_id:
+        raise HeartbeatShadowError("Heartbeat rollback parity run is invalid")
+    artifact_paths = [repo_root_path / str(row[0]) for row in projections]
+    if not artifact_paths:
+        raise HeartbeatShadowError("Heartbeat rollback lacks parity projections")
+    audit_function = mode_to_audit[mode][0]
+    try:
+        audit = audit_function(
+            audit_database,
+            artifact_paths,
+            workflow=HEARTBEAT_WORKFLOW,
+            run_id=run_id,
+            repo_root_path=repo_root_path,
+        )
+    except (ShadowBackfillError, sqlite3.Error) as exc:
+        raise HeartbeatShadowError("Heartbeat rollback parity audit failed") from exc
+    mismatch_count = len(audit.issues)
+    if (
+        audit.status != "pass"
+        or audit.checked_count != len(artifact_paths)
+        or mismatch_count != 0
+    ):
+        raise HeartbeatShadowError("Heartbeat rollback parity is not 100%")
+    return {
+        "status": "pass",
+        "authority_mode": mode,
+        "run_id": run_id,
+        "checked_count": audit.checked_count,
+        "matched_count": len(artifact_paths),
+        "mismatch_count": 0,
+        "percent": 100,
+        "artifact_paths": [
+            path.relative_to(repo_root_path).as_posix() for path in artifact_paths
+        ],
+    }
+
+
+def _move_database_to_local_backup(source: Path, backup: Path) -> list[str]:
+    if backup.exists() or any(Path(f"{backup}{suffix}").exists() for suffix in SQLITE_SIDECAR_SUFFIXES):
+        raise HeartbeatShadowError("Heartbeat rollback backup already exists")
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    sidecars = _sqlite_sidecars(source)
+    os.replace(source, backup)
+    moved: list[str] = []
+    try:
+        for sidecar in sidecars:
+            destination = Path(f"{backup}{sidecar.name.removeprefix(source.name)}")
+            os.replace(sidecar, destination)
+            moved.append(destination.name)
+    finally:
+        _fsync_directory(backup.parent)
+        _fsync_directory(source.parent)
+    return moved
+
+
 def run_heartbeat_file_shadow_cycle(
     *,
     baseline_path: Path,
@@ -1123,32 +1271,35 @@ def force_heartbeat_file_authority_rollback(
         raise HeartbeatShadowError("Heartbeat rollback target is not the ignored control DB")
     if not target.is_file():
         raise HeartbeatShadowError("Heartbeat shadow DB is missing")
-    counts = _runtime_authority_counts(target)
+    if target_receipt.exists():
+        raise HeartbeatShadowError("Heartbeat rollback receipt already exists")
+    audit_snapshot = _rollback_recovery_database(root, rollback_id, "audit-snapshot.db")
+    backup = _rollback_recovery_database(root, rollback_id, target.name)
+    if backup.exists() or any(Path(f"{backup}{suffix}").exists() for suffix in SQLITE_SIDECAR_SUFFIXES):
+        raise HeartbeatShadowError("Heartbeat rollback backup already exists")
+    assert_privacy_preflight(root, database_paths=(target, audit_snapshot, backup))
+    snapshot = snapshot_heartbeat_runtime_authority_database(
+        source_database=target,
+        snapshot_database=audit_snapshot,
+        repo_root_path=root,
+    )
+    counts = dict(snapshot["runtime_authority_counts"])
     if any(counts.values()):
         raise HeartbeatShadowError("Heartbeat rollback found runtime authority rows")
+    source_idle = _assert_rollback_source_idle(target)
     manifest = heartbeat_authority_manifest(
         baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
     )
     if _manifest_authority_digest(manifest) != authority_input_digest:
         raise HeartbeatShadowError("Heartbeat file authority drifted before rollback")
-    backup = target.with_name(f"{target.name}.backup.{rollback_id}")
-    if backup.exists():
-        raise HeartbeatShadowError("Heartbeat rollback backup already exists")
-    assert_privacy_preflight(root, database_paths=(target, backup))
-    with sqlite3.connect(target) as connection:
-        quick_check = connection.execute("PRAGMA quick_check").fetchone()
-        if quick_check != ("ok",):
-            raise HeartbeatShadowError("Heartbeat shadow DB failed integrity check")
-        checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        if not checkpoint or checkpoint[0] != 0:
-            raise HeartbeatShadowError("Heartbeat shadow DB checkpoint is busy")
-    os.replace(target, backup)
-    for suffix in ("-wal", "-shm", "-journal"):
-        sidecar = Path(f"{target}{suffix}")
-        if sidecar.exists():
-            os.replace(sidecar, Path(f"{backup}{suffix}"))
+    parity = _rollback_shadow_parity(audit_snapshot, repo_root_path=root)
+    source_sha256 = _sha256_file(target)
+    moved_sidecars = _move_database_to_local_backup(target, backup)
     if target.exists():
         raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
+    backup_sha256 = _sha256_file(backup)
+    if backup_sha256 != source_sha256:
+        raise HeartbeatShadowError("Heartbeat rollback backup hash mismatch")
     recreated = heartbeat_authority_manifest(
         baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
     )
@@ -1162,12 +1313,30 @@ def force_heartbeat_file_authority_rollback(
         "authority": "file_artifacts",
         "db_authority_enabled": False,
         "authority_input_digest": recreated_digest,
+        "rollback_id": rollback_id,
         "file_authority_view_recreated": True,
+        "parity": parity,
         "parity_percent": 100,
         "shadow_database_removed": True,
         "recoverable_local_backup_created": True,
-        "recoverable_local_backup_sha256": _sha256_file(backup),
+        "recoverable_local_backup_path": backup.relative_to(root).as_posix(),
+        "recoverable_local_backup_sha256": backup_sha256,
+        "source_database_sha256_before_rollback": source_sha256,
+        "source_sidecars_before_rollback": source_idle["source_sidecars"],
+        "source_sidecars_moved_to_backup": moved_sidecars,
+        "backup_sidecars": _sidecar_receipts(backup),
+        "audit_snapshot_database": audit_snapshot.relative_to(root).as_posix(),
+        "audit_snapshot_sha256": snapshot["snapshot_sha256"],
+        "audit_snapshot_sidecars_present": False,
         "runtime_authority_counts_before_rollback": counts,
+        "source_database_idle_check": source_idle["quick_check"],
+        "local_recovery_only": True,
+        "packaging_retrieval_denied": True,
+        "production_gateway_mutated": False,
+        "production_config_mutated": False,
+        "production_service_mutated": False,
+        "production_cron_mutated": False,
+        "production_authority_mutated": False,
         "production_session_or_lease_authority_left": False,
     }
     _atomic_write_json(target_receipt, receipt)
