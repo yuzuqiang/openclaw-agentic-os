@@ -13,6 +13,7 @@ import agentic_os.runtime_dispatch as runtime_dispatch
 import agentic_os.reconciliation as reconciliation_module
 from agentic_os.migrations import apply_migrations
 from agentic_os.openclaw_adapter import (
+    AdapterAmbiguousOutcomeError,
     AdapterContractError,
     MetadataObservation,
     OpenClawAdapter,
@@ -576,6 +577,42 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE rpc_kind='allow_lease_release'"
                 ).fetchone()[0],
                 "accepted",
+            )
+
+    def test_ambiguous_adapter_outcome_on_spawn_preserves_owned_lease(self) -> None:
+        adapter = TransportFailingAdapter(
+            {"sessions_spawn": AdapterAmbiguousOutcomeError("post-call drift")},
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            release=[self._release_observation()],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,release_idempotency_key,reconciliation_status "
+                    "FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("acquired", "release-idem", "not_needed"),
+            )
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_release'"
+                ).fetchone()
             )
 
     def test_spawn_metadata_mismatch_releases_only_owned_lease(self) -> None:

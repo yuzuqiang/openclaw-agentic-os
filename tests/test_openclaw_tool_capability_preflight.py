@@ -223,6 +223,15 @@ def init_git_repo(path):
     )
 
 
+def write_attestation_key():
+    key_path = os.path.join(tempfile.mkdtemp(prefix="attestation-key-"), "attestation.key")
+    key = bytes(range(32))
+    with open(key_path, "wb") as handle:
+        handle.write(key)
+    os.chmod(key_path, 0o600)
+    return key_path, key
+
+
 def write_persistent_runtime_fixture(root):
     write_contract_candidate_dist(root)
     scripts_dir = os.path.join(root, "scripts")
@@ -409,26 +418,27 @@ def resign_persistent_evidence(evidence, key):
 
 
 def run_persistent_preflight(evidence, root, key_path):
-    evidence_path = os.path.join(root, "persistent-evidence.json")
-    with open(evidence_path, "w", encoding="utf-8") as handle:
-        json.dump(evidence, handle, sort_keys=True)
-    env = os.environ.copy()
-    env["OPENCLAW_INSTALL_ROOT"] = root
-    env["OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE"] = key_path
-    env["PATH"] = os.path.join(root, "bin") + os.pathsep + env.get("PATH", "")
-    return subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--persistent-attested-preflight-json-file",
-            evidence_path,
-            "--json",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    with tempfile.TemporaryDirectory(prefix="persistent-evidence-") as evidence_dir:
+        evidence_path = os.path.join(evidence_dir, "persistent-evidence.json")
+        with open(evidence_path, "w", encoding="utf-8") as handle:
+            json.dump(evidence, handle, sort_keys=True)
+        env = os.environ.copy()
+        env["OPENCLAW_INSTALL_ROOT"] = root
+        env["OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE"] = key_path
+        env["PATH"] = os.path.join(root, "bin") + os.pathsep + env.get("PATH", "")
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--persistent-attested-preflight-json-file",
+                evidence_path,
+                "--json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
 
 def add_fake_openclaw_to_env(
@@ -3556,11 +3566,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
 
             result = run_persistent_preflight(evidence, install_root, key_path)
@@ -3589,11 +3595,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             evidence["status"] = "pass"
             evidence["attestation"]["response"]["signature"] = "0" * 64
@@ -3612,11 +3614,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             signed_payload = evidence["attestation"]["response"]["signed_payload"]
             signed_payload["issued_at_epoch_ms"] = int(time.time() * 1000) - 60_000
@@ -3648,11 +3646,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             signed_payload = evidence["attestation"]["response"]["signed_payload"]
             issued = (
@@ -3677,11 +3671,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             evidence["captured_at_epoch_ms"] = (
                 int(time.time() * 1000)
@@ -3696,17 +3686,66 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("captured_at is in the future", payload["error"])
 
+    def test_persistent_attested_preflight_rejects_dirty_runtime_worktree(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            Path(install_root, "untracked-runtime-drift.txt").write_text(
+                "drift\n", encoding="utf-8"
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("runtime worktree must be clean", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_runner_digest_not_at_head(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            Path(fixture["runner"]).write_text(
+                "#!/usr/bin/env python3\nraise SystemExit(0)\n# local drift\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    install_root,
+                    "update-index",
+                    "--assume-unchanged",
+                    "scripts/agentic-os-persistent-lifecycle-runner.mts",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            forged_digest = file_sha256(fixture["runner"])
+            evidence["runner"]["script_sha256"] = forged_digest
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("committed blob", payload["error"])
+
     def test_persistent_attested_preflight_rejects_signed_source_set_mismatch(
         self,
     ) -> None:
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             binding = evidence["attestation"]["response"]["signed_payload"]["binding"]
             binding["sources"] = binding["sources"][:-1]
@@ -3726,11 +3765,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             evidence["rpc_evidence"]["allow_lease_status"]["response"][
                 "runtime_attestation"
@@ -3752,11 +3787,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
-            key_path = os.path.join(install_root, "attestation.key")
-            key = bytes(range(32))
-            with open(key_path, "wb") as handle:
-                handle.write(key)
-            os.chmod(key_path, 0o600)
+            key_path, key = write_attestation_key()
             evidence = build_persistent_evidence(module, install_root, fixture, key)
             evidence["rpc_evidence"]["allow_lease_status"]["request_params"] = {
                 "requesterAgentId": "main"

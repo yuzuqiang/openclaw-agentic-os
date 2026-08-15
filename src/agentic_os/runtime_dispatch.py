@@ -23,6 +23,7 @@ from agentic_os.metadata import (
 )
 from agentic_os.migrations import MigrationError, repository_root, verify_database_connection
 from agentic_os.openclaw_adapter import (
+    AdapterAmbiguousOutcomeError,
     AdapterContractError,
     MetadataCapableOpenClawAdapter,
     MetadataObservation,
@@ -41,7 +42,12 @@ METADATA_RUNTIME_ERRORS = (
     sqlite3.Error,
 )
 
-AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError, subprocess.TimeoutExpired)
+AMBIGUOUS_TRANSPORT_ERRORS = (
+    AdapterAmbiguousOutcomeError,
+    TimeoutError,
+    OSError,
+    subprocess.TimeoutExpired,
+)
 RELEASE_FAILURE_ERRORS = METADATA_RUNTIME_ERRORS + AMBIGUOUS_TRANSPORT_ERRORS
 
 

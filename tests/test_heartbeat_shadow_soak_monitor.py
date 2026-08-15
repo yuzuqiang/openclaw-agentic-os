@@ -323,7 +323,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertNotIn("process_alive", envelope["monitor"])
 
     def test_run_validation_abort_persists_failed_closed_envelope(self) -> None:
-        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
             config = monitor._build_config(self.args)
             self.state_dir.mkdir(parents=True, exist_ok=True)
             monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
@@ -339,6 +341,117 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
+
+    def test_run_revalidates_git_contract_before_resuming(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            with mock.patch.object(
+                monitor,
+                "_assert_start_git_contract",
+                side_effect=monitor.MonitorError("dirty monitor"),
+            ):
+                result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["monitor_git_identity_invalid"])
+        self.assertEqual(envelope["note"], "dirty monitor")
+
+    def test_unreadable_core_receipt_persists_failed_closed_envelope(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = "a" * 64
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            (self.state_dir / "core-soak-receipt.json").write_text(
+                "{broken", encoding="utf-8"
+            )
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
+        self.assertIn("unreadable JSON", envelope["note"])
+
+    def test_run_rejects_core_receipt_from_other_monitor_config(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id="other-run",
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
+        self.assertIn("run_id", envelope["note"])
+
+    def test_status_refresh_preserves_failed_closed_audit_fields(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            sample = _pass_sample(1_700_000_000_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, sample)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._persist_envelope(
+                config,
+                status="failed_closed",
+                violation="coverage_gap",
+                sample=sample,
+                note="gap detected",
+            )
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 0)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["coverage_gap"])
+        self.assertEqual(envelope["note"], "gap detected")
+        self.assertIs(envelope["coverage"]["coverage_gap_detected"], True)
 
     def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):

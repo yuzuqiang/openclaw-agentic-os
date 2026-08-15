@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,10 +44,10 @@ SCHEMA_STOP = "p03-heartbeat-shadow-monitor-stop-request.v1"
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 EXPECTED_LIFECYCLE_SHA256 = (
-    "f0104b14fa6eba60dc0c703c270ec4c2f473553ef5670b64ce25aed91da91663"
+    "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "1d3a8ddc7fd45e2f1695c235d1e0fddf6ad98a4ac7b28ff88b49bbe1c339a1d5"
+    "fb70bc7ff179aff4967cef2e34e8aed6d5cd2c243c5bc1853394002313a0ca5a"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -197,6 +197,19 @@ def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
     )
 
 
+def _validate_receipt_config_binding(
+    config: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    if receipt.get("run_id") != config.get("run_id"):
+        raise MonitorError("core receipt run_id does not match monitor config")
+    if receipt.get("authority_input_digest") != config.get("authority_input_digest"):
+        raise MonitorError("core receipt authority digest does not match monitor config")
+    if receipt.get("duration_hours") != config.get("duration_hours"):
+        raise MonitorError("core receipt duration does not match monitor config")
+    if receipt.get("sample_interval_seconds") != config.get("sample_interval_seconds"):
+        raise MonitorError("core receipt sample interval does not match monitor config")
+
+
 def _require_sha256(label: str, value: str) -> None:
     if not _is_sha256(value):
         raise MonitorError(f"{label} must be a full lowercase SHA-256")
@@ -307,6 +320,7 @@ def _envelope(
     config: Mapping[str, Any],
     status: str,
     violation: str | None = None,
+    violations: Sequence[str] | None = None,
     sample: Mapping[str, Any] | None = None,
     note: str | None = None,
 ) -> dict[str, Any]:
@@ -317,10 +331,10 @@ def _envelope(
     snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
     receipt: dict[str, Any] | None = None
     if core_receipt_path.exists():
-        receipt = _read_json(core_receipt_path)
         try:
+            receipt = _read_json(core_receipt_path)
             validate_heartbeat_soak_receipt(receipt)
-        except HeartbeatShadowError:
+        except (HeartbeatShadowError, MonitorError):
             if status != "failed_closed":
                 raise
             receipt = None
@@ -355,6 +369,11 @@ def _envelope(
     stop_argv = _command(script_path, "stop", state_dir)
     rollback_argv = _command(script_path, "rollback", state_dir)
     status_argv = _command(script_path, "status", state_dir)
+    violations_list = (
+        [str(item) for item in violations]
+        if violations is not None
+        else ([] if violation is None else [violation])
+    )
     monitor_doc = {
         "pid": pid,
         "pidfile": str(pidfile),
@@ -417,7 +436,7 @@ def _envelope(
             "last_sampled_at_epoch_ms": last_sampled_at,
             "next_due_epoch_ms": next_due,
             "allowed_latest_epoch_ms": allowed_latest,
-            "coverage_gap_detected": violation == "coverage_gap",
+            "coverage_gap_detected": "coverage_gap" in violations_list,
         },
         "first_sample": first_sample,
         "latest_sample": latest_sample,
@@ -428,7 +447,7 @@ def _envelope(
             "stop_request_exists": _path_from_config(config, "stop_request_path").exists(),
             "rollback_receipt_exists": _path_from_config(config, "rollback_receipt_path").exists(),
         },
-        "violations": [] if violation is None else [violation],
+        "violations": violations_list,
         "note": note,
     }
     return envelope
@@ -755,10 +774,20 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     config = _load_config(state_dir)
+    try:
+        _assert_start_git_contract(config)
+    except MonitorError as exc:
+        _persist_envelope(
+            config,
+            status="failed_closed",
+            violation="monitor_git_identity_invalid",
+            note=str(exc),
+        )
+        return 2
     _write_pidfile(config)
     try:
         _persist_envelope(config, status="running", note="daemon_active")
-    except HeartbeatShadowError as exc:
+    except (HeartbeatShadowError, MonitorError) as exc:
         _persist_envelope(
             config,
             status="failed_closed",
@@ -768,10 +797,11 @@ def run(args: argparse.Namespace) -> int:
         return 2
     while True:
         receipt_path = _path_from_config(config, "core_soak_receipt_path")
-        receipt = _read_json(receipt_path)
         try:
+            receipt = _read_json(receipt_path)
             validate_heartbeat_soak_receipt(receipt)
-        except HeartbeatShadowError as exc:
+            _validate_receipt_config_binding(config, receipt)
+        except (HeartbeatShadowError, MonitorError) as exc:
             _persist_envelope(
                 config,
                 status="failed_closed",
@@ -868,7 +898,22 @@ def status(args: argparse.Namespace) -> int:
     try:
         config = _load_config(state_dir)
         refreshed_status = str(envelope.get("status", "unknown"))
-        envelope = _envelope(config=config, status=refreshed_status)
+        existing_violations = envelope.get("violations")
+        violations = (
+            [str(item) for item in existing_violations]
+            if isinstance(existing_violations, list)
+            else []
+        )
+        note = envelope.get("note") if isinstance(envelope.get("note"), str) else None
+        latest_sample = envelope.get("latest_sample")
+        sample = latest_sample if isinstance(latest_sample, Mapping) else None
+        envelope = _envelope(
+            config=config,
+            status=refreshed_status,
+            violations=violations,
+            sample=sample,
+            note=note,
+        )
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
     except MonitorError:
         pass

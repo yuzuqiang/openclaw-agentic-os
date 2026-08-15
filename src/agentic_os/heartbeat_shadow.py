@@ -698,13 +698,21 @@ def _move_database_to_local_backup(source: Path, backup: Path) -> list[str]:
         raise HeartbeatShadowError("Heartbeat rollback backup already exists")
     backup.parent.mkdir(parents=True, exist_ok=True)
     sidecars = _sqlite_sidecars(source)
-    os.replace(source, backup)
     moved: list[str] = []
+    moved_paths: list[tuple[Path, Path]] = []
     try:
+        os.replace(source, backup)
+        moved_paths.append((backup, source))
         for sidecar in sidecars:
             destination = Path(f"{backup}{sidecar.name.removeprefix(source.name)}")
             os.replace(sidecar, destination)
+            moved_paths.append((destination, sidecar))
             moved.append(destination.name)
+    except OSError as exc:
+        for destination, original in reversed(moved_paths):
+            if destination.exists() and not original.exists():
+                os.replace(destination, original)
+        raise HeartbeatShadowError("Heartbeat rollback backup move failed atomically") from exc
     finally:
         _fsync_directory(backup.parent)
         _fsync_directory(source.parent)

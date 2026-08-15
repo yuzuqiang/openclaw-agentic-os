@@ -30,6 +30,10 @@ class AdapterContractError(ValueError):
     """An OpenClaw response did not expose the required metadata contract."""
 
 
+class AdapterAmbiguousOutcomeError(AdapterContractError):
+    """An application RPC may have succeeded but can no longer be verified."""
+
+
 @dataclass(frozen=True)
 class MetadataObservation:
     metadata_contract_version: str | None
@@ -920,7 +924,7 @@ class OpenClawAdapter:
                 self._transport, state.attestation, clock_ms=state.clock_ms
             )
         except (AttributeError, RuntimeAttestationError) as exc:
-            raise AdapterContractError(
+            raise AdapterAmbiguousOutcomeError(
                 "runtime attestation expired or drifted after application RPC; "
                 "outcome requires human review"
             ) from exc

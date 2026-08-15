@@ -1844,12 +1844,35 @@ def _validate_runtime_and_agentic_heads(evidence: Mapping[str, Any]) -> tuple[Pa
     ).lower()
     if _require_valid_git_revision(runtime_worktree, "HEAD") != expected_runtime_head:
         raise AdapterContractError("persistent preflight runtime head mismatch")
+    _require_clean_persistent_runtime_worktree(runtime_worktree)
     script_root = Path(__file__).resolve().parents[1]
     if agentic_os_worktree != script_root:
         raise AdapterContractError("persistent preflight Agentic OS worktree mismatch")
     if _require_valid_git_revision(script_root, "HEAD") != expected_agentic_head:
         raise AdapterContractError("persistent preflight Agentic OS head mismatch")
     return runtime_worktree, agentic_os_worktree
+
+
+def _require_clean_persistent_runtime_worktree(runtime_worktree: Path) -> None:
+    status = _git_status_porcelain(runtime_worktree)
+    if status is None:
+        raise AdapterContractError("persistent preflight runtime worktree status unavailable")
+    if status.strip():
+        raise AdapterContractError("persistent preflight runtime worktree must be clean")
+
+
+def _git_committed_blob_digest(root: Path, path: Path, revision: str = "HEAD") -> str:
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+        proc = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-p", f"{revision}:{relative}"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        raise AdapterContractError("persistent runner script committed blob is unavailable") from exc
+    return hashlib.sha256(proc.stdout).hexdigest()
 
 
 def _validate_runner_script_binding(evidence: Mapping[str, Any], runtime_worktree: Path) -> None:
@@ -1865,6 +1888,9 @@ def _validate_runner_script_binding(evidence: Mapping[str, Any], runtime_worktre
     expected = _require_sha256(runner.get("script_sha256"), "persistent runner script digest")
     if observed != expected:
         raise AdapterContractError("persistent runner script digest mismatch")
+    committed = _git_committed_blob_digest(runtime_worktree, script_path)
+    if committed != expected:
+        raise AdapterContractError("persistent runner script digest does not match committed blob")
 
 
 def _require_persistent_rpc_record(

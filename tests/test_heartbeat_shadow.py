@@ -652,6 +652,51 @@ class HeartbeatShadowTests(unittest.TestCase):
         )
         self.assertTrue(receipt_path.is_file())
 
+    def test_forced_rollback_compensates_partial_sidecar_backup_move(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/partial-rollback.json"
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                "UPDATE workflow_authority SET updated_at='partial-move' "
+                "WHERE workflow='heartbeat'"
+            )
+            connection.commit()
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.assertTrue(self.database.with_name("control.db-wal").exists())
+        original_replace = heartbeat_shadow_module.os.replace
+
+        def fail_wal_move(source: Path, destination: Path) -> None:
+            if str(destination).endswith("control.db-wal"):
+                raise OSError("simulated wal move failure")
+            original_replace(source, destination)
+
+        with mock.patch.object(
+            heartbeat_shadow_module.os,
+            "replace",
+            side_effect=fail_wal_move,
+        ):
+            with self.assertRaisesRegex(HeartbeatShadowError, "failed atomically"):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="partial-sidecar",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+
+        backup = (
+            self.root
+            / "state/agentic-os/backups/heartbeat-shadow-rollback/partial-sidecar/control.db"
+        )
+        self.assertTrue(self.database.is_file())
+        self.assertTrue(self.database.with_name("control.db-wal").exists())
+        self.assertFalse(backup.exists())
+        self.assertFalse(receipt_path.exists())
+
     def test_forced_rollback_fails_closed_on_runtime_authority_rows(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/rejected-rollback.json"
