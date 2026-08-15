@@ -1893,6 +1893,15 @@ def _validate_runner_script_binding(evidence: Mapping[str, Any], runtime_worktre
         raise AdapterContractError("persistent runner script digest does not match committed blob")
 
 
+def _require_active_install_root_matches_runtime_worktree(
+    root: Path, runtime_worktree: Path
+) -> None:
+    if root.resolve() != runtime_worktree.resolve():
+        raise RuntimeEvidenceError(
+            "persistent active install root must match reviewed runtime worktree"
+        )
+
+
 def _require_persistent_rpc_record(
     evidence: Mapping[str, Any], key: str, method: str
 ) -> Mapping[str, Any]:
@@ -1917,6 +1926,34 @@ def _require_persistent_rpc_record(
     if record.get("raw_response_sha256") != digest:
         raise AdapterContractError(f"persistent {method} raw response digest mismatch")
     return record
+
+
+def _persistent_rpc_transcript_sha256(evidence: Mapping[str, Any]) -> str:
+    records = []
+    for key, method in (
+        ("tools_catalog", "tools.catalog"),
+        ("allow_lease_status", "subagents.allowLease.status"),
+    ):
+        record = _require_persistent_rpc_record(evidence, key, method)
+        records.append(
+            {
+                "key": key,
+                "method": method,
+                "request_params": dict(
+                    _require_record(
+                        record.get("request_params"),
+                        f"persistent {method} request_params",
+                    )
+                ),
+                "raw_response_sha256": record.get("raw_response_sha256"),
+            }
+        )
+    return _canonical_json_sha256(
+        {
+            "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+            "records": records,
+        }
+    )
 
 
 def _validate_status_attestation_receipt(
@@ -2014,6 +2051,7 @@ def _validate_persistent_attestation(
             "owner_scope_id",
             "binding",
             "method_bindings",
+            "rpc_transcript_sha256",
         ),
         "persistent signed attestation payload",
     )
@@ -2027,6 +2065,10 @@ def _validate_persistent_attestation(
         raise AdapterContractError("persistent attestation nonce mismatch")
     if signed_payload.get("client_process_id") != request_params.get("client_process_id"):
         raise AdapterContractError("persistent attestation client process mismatch")
+    if signed_payload.get("rpc_transcript_sha256") != _persistent_rpc_transcript_sha256(
+        evidence
+    ):
+        raise AdapterContractError("persistent RPC transcript is not signed-channel bound")
     if (
         attestation.get("runtime_identity_token_sha256")
         != signed_payload.get("runtime_identity_token_sha256")
@@ -2760,6 +2802,7 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
         include_env_override=True,
         require_env_override=True,
     )
+    _require_active_install_root_matches_runtime_worktree(root, runtime_worktree)
     runtime_record = _require_record(evidence.get("runtime"), "persistent runtime")
     for key, label in (
         ("executable_sha256", "active_executable_sha256"),

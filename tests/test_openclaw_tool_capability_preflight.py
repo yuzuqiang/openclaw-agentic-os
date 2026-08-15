@@ -279,6 +279,48 @@ def persistent_status_receipt(signed_payload):
     }
 
 
+def persistent_rpc_transcript_sha256(module, rpc_evidence):
+    records = []
+    for key, method in (
+        ("tools_catalog", "tools.catalog"),
+        ("allow_lease_status", "subagents.allowLease.status"),
+    ):
+        record = rpc_evidence[key]
+        records.append(
+            {
+                "key": key,
+                "method": method,
+                "request_params": dict(record["request_params"]),
+                "raw_response_sha256": record["raw_response_sha256"],
+            }
+        )
+    return module._canonical_json_sha256(
+        {
+            "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+            "records": records,
+        }
+    )
+
+
+def refresh_persistent_rpc_transcript(evidence, module):
+    signed_payload = evidence["attestation"]["response"]["signed_payload"]
+    evidence["rpc_evidence"]["allow_lease_status"]["response"][
+        "runtime_attestation"
+    ] = persistent_status_receipt(signed_payload)
+    evidence["rpc_evidence"]["allow_lease_status"]["raw_response_sha256"] = canonical_sha256(
+        evidence["rpc_evidence"]["allow_lease_status"]["response"]
+    )
+    signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
+        module, evidence["rpc_evidence"]
+    )
+    evidence["rpc_evidence"]["allow_lease_status"]["response"][
+        "runtime_attestation"
+    ] = persistent_status_receipt(signed_payload)
+    evidence["rpc_evidence"]["allow_lease_status"]["raw_response_sha256"] = canonical_sha256(
+        evidence["rpc_evidence"]["allow_lease_status"]["response"]
+    )
+
+
 def build_persistent_evidence(module, root, fixture, key):
     now_ms = int(time.time() * 1000)
     method_bindings = module._expected_method_bindings_payload()
@@ -330,12 +372,6 @@ def build_persistent_evidence(module, root, fixture, key):
         },
         "method_bindings": method_bindings,
     }
-    signature = hmac.new(key, canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
-    attestation_response = {
-        "signature_algorithm": "hmac-sha256",
-        "signature": signature,
-        "signed_payload": signed_payload,
-    }
     tools_catalog = {
         "groups": [
             {
@@ -350,9 +386,27 @@ def build_persistent_evidence(module, root, fixture, key):
     status_response = {
         "status": "ok",
         "leases": [],
-        "runtime_attestation": persistent_status_receipt(signed_payload),
     }
-    return {
+    rpc_evidence = {
+        "tools_catalog": {
+            "method": "tools.catalog",
+            "request_params": {},
+            "response": tools_catalog,
+            "raw_response_sha256": canonical_sha256(tools_catalog),
+        },
+        "allow_lease_status": {
+            "method": "subagents.allowLease.status",
+            "request_params": {},
+            "response": status_response,
+            "raw_response_sha256": canonical_sha256(status_response),
+        },
+    }
+    attestation_response = {
+        "signature_algorithm": "hmac-sha256",
+        "signature": "0" * 64,
+        "signed_payload": signed_payload,
+    }
+    evidence = {
         "schema_version": module.PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION,
         "captured_at_epoch_ms": now_ms,
         "expected_runtime_head": git_head(root),
@@ -385,36 +439,26 @@ def build_persistent_evidence(module, root, fixture, key):
                 "runtime_identity_token_sha256"
             ],
         },
-        "rpc_evidence": {
-            "tools_catalog": {
-                "method": "tools.catalog",
-                "request_params": {},
-                "response": tools_catalog,
-                "raw_response_sha256": canonical_sha256(tools_catalog),
-            },
-            "allow_lease_status": {
-                "method": "subagents.allowLease.status",
-                "request_params": {},
-                "response": status_response,
-                "raw_response_sha256": canonical_sha256(status_response),
-            },
-        },
+        "rpc_evidence": rpc_evidence,
     }
+    refresh_persistent_rpc_transcript(evidence, module)
+    signature = hmac.new(key, canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
+    evidence["attestation"]["response"]["signature"] = signature
+    evidence["attestation"]["response_sha256"] = canonical_sha256(
+        evidence["attestation"]["response"]
+    )
+    return evidence
 
 
 def resign_persistent_evidence(evidence, key):
+    module = load_preflight_module()
+    refresh_persistent_rpc_transcript(evidence, module)
     signed_payload = evidence["attestation"]["response"]["signed_payload"]
     response = evidence["attestation"]["response"]
     response["signature"] = hmac.new(
         key, canonical_json_bytes(signed_payload), hashlib.sha256
     ).hexdigest()
     evidence["attestation"]["response_sha256"] = canonical_sha256(response)
-    evidence["rpc_evidence"]["allow_lease_status"]["response"][
-        "runtime_attestation"
-    ] = persistent_status_receipt(signed_payload)
-    evidence["rpc_evidence"]["allow_lease_status"]["raw_response_sha256"] = canonical_sha256(
-        evidence["rpc_evidence"]["allow_lease_status"]["response"]
-    )
 
 
 def run_persistent_preflight(evidence, root, key_path):
@@ -3619,19 +3663,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             signed_payload = evidence["attestation"]["response"]["signed_payload"]
             signed_payload["issued_at_epoch_ms"] = int(time.time() * 1000) - 60_000
             signed_payload["expires_at_epoch_ms"] = int(time.time() * 1000) - 1
-            evidence["rpc_evidence"]["allow_lease_status"]["response"][
-                "runtime_attestation"
-            ] = persistent_status_receipt(signed_payload)
-            evidence["rpc_evidence"]["allow_lease_status"][
-                "raw_response_sha256"
-            ] = canonical_sha256(
-                evidence["rpc_evidence"]["allow_lease_status"]["response"]
-            )
-            response = evidence["attestation"]["response"]
-            response["signature"] = hmac.new(
-                key, canonical_json_bytes(signed_payload), hashlib.sha256
-            ).hexdigest()
-            evidence["attestation"]["response_sha256"] = canonical_sha256(response)
+            resign_persistent_evidence(evidence, key)
 
             result = run_persistent_preflight(evidence, install_root, key_path)
 
@@ -3739,6 +3771,47 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("committed blob", payload["error"])
 
+    def test_persistent_attested_preflight_rejects_install_root_drift_from_reviewed_worktree(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as reviewed_root, tempfile.TemporaryDirectory() as active_root:
+            reviewed_fixture = write_persistent_runtime_fixture(reviewed_root)
+            write_persistent_runtime_fixture(active_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(
+                module, reviewed_root, reviewed_fixture, key
+            )
+
+            result = run_persistent_preflight(evidence, active_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("install root must match reviewed runtime worktree", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_unsigned_rpc_transcript_drift(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["rpc_evidence"]["tools_catalog"]["response"]["groups"].append(
+                {"id": "forged", "tools": []}
+            )
+            evidence["rpc_evidence"]["tools_catalog"]["raw_response_sha256"] = canonical_sha256(
+                evidence["rpc_evidence"]["tools_catalog"]["response"]
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("RPC transcript", payload["error"])
+
     def test_persistent_attested_preflight_rejects_signed_source_set_mismatch(
         self,
     ) -> None:
@@ -3775,6 +3848,15 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             ] = canonical_sha256(
                 evidence["rpc_evidence"]["allow_lease_status"]["response"]
             )
+            signed_payload = evidence["attestation"]["response"]["signed_payload"]
+            signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
+                module, evidence["rpc_evidence"]
+            )
+            response = evidence["attestation"]["response"]
+            response["signature"] = hmac.new(
+                key, canonical_json_bytes(signed_payload), hashlib.sha256
+            ).hexdigest()
+            evidence["attestation"]["response_sha256"] = canonical_sha256(response)
 
             result = run_persistent_preflight(evidence, install_root, key_path)
 

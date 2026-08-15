@@ -4,6 +4,10 @@
     "command": "phase-c independent verifier reviewed phase-b-p03-isolated-candidate-lifecycle-20260814T032902Z.json",
     "completed_at": "2026-08-14T03:29:14Z"
   },
+  "authenticated_record": {
+    "path": "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260814T032914Z.json",
+    "sha256": "40e97095921c09831e8105e3b93724659492021a669104e5fd63a47371ea8b6f"
+  },
   "status": "pass",
   "receipt_sha256": "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8",
   "validated_at_utc": "2026-08-14T03:29:14Z",

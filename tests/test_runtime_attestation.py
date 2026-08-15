@@ -391,6 +391,32 @@ class RuntimeAttestationTests(unittest.TestCase):
             adapter.allow_lease_acquire(lease_params())
         self.assertEqual(transport.calls, [])
 
+    def test_in_place_reattestation_preserves_accepted_session_state(self) -> None:
+        from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
+
+        monotonic = {"now": 10_000}
+        transport = FakeAttestedTransport()
+        attestor = TransportBoundRuntimeAttestor(
+            DigestVerifier(),
+            clock_ms=lambda: NOW_MS,
+            monotonic_ms=lambda: monotonic["now"],
+            nonce_factory=lambda: "challenge-1",
+        )
+        adapter = OpenClawAdapter.from_attested_transport(transport, attestor)
+        session = adapter.sessions_spawn(spawn_params())
+        self.assertEqual(session.external_id, "session-1")
+
+        monotonic["now"] += 60_000
+        with self.assertRaisesRegex(AdapterContractError, "monotonic deadline"):
+            adapter.session_status("session-1")
+
+        adapter.refresh_runtime_attestation(attestor)
+        adapter.session_status("session-1")
+
+        self.assertEqual(
+            transport.calls[-1], ("session_status", {"sessionKey": "session-1"})
+        )
+
     def test_transport_must_explicitly_claim_persistent_channel_authority(self) -> None:
         class MissingCapabilityTransport:
             def __init__(self) -> None:

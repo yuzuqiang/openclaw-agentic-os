@@ -99,6 +99,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             "soak": {"production_cron_mutated": False},
         }
         lifecycle_sha = _write_json(self.lifecycle, lifecycle)
+        self.validation_anchor = self.root / "docs/runtime-evidence/validation-anchor.json"
+        anchor = {
+            "schema_version": "agentic-os.independent-validation-anchor.v1",
+            "record_authority": "phase_c_terminal_checkpoint",
+            "validation_verdict": "pass",
+            "receipt_sha256": lifecycle_sha,
+            "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+            "verifier": {
+                "identity": "security-engineer-phase-c",
+                "role": "independent_verifier",
+                "session_key": "phase-c-session",
+            },
+        }
+        anchor_sha = _write_json(self.validation_anchor, anchor)
         validation_sha = _write_json(
             self.validation,
             {
@@ -113,6 +127,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "invocation": {
                     "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
                     "completed_at": "2026-08-15T00:00:00Z",
+                },
+                "authenticated_record": {
+                    "path": str(self.validation_anchor.relative_to(self.root)),
+                    "sha256": anchor_sha,
                 },
             },
         )
@@ -221,6 +239,34 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.args.expected_independent_validation_sha256 = weak_validation_sha
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             with self.assertRaisesRegex(monitor.MonitorError, "verifier provenance"):
+                monitor._build_config(self.args)
+
+    def test_predecessor_validation_requires_authenticated_record_hash(self) -> None:
+        lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
+        validation_sha = _write_json(
+            self.validation,
+            {
+                "status": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
+                "invocation": {
+                    "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
+                    "completed_at": "2026-08-15T00:00:00Z",
+                },
+                "authenticated_record": {
+                    "path": str(self.validation_anchor.relative_to(self.root)),
+                    "sha256": "0" * 64,
+                },
+            },
+        )
+        self.args.expected_independent_validation_sha256 = validation_sha
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(monitor.MonitorError, "authenticated record hash"):
                 monitor._build_config(self.args)
 
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
@@ -357,6 +403,48 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertEqual(envelope["status"], "first_sample_pass")
         self.assertNotIn("process_alive", envelope["monitor"])
+
+    def test_daemon_readiness_accepts_child_running_envelope(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            self.state_dir / "monitor-envelope.json",
+            {"status": "running", "monitor": {"pid": 12345}},
+        )
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+
+        monitor._wait_for_daemon_ready(config, process)
+
+    def test_daemon_readiness_rejects_child_failed_envelope(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            self.state_dir / "monitor-envelope.json",
+            {"status": "failed_closed", "monitor": {"pid": 12345}},
+        )
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+
+        with self.assertRaisesRegex(monitor.MonitorError, "failed closed"):
+            monitor._wait_for_daemon_ready(config, process)
+
+    def test_daemon_readiness_rejects_early_process_exit(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = 2
+
+        with self.assertRaisesRegex(monitor.MonitorError, "exited before readiness"):
+            monitor._wait_for_daemon_ready(config, process)
 
     def test_run_validation_abort_persists_failed_closed_envelope(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(

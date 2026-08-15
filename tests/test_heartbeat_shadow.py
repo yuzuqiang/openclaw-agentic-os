@@ -808,7 +808,57 @@ class HeartbeatShadowTests(unittest.TestCase):
                     repo_root_path=self.root,
                 )
 
-        self.assertTrue(self.database.exists())
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(receipt_path.exists())
+
+    def test_rollback_source_path_guard_blocks_sqlite_reopen(self) -> None:
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.database.unlink(missing_ok=True)
+        descriptor = heartbeat_shadow_module._create_rollback_source_path_guard(
+            self.database
+        )
+        try:
+            with self.assertRaises(sqlite3.Error):
+                sqlite3.connect(self.database)
+        finally:
+            heartbeat_shadow_module._release_rollback_source_path_guard(
+                self.database, descriptor
+            )
+        self.assertFalse(self.database.exists())
+
+    def test_forced_rollback_restores_database_when_post_move_step_fails(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/post-move-fail-rollback.json"
+        backup = (
+            self.root
+            / "state/agentic-os/backups/heartbeat-shadow-rollback/post-move-fail/control.db"
+        )
+        original_sha256 = heartbeat_shadow_module._sha256_file
+
+        def fail_backup_hash(path: Path) -> str:
+            if Path(path) == backup:
+                raise HeartbeatShadowError("simulated backup hash failure")
+            return original_sha256(path)
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_sha256_file",
+            side_effect=fail_backup_hash,
+        ):
+            with self.assertRaisesRegex(HeartbeatShadowError, "simulated backup hash"):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="post-move-fail",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(backup.exists())
         self.assertFalse(receipt_path.exists())
 
     def test_forced_rollback_checkpoints_committed_wal_under_final_lock(self) -> None:

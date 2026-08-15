@@ -68,6 +68,11 @@ class MetadataCapableOpenClawAdapter(Protocol):
     def session_result(self, session_key: str) -> MetadataObservation:
         ...
 
+    def refresh_runtime_attestation(
+        self, attestor: TransportBoundRuntimeAttestor
+    ) -> None:
+        ...
+
 
 class OpenClawTransport(Protocol):
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -888,6 +893,23 @@ class OpenClawAdapter:
     def runtime_attestation_digest(self) -> str:
         state = self._require_verified_runtime_authority()
         return state.attestation.payload_sha256
+
+    def refresh_runtime_attestation(
+        self, attestor: TransportBoundRuntimeAttestor
+    ) -> None:
+        if getattr(self._transport, "supports_persistent_adapter_authority", False) is not True:
+            raise AdapterContractError(
+                "transport cannot refresh persistent adapter authority without a bound application channel"
+            )
+        try:
+            attestation = attestor.attest(self._transport)
+        except RuntimeAttestationError as exc:
+            raise AdapterContractError(str(exc)) from exc
+        _ADAPTER_AUTHORITIES[self] = _AdapterAuthorityState(
+            attestation=attestation,
+            clock_ms=attestor.clock_ms,
+            monotonic_ms=attestor.monotonic_ms,
+        )
 
     @classmethod
     def from_preflighted_catalog(

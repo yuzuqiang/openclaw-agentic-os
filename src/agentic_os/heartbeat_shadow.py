@@ -767,11 +767,7 @@ def _move_database_to_local_backup(source: Path, backup: Path) -> list[str]:
 
 def _create_rollback_source_path_guard(source: Path) -> int:
     try:
-        descriptor = os.open(
-            source,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            0o600,
-        )
+        source.mkdir(mode=0o700)
     except FileExistsError as exc:
         raise HeartbeatShadowError(
             "Heartbeat shadow DB path was recreated during rollback"
@@ -779,6 +775,16 @@ def _create_rollback_source_path_guard(source: Path) -> int:
     except OSError as exc:
         raise HeartbeatShadowError(
             "Heartbeat rollback source path guard could not be created"
+        ) from exc
+    try:
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError as exc:
+        try:
+            source.rmdir()
+        except OSError:
+            pass
+        raise HeartbeatShadowError(
+            "Heartbeat rollback source path guard could not be opened"
         ) from exc
     return descriptor
 
@@ -798,7 +804,7 @@ def _release_rollback_source_path_guard(source: Path, descriptor: int) -> None:
                 and source_stat.st_dev == descriptor_stat.st_dev
                 and source_stat.st_ino == descriptor_stat.st_ino
             ):
-                source.unlink()
+                source.rmdir()
             elif source_stat is not None:
                 raise HeartbeatShadowError(
                     "Heartbeat rollback source path was replaced before guard removal"
@@ -810,6 +816,41 @@ def _release_rollback_source_path_guard(source: Path, descriptor: int) -> None:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _remove_recreated_rollback_source_path(source: Path) -> None:
+    try:
+        if source.is_dir():
+            source.rmdir()
+        elif source.exists():
+            source.unlink()
+    except OSError as exc:
+        raise HeartbeatShadowError(
+            "Heartbeat rollback recreated source path could not be removed"
+        ) from exc
+
+
+def _restore_database_from_local_backup(source: Path, backup: Path) -> None:
+    if source.exists():
+        raise HeartbeatShadowError("Heartbeat rollback source path blocks restore")
+    try:
+        os.replace(backup, source)
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            backup_sidecar = Path(f"{backup}{suffix}")
+            source_sidecar = Path(f"{source}{suffix}")
+            if backup_sidecar.exists():
+                if source_sidecar.exists():
+                    raise HeartbeatShadowError(
+                        "Heartbeat rollback sidecar path blocks restore"
+                    )
+                os.replace(backup_sidecar, source_sidecar)
+    except OSError as exc:
+        raise HeartbeatShadowError(
+            "Heartbeat rollback backup restore failed"
+        ) from exc
+    finally:
+        _fsync_directory(backup.parent)
+        _fsync_directory(source.parent)
 
 
 def run_heartbeat_file_shadow_cycle(
@@ -1570,6 +1611,8 @@ def force_heartbeat_file_authority_rollback(
     assert_privacy_preflight(root, database_paths=(target, audit_snapshot, backup))
     lock_connection, source_idle = _lock_rollback_source_idle(target)
     source_path_guard: int | None = None
+    backup_created = False
+    receipt_written = False
     try:
         snapshot = _locked_rollback_audit_snapshot(target, audit_snapshot, root)
         counts = dict(snapshot["runtime_authority_counts"])
@@ -1590,6 +1633,7 @@ def force_heartbeat_file_authority_rollback(
         )
         source_sha256 = _sha256_file(target)
         moved_sidecars = _move_database_to_local_backup(target, backup)
+        backup_created = True
         source_path_guard = _create_rollback_source_path_guard(target)
         backup_sha256 = _sha256_file(backup)
         if backup_sha256 != source_sha256:
@@ -1639,10 +1683,15 @@ def force_heartbeat_file_authority_rollback(
             "production_session_or_lease_authority_left": False,
         }
         _atomic_write_json(target_receipt, receipt)
+        receipt_written = True
     finally:
         if source_path_guard is not None:
             _release_rollback_source_path_guard(target, source_path_guard)
             source_path_guard = None
+        if backup_created and not receipt_written:
+            if target.exists():
+                _remove_recreated_rollback_source_path(target)
+            _restore_database_from_local_backup(target, backup)
         try:
             lock_connection.execute("ROLLBACK")
         except sqlite3.Error:

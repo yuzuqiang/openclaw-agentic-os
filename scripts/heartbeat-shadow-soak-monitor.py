@@ -43,11 +43,12 @@ SCHEMA_SNAPSHOTS = "p03-heartbeat-shadow-runtime-snapshot-receipts.v1"
 SCHEMA_STOP = "p03-heartbeat-shadow-monitor-stop-request.v1"
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
+DAEMON_READY_TIMEOUT_SECONDS = 2.0
 EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "67eaebe1e9de76b0aca984df7f01fad9018753ede3cf6ed78f855f8c9e61420e"
+    "ddcc4f0f5df6a794885d3dba7055c3e840f5354909dfcc0c0144532403001536"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -340,6 +341,54 @@ def _validate_independent_validation_provenance(
         value = invocation.get(key)
         if not isinstance(value, str) or not value:
             raise MonitorError(f"independent validation invocation {key} is missing")
+    _validate_independent_validation_anchor(config, validation)
+
+
+def _validate_independent_validation_anchor(
+    config: Mapping[str, Any], validation: Mapping[str, Any]
+) -> None:
+    anchor = validation.get("authenticated_record")
+    if not isinstance(anchor, Mapping):
+        raise MonitorError("independent validation authenticated record is missing")
+    raw_path = anchor.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise MonitorError("independent validation authenticated record path is missing")
+    anchor_path = Path(raw_path)
+    if not anchor_path.is_absolute():
+        anchor_path = (REPO_ROOT / anchor_path).resolve()
+    else:
+        anchor_path = anchor_path.resolve()
+    try:
+        anchor_path.relative_to(REPO_ROOT.resolve())
+    except ValueError as exc:
+        raise MonitorError(
+            "independent validation authenticated record must be repo-bound"
+        ) from exc
+    expected_sha = str(anchor.get("sha256", ""))
+    if _sha256_file(anchor_path) != expected_sha:
+        raise MonitorError("independent validation authenticated record hash mismatch")
+    record = _read_json(anchor_path)
+    if record.get("schema_version") != "agentic-os.independent-validation-anchor.v1":
+        raise MonitorError("independent validation authenticated record schema mismatch")
+    if record.get("record_authority") == "lifecycle_producer":
+        raise MonitorError("independent validation authenticated record is self-produced")
+    if record.get("validation_verdict") != "pass":
+        raise MonitorError("independent validation authenticated record is not PASS")
+    if record.get("receipt_sha256") != validation.get("receipt_sha256"):
+        raise MonitorError("independent validation authenticated record receipt mismatch")
+    if record.get("implementation_head") != config["exact_heads"]["implementation_base"]:
+        raise MonitorError(
+            "independent validation authenticated record implementation mismatch"
+        )
+    verifier = validation["verifier"]
+    record_verifier = record.get("verifier")
+    if not isinstance(record_verifier, Mapping):
+        raise MonitorError("independent validation authenticated record verifier missing")
+    for key in ("identity", "role", "session_key"):
+        if record_verifier.get(key) != verifier.get(key):
+            raise MonitorError(
+                f"independent validation authenticated record verifier {key} mismatch"
+            )
 
 
 def _envelope(
@@ -507,6 +556,36 @@ def _write_pidfile(config: Mapping[str, Any]) -> None:
     pidfile = _path_from_config(config, "pidfile_path")
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     pidfile.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+
+def _wait_for_daemon_ready(config: Mapping[str, Any], process: subprocess.Popen[bytes]) -> None:
+    envelope_path = _path_from_config(config, "monitor_envelope_path")
+    deadline = time.monotonic() + DAEMON_READY_TIMEOUT_SECONDS
+    last_status = None
+    while time.monotonic() < deadline:
+        if envelope_path.exists():
+            try:
+                envelope = _read_json(envelope_path)
+            except MonitorError:
+                envelope = {}
+            last_status = envelope.get("status")
+            if last_status == "failed_closed":
+                raise MonitorError("monitor daemon failed closed before readiness")
+            monitor = envelope.get("monitor")
+            if (
+                last_status == "running"
+                and isinstance(monitor, Mapping)
+                and monitor.get("pid") == process.pid
+                and process.poll() is None
+            ):
+                return
+        exit_code = process.poll()
+        if exit_code is not None:
+            raise MonitorError(f"monitor daemon exited before readiness: {exit_code}")
+        time.sleep(0.05)
+    raise MonitorError(
+        f"monitor daemon did not report readiness; last_status={last_status!r}"
+    )
 
 
 def _assert_no_active_monitor(state_dir: Path) -> None:
@@ -774,7 +853,12 @@ def start(args: argparse.Namespace) -> int:
         start_new_session=True,
     )
     _path_from_config(config, "pidfile_path").write_text(f"{process.pid}\n", encoding="utf-8")
-    _persist_envelope(config, status="running", sample=first, note="daemon_started_after_first_sample")
+    try:
+        _wait_for_daemon_ready(config, process)
+    except MonitorError as exc:
+        if process.poll() is None:
+            process.terminate()
+        raise MonitorError("monitor daemon did not become ready") from exc
     print(
         json.dumps(
             {
