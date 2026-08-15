@@ -1137,7 +1137,11 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
     def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
         evidence_dir = repository_root() / "docs" / "runtime-evidence"
-        isolated_files = sorted(evidence_dir.glob("*isolated*.json"))
+        isolated_files = sorted(
+            path
+            for path in evidence_dir.glob("*isolated*.json")
+            if "lifecycle" not in path.name
+        )
         self.assertTrue(isolated_files)
         for path in isolated_files:
             with self.subTest(path=path.name):
@@ -1175,6 +1179,21 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                         {},
                     )
                     self.assertGreater(history.get("history_items_identity_checked", 0), 0)
+
+    def test_committed_lifecycle_receipts_do_not_expose_plaintext_gateway_tokens(
+        self,
+    ) -> None:
+        evidence_dir = repository_root() / "docs" / "runtime-evidence"
+        lifecycle_files = sorted(evidence_dir.glob("*lifecycle*.json"))
+        self.assertTrue(lifecycle_files)
+        for path in lifecycle_files:
+            with self.subTest(path=path.name):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                staging = payload.get("staging", {})
+                self.assertNotIn("token", staging)
+                if "token_redacted" in staging:
+                    self.assertIs(staging["token_redacted"], True)
+                    self.assertRegex(staging.get("token_sha256", ""), r"^[0-9a-f]{64}$")
 
     def test_installed_openclaw_negative_baseline_fails_for_2026_7_1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

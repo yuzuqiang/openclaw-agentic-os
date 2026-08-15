@@ -840,6 +840,26 @@ class RuntimeDispatchTests(unittest.TestCase):
                         0,
                     )
 
+    def test_invalid_transient_spawn_descriptor_fails_before_acquire(self) -> None:
+        request = DispatchRequest(**{**self.request.__dict__, "spawn_task": None})
+        adapter = self._accepted_adapter()
+
+        with self.assertRaisesRegex(RuntimeDispatchError, "transient task"):
+            dispatch_with_metadata(self.database, adapter, request)
+
+        self.assertEqual(adapter.calls, [])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM external_rpc_intents").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM spawn_requests WHERE spawn_request_id='spawn'"
+                ).fetchone()[0],
+                "pending",
+            )
+
     def test_failed_spawn_replay_preserves_review_state_without_adapter_call(self) -> None:
         for state in ("pending", "unknown", "failed", "human_review_required"):
             with self.subTest(state=state):

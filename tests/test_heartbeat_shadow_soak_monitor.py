@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import signal
 import tempfile
 import unittest
 from argparse import Namespace
@@ -264,6 +266,48 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                         )
 
         rollback.assert_not_called()
+
+    def test_unrequested_signal_exits_nonzero_after_failed_closed_envelope(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HEARTBEAT_SHADOW_MONITOR_STATE_DIR": str(self.state_dir)},
+        ), mock.patch.object(
+            monitor, "_load_config", return_value={"state_dir": str(self.state_dir)}
+        ), mock.patch.object(
+            monitor, "_stop_requested", return_value=False
+        ), mock.patch.object(
+            monitor, "_persist_envelope"
+        ) as persist:
+            with self.assertRaises(SystemExit) as raised:
+                monitor._handle_signal(signal.SIGTERM, None)
+
+        self.assertEqual(raised.exception.code, 2)
+        persist.assert_called_once_with(
+            {"state_dir": str(self.state_dir)},
+            status="failed_closed",
+            violation=f"signal_{signal.SIGTERM}",
+        )
+
+    def test_requested_signal_exits_zero_after_stopped_envelope(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"HEARTBEAT_SHADOW_MONITOR_STATE_DIR": str(self.state_dir)},
+        ), mock.patch.object(
+            monitor, "_load_config", return_value={"state_dir": str(self.state_dir)}
+        ), mock.patch.object(
+            monitor, "_stop_requested", return_value=True
+        ), mock.patch.object(
+            monitor, "_persist_envelope"
+        ) as persist:
+            with self.assertRaises(SystemExit) as raised:
+                monitor._handle_signal(signal.SIGINT, None)
+
+        self.assertEqual(raised.exception.code, 0)
+        persist.assert_called_once_with(
+            {"state_dir": str(self.state_dir)},
+            status="stopped",
+            violation=None,
+        )
 
 
 if __name__ == "__main__":

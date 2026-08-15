@@ -1201,6 +1201,7 @@ def dispatch_with_metadata(
             existing = _existing_spawn_replay_result(connection, request)
             if existing is not None:
                 return existing
+            validate_transient_spawn_descriptor(request)
             insert_pending_dispatch(connection, request)
 
         try:

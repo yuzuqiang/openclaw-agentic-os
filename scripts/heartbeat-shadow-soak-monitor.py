@@ -44,10 +44,10 @@ SCHEMA_STOP = "p03-heartbeat-shadow-monitor-stop-request.v1"
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 EXPECTED_LIFECYCLE_SHA256 = (
-    "59e5fdeee1299807db418612d5a9b4e238c15438be5b15ed71f06914b82d9b74"
+    "f0104b14fa6eba60dc0c703c270ec4c2f473553ef5670b64ce25aed91da91663"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "83942f17b050fd384ab38b4d98e0114424a3f37273fa905c796b2fcdd356f542"
+    "1d3a8ddc7fd45e2f1695c235d1e0fddf6ad98a4ac7b28ff88b49bbe1c339a1d5"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -667,16 +667,18 @@ def _stop_requested(config: Mapping[str, Any]) -> bool:
 
 def _handle_signal(signum: int, frame: object) -> None:
     del frame
+    exit_code = 2
     state_dir = Path(os.environ.get("HEARTBEAT_SHADOW_MONITOR_STATE_DIR", ""))
     if state_dir:
         try:
             config = _load_config(state_dir)
             status = "stopped" if _stop_requested(config) else "failed_closed"
             violation = None if status == "stopped" else f"signal_{signum}"
+            exit_code = 0 if status == "stopped" else 2
             _persist_envelope(config, status=status, violation=violation)
         except Exception:
             pass
-    raise SystemExit(0 if signum in {signal.SIGTERM, signal.SIGINT} else 2)
+    raise SystemExit(exit_code)
 
 
 def run(args: argparse.Namespace) -> int:

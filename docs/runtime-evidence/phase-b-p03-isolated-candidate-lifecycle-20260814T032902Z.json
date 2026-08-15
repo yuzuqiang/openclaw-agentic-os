@@ -78,7 +78,13 @@
   "staging": {
     "stagedRoot": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/staged-runtime",
     "executable": "/Users/zuqiangyu/clawd/artifacts/phase-runs/phase-20260813-215118-run-20260813-215118/runtime-candidate-p03-parent-approved1/staged-runtime/openclaw.mjs",
-    "token": "lHGEQ9fAbDwugODX_UNeI1nhwXQW8u98",
+    "token_redacted": true,
+    "token_sha256": "8dd7885401a76783753d2f02441d048c439c6a040631ed30f0dd5afe25f15730",
+    "token_rotation": {
+      "plaintext_committed": false,
+      "successor_token_material_committed": false,
+      "status": "ephemeral_candidate_token_invalidated_after_local_teardown"
+    },
     "executable_sha256": "0f6f5f70cfcfae01bda117d02139ed9159219659076d8d2eb0d005b266ffde7d",
     "package_json_sha256": "51c0a69bea92e8bf3f8db58b503e26343116b078f4821b2ebdfb83a70a51021c",
     "dist_entry_sha256": "adc30b2fe9e67c4725334cc5089e81cc2de89e7bb8409e97e517b476abf86358",
