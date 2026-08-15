@@ -3671,6 +3671,31 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("issue time is in the future", payload["error"])
 
+    def test_persistent_attested_preflight_rejects_future_dated_capture(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["captured_at_epoch_ms"] = (
+                int(time.time() * 1000)
+                + module.PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS
+                + 60_000
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("captured_at is in the future", payload["error"])
+
     def test_persistent_attested_preflight_rejects_signed_source_set_mismatch(
         self,
     ) -> None:

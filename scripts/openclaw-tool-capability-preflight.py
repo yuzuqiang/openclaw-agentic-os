@@ -2718,7 +2718,12 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
     evidence = dict(_require_record(evidence, "persistent attested preflight evidence"))
     if evidence.get("schema_version") != PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION:
         raise RuntimeEvidenceError("persistent attested preflight evidence schema mismatch")
-    _require_int(evidence.get("captured_at_epoch_ms"), "persistent evidence captured_at")
+    captured_at = _require_int(
+        evidence.get("captured_at_epoch_ms"), "persistent evidence captured_at"
+    )
+    now_ms = time.time_ns() // 1_000_000
+    if captured_at > now_ms + PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS:
+        raise RuntimeEvidenceError("persistent evidence captured_at is in the future")
     runtime_worktree, _agentic_os_worktree = _validate_runtime_and_agentic_heads(evidence)
     _validate_runner_script_binding(evidence, runtime_worktree)
     if bool(agentic_os.DB_AUTHORITY_ENABLED) is not False:
