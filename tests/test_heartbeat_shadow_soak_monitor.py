@@ -29,9 +29,16 @@ def _write_json(path: Path, value: dict[str, object]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _pass_sample(sampled_at_epoch_ms: int, digest: str) -> dict[str, object]:
+def _pass_sample(
+    sampled_at_epoch_ms: int,
+    digest: str,
+    sampled_at_monotonic_ms: int | None = None,
+) -> dict[str, object]:
+    if sampled_at_monotonic_ms is None:
+        sampled_at_monotonic_ms = sampled_at_epoch_ms
     return {
         "sampled_at_epoch_ms": sampled_at_epoch_ms,
+        "sampled_at_monotonic_ms": sampled_at_monotonic_ms,
         "status": "pass",
         "authority_mode": "file_authority_shadow",
         "expected_authority_input_digest": digest,
@@ -119,7 +126,11 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         digest = "a" * 64
 
         def sample_side_effect(**kwargs: object) -> dict[str, object]:
-            return _pass_sample(int(kwargs["sampled_at_epoch_ms"]), digest)
+            return _pass_sample(
+                int(kwargs["sampled_at_epoch_ms"]),
+                digest,
+                int(kwargs["sampled_at_monotonic_ms"]),
+            )
 
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
@@ -199,6 +210,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 run_id=config["run_id"],
                 authority_input_digest=digest,
                 started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
                 duration_hours=24,
                 sample_interval_seconds=300,
             )
@@ -396,6 +408,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 run_id="other-run",
                 authority_input_digest=digest,
                 started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
                 duration_hours=24,
                 sample_interval_seconds=300,
             )
@@ -425,6 +438,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 run_id=config["run_id"],
                 authority_input_digest=digest,
                 started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
                 duration_hours=24,
                 sample_interval_seconds=300,
             )

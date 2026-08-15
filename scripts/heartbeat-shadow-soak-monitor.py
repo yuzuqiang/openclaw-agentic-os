@@ -566,6 +566,7 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, Any]:
+    sampled_at_monotonic_ms = time.monotonic_ns() // 1_000_000
     snapshot_path = _runtime_snapshot_path(config, sampled_at_epoch_ms)
     try:
         snapshot = snapshot_heartbeat_runtime_authority_database(
@@ -575,7 +576,11 @@ def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, An
         )
         _append_runtime_snapshot_receipt(config, snapshot)
     except (HeartbeatShadowError, MonitorError, OSError):
-        return _failed_runtime_observation_sample(config, sampled_at_epoch_ms)
+        return _failed_runtime_observation_sample(
+            config,
+            sampled_at_epoch_ms,
+            sampled_at_monotonic_ms,
+        )
     return heartbeat_parity_sample(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
@@ -587,6 +592,7 @@ def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, An
         database=_path_from_config(config, "database_path"),
         runtime_audit_database=snapshot_path,
         sampled_at_epoch_ms=sampled_at_epoch_ms,
+        sampled_at_monotonic_ms=sampled_at_monotonic_ms,
         repo_root_path=REPO_ROOT,
     )
 
@@ -622,7 +628,9 @@ def _append_runtime_snapshot_receipt(
 
 
 def _failed_runtime_observation_sample(
-    config: Mapping[str, Any], sampled_at_epoch_ms: int
+    config: Mapping[str, Any],
+    sampled_at_epoch_ms: int,
+    sampled_at_monotonic_ms: int,
 ) -> dict[str, Any]:
     counts = {
         "lease_rows": 0,
@@ -633,6 +641,7 @@ def _failed_runtime_observation_sample(
     }
     return {
         "sampled_at_epoch_ms": sampled_at_epoch_ms,
+        "sampled_at_monotonic_ms": sampled_at_monotonic_ms,
         "status": "fail",
         "authority_mode": "file_authority_shadow",
         "expected_authority_input_digest": str(config["authority_input_digest"]),
@@ -663,6 +672,7 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "samples").mkdir(parents=True, exist_ok=True)
     started = _epoch_ms()
+    started_monotonic = time.monotonic_ns() // 1_000_000
     cycle = run_heartbeat_file_shadow_cycle(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
@@ -680,6 +690,7 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
         run_id=str(config["run_id"]),
         authority_input_digest=str(config["authority_input_digest"]),
         started_at_epoch_ms=started,
+        started_at_monotonic_ms=started_monotonic,
         duration_hours=int(config["duration_hours"]),
         sample_interval_seconds=int(config["sample_interval_seconds"]),
     )

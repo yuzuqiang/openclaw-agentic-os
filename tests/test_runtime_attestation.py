@@ -350,6 +350,25 @@ class RuntimeAttestationTests(unittest.TestCase):
             self._adapter(transport)
         self.assertEqual(transport.calls, [])
 
+    def test_wall_clock_rollback_after_attestation_rejects_adapter_authority(self) -> None:
+        from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
+
+        clock = {"now": NOW_MS}
+        transport = FakeAttestedTransport()
+        adapter = OpenClawAdapter.from_attested_transport(
+            transport,
+            TransportBoundRuntimeAttestor(
+                DigestVerifier(),
+                clock_ms=lambda: clock["now"],
+                nonce_factory=lambda: "challenge-1",
+            ),
+        )
+
+        clock["now"] = NOW_MS - 31_001
+        with self.assertRaisesRegex(AdapterContractError, "clock moved backward"):
+            adapter.allow_lease_acquire(lease_params())
+        self.assertEqual(transport.calls, [])
+
     def test_unsigned_status_alias_injection_is_rejected(self) -> None:
         transport = FakeAttestedTransport()
 

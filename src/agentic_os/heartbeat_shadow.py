@@ -69,6 +69,7 @@ SOAK_SAMPLE_FIELDS = {
     "runtime_authority_counts",
     "runtime_authority_counts_observed",
     "sampled_at_epoch_ms",
+    "sampled_at_monotonic_ms",
     "status",
 }
 
@@ -628,7 +629,35 @@ def _locked_rollback_audit_snapshot(
     }
 
 
-def _rollback_shadow_parity(audit_database: Path, *, repo_root_path: Path) -> dict[str, Any]:
+def _artifact_projection_set_binds_authority_digest(
+    artifact_paths: list[Path], authority_input_digest: object
+) -> bool:
+    if not _is_sha256(authority_input_digest):
+        return False
+    for path in artifact_paths:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(document, Mapping):
+            return False
+        try:
+            projection_digest = document.get("authority_input_digest")
+            if projection_digest is None:
+                projection_digest = _manifest_authority_digest(document)
+        except HeartbeatShadowError:
+            return False
+        if projection_digest != authority_input_digest:
+            return False
+    return True
+
+
+def _rollback_shadow_parity(
+    audit_database: Path,
+    *,
+    repo_root_path: Path,
+    authority_input_digest: str,
+) -> dict[str, Any]:
     mode_to_audit = {
         "file_authority_shadow": (audit_file_authority_shadow, "file_authority_shadow"),
         "dual_write_shadow": (audit_dual_write_shadow, "dual_write_shadow"),
@@ -650,12 +679,29 @@ def _rollback_shadow_parity(audit_database: Path, *, repo_root_path: Path) -> di
         ).fetchall()
         if not candidates:
             raise HeartbeatShadowError("Heartbeat rollback lacks finalized parity run")
-        run_id = candidates[0][0]
-        projections = connection.execute(
-            "SELECT path FROM artifact_projections WHERE run_id=? "
-            "AND source_authority=? ORDER BY path",
-            (run_id, mode_to_audit[mode][1]),
-        ).fetchall()
+        run_id = None
+        projections: list[tuple[Any, ...]] = []
+        for candidate in candidates:
+            candidate_run_id = candidate[0]
+            candidate_projections = connection.execute(
+                "SELECT path FROM artifact_projections WHERE run_id=? "
+                "AND source_authority=? ORDER BY path",
+                (candidate_run_id, mode_to_audit[mode][1]),
+            ).fetchall()
+            if not candidate_projections:
+                continue
+            candidate_paths = [repo_root_path / str(row[0]) for row in candidate_projections]
+            if not _artifact_projection_set_binds_authority_digest(
+                candidate_paths, authority_input_digest
+            ):
+                continue
+            run_id = candidate_run_id
+            projections = candidate_projections
+            break
+        if run_id is None:
+            raise HeartbeatShadowError(
+                "Heartbeat rollback lacks parity run bound to authority digest"
+            )
     if not isinstance(run_id, str) or not run_id:
         raise HeartbeatShadowError("Heartbeat rollback parity run is invalid")
     artifact_paths = [repo_root_path / str(row[0]) for row in projections]
@@ -981,10 +1027,15 @@ def heartbeat_parity_sample(
     database: Path,
     runtime_audit_database: Path | None = None,
     sampled_at_epoch_ms: int,
+    sampled_at_monotonic_ms: int | None = None,
     repo_root_path: Path | None = None,
 ) -> dict[str, Any]:
     if type(sampled_at_epoch_ms) is not int or sampled_at_epoch_ms <= 0:
         raise HeartbeatShadowError("sample time must be a positive integer")
+    if sampled_at_monotonic_ms is None:
+        sampled_at_monotonic_ms = time.monotonic_ns() // 1_000_000
+    if type(sampled_at_monotonic_ms) is not int or sampled_at_monotonic_ms <= 0:
+        raise HeartbeatShadowError("sample monotonic time must be a positive integer")
     if not _is_sha256(authority_input_digest):
         raise HeartbeatShadowError("sample authority input digest must be SHA-256")
     _required_identity("sample run_id", run_id)
@@ -1068,6 +1119,7 @@ def heartbeat_parity_sample(
     passed = not any(counters.values()) and observation_error is None
     return {
         "sampled_at_epoch_ms": sampled_at_epoch_ms,
+        "sampled_at_monotonic_ms": sampled_at_monotonic_ms,
         "status": "pass" if passed else "fail",
         "authority_mode": authority_mode,
         "expected_authority_input_digest": authority_input_digest,
@@ -1089,6 +1141,7 @@ def new_heartbeat_soak_receipt(
     started_at_epoch_ms: int,
     duration_hours: int,
     sample_interval_seconds: int,
+    started_at_monotonic_ms: int | None = None,
 ) -> dict[str, Any]:
     _assert_db_authority_disabled()
     normalized_run_id = _required_identity("Heartbeat soak run_id", run_id)
@@ -1108,6 +1161,10 @@ def new_heartbeat_soak_receipt(
         )
     if type(started_at_epoch_ms) is not int or started_at_epoch_ms <= 0:
         raise HeartbeatShadowError("Heartbeat soak start must be positive epoch ms")
+    if started_at_monotonic_ms is None:
+        started_at_monotonic_ms = time.monotonic_ns() // 1_000_000
+    if type(started_at_monotonic_ms) is not int or started_at_monotonic_ms <= 0:
+        raise HeartbeatShadowError("Heartbeat soak start must be positive monotonic ms")
     return {
         "schema_version": "p03-heartbeat-soak-receipt.v1",
         "status": "in_progress",
@@ -1118,6 +1175,8 @@ def new_heartbeat_soak_receipt(
         "authority_input_digest": authority_input_digest,
         "started_at_epoch_ms": started_at_epoch_ms,
         "deadline_epoch_ms": started_at_epoch_ms + duration_hours * 3_600_000,
+        "started_at_monotonic_ms": started_at_monotonic_ms,
+        "deadline_monotonic_ms": started_at_monotonic_ms + duration_hours * 3_600_000,
         "duration_hours": duration_hours,
         "sample_interval_seconds": sample_interval_seconds,
         "samples": [],
@@ -1131,12 +1190,15 @@ def _validate_heartbeat_soak_sample(
     if set(sample) != SOAK_SAMPLE_FIELDS:
         raise HeartbeatShadowError("Heartbeat soak sample fields are invalid")
     sampled_at = sample.get("sampled_at_epoch_ms")
+    sampled_monotonic = sample.get("sampled_at_monotonic_ms")
     counters = sample.get("counters")
     counts = sample.get("runtime_authority_counts")
     observed_digest = sample.get("observed_authority_input_digest")
     if (
         type(sampled_at) is not int
         or sampled_at <= 0
+        or type(sampled_monotonic) is not int
+        or sampled_monotonic <= 0
         or sample.get("status") not in {"pass", "fail"}
         or sample.get("authority_mode")
         not in {"file_authority_shadow", "dual_write_shadow"}
@@ -1198,22 +1260,45 @@ def append_heartbeat_soak_sample(
         expected_authority_input_digest=receipt["authority_input_digest"],
     )
     sampled_at = sample.get("sampled_at_epoch_ms")
+    sampled_monotonic = sample.get("sampled_at_monotonic_ms")
     if type(sampled_at) is not int:
         raise HeartbeatShadowError("Heartbeat soak sample time is invalid")
+    if type(sampled_monotonic) is not int:
+        raise HeartbeatShadowError("Heartbeat soak monotonic sample time is invalid")
     samples = [dict(item) for item in receipt["samples"]]
     if samples:
         minimum = samples[-1]["sampled_at_epoch_ms"] + receipt["sample_interval_seconds"] * 1000
+        minimum_monotonic = (
+            samples[-1]["sampled_at_monotonic_ms"]
+            + receipt["sample_interval_seconds"] * 1000
+        )
         if sampled_at < minimum:
             raise HeartbeatShadowError("Heartbeat soak sample interval is too short")
+        if sampled_monotonic < minimum_monotonic:
+            raise HeartbeatShadowError("Heartbeat soak monotonic interval is too short")
         maximum = samples[-1]["sampled_at_epoch_ms"] + receipt["sample_interval_seconds"] * 2000
+        maximum_monotonic = (
+            samples[-1]["sampled_at_monotonic_ms"]
+            + receipt["sample_interval_seconds"] * 2000
+        )
         if sampled_at > maximum:
             raise HeartbeatShadowError("Heartbeat soak sample interval has a coverage gap")
+        if sampled_monotonic > maximum_monotonic:
+            raise HeartbeatShadowError("Heartbeat soak monotonic interval has a coverage gap")
     elif sampled_at < receipt["started_at_epoch_ms"]:
         raise HeartbeatShadowError("Heartbeat soak sample precedes start")
+    elif sampled_monotonic < receipt["started_at_monotonic_ms"]:
+        raise HeartbeatShadowError("Heartbeat soak monotonic sample precedes start")
     elif sampled_at > receipt["started_at_epoch_ms"] + receipt["sample_interval_seconds"] * 1000:
         raise HeartbeatShadowError("Heartbeat soak first sample missed its coverage window")
+    elif sampled_monotonic > receipt["started_at_monotonic_ms"] + receipt["sample_interval_seconds"] * 1000:
+        raise HeartbeatShadowError(
+            "Heartbeat soak first monotonic sample missed its coverage window"
+        )
     if sampled_at > receipt["deadline_epoch_ms"] + receipt["sample_interval_seconds"] * 1000:
         raise HeartbeatShadowError("Heartbeat soak sample exceeds bounded deadline")
+    if sampled_monotonic > receipt["deadline_monotonic_ms"] + receipt["sample_interval_seconds"] * 1000:
+        raise HeartbeatShadowError("Heartbeat soak monotonic sample exceeds bounded deadline")
     samples.append(dict(sample))
     maximum_samples = (
         receipt["duration_hours"] * 3_600 // receipt["sample_interval_seconds"] + 2
@@ -1228,7 +1313,11 @@ def append_heartbeat_soak_sample(
         if sample.get("status") != "pass" or any(aggregate.values())
         else "in_progress"
     )
-    if status == "in_progress" and sampled_at >= receipt["deadline_epoch_ms"]:
+    if (
+        status == "in_progress"
+        and sampled_at >= receipt["deadline_epoch_ms"]
+        and sampled_monotonic >= receipt["deadline_monotonic_ms"]
+    ):
         status = "complete"
     result = {
         **dict(receipt),
@@ -1252,6 +1341,8 @@ def validate_heartbeat_soak_receipt(receipt: Mapping[str, Any]) -> None:
         "authority_input_digest",
         "started_at_epoch_ms",
         "deadline_epoch_ms",
+        "started_at_monotonic_ms",
+        "deadline_monotonic_ms",
         "duration_hours",
         "sample_interval_seconds",
         "samples",
@@ -1279,10 +1370,16 @@ def validate_heartbeat_soak_receipt(receipt: Mapping[str, Any]) -> None:
         raise HeartbeatShadowError("Heartbeat soak interval is invalid")
     started = receipt.get("started_at_epoch_ms")
     deadline = receipt.get("deadline_epoch_ms")
+    started_monotonic = receipt.get("started_at_monotonic_ms")
+    deadline_monotonic = receipt.get("deadline_monotonic_ms")
     if (
         type(started) is not int
         or type(deadline) is not int
         or deadline != started + duration * 3_600_000
+        or type(started_monotonic) is not int
+        or started_monotonic <= 0
+        or type(deadline_monotonic) is not int
+        or deadline_monotonic != started_monotonic + duration * 3_600_000
     ):
         raise HeartbeatShadowError("Heartbeat soak deadline is invalid")
     samples = receipt.get("samples")
@@ -1297,6 +1394,7 @@ def validate_heartbeat_soak_receipt(receipt: Mapping[str, Any]) -> None:
     if len(samples) > maximum_samples:
         raise HeartbeatShadowError("Heartbeat soak sample count exceeds its bounded window")
     previous_sampled_at: int | None = None
+    previous_sampled_monotonic: int | None = None
     recomputed = {key: 0 for key in SOAK_COUNTER_KEYS}
     for sample in samples:
         if not isinstance(sample, Mapping):
@@ -1306,21 +1404,44 @@ def validate_heartbeat_soak_receipt(receipt: Mapping[str, Any]) -> None:
             expected_authority_input_digest=authority_digest,
         )
         sampled_at = sample["sampled_at_epoch_ms"]
+        sampled_monotonic = sample["sampled_at_monotonic_ms"]
         if sampled_at < started:
             raise HeartbeatShadowError("Heartbeat soak sample precedes start")
+        if sampled_monotonic < started_monotonic:
+            raise HeartbeatShadowError("Heartbeat soak monotonic sample precedes start")
         if sampled_at > deadline + interval * 1000:
             raise HeartbeatShadowError("Heartbeat soak sample exceeds bounded deadline")
+        if sampled_monotonic > deadline_monotonic + interval * 1000:
+            raise HeartbeatShadowError("Heartbeat soak monotonic sample exceeds bounded deadline")
         if previous_sampled_at is not None and (
             sampled_at < previous_sampled_at + interval * 1000
         ):
             raise HeartbeatShadowError("Heartbeat soak sample interval is too short")
+        if previous_sampled_monotonic is not None and (
+            sampled_monotonic < previous_sampled_monotonic + interval * 1000
+        ):
+            raise HeartbeatShadowError("Heartbeat soak monotonic interval is too short")
         if previous_sampled_at is not None and (
             sampled_at > previous_sampled_at + interval * 2000
         ):
             raise HeartbeatShadowError("Heartbeat soak sample interval has a coverage gap")
+        if previous_sampled_monotonic is not None and (
+            sampled_monotonic > previous_sampled_monotonic + interval * 2000
+        ):
+            raise HeartbeatShadowError(
+                "Heartbeat soak monotonic interval has a coverage gap"
+            )
         if previous_sampled_at is None and sampled_at > started + interval * 1000:
             raise HeartbeatShadowError("Heartbeat soak first sample missed its coverage window")
+        if (
+            previous_sampled_monotonic is None
+            and sampled_monotonic > started_monotonic + interval * 1000
+        ):
+            raise HeartbeatShadowError(
+                "Heartbeat soak first monotonic sample missed its coverage window"
+            )
         previous_sampled_at = sampled_at
+        previous_sampled_monotonic = sampled_monotonic
         for key in SOAK_COUNTER_KEYS:
             recomputed[key] += sample["counters"][key]
     if dict(aggregate) != recomputed:
@@ -1328,6 +1449,10 @@ def validate_heartbeat_soak_receipt(receipt: Mapping[str, Any]) -> None:
     if receipt["status"] == "complete":
         if not samples or samples[-1].get("sampled_at_epoch_ms", 0) < deadline:
             raise HeartbeatShadowError("Heartbeat soak cannot complete before 24-72h deadline")
+        if not samples or samples[-1].get("sampled_at_monotonic_ms", 0) < deadline_monotonic:
+            raise HeartbeatShadowError(
+                "Heartbeat soak cannot complete before monotonic 24-72h deadline"
+            )
         if any(aggregate.values()) or any(item.get("status") != "pass" for item in samples):
             raise HeartbeatShadowError("Heartbeat soak completion contains violations")
     elif receipt["status"] == "failed":
@@ -1338,6 +1463,10 @@ def validate_heartbeat_soak_receipt(receipt: Mapping[str, Any]) -> None:
             raise HeartbeatShadowError("Heartbeat soak in-progress state contains a failure")
         if samples and samples[-1].get("sampled_at_epoch_ms", 0) >= deadline:
             raise HeartbeatShadowError("Heartbeat soak remained in progress after its deadline")
+        if samples and samples[-1].get("sampled_at_monotonic_ms", 0) >= deadline_monotonic:
+            raise HeartbeatShadowError(
+                "Heartbeat soak remained in progress after its monotonic deadline"
+            )
 
 
 def persist_heartbeat_soak_receipt(
@@ -1406,7 +1535,11 @@ def force_heartbeat_file_authority_rollback(
         )
         if _manifest_authority_digest(manifest) != authority_input_digest:
             raise HeartbeatShadowError("Heartbeat file authority drifted before rollback")
-        parity = _rollback_shadow_parity(audit_snapshot, repo_root_path=root)
+        parity = _rollback_shadow_parity(
+            audit_snapshot,
+            repo_root_path=root,
+            authority_input_digest=authority_input_digest,
+        )
         source_sha256 = _sha256_file(target)
         moved_sidecars = _move_database_to_local_backup(target, backup)
         if target.exists():

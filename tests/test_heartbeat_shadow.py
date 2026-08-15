@@ -317,6 +317,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             run_id="heartbeat-soak",
             authority_input_digest=prior["authority_input_digest"],
             started_at_epoch_ms=started,
+            started_at_monotonic_ms=started,
             duration_hours=24,
             sample_interval_seconds=3600,
         )
@@ -330,6 +331,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=started,
+            sampled_at_monotonic_ms=started,
             repo_root_path=self.root,
         )
         self.assertEqual(first["parity_percent"], 100)
@@ -346,6 +348,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=started + 3_600_000,
+            sampled_at_monotonic_ms=started + 3_600_000,
             repo_root_path=self.root,
         )
         receipt = append_heartbeat_soak_sample(receipt, final)
@@ -366,6 +369,7 @@ class HeartbeatShadowTests(unittest.TestCase):
                     authority_mode="file_authority_shadow",
                     database=self.database,
                     sampled_at_epoch_ms=sampled_at,
+                    sampled_at_monotonic_ms=sampled_at,
                     repo_root_path=self.root,
                 ),
             )
@@ -403,6 +407,7 @@ class HeartbeatShadowTests(unittest.TestCase):
                 authority_mode="file_authority_shadow",
                 database=self.database,
                 sampled_at_epoch_ms=1_700_000_060_000,
+                sampled_at_monotonic_ms=1_700_000_060_000,
                 repo_root_path=self.root,
             )
             self.assertEqual(direct["status"], "fail")
@@ -435,6 +440,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             database=self.database,
             runtime_audit_database=snapshot_path,
             sampled_at_epoch_ms=1_700_000_060_000,
+            sampled_at_monotonic_ms=1_700_000_060_000,
             repo_root_path=self.root,
         )
         self.assertEqual(sample["status"], "pass")
@@ -453,6 +459,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=1_700_000_060_000,
+            sampled_at_monotonic_ms=1_700_000_060_000,
             repo_root_path=self.root,
         )
 
@@ -463,6 +470,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             run_id="heartbeat-soak-fail",
             authority_input_digest=prior["authority_input_digest"],
             started_at_epoch_ms=1_700_000_000_000,
+            started_at_monotonic_ms=1_700_000_000_000,
             duration_hours=24,
             sample_interval_seconds=60,
         )
@@ -486,6 +494,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=1_700_000_060_000,
+            sampled_at_monotonic_ms=1_700_000_060_000,
             repo_root_path=self.root,
         )
 
@@ -500,6 +509,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             run_id="heartbeat-soak",
             authority_input_digest=prior["authority_input_digest"],
             started_at_epoch_ms=started,
+            started_at_monotonic_ms=started,
             duration_hours=24,
             sample_interval_seconds=60,
         )
@@ -513,6 +523,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=started,
+            sampled_at_monotonic_ms=started,
             repo_root_path=self.root,
         )
         tampered_sample = {
@@ -537,6 +548,14 @@ class HeartbeatShadowTests(unittest.TestCase):
         with self.assertRaisesRegex(HeartbeatShadowError, "cannot complete before"):
             validate_heartbeat_soak_receipt(early_complete)
 
+        wall_clock_fast_forward = {
+            **sample,
+            "sampled_at_epoch_ms": started + 60_000,
+            "sampled_at_monotonic_ms": started,
+        }
+        with self.assertRaisesRegex(HeartbeatShadowError, "monotonic"):
+            append_heartbeat_soak_sample(receipt, wall_clock_fast_forward)
+
         gap = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
@@ -547,6 +566,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=started + 180_000,
+            sampled_at_monotonic_ms=started + 180_000,
             repo_root_path=self.root,
         )
         with self.assertRaisesRegex(HeartbeatShadowError, "coverage gap"):
@@ -567,6 +587,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             authority_mode="file_authority_shadow",
             database=self.database,
             sampled_at_epoch_ms=1_700_000_060_000,
+            sampled_at_monotonic_ms=1_700_000_060_000,
             repo_root_path=self.root,
         )
         self.assertEqual(privacy["counters"]["privacy_violation"], 1)
@@ -590,6 +611,7 @@ class HeartbeatShadowTests(unittest.TestCase):
                 authority_mode="file_authority_shadow",
                 database=self.database,
                 sampled_at_epoch_ms=1_700_000_060_000,
+                sampled_at_monotonic_ms=1_700_000_060_000,
                 repo_root_path=self.root,
             )
         self.assertIs(unknown["runtime_authority_counts_observed"], False)
@@ -780,6 +802,48 @@ class HeartbeatShadowTests(unittest.TestCase):
             repo_root_path=self.root,
         )
         self.assertEqual(receipt["status"], "pass")
+        self.assertFalse(self.database.exists())
+        self.assertTrue(receipt_path.exists())
+
+    def test_forced_rollback_selects_parity_run_bound_to_requested_digest(self) -> None:
+        prior = run_heartbeat_file_shadow_cycle(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            manifest_path=self.root / "artifacts/old-heartbeat-authority.json",
+            run_id="heartbeat-file-shadow-old",
+            database=self.database,
+            repo_root_path=self.root,
+            observed_at_epoch_ms=1_700_000_000_000,
+        )
+        self._write_baseline(every="45m")
+        newer = run_heartbeat_file_shadow_cycle(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            manifest_path=self.root / "artifacts/new-heartbeat-authority.json",
+            run_id="heartbeat-file-shadow-new",
+            database=self.database,
+            repo_root_path=self.root,
+            observed_at_epoch_ms=1_700_000_060_000,
+        )
+        self._write_baseline(every="30m")
+        receipt_path = self.root / "artifacts/digest-bound-rollback.json"
+
+        receipt = force_heartbeat_file_authority_rollback(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            database=self.database,
+            authority_input_digest=prior["authority_input_digest"],
+            rollback_id="digest-bound",
+            receipt_path=receipt_path,
+            repo_root_path=self.root,
+        )
+        self.assertNotEqual(
+            prior["authority_input_digest"], newer["authority_input_digest"]
+        )
+        self.assertEqual(receipt["parity"]["run_id"], "heartbeat-file-shadow-old")
         self.assertFalse(self.database.exists())
         self.assertTrue(receipt_path.exists())
 

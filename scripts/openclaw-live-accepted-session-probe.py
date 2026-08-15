@@ -1312,8 +1312,9 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
             lease_ids_to_release=lease_ids_to_release,
         )
+        probe_task = "Return exactly: issue35 identity probe complete"
         spawn_args = {
-            "task": "Return exactly: issue35 identity probe complete",
+            "task": probe_task,
             "taskName": f"issue35probe{args.probe_id.replace('-', '')[:24]}",
             "runtime": "subagent",
             "mode": "run",
@@ -1331,7 +1332,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "idempotency_key": f"issue35-spawn-{args.probe_id}",
                 "phase": "B",
                 "agent_id": args.agent_id,
-                "task_digest": f"issue35-task-{args.probe_id}",
+                "task_digest": hashlib.sha256(probe_task.encode("utf-8")).hexdigest(),
             },
         }
         if tuple(spawn_args) != ATTESTED_SESSIONS_SPAWN_PARAMETERS:

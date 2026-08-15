@@ -169,6 +169,8 @@ class VerifiedRuntimeAttestation:
     identity_sha256: str
     issued_at_epoch_ms: int
     expires_at_epoch_ms: int
+    accepted_at_epoch_ms: int
+    max_clock_skew_ms: int
     local_process_id: int
     transport_object_id: int
     transport_identity: str
@@ -591,6 +593,8 @@ class TransportBoundRuntimeAttestor:
             identity_sha256=identity_sha256,
             issued_at_epoch_ms=issued,
             expires_at_epoch_ms=expires,
+            accepted_at_epoch_ms=now,
+            max_clock_skew_ms=self._max_clock_skew_ms,
             local_process_id=local_pid,
             transport_object_id=id(transport),
             transport_identity=transport_identity,
@@ -612,7 +616,12 @@ def assert_attestation_current(
         raise RuntimeAttestationError("cross-process runtime attestation replay is forbidden")
     if id(transport) != attestation.transport_object_id:
         raise RuntimeAttestationError("runtime attestation belongs to another transport")
-    if clock_ms() >= attestation.expires_at_epoch_ms:
+    now = clock_ms()
+    if now < attestation.accepted_at_epoch_ms - attestation.max_clock_skew_ms:
+        raise RuntimeAttestationError("runtime attestation clock moved backward")
+    if now < attestation.issued_at_epoch_ms - attestation.max_clock_skew_ms:
+        raise RuntimeAttestationError("runtime attestation validity window is in the future")
+    if now >= attestation.expires_at_epoch_ms:
         raise RuntimeAttestationError("runtime attestation is expired")
     snapshot = _mapping(
         transport.runtime_identity_snapshot(), "runtime identity snapshot"

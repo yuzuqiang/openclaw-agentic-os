@@ -1055,6 +1055,12 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
             payload["allow_lease_release"]["gateway_lease_id_sha256"],
             module._identity_sha256("lease-unit"),
         )
+        self.assertEqual(
+            state["metadata"]["task_digest"],
+            module.hashlib.sha256(
+                "Return exactly: issue35 identity probe complete".encode("utf-8")
+            ).hexdigest(),
+        )
 
     def test_release_metadata_must_belong_to_released_lease_object(self) -> None:
         module = load_probe_module()
