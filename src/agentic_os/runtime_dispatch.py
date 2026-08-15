@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -40,7 +41,7 @@ METADATA_RUNTIME_ERRORS = (
     sqlite3.Error,
 )
 
-AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError)
+AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError, subprocess.TimeoutExpired)
 RELEASE_FAILURE_ERRORS = METADATA_RUNTIME_ERRORS + AMBIGUOUS_TRANSPORT_ERRORS
 
 

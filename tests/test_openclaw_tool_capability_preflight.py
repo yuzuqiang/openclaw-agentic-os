@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agentic_os.migrations import repository_root
@@ -276,7 +277,8 @@ def build_persistent_evidence(module, root, fixture, key):
     package_path = os.path.join(root, "package.json")
     launcher_sha = file_sha256(fixture["launcher"])
     sources = [
-        {"path": "openclaw.mjs", "sha256": launcher_sha},
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(module._runtime_source_digest_snapshot(Path(root)).items())
     ]
     signed_payload = {
         "schema_version": "agentic-os.openclaw-attestation.v1",
@@ -389,6 +391,21 @@ def build_persistent_evidence(module, root, fixture, key):
             },
         },
     }
+
+
+def resign_persistent_evidence(evidence, key):
+    signed_payload = evidence["attestation"]["response"]["signed_payload"]
+    response = evidence["attestation"]["response"]
+    response["signature"] = hmac.new(
+        key, canonical_json_bytes(signed_payload), hashlib.sha256
+    ).hexdigest()
+    evidence["attestation"]["response_sha256"] = canonical_sha256(response)
+    evidence["rpc_evidence"]["allow_lease_status"]["response"][
+        "runtime_attestation"
+    ] = persistent_status_receipt(signed_payload)
+    evidence["rpc_evidence"]["allow_lease_status"]["raw_response_sha256"] = canonical_sha256(
+        evidence["rpc_evidence"]["allow_lease_status"]["response"]
+    )
 
 
 def run_persistent_preflight(evidence, root, key_path):
@@ -1137,15 +1154,16 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
     def test_committed_isolated_runtime_evidence_is_target_bound(self) -> None:
         evidence_dir = repository_root() / "docs" / "runtime-evidence"
-        isolated_files = sorted(
-            path
-            for path in evidence_dir.glob("*isolated*.json")
-            if "lifecycle" not in path.name
-        )
+        isolated_files = sorted(evidence_dir.glob("*isolated*.json"))
         self.assertTrue(isolated_files)
         for path in isolated_files:
             with self.subTest(path=path.name):
                 payload = json.loads(path.read_text(encoding="utf-8"))
+                if "lifecycle" in path.name:
+                    self.assertEqual(payload.get("status"), "pass")
+                    self.assertIsInstance(payload.get("staging"), dict)
+                    self.assertIsInstance(payload.get("preflight"), dict)
+                    continue
                 catalog = payload.get("catalog")
                 if catalog is None:
                     catalog = payload.get("preflight", {}).get("catalog")
@@ -3623,6 +3641,59 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("stale or expired", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_future_dated_attestation(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            signed_payload = evidence["attestation"]["response"]["signed_payload"]
+            issued = (
+                int(time.time() * 1000)
+                + module.PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS
+                + 60_000
+            )
+            signed_payload["issued_at_epoch_ms"] = issued
+            signed_payload["expires_at_epoch_ms"] = issued + 60_000
+            resign_persistent_evidence(evidence, key)
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("issue time is in the future", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_signed_source_set_mismatch(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path = os.path.join(install_root, "attestation.key")
+            key = bytes(range(32))
+            with open(key_path, "wb") as handle:
+                handle.write(key)
+            os.chmod(key_path, 0o600)
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            binding = evidence["attestation"]["response"]["signed_payload"]["binding"]
+            binding["sources"] = binding["sources"][:-1]
+            binding["sources_sha256"] = canonical_sha256(binding["sources"])
+            resign_persistent_evidence(evidence, key)
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("signed runtime sources do not match active source snapshot", payload["error"])
 
     def test_persistent_attested_preflight_rejects_status_receipt_mismatch(
         self,

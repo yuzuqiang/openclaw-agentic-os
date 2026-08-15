@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -52,6 +53,10 @@ RUNTIME_AUTHORITY_COUNT_KEYS = (
     "duplicate_spawn_identity_groups",
 )
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+SAFE_SCHEDULER_FIELDS = {
+    "every": str,
+    "target": str,
+}
 SOAK_SAMPLE_FIELDS = {
     "authority_mode",
     "counters",
@@ -162,6 +167,35 @@ def _contains_sensitive_key(value: object) -> bool:
     return False
 
 
+def _safe_scheduler_projection(value: object, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise HeartbeatShadowError(f"{label} must be an object")
+    if set(value) != set(SAFE_SCHEDULER_FIELDS):
+        raise HeartbeatShadowError(f"{label} contains unsupported scheduler fields")
+    result: dict[str, str] = {}
+    for key, expected_type in SAFE_SCHEDULER_FIELDS.items():
+        item = value.get(key)
+        if (
+            type(item) is not expected_type
+            or item != item.strip()
+            or not item
+            or len(item) > 200
+        ):
+            raise HeartbeatShadowError(f"{label}.{key} must be bounded non-empty text")
+        result[key] = item
+    if _contains_sensitive_key(result):
+        raise HeartbeatShadowError(f"{label} contains sensitive keys")
+    return result
+
+
+def _live_scheduler_projection(live_config_path: Path) -> dict[str, str]:
+    config = _json_file(live_config_path.expanduser().resolve(), "live OpenClaw config")
+    agents = config.get("agents")
+    defaults = agents.get("defaults") if isinstance(agents, Mapping) else None
+    heartbeat = defaults.get("heartbeat") if isinstance(defaults, Mapping) else None
+    return _safe_scheduler_projection(heartbeat, "live Heartbeat scheduler projection")
+
+
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> str:
     target = path.expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +240,7 @@ def heartbeat_control_database(repo_root_path: Path | None = None) -> Path:
 
 
 def _validate_baseline(
-    baseline: Mapping[str, Any], heartbeat_file: Path
+    baseline: Mapping[str, Any], heartbeat_file: Path, live_config_path: Path
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if set(baseline) != {
         "captured_at",
@@ -271,13 +305,14 @@ def _validate_baseline(
     if scheduler.get("source") != "agents.defaults.heartbeat":
         raise HeartbeatShadowError("Heartbeat scheduler source is not authoritative")
     scheduler_value = scheduler.get("value")
-    if not isinstance(scheduler_value, Mapping):
-        raise HeartbeatShadowError("Heartbeat scheduler value must be an object")
-    if _contains_sensitive_key(scheduler_value):
-        raise HeartbeatShadowError("Heartbeat scheduler projection contains sensitive keys")
-    scheduler_digest = _sha256_bytes(_canonical_json(scheduler_value).encode("utf-8"))
+    safe_scheduler = _safe_scheduler_projection(
+        scheduler_value, "sanitized Heartbeat scheduler projection"
+    )
+    scheduler_digest = _sha256_bytes(_canonical_json(safe_scheduler).encode("utf-8"))
     if scheduler_digest != scheduler.get("canonical_json_sha256"):
         raise HeartbeatShadowError("Heartbeat scheduler subtree digest does not match")
+    if _live_scheduler_projection(live_config_path) != safe_scheduler:
+        raise HeartbeatShadowError("live Heartbeat scheduler config drifted from baseline")
 
     interpretation = baseline.get("runtime_interpretation")
     if not isinstance(interpretation, Mapping) or set(interpretation) != {
@@ -295,21 +330,26 @@ def _validate_baseline(
     _assert_db_authority_disabled()
     return dict(file_authority), {
         "source": scheduler["source"],
-        "value": dict(scheduler_value),
-        "canonical_json_sha256": scheduler_digest,
+        "value": safe_scheduler,
+        "canonical_json_sha256": _sha256_bytes(
+            _canonical_json(safe_scheduler).encode("utf-8")
+        ),
     }
 
 
 def heartbeat_authority_manifest(
     baseline_path: Path,
     heartbeat_file: Path,
+    live_config_path: Path,
     *,
     observed_at_epoch_ms: int | None = None,
 ) -> dict[str, Any]:
     """Build the exact two-input authority manifest; no full config is accepted."""
 
     baseline = _json_file(baseline_path.expanduser().resolve(), "Heartbeat baseline")
-    file_authority, scheduler = _validate_baseline(baseline, heartbeat_file)
+    file_authority, scheduler = _validate_baseline(
+        baseline, heartbeat_file, live_config_path
+    )
     observed = (
         time.time_ns() // 1_000_000
         if observed_at_epoch_ms is None
@@ -503,7 +543,7 @@ def _sidecar_receipts(database: Path) -> list[dict[str, Any]]:
     return receipts
 
 
-def _assert_rollback_source_idle(database: Path) -> dict[str, Any]:
+def _assert_no_live_rollback_sidecars(database: Path) -> None:
     for sidecar in _sqlite_sidecars(database):
         size = sidecar.stat().st_size
         if sidecar.name.endswith("-wal") and size != 0:
@@ -512,27 +552,79 @@ def _assert_rollback_source_idle(database: Path) -> dict[str, Any]:
             raise HeartbeatShadowError(
                 "Heartbeat shadow DB has live rollback journal content"
             )
+
+
+def _lock_rollback_source_idle(database: Path) -> tuple[sqlite3.Connection, dict[str, Any]]:
+    connection: sqlite3.Connection | None = None
     try:
-        with sqlite3.connect(
-            database, isolation_level=None, timeout=0.1
-        ) as connection:
-            connection.execute("PRAGMA busy_timeout=100")
-            connection.execute("BEGIN EXCLUSIVE")
-            connection.execute("ROLLBACK")
-            quick_check = connection.execute("PRAGMA quick_check").fetchone()
-            checkpoint = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        connection = sqlite3.connect(database, isolation_level=None, timeout=0.1)
+        connection.execute("PRAGMA busy_timeout=100")
+        checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if not checkpoint or checkpoint[0] != 0:
+            raise HeartbeatShadowError("Heartbeat shadow DB checkpoint is busy")
+        connection.execute("BEGIN EXCLUSIVE")
+        _assert_no_live_rollback_sidecars(database)
+        quick_check = connection.execute("PRAGMA quick_check").fetchone()
+    except HeartbeatShadowError:
+        if connection is not None:
+            connection.close()
+        raise
     except sqlite3.Error as exc:
+        if connection is not None:
+            connection.close()
         raise HeartbeatShadowError(
             "Heartbeat shadow DB is not idle/checkpointable"
         ) from exc
     if quick_check != ("ok",):
+        connection.close()
         raise HeartbeatShadowError("Heartbeat shadow DB failed read-only integrity check")
-    if not checkpoint or checkpoint[0] != 0:
-        raise HeartbeatShadowError("Heartbeat shadow DB checkpoint is busy")
-    return {
+    return connection, {
         "quick_check": "ok",
         "checkpoint": list(checkpoint),
         "source_sidecars": _sidecar_receipts(database),
+    }
+
+
+def _locked_rollback_audit_snapshot(
+    source: Path, target: Path, root: Path
+) -> dict[str, Any]:
+    if target.exists() or any(Path(f"{target}{suffix}").exists() for suffix in SQLITE_SIDECAR_SUFFIXES):
+        raise HeartbeatShadowError("Heartbeat runtime authority snapshot target already exists")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copyfile(source, target)
+        target.chmod(0o600)
+        _remove_checkpointed_snapshot_sidecars(target)
+        if _sqlite_sidecars(target):
+            raise HeartbeatShadowError("Heartbeat runtime snapshot is not sidecar-free")
+        with sqlite3.connect(f"{target.as_uri()}?mode=ro&immutable=1", uri=True) as connection:
+            quick_check = connection.execute("PRAGMA quick_check").fetchone()
+            if quick_check != ("ok",):
+                raise HeartbeatShadowError("Heartbeat runtime snapshot immutable check failed")
+        counts = _runtime_authority_counts(target)
+    except HeartbeatShadowError:
+        target.unlink(missing_ok=True)
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            Path(f"{target}{suffix}").unlink(missing_ok=True)
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        target.unlink(missing_ok=True)
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            Path(f"{target}{suffix}").unlink(missing_ok=True)
+        raise HeartbeatShadowError("Heartbeat runtime snapshot could not be created") from exc
+    return {
+        "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
+        "status": "pass",
+        "authority": "file_artifacts",
+        "db_authority_enabled": False,
+        "source_database": source.relative_to(root).as_posix(),
+        "source_sidecars_observed": [sidecar.name for sidecar in _sqlite_sidecars(source)],
+        "snapshot_database": target.relative_to(root).as_posix(),
+        "snapshot_sha256": _sha256_file(target),
+        "snapshot_sidecars_present": False,
+        "local_recovery_only": True,
+        "packaging_retrieval_denied": True,
+        "runtime_authority_counts": counts,
     }
 
 
@@ -623,6 +715,7 @@ def run_heartbeat_file_shadow_cycle(
     *,
     baseline_path: Path,
     heartbeat_file: Path,
+    live_config_path: Path,
     manifest_path: Path,
     run_id: str,
     database: Path | None = None,
@@ -638,7 +731,10 @@ def run_heartbeat_file_shadow_cycle(
         )
     target_manifest = _repo_artifact_path(root, manifest_path, "Heartbeat manifest")
     manifest = heartbeat_authority_manifest(
-        baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
+        baseline_path,
+        heartbeat_file,
+        live_config_path,
+        observed_at_epoch_ms=observed_at_epoch_ms,
     )
     manifest_sha256 = _atomic_write_json(target_manifest, manifest)
     try:
@@ -659,7 +755,10 @@ def run_heartbeat_file_shadow_cycle(
     except ShadowBackfillError as exc:
         raise HeartbeatShadowError(str(exc)) from exc
     live_manifest = heartbeat_authority_manifest(
-        baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
+        baseline_path,
+        heartbeat_file,
+        live_config_path,
+        observed_at_epoch_ms=observed_at_epoch_ms,
     )
     authority_digest = _manifest_authority_digest(manifest)
     if _manifest_authority_digest(live_manifest) != authority_digest:
@@ -751,6 +850,7 @@ def run_heartbeat_dual_write_projection(
     *,
     baseline_path: Path,
     heartbeat_file: Path,
+    live_config_path: Path,
     projection_receipt_path: Path,
     run_id: str,
     prior_file_shadow_receipt: Mapping[str, Any],
@@ -802,7 +902,10 @@ def run_heartbeat_dual_write_projection(
             "Heartbeat file-shadow preflight DB projection is not an exact PASS"
         )
     manifest = heartbeat_authority_manifest(
-        baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
+        baseline_path,
+        heartbeat_file,
+        live_config_path,
+        observed_at_epoch_ms=observed_at_epoch_ms,
     )
     authority_digest = _manifest_authority_digest(manifest)
     if authority_digest != prior_file_shadow_receipt.get("authority_input_digest"):
@@ -862,6 +965,7 @@ def heartbeat_parity_sample(
     *,
     baseline_path: Path,
     heartbeat_file: Path,
+    live_config_path: Path,
     projected_artifact: Path,
     run_id: str,
     authority_input_digest: str,
@@ -907,6 +1011,7 @@ def heartbeat_parity_sample(
         manifest = heartbeat_authority_manifest(
             baseline_path,
             heartbeat_file,
+            live_config_path,
             observed_at_epoch_ms=sampled_at_epoch_ms,
         )
         current_digest = _manifest_authority_digest(manifest)
@@ -1246,6 +1351,7 @@ def force_heartbeat_file_authority_rollback(
     *,
     baseline_path: Path,
     heartbeat_file: Path,
+    live_config_path: Path,
     database: Path,
     authority_input_digest: str,
     rollback_id: str,
@@ -1278,30 +1384,39 @@ def force_heartbeat_file_authority_rollback(
     if backup.exists() or any(Path(f"{backup}{suffix}").exists() for suffix in SQLITE_SIDECAR_SUFFIXES):
         raise HeartbeatShadowError("Heartbeat rollback backup already exists")
     assert_privacy_preflight(root, database_paths=(target, audit_snapshot, backup))
-    snapshot = snapshot_heartbeat_runtime_authority_database(
-        source_database=target,
-        snapshot_database=audit_snapshot,
-        repo_root_path=root,
-    )
-    counts = dict(snapshot["runtime_authority_counts"])
-    if any(counts.values()):
-        raise HeartbeatShadowError("Heartbeat rollback found runtime authority rows")
-    source_idle = _assert_rollback_source_idle(target)
-    manifest = heartbeat_authority_manifest(
-        baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
-    )
-    if _manifest_authority_digest(manifest) != authority_input_digest:
-        raise HeartbeatShadowError("Heartbeat file authority drifted before rollback")
-    parity = _rollback_shadow_parity(audit_snapshot, repo_root_path=root)
-    source_sha256 = _sha256_file(target)
-    moved_sidecars = _move_database_to_local_backup(target, backup)
-    if target.exists():
-        raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
-    backup_sha256 = _sha256_file(backup)
-    if backup_sha256 != source_sha256:
-        raise HeartbeatShadowError("Heartbeat rollback backup hash mismatch")
+    lock_connection, source_idle = _lock_rollback_source_idle(target)
+    try:
+        snapshot = _locked_rollback_audit_snapshot(target, audit_snapshot, root)
+        counts = dict(snapshot["runtime_authority_counts"])
+        if any(counts.values()):
+            raise HeartbeatShadowError("Heartbeat rollback found runtime authority rows")
+        manifest = heartbeat_authority_manifest(
+            baseline_path,
+            heartbeat_file,
+            live_config_path,
+            observed_at_epoch_ms=observed_at_epoch_ms,
+        )
+        if _manifest_authority_digest(manifest) != authority_input_digest:
+            raise HeartbeatShadowError("Heartbeat file authority drifted before rollback")
+        parity = _rollback_shadow_parity(audit_snapshot, repo_root_path=root)
+        source_sha256 = _sha256_file(target)
+        moved_sidecars = _move_database_to_local_backup(target, backup)
+        if target.exists():
+            raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
+        backup_sha256 = _sha256_file(backup)
+        if backup_sha256 != source_sha256:
+            raise HeartbeatShadowError("Heartbeat rollback backup hash mismatch")
+    finally:
+        try:
+            lock_connection.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        lock_connection.close()
     recreated = heartbeat_authority_manifest(
-        baseline_path, heartbeat_file, observed_at_epoch_ms=observed_at_epoch_ms
+        baseline_path,
+        heartbeat_file,
+        live_config_path,
+        observed_at_epoch_ms=observed_at_epoch_ms,
     )
     recreated_digest = _manifest_authority_digest(recreated)
     if recreated_digest != authority_input_digest:

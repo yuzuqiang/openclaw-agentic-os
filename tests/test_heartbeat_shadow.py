@@ -5,11 +5,13 @@ import json
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import agentic_os
+import agentic_os.heartbeat_shadow as heartbeat_shadow_module
 from agentic_os.heartbeat_shadow import (
     HeartbeatShadowError,
     append_heartbeat_soak_sample,
@@ -58,6 +60,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             "# Heartbeat\n\n- Check one bounded maintenance item.\n",
             encoding="utf-8",
         )
+        self.live_config_path = self.root / "openclaw.json"
         self.baseline_path = self.root / "evidence/heartbeat-baseline.json"
         self.manifest_path = self.root / "artifacts/heartbeat-authority.json"
         self.projection_path = self.root / "artifacts/heartbeat-dual-write.json"
@@ -97,12 +100,18 @@ class HeartbeatShadowTests(unittest.TestCase):
 
     def _write_baseline(self, *, every: str = "30m") -> None:
         self.baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        self.live_config_path.write_bytes(
+            _canonical_json(
+                {"agents": {"defaults": {"heartbeat": {"every": every, "target": "main"}}}}
+            )
+        )
         self.baseline_path.write_bytes(_canonical_json(self._baseline(every=every)))
 
     def _file_shadow_cycle(self, run_id: str = "heartbeat-file-shadow") -> dict[str, object]:
         return run_heartbeat_file_shadow_cycle(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             manifest_path=self.manifest_path,
             run_id=run_id,
             database=self.database,
@@ -183,7 +192,9 @@ class HeartbeatShadowTests(unittest.TestCase):
     def test_manifest_rejects_authority_drift_privacy_weakening_and_db_authority(self) -> None:
         self.heartbeat_file.write_text("# drift\n", encoding="utf-8")
         with self.assertRaisesRegex(HeartbeatShadowError, "drifted"):
-            heartbeat_authority_manifest(self.baseline_path, self.heartbeat_file)
+            heartbeat_authority_manifest(
+                self.baseline_path, self.heartbeat_file, self.live_config_path
+            )
 
         self.heartbeat_file.write_text(
             "# Heartbeat\n\n- Check one bounded maintenance item.\n",
@@ -193,12 +204,36 @@ class HeartbeatShadowTests(unittest.TestCase):
         unsafe["privacy_boundary"]["secrets_persisted"] = True
         self.baseline_path.write_bytes(_canonical_json(unsafe))
         with self.assertRaisesRegex(HeartbeatShadowError, "privacy boundary"):
-            heartbeat_authority_manifest(self.baseline_path, self.heartbeat_file)
+            heartbeat_authority_manifest(
+                self.baseline_path, self.heartbeat_file, self.live_config_path
+            )
 
         self._write_baseline()
         with mock.patch.object(agentic_os, "DB_AUTHORITY_ENABLED", True):
             with self.assertRaisesRegex(HeartbeatShadowError, "authority must remain disabled"):
-                heartbeat_authority_manifest(self.baseline_path, self.heartbeat_file)
+                heartbeat_authority_manifest(
+                    self.baseline_path, self.heartbeat_file, self.live_config_path
+                )
+
+    def test_manifest_rejects_unsafe_scheduler_projection_and_live_config_drift(self) -> None:
+        unsafe = self._baseline()
+        unsafe["scheduler_projection"]["value"]["token"] = "not-safe"
+        self.baseline_path.write_bytes(_canonical_json(unsafe))
+        with self.assertRaisesRegex(HeartbeatShadowError, "unsupported scheduler fields"):
+            heartbeat_authority_manifest(
+                self.baseline_path, self.heartbeat_file, self.live_config_path
+            )
+
+        self._write_baseline()
+        self.live_config_path.write_bytes(
+            _canonical_json(
+                {"agents": {"defaults": {"heartbeat": {"every": "5m", "target": "main"}}}}
+            )
+        )
+        with self.assertRaisesRegex(HeartbeatShadowError, "live Heartbeat scheduler"):
+            heartbeat_authority_manifest(
+                self.baseline_path, self.heartbeat_file, self.live_config_path
+            )
 
     def test_cycle_rejects_artifacts_and_database_outside_checked_root(self) -> None:
         outside = Path(self.temporary.name).parent / "heartbeat-outside.json"
@@ -207,6 +242,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             run_heartbeat_file_shadow_cycle(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 manifest_path=outside,
                 run_id="outside-manifest",
                 database=self.database,
@@ -219,6 +255,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             run_heartbeat_file_shadow_cycle(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 manifest_path=self.manifest_path,
                 run_id="wrong-db",
                 database=wrong_database,
@@ -230,6 +267,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         receipt = run_heartbeat_dual_write_projection(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projection_receipt_path=self.projection_path,
             run_id="heartbeat-dual-write",
             prior_file_shadow_receipt=prior,
@@ -264,6 +302,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             run_heartbeat_dual_write_projection(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 projection_receipt_path=self.root / "artifacts/rejected.json",
                 run_id="heartbeat-rejected",
                 prior_file_shadow_receipt=tampered,
@@ -284,6 +323,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         first = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -299,6 +339,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         final = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -318,6 +359,7 @@ class HeartbeatShadowTests(unittest.TestCase):
                 heartbeat_parity_sample(
                     baseline_path=self.baseline_path,
                     heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
                     projected_artifact=self.manifest_path,
                     run_id=prior["run_id"],
                     authority_input_digest=prior["authority_input_digest"],
@@ -354,6 +396,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             direct = heartbeat_parity_sample(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 projected_artifact=self.manifest_path,
                 run_id=prior["run_id"],
                 authority_input_digest=prior["authority_input_digest"],
@@ -384,6 +427,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         sample = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -402,6 +446,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         sample = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -424,6 +469,30 @@ class HeartbeatShadowTests(unittest.TestCase):
         receipt = append_heartbeat_soak_sample(receipt, sample)
         self.assertEqual(receipt["status"], "failed")
 
+    def test_parity_sample_observes_fresh_live_heartbeat_config_drift(self) -> None:
+        prior = self._file_shadow_cycle()
+        self.live_config_path.write_bytes(
+            _canonical_json(
+                {"agents": {"defaults": {"heartbeat": {"every": "5m", "target": "main"}}}}
+            )
+        )
+        sample = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            projected_artifact=self.manifest_path,
+            run_id=prior["run_id"],
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=1_700_000_060_000,
+            repo_root_path=self.root,
+        )
+
+        self.assertEqual(sample["status"], "fail")
+        self.assertEqual(sample["observation_error"], "authority_manifest_invalid")
+        self.assertEqual(sample["counters"]["projection_drift"], 1)
+
     def test_soak_rejects_tampered_samples_aggregates_and_early_completion(self) -> None:
         prior = self._file_shadow_cycle()
         started = 1_700_000_000_000
@@ -437,6 +506,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         sample = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -470,6 +540,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         gap = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -489,6 +560,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         privacy = heartbeat_parity_sample(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             projected_artifact=self.manifest_path,
             run_id=prior["run_id"],
             authority_input_digest=prior["authority_input_digest"],
@@ -511,6 +583,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             unknown = heartbeat_parity_sample(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 projected_artifact=self.manifest_path,
                 run_id=prior["run_id"],
                 authority_input_digest=prior["authority_input_digest"],
@@ -539,6 +612,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         receipt = force_heartbeat_file_authority_rollback(
             baseline_path=self.baseline_path,
             heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
             database=self.database,
             authority_input_digest=prior["authority_input_digest"],
             rollback_id="drill-1",
@@ -586,6 +660,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             force_heartbeat_file_authority_rollback(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 database=self.database,
                 authority_input_digest=prior["authority_input_digest"],
                 rollback_id="blocked",
@@ -595,34 +670,73 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertTrue(self.database.is_file())
         self.assertFalse(receipt_path.exists())
 
-    def test_forced_rollback_rejects_non_empty_wal_before_source_mutation(self) -> None:
+    def test_forced_rollback_holds_exclusive_lock_across_final_snapshot_and_move(self) -> None:
         prior = self._file_shadow_cycle()
-        receipt_path = self.root / "artifacts/rejected-live-wal.json"
+        receipt_path = self.root / "artifacts/heartbeat-rollback-lock.json"
+        original_snapshot = heartbeat_shadow_module._locked_rollback_audit_snapshot
+        writer_result: list[str] = []
+
+        def racing_snapshot(source: Path, target: Path, root: Path) -> dict[str, object]:
+            def writer() -> None:
+                connection = sqlite3.connect(self.database, timeout=0.1)
+                try:
+                    connection.execute("CREATE TABLE rollback_writer_race(value TEXT)")
+                    connection.commit()
+                    writer_result.append("write_succeeded")
+                except sqlite3.Error:
+                    writer_result.append("write_blocked")
+                finally:
+                    connection.close()
+
+            thread = threading.Thread(target=writer)
+            thread.start()
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+            return original_snapshot(source, target, root)
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_locked_rollback_audit_snapshot",
+            side_effect=racing_snapshot,
+        ):
+            receipt = force_heartbeat_file_authority_rollback(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                database=self.database,
+                authority_input_digest=prior["authority_input_digest"],
+                rollback_id="lock-race",
+                receipt_path=receipt_path,
+                repo_root_path=self.root,
+            )
+
+        self.assertEqual(writer_result, ["write_blocked"])
+        self.assertEqual(receipt["status"], "pass")
+        self.assertFalse(self.database.exists())
+
+    def test_forced_rollback_checkpoints_committed_wal_under_final_lock(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/committed-wal-rollback.json"
         with sqlite3.connect(self.database) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
-                "UPDATE workflow_authority SET updated_at='live-wal' WHERE workflow='heartbeat'"
+                "UPDATE workflow_authority SET updated_at='committed-wal' WHERE workflow='heartbeat'"
             )
             connection.commit()
             self.assertGreater(self.database.with_name("control.db-wal").stat().st_size, 0)
-            with self.assertRaisesRegex(HeartbeatShadowError, "live WAL"):
-                force_heartbeat_file_authority_rollback(
-                    baseline_path=self.baseline_path,
-                    heartbeat_file=self.heartbeat_file,
-                    database=self.database,
-                    authority_input_digest=prior["authority_input_digest"],
-                    rollback_id="live-wal",
-                    receipt_path=receipt_path,
-                    repo_root_path=self.root,
-                )
-        self.assertTrue(self.database.is_file())
-        self.assertFalse(receipt_path.exists())
-        self.assertFalse(
-            (
-                self.root
-                / "state/agentic-os/backups/heartbeat-shadow-rollback/live-wal/control.db"
-            ).exists()
+        receipt = force_heartbeat_file_authority_rollback(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            database=self.database,
+            authority_input_digest=prior["authority_input_digest"],
+            rollback_id="committed-wal",
+            receipt_path=receipt_path,
+            repo_root_path=self.root,
         )
+        self.assertEqual(receipt["status"], "pass")
+        self.assertFalse(self.database.exists())
+        self.assertTrue(receipt_path.exists())
 
     def test_forced_rollback_rejects_busy_source_before_source_mutation(self) -> None:
         prior = self._file_shadow_cycle()
@@ -632,11 +746,12 @@ class HeartbeatShadowTests(unittest.TestCase):
             locker.execute("BEGIN EXCLUSIVE")
             with self.assertRaisesRegex(
                 HeartbeatShadowError,
-                "snapshot could not be created|idle/checkpointable",
+                "checkpoint is busy|snapshot could not be created|idle/checkpointable",
             ):
                 force_heartbeat_file_authority_rollback(
                     baseline_path=self.baseline_path,
                     heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
                     database=self.database,
                     authority_input_digest=prior["authority_input_digest"],
                     rollback_id="busy-source",
@@ -663,6 +778,7 @@ class HeartbeatShadowTests(unittest.TestCase):
             force_heartbeat_file_authority_rollback(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
                 database=self.database,
                 authority_input_digest=prior["authority_input_digest"],
                 rollback_id="parity-drift",

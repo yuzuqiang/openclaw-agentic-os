@@ -153,6 +153,50 @@ def _resolve_inside_repo(path: Path, repo_root: Path, label: str) -> Path:
     return target
 
 
+def _git_text(repo_root: Path, args: list[str], label: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise MonitorError(f"git {label} failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
+    repo_root = Path(str(config["repo_root"])).resolve()
+    status = _git_text(repo_root, ["status", "--porcelain=v1"], "status")
+    if status:
+        raise MonitorError("worktree must be clean before starting heartbeat soak monitor")
+    exact_heads = config.get("exact_heads")
+    if not isinstance(exact_heads, Mapping):
+        raise MonitorError("monitor exact head contract is missing")
+    head = _git_text(repo_root, ["rev-parse", "HEAD"], "rev-parse HEAD")
+    if head != exact_heads.get("monitor_implementation_head"):
+        raise MonitorError("monitor implementation head does not match Git HEAD")
+    for key in (
+        "agentic_os_evidence_head",
+        "implementation_base",
+        "monitor_implementation_head",
+    ):
+        commit = str(exact_heads.get(key, ""))
+        _git_text(repo_root, ["cat-file", "-e", f"{commit}^{{commit}}"], key)
+    _git_text(
+        repo_root,
+        [
+            "merge-base",
+            "--is-ancestor",
+            str(exact_heads["implementation_base"]),
+            str(exact_heads["monitor_implementation_head"]),
+        ],
+        "implementation ancestry",
+    )
+
+
 def _require_sha256(label: str, value: str) -> None:
     if not _is_sha256(value):
         raise MonitorError(f"{label} must be a full lowercase SHA-256")
@@ -274,7 +318,12 @@ def _envelope(
     receipt: dict[str, Any] | None = None
     if core_receipt_path.exists():
         receipt = _read_json(core_receipt_path)
-        validate_heartbeat_soak_receipt(receipt)
+        try:
+            validate_heartbeat_soak_receipt(receipt)
+        except HeartbeatShadowError:
+            if status != "failed_closed":
+                raise
+            receipt = None
     snapshot_doc: dict[str, Any] | None = None
     if snapshot_receipts_path.exists():
         snapshot_doc = _read_json(snapshot_receipts_path)
@@ -298,13 +347,34 @@ def _envelope(
     current_pid = os.getpid()
     pid = _load_pid(pidfile) or current_pid
     terminal_status = status in {"complete", "failed_closed", "rolled_back", "stopped"}
+    no_daemon_status = status == "first_sample_pass"
     process_alive = _pid_alive(pid)
-    if terminal_status and pid == current_pid:
+    if (terminal_status or no_daemon_status) and pid == current_pid:
         process_alive = False
     argv = list(config.get("run_argv", [])) or _command(script_path, "run", state_dir)
     stop_argv = _command(script_path, "stop", state_dir)
     rollback_argv = _command(script_path, "rollback", state_dir)
     status_argv = _command(script_path, "status", state_dir)
+    monitor_doc = {
+        "pid": pid,
+        "pidfile": str(pidfile),
+        "process_identity_observed_at": _utc_now(),
+        "terminal_status_expected_after_write": terminal_status,
+        "script_path": str(script_path),
+        "script_sha256": _sha256_file(script_path),
+        "argv": argv,
+        "argv_sha256": _sha256_text(_command_text(argv)),
+        "python_executable": sys.executable,
+        "run_command": _command_text(argv),
+        "stop_command": _command_text(stop_argv),
+        "rollback_command": _command_text(rollback_argv),
+        "status_command": _command_text(status_argv),
+        "sample_interval_seconds": config["sample_interval_seconds"],
+        "duration_hours": config["duration_hours"],
+        "deadline_epoch_ms": receipt.get("deadline_epoch_ms") if receipt else None,
+    }
+    if not no_daemon_status:
+        monitor_doc["process_alive"] = process_alive
     envelope = {
         "schema_version": SCHEMA_ENVELOPE,
         "status": status,
@@ -320,29 +390,12 @@ def _envelope(
         "updated_at": _utc_now(),
         "exact_heads": config["exact_heads"],
         "predecessor_receipts": config["predecessor_receipts"],
-        "monitor": {
-            "pid": pid,
-            "pidfile": str(pidfile),
-            "process_alive": process_alive,
-            "process_identity_observed_at": _utc_now(),
-            "terminal_status_expected_after_write": terminal_status,
-            "script_path": str(script_path),
-            "script_sha256": _sha256_file(script_path),
-            "argv": argv,
-            "argv_sha256": _sha256_text(_command_text(argv)),
-            "python_executable": sys.executable,
-            "run_command": _command_text(argv),
-            "stop_command": _command_text(stop_argv),
-            "rollback_command": _command_text(rollback_argv),
-            "status_command": _command_text(status_argv),
-            "sample_interval_seconds": config["sample_interval_seconds"],
-            "duration_hours": config["duration_hours"],
-            "deadline_epoch_ms": receipt.get("deadline_epoch_ms") if receipt else None,
-        },
+        "monitor": monitor_doc,
         "receipts": {
             "state_dir": str(state_dir),
             "baseline_path": config["baseline_path"],
             "heartbeat_file": config["heartbeat_file"],
+            "live_config_path": config["live_config_path"],
             "manifest_path": config["manifest_path"],
             "file_shadow_cycle_receipt_path": config["file_shadow_cycle_receipt_path"],
             "core_soak_receipt_path": config["core_soak_receipt_path"],
@@ -439,6 +492,7 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         _require_sha256(label, value)
     baseline = _resolve_inside_repo(args.baseline_path, repo_root, "baseline_path")
     heartbeat = _resolve_inside_repo(args.heartbeat_file, repo_root, "heartbeat_file")
+    live_config = _resolve_inside_repo(args.live_config_path, repo_root, "live_config_path")
     lifecycle = _resolve_inside_repo(
         args.lifecycle_receipt_path, repo_root, "lifecycle_receipt_path"
     )
@@ -455,6 +509,7 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         "script_path": str(script_path),
         "baseline_path": str(baseline),
         "heartbeat_file": str(heartbeat),
+        "live_config_path": str(live_config),
         "database_path": str(repo_root / "state/agentic-os/control.db"),
         "manifest_path": str(state_dir / "heartbeat-authority-manifest.json"),
         "file_shadow_cycle_receipt_path": str(state_dir / "file-shadow-cycle-receipt.json"),
@@ -505,6 +560,7 @@ def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, An
     return heartbeat_parity_sample(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
+        live_config_path=_path_from_config(config, "live_config_path"),
         projected_artifact=_path_from_config(config, "manifest_path"),
         run_id=str(config["file_shadow_run_id"]),
         authority_input_digest=str(config["authority_input_digest"]),
@@ -591,6 +647,7 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
     cycle = run_heartbeat_file_shadow_cycle(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
+        live_config_path=_path_from_config(config, "live_config_path"),
         manifest_path=_path_from_config(config, "manifest_path"),
         run_id=str(config["file_shadow_run_id"]),
         database=_path_from_config(config, "database_path"),
@@ -626,10 +683,21 @@ def start(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     _assert_no_active_monitor(state_dir)
     config = _build_config(args)
+    _assert_start_git_contract(config)
     first = _first_sample(config)
     if args.no_daemon:
-        _persist_envelope(config, status="running", sample=first, note="daemon not started")
-        print(json.dumps({"status": "first_sample_pass", "daemon_started": False}, sort_keys=True))
+        _persist_envelope(
+            config,
+            status="first_sample_pass",
+            sample=first,
+            note="daemon not started",
+        )
+        print(
+            json.dumps(
+                {"status": "first_sample_pass", "daemon_started": False},
+                sort_keys=True,
+            )
+        )
         return 0
 
     log_path = _path_from_config(config, "daemon_log_path")
@@ -688,11 +756,29 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     config = _load_config(state_dir)
     _write_pidfile(config)
-    _persist_envelope(config, status="running", note="daemon_active")
+    try:
+        _persist_envelope(config, status="running", note="daemon_active")
+    except HeartbeatShadowError as exc:
+        _persist_envelope(
+            config,
+            status="failed_closed",
+            violation="core_receipt_invalid",
+            note=str(exc),
+        )
+        return 2
     while True:
         receipt_path = _path_from_config(config, "core_soak_receipt_path")
         receipt = _read_json(receipt_path)
-        validate_heartbeat_soak_receipt(receipt)
+        try:
+            validate_heartbeat_soak_receipt(receipt)
+        except HeartbeatShadowError as exc:
+            _persist_envelope(
+                config,
+                status="failed_closed",
+                violation="core_receipt_invalid",
+                note=str(exc),
+            )
+            return 2
         if receipt["status"] == "complete":
             _persist_envelope(config, status="complete", note="core_receipt_complete")
             return 0
@@ -801,6 +887,7 @@ def rollback(args: argparse.Namespace) -> int:
     result = force_heartbeat_file_authority_rollback(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
+        live_config_path=_path_from_config(config, "live_config_path"),
         database=_path_from_config(config, "database_path"),
         authority_input_digest=str(receipt["authority_input_digest"]),
         rollback_id=args.rollback_id,
@@ -821,6 +908,7 @@ def parser() -> argparse.ArgumentParser:
     start_cmd.add_argument("--run-id", required=True)
     start_cmd.add_argument("--baseline-path", type=Path, required=True)
     start_cmd.add_argument("--heartbeat-file", type=Path, required=True)
+    start_cmd.add_argument("--live-config-path", type=Path, required=True)
     start_cmd.add_argument(
         "--lifecycle-receipt-path",
         type=Path,

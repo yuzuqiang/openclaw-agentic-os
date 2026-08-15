@@ -67,6 +67,14 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.heartbeat = self.root / "docs/runtime-evidence/soak/HEARTBEAT.md"
         self.heartbeat.parent.mkdir(parents=True, exist_ok=True)
         self.heartbeat.write_text("# Heartbeat\n\nNo active periodic tasks.\n", encoding="utf-8")
+        self.live_config = self.root / "openclaw.json"
+        self.live_config.write_text(
+            json.dumps(
+                {"agents": {"defaults": {"heartbeat": {"every": "30m", "target": "main"}}}},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         self.baseline = self.root / "docs/runtime-evidence/soak/baseline.json"
         self.baseline.write_text("{}", encoding="utf-8")
         self.lifecycle = self.root / "docs/runtime-evidence/lifecycle.json"
@@ -93,6 +101,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             run_id="phase-b-test-soak",
             baseline_path=self.baseline,
             heartbeat_file=self.heartbeat,
+            live_config_path=self.live_config,
             lifecycle_receipt_path=self.lifecycle,
             independent_validation_path=self.validation,
             runtime_head=monitor.EXPECTED_RUNTIME_HEAD,
@@ -245,6 +254,91 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertIs(sample["runtime_authority_counts_observed"], False)
         self.assertEqual(sample["observation_error"], "runtime_authority_audit_error")
         self.assertEqual(sample["counters"]["unknown_or_unowned_session"], 1)
+
+    def test_start_git_contract_requires_clean_worktree_and_exact_head(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+        heads = config["exact_heads"]
+        clean_calls: list[list[str]] = []
+
+        def clean_git(_repo_root: Path, argv: list[str], _label: str) -> str:
+            clean_calls.append(argv)
+            if argv == ["status", "--porcelain=v1"]:
+                return ""
+            if argv == ["rev-parse", "HEAD"]:
+                return str(heads["monitor_implementation_head"])
+            return ""
+
+        with mock.patch.object(monitor, "_git_text", side_effect=clean_git):
+            monitor._assert_start_git_contract(config)
+
+        self.assertIn(
+            [
+                "cat-file",
+                "-e",
+                f"{heads['monitor_implementation_head']}^{{commit}}",
+            ],
+            clean_calls,
+        )
+        self.assertIn(
+            [
+                "merge-base",
+                "--is-ancestor",
+                heads["implementation_base"],
+                heads["monitor_implementation_head"],
+            ],
+            clean_calls,
+        )
+
+        with mock.patch.object(monitor, "_git_text", return_value=" M changed.py"):
+            with self.assertRaisesRegex(monitor.MonitorError, "clean"):
+                monitor._assert_start_git_contract(config)
+
+        def mismatch_git(_repo_root: Path, argv: list[str], _label: str) -> str:
+            if argv == ["status", "--porcelain=v1"]:
+                return ""
+            if argv == ["rev-parse", "HEAD"]:
+                return "0" * 40
+            return ""
+
+        with mock.patch.object(monitor, "_git_text", side_effect=mismatch_git):
+            with self.assertRaisesRegex(monitor.MonitorError, "does not match"):
+                monitor._assert_start_git_contract(config)
+
+    def test_no_daemon_start_persists_first_sample_without_running_process(self) -> None:
+        digest = "a" * 64
+        first = _pass_sample(1_700_000_000_000, digest)
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_first_sample", return_value=first
+        ):
+            result = monitor.start(self.args)
+
+        self.assertEqual(result, 0)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "first_sample_pass")
+        self.assertNotIn("process_alive", envelope["monitor"])
+
+    def test_run_validation_abort_persists_failed_closed_envelope(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "core-soak-receipt.json",
+                {"schema_version": "broken"},
+            )
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
 
     def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):

@@ -64,6 +64,7 @@ PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION = (
 )
 PERSISTENT_PREFLIGHT_MIN_TTL_MS = 20_000
 PERSISTENT_PREFLIGHT_MAX_ATTESTATION_LIFETIME_MS = 300_000
+PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS = 30_000
 PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "allow_lease_acquire": (
         "subagents.allowLease.acquire",
@@ -381,6 +382,13 @@ def _runtime_source_digest_snapshot(root: Path) -> dict[str, str]:
         if path.exists():
             snapshot[_relative_source_path(root, path)] = _file_digest(path)
     return snapshot
+
+
+def _source_records_from_snapshot(snapshot: Mapping[str, str]) -> list[dict[str, str]]:
+    return [
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(snapshot.items())
+    ]
 
 
 def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
@@ -1921,6 +1929,7 @@ def _validate_persistent_attestation(
     evidence: Mapping[str, Any],
     *,
     runtime_identity_catalog: Mapping[str, Any],
+    source_digest_snapshot: Mapping[str, str],
 ) -> Mapping[str, Any]:
     attestation = _require_record(evidence.get("attestation"), "persistent attestation")
     _require_exact_keys(
@@ -2009,6 +2018,8 @@ def _validate_persistent_attestation(
         signed_payload.get("expires_at_epoch_ms"), "persistent attestation expires_at"
     )
     now_ms = time.time_ns() // 1_000_000
+    if issued > now_ms + PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS:
+        raise AdapterContractError("persistent attestation issue time is in the future")
     if expires <= issued or expires - issued > PERSISTENT_PREFLIGHT_MAX_ATTESTATION_LIFETIME_MS:
         raise AdapterContractError("persistent attestation lifetime invalid")
     if expires - now_ms < PERSISTENT_PREFLIGHT_MIN_TTL_MS:
@@ -2054,8 +2065,28 @@ def _validate_persistent_attestation(
     sources = binding.get("sources")
     if not isinstance(sources, list) or not sources:
         raise AdapterContractError("persistent runtime sources must be a non-empty list")
+    signed_source_snapshot: dict[str, str] = {}
+    for source in sources:
+        source_record = _require_record(source, "persistent runtime source")
+        _require_exact_keys(source_record, ("path", "sha256"), "persistent runtime source")
+        source_path = _require_string(source_record.get("path"), "persistent runtime source path")
+        if source_path.startswith("/") or ".." in Path(source_path).parts:
+            raise AdapterContractError("persistent runtime source path is invalid")
+        if source_path in signed_source_snapshot:
+            raise AdapterContractError("persistent runtime source paths must be unique")
+        signed_source_snapshot[source_path] = _require_sha256(
+            source_record.get("sha256"), "persistent runtime source digest"
+        )
     if binding.get("sources_sha256") != _canonical_json_sha256(sources):
         raise AdapterContractError("persistent runtime sources digest mismatch")
+    if dict(sorted(signed_source_snapshot.items())) != dict(sorted(source_digest_snapshot.items())):
+        raise AdapterContractError(
+            "persistent signed runtime sources do not match active source snapshot"
+        )
+    if sources != _source_records_from_snapshot(source_digest_snapshot):
+        raise AdapterContractError(
+            "persistent signed runtime sources must use canonical source snapshot order"
+        )
     if catalog.get("authority") != "tools.catalog.runtimeMethods":
         raise AdapterContractError("persistent catalog authority mismatch")
     if catalog.get("sha256") != expected_catalog_sha256:
@@ -2717,6 +2748,7 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
     signed_payload = _validate_persistent_attestation(
         evidence,
         runtime_identity_catalog=runtime_identity_catalog,
+        source_digest_snapshot=source_digest_snapshot,
     )
     catalog_record = _require_persistent_rpc_record(evidence, "tools_catalog", "tools.catalog")
     active_catalog = _require_record(catalog_record.get("response"), "persistent tools.catalog")

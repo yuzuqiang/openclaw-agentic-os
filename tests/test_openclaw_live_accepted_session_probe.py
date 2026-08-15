@@ -1210,7 +1210,14 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertIn("raw_response_sha256", structured["first"])
         spawn_params = [params for method, params in calls if method == "sessions_spawn"]
         self.assertTrue(spawn_params)
+        self.assertEqual(
+            [list(params) for params in spawn_params],
+            [list(module.ATTESTED_SESSIONS_SPAWN_PARAMETERS)] * 2,
+        )
         self.assertTrue(all(params["gateway_lease_id"] == "lease-unit" for params in spawn_params))
+        self.assertTrue(all(params["cleanup"] == "keep" for params in spawn_params))
+        self.assertTrue(all(params["context"] == "isolated" for params in spawn_params))
+        self.assertTrue(all(params["lightContext"] is False for params in spawn_params))
         self.assertTrue(
             all("gateway_lease_id" not in params["metadata"] for params in spawn_params)
         )

@@ -37,6 +37,20 @@ from agentic_os.metadata import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT = ROOT / "scripts" / "openclaw-tool-capability-preflight.py"
+ATTESTED_SESSIONS_SPAWN_PARAMETERS = (
+    "task",
+    "taskName",
+    "runtime",
+    "mode",
+    "agentId",
+    "cleanup",
+    "context",
+    "lightContext",
+    "client_request_id",
+    "idempotency_key",
+    "gateway_lease_id",
+    "metadata",
+)
 
 
 class LiveRpcError(RuntimeError):
@@ -1304,9 +1318,12 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "runtime": "subagent",
             "mode": "run",
             "agentId": args.agent_id,
-            "gateway_lease_id": gateway_lease_id,
+            "cleanup": "keep",
+            "context": "isolated",
+            "lightContext": False,
             "client_request_id": f"issue35-client-{args.probe_id}",
             "idempotency_key": f"issue35-spawn-{args.probe_id}",
+            "gateway_lease_id": gateway_lease_id,
             "metadata": {
                 "run_id": f"issue35-run-{args.probe_id}",
                 "transition_id": f"issue35-transition-{args.probe_id}",
@@ -1317,6 +1334,10 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "task_digest": f"issue35-task-{args.probe_id}",
             },
         }
+        if tuple(spawn_args) != ATTESTED_SESSIONS_SPAWN_PARAMETERS:
+            raise MetadataContractError(
+                "sessions_spawn probe args do not match attested parameter vector"
+            )
         evidence["rpc_attempted"].append("sessions_spawn")
         accepted_one = _session_spawn_once(
             openclaw_executable,

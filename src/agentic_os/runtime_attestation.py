@@ -75,6 +75,8 @@ class HmacSha256Verifier:
 class GatewayCliAttestedTransport:
     """One exact CLI/Gateway transport used by preflight and the live adapter."""
 
+    supports_persistent_adapter_authority = False
+
     def __init__(self, executable: str, *, executable_sha256: str, catalog_sha256: str,
                  timeout_ms: int = 10_000) -> None:
         resolved_executable = Path(shutil.which(executable) or executable).resolve()
@@ -231,7 +233,7 @@ _REQUIRED_LOGICAL_METHODS: Mapping[str, tuple[str, tuple[str, ...]]] = {
 }
 
 _BINDING_KEYS = frozenset(
-    ("executable", "install", "sources", "catalog", "gateway", "transport")
+    ("executable", "install", "sources", "sources_sha256", "catalog", "gateway", "transport")
 )
 _ENVELOPE_KEYS = frozenset(
     ("runtime_identity_token", "signature_algorithm", "signature", "signed_payload")
@@ -269,6 +271,26 @@ def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
         raise RuntimeAttestationError(
             "runtime attestation must be canonical JSON"
         ) from exc
+
+
+def _canonical_value_bytes(value: Any, label: str) -> bytes:
+    try:
+        _assert_json_object_keys(value, label)
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except RuntimeAttestationError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise RuntimeAttestationError(f"{label} must be canonical JSON") from exc
+
+
+def _canonical_value_sha256(value: Any, label: str) -> str:
+    return hashlib.sha256(_canonical_value_bytes(value, label)).hexdigest()
 
 
 def _assert_json_object_keys(value: Any, label: str) -> None:
@@ -347,6 +369,9 @@ def _validate_binding(value: Any) -> tuple[Mapping[str, Any], str, str, str, str
             raise RuntimeAttestationError("runtime source binding paths must be unique")
         source_paths.add(path)
         _sha256(source["sha256"], f"runtime source binding {index} digest")
+    sources_sha256 = _sha256(binding["sources_sha256"], "runtime sources aggregate digest")
+    if sources_sha256 != _canonical_value_sha256(sources, "runtime source binding"):
+        raise RuntimeAttestationError("runtime source binding aggregate digest mismatch")
 
     catalog = _mapping(binding["catalog"], "runtime catalog binding")
     _exact_keys(

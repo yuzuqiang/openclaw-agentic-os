@@ -96,6 +96,10 @@ def binding() -> dict[str, object]:
         ],
         "method_bindings": method_bindings(),
     }
+    sources = [
+        {"path": "dist/openclaw-tools.js", "sha256": "3" * 64},
+        {"path": "dist/server-methods.js", "sha256": "4" * 64},
+    ]
     return {
         "executable": {"path_sha256": "0" * 64, "content_sha256": "1" * 64},
         "install": {
@@ -104,10 +108,16 @@ def binding() -> dict[str, object]:
             "package_name": "openclaw",
             "version": "2026.7.1",
         },
-        "sources": [
-            {"path": "dist/openclaw-tools.js", "sha256": "3" * 64},
-            {"path": "dist/server-methods.js", "sha256": "4" * 64},
-        ],
+        "sources": sources,
+        "sources_sha256": hashlib.sha256(
+            json.dumps(
+                sources,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest(),
         "catalog": {
             "authority": "tools.catalog",
             "sha256": "5" * 64,
@@ -370,6 +380,24 @@ class RuntimeAttestationTests(unittest.TestCase):
                     adapter.allow_lease_acquire(lease_params())
                 self.assertEqual(transport.calls, [])
 
+    def test_source_binding_aggregate_digest_is_required(self) -> None:
+        transport = FakeAttestedTransport()
+        transport.binding["sources_sha256"] = "9" * 64
+        with self.assertRaisesRegex(AdapterContractError, "aggregate digest"):
+            self._adapter(transport)
+
+    def test_identity_drift_after_application_rpc_rejects_response(self) -> None:
+        class PostCallDriftTransport(FakeAttestedTransport):
+            def call(self, method, params):
+                response = super().call(method, params)
+                self.binding["gateway"]["build_id"] = "drifted-build"
+                return response
+
+        transport = PostCallDriftTransport()
+        adapter = self._adapter(transport)
+        with self.assertRaisesRegex(AdapterContractError, "after application RPC"):
+            adapter.allow_lease_acquire(lease_params())
+
     def test_cross_process_replay_fails_before_identity_read_or_rpc(self) -> None:
         transport = FakeAttestedTransport()
         adapter = self._adapter(transport)
@@ -479,6 +507,29 @@ class RuntimeAttestationTests(unittest.TestCase):
             executable.write_bytes(b"drift")
             with self.assertRaisesRegex(RuntimeAttestationError, "drifted"):
                 transport.runtime_identity_snapshot()
+
+    def test_cli_transport_cannot_mint_persistent_adapter_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "openclaw"
+            executable.write_bytes(b"candidate")
+            executable.chmod(0o755)
+            executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+            transport = GatewayCliAttestedTransport(
+                str(executable),
+                executable_sha256=executable_sha,
+                catalog_sha256="5" * 64,
+            )
+            from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
+
+            with self.assertRaisesRegex(AdapterContractError, "persistent adapter authority"):
+                OpenClawAdapter.from_attested_transport(
+                    transport,
+                    TransportBoundRuntimeAttestor(
+                        DigestVerifier(),
+                        clock_ms=lambda: NOW_MS,
+                        nonce_factory=lambda: "challenge-1",
+                    ),
+                )
 
     def test_cli_transport_uses_signed_challenge_snapshot_without_identity_rpc(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

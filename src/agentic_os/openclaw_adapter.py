@@ -838,6 +838,10 @@ class OpenClawAdapter:
         transport: AttestableOpenClawTransport,
         attestor: TransportBoundRuntimeAttestor,
     ) -> "OpenClawAdapter":
+        if getattr(transport, "supports_persistent_adapter_authority", True) is False:
+            raise AdapterContractError(
+                "transport cannot mint persistent adapter authority without a bound application channel"
+            )
         try:
             attestation = attestor.attest(transport)
         except RuntimeAttestationError as exc:
@@ -910,9 +914,17 @@ class OpenClawAdapter:
                 f"{binding.method} request must contain the exact attested parameter set "
                 f"({'; '.join(details)})"
             )
-        return binding.method, _transport_response(
-            self._transport.call(binding.method, params), binding.method
-        )
+        response = self._transport.call(binding.method, params)
+        try:
+            assert_attestation_current(
+                self._transport, state.attestation, clock_ms=state.clock_ms
+            )
+        except (AttributeError, RuntimeAttestationError) as exc:
+            raise AdapterContractError(
+                "runtime attestation expired or drifted after application RPC; "
+                "outcome requires human review"
+            ) from exc
+        return binding.method, _transport_response(response, binding.method)
 
     @staticmethod
     def _metadata_error(exc: MetadataContractError) -> AdapterContractError:

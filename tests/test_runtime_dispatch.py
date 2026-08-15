@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from collections import Counter
@@ -743,6 +744,40 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE rpc_kind='allow_lease_release'"
                 ).fetchone()[0],
                 "unknown",
+            )
+
+    def test_spawn_subprocess_timeout_is_ambiguous_and_retains_lease_for_review(self) -> None:
+        adapter = TransportFailingAdapter(
+            {
+                "sessions_spawn": subprocess.TimeoutExpired(
+                    cmd=["openclaw", "gateway", "call", "sessions_spawn"],
+                    timeout=30,
+                )
+            },
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,reconciliation_status FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("acquired", "not_needed"),
             )
 
     def test_identical_dispatch_replay_skips_adapter_and_conflicting_reuse_fails(self) -> None:
