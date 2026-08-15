@@ -765,6 +765,53 @@ def _move_database_to_local_backup(source: Path, backup: Path) -> list[str]:
     return moved
 
 
+def _create_rollback_source_path_guard(source: Path) -> int:
+    try:
+        descriptor = os.open(
+            source,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise HeartbeatShadowError(
+            "Heartbeat shadow DB path was recreated during rollback"
+        ) from exc
+    except OSError as exc:
+        raise HeartbeatShadowError(
+            "Heartbeat rollback source path guard could not be created"
+        ) from exc
+    return descriptor
+
+
+def _release_rollback_source_path_guard(source: Path, descriptor: int) -> None:
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        try:
+            source_stat = source.stat()
+        except FileNotFoundError:
+            source_stat = None
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            if (
+                source_stat is not None
+                and source_stat.st_dev == descriptor_stat.st_dev
+                and source_stat.st_ino == descriptor_stat.st_ino
+            ):
+                source.unlink()
+            elif source_stat is not None:
+                raise HeartbeatShadowError(
+                    "Heartbeat rollback source path was replaced before guard removal"
+                )
+        except OSError as exc:
+            raise HeartbeatShadowError(
+                "Heartbeat rollback source path guard could not be removed"
+            ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def run_heartbeat_file_shadow_cycle(
     *,
     baseline_path: Path,
@@ -1522,6 +1569,7 @@ def force_heartbeat_file_authority_rollback(
         raise HeartbeatShadowError("Heartbeat rollback backup already exists")
     assert_privacy_preflight(root, database_paths=(target, audit_snapshot, backup))
     lock_connection, source_idle = _lock_rollback_source_idle(target)
+    source_path_guard: int | None = None
     try:
         snapshot = _locked_rollback_audit_snapshot(target, audit_snapshot, root)
         counts = dict(snapshot["runtime_authority_counts"])
@@ -1542,58 +1590,64 @@ def force_heartbeat_file_authority_rollback(
         )
         source_sha256 = _sha256_file(target)
         moved_sidecars = _move_database_to_local_backup(target, backup)
-        if target.exists():
-            raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
+        source_path_guard = _create_rollback_source_path_guard(target)
         backup_sha256 = _sha256_file(backup)
         if backup_sha256 != source_sha256:
             raise HeartbeatShadowError("Heartbeat rollback backup hash mismatch")
+        recreated = heartbeat_authority_manifest(
+            baseline_path,
+            heartbeat_file,
+            live_config_path,
+            observed_at_epoch_ms=observed_at_epoch_ms,
+        )
+        recreated_digest = _manifest_authority_digest(recreated)
+        if recreated_digest != authority_input_digest:
+            raise HeartbeatShadowError(
+                "Heartbeat file-authority view was not recreated exactly"
+            )
+        receipt = {
+            "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
+            "status": "pass",
+            "workflow": HEARTBEAT_WORKFLOW,
+            "authority": "file_artifacts",
+            "db_authority_enabled": False,
+            "authority_input_digest": recreated_digest,
+            "rollback_id": rollback_id,
+            "file_authority_view_recreated": True,
+            "parity": parity,
+            "parity_percent": 100,
+            "shadow_database_removed": True,
+            "recoverable_local_backup_created": True,
+            "recoverable_local_backup_path": backup.relative_to(root).as_posix(),
+            "recoverable_local_backup_sha256": backup_sha256,
+            "source_database_sha256_before_rollback": source_sha256,
+            "source_sidecars_before_rollback": source_idle["source_sidecars"],
+            "source_sidecars_moved_to_backup": moved_sidecars,
+            "backup_sidecars": _sidecar_receipts(backup),
+            "audit_snapshot_database": audit_snapshot.relative_to(root).as_posix(),
+            "audit_snapshot_sha256": snapshot["snapshot_sha256"],
+            "audit_snapshot_sidecars_present": False,
+            "runtime_authority_counts_before_rollback": counts,
+            "source_database_idle_check": source_idle["quick_check"],
+            "local_recovery_only": True,
+            "packaging_retrieval_denied": True,
+            "production_gateway_mutated": False,
+            "production_config_mutated": False,
+            "production_service_mutated": False,
+            "production_cron_mutated": False,
+            "production_authority_mutated": False,
+            "production_session_or_lease_authority_left": False,
+        }
+        _atomic_write_json(target_receipt, receipt)
     finally:
+        if source_path_guard is not None:
+            _release_rollback_source_path_guard(target, source_path_guard)
+            source_path_guard = None
         try:
             lock_connection.execute("ROLLBACK")
         except sqlite3.Error:
             pass
         lock_connection.close()
-    recreated = heartbeat_authority_manifest(
-        baseline_path,
-        heartbeat_file,
-        live_config_path,
-        observed_at_epoch_ms=observed_at_epoch_ms,
-    )
-    recreated_digest = _manifest_authority_digest(recreated)
-    if recreated_digest != authority_input_digest:
-        raise HeartbeatShadowError("Heartbeat file-authority view was not recreated exactly")
-    receipt = {
-        "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
-        "status": "pass",
-        "workflow": HEARTBEAT_WORKFLOW,
-        "authority": "file_artifacts",
-        "db_authority_enabled": False,
-        "authority_input_digest": recreated_digest,
-        "rollback_id": rollback_id,
-        "file_authority_view_recreated": True,
-        "parity": parity,
-        "parity_percent": 100,
-        "shadow_database_removed": True,
-        "recoverable_local_backup_created": True,
-        "recoverable_local_backup_path": backup.relative_to(root).as_posix(),
-        "recoverable_local_backup_sha256": backup_sha256,
-        "source_database_sha256_before_rollback": source_sha256,
-        "source_sidecars_before_rollback": source_idle["source_sidecars"],
-        "source_sidecars_moved_to_backup": moved_sidecars,
-        "backup_sidecars": _sidecar_receipts(backup),
-        "audit_snapshot_database": audit_snapshot.relative_to(root).as_posix(),
-        "audit_snapshot_sha256": snapshot["snapshot_sha256"],
-        "audit_snapshot_sidecars_present": False,
-        "runtime_authority_counts_before_rollback": counts,
-        "source_database_idle_check": source_idle["quick_check"],
-        "local_recovery_only": True,
-        "packaging_retrieval_denied": True,
-        "production_gateway_mutated": False,
-        "production_config_mutated": False,
-        "production_service_mutated": False,
-        "production_cron_mutated": False,
-        "production_authority_mutated": False,
-        "production_session_or_lease_authority_left": False,
-    }
-    _atomic_write_json(target_receipt, receipt)
+    if target.exists():
+        raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
     return receipt

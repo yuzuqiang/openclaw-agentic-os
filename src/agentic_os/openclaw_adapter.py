@@ -628,14 +628,9 @@ def _history_item_session_keys(
                     ),
                 ),
             )
-            if (
-                session_key is not None
-                or spawn_request_session_key is not None
-                or external_id is not None
-            ):
-                identities.append(
-                    (label, session_key, spawn_request_session_key, external_id)
-                )
+            identities.append(
+                (label, session_key, spawn_request_session_key, external_id)
+            )
     return tuple(identities)
 
 
@@ -820,6 +815,7 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
 class _AdapterAuthorityState:
     attestation: VerifiedRuntimeAttestation
     clock_ms: Any
+    monotonic_ms: Any
 
 
 _ADAPTER_AUTHORITIES: "weakref.WeakKeyDictionary[OpenClawAdapter, _AdapterAuthorityState]" = (
@@ -842,7 +838,7 @@ class OpenClawAdapter:
         transport: AttestableOpenClawTransport,
         attestor: TransportBoundRuntimeAttestor,
     ) -> "OpenClawAdapter":
-        if getattr(transport, "supports_persistent_adapter_authority", True) is False:
+        if getattr(transport, "supports_persistent_adapter_authority", False) is not True:
             raise AdapterContractError(
                 "transport cannot mint persistent adapter authority without a bound application channel"
             )
@@ -859,6 +855,7 @@ class OpenClawAdapter:
         _ADAPTER_AUTHORITIES[adapter] = _AdapterAuthorityState(
             attestation=attestation,
             clock_ms=attestor.clock_ms,
+            monotonic_ms=attestor.monotonic_ms,
         )
         return adapter
 
@@ -870,7 +867,10 @@ class OpenClawAdapter:
             )
         try:
             assert_attestation_current(
-                self._transport, state.attestation, clock_ms=state.clock_ms
+                self._transport,
+                state.attestation,
+                clock_ms=state.clock_ms,
+                monotonic_ms=state.monotonic_ms,
             )
         except (AttributeError, RuntimeAttestationError) as exc:
             raise AdapterContractError(str(exc)) from exc
@@ -921,7 +921,10 @@ class OpenClawAdapter:
         response = self._transport.call(binding.method, params)
         try:
             assert_attestation_current(
-                self._transport, state.attestation, clock_ms=state.clock_ms
+                self._transport,
+                state.attestation,
+                clock_ms=state.clock_ms,
+                monotonic_ms=state.monotonic_ms,
             )
         except (AttributeError, RuntimeAttestationError) as exc:
             raise AdapterAmbiguousOutcomeError(
@@ -1224,7 +1227,7 @@ class OpenClawAdapter:
             item_spawn_request_session_key,
             item_external_id,
         ) in _history_item_session_keys(response):
-            if item_session_key is not None and item_session_key != session_key:
+            if item_session_key != session_key:
                 raise AdapterContractError(
                     f"{method} {label} identity must match requested session"
                 )

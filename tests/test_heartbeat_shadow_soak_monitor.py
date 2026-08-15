@@ -101,7 +101,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         lifecycle_sha = _write_json(self.lifecycle, lifecycle)
         validation_sha = _write_json(
             self.validation,
-            {"status": "pass", "receipt_sha256": lifecycle_sha},
+            {
+                "status": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
+                "invocation": {
+                    "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
+                    "completed_at": "2026-08-15T00:00:00Z",
+                },
+            },
         )
         self.args = Namespace(
             state_dir=self.state_dir,
@@ -198,6 +211,17 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertIn(" stop ", envelope["monitor"]["stop_command"])
         self.assertIn(" rollback ", envelope["monitor"]["rollback_command"])
+
+    def test_predecessor_validation_requires_independent_provenance(self) -> None:
+        lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
+        weak_validation_sha = _write_json(
+            self.validation,
+            {"status": "pass", "receipt_sha256": lifecycle_sha},
+        )
+        self.args.expected_independent_validation_sha256 = weak_validation_sha
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(monitor.MonitorError, "verifier provenance"):
+                monitor._build_config(self.args)
 
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
         digest = "a" * 64
@@ -394,6 +418,29 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
         self.assertIn("unreadable JSON", envelope["note"])
+
+    def test_failed_closed_persists_despite_corrupt_snapshot_ledger(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = "a" * 64
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            (self.state_dir / "runtime-snapshot-receipts.json").write_text(
+                "{broken", encoding="utf-8"
+            )
+            monitor._persist_envelope(
+                config,
+                status="failed_closed",
+                violation="snapshot_ledger_corrupt",
+                note="sample failed",
+            )
+
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["snapshot_ledger_corrupt"])
+        self.assertEqual(envelope["runtime_snapshots"]["snapshots_count"], 0)
 
     def test_run_rejects_core_receipt_from_other_monitor_config(self) -> None:
         digest = "a" * 64

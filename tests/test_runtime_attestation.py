@@ -143,6 +143,8 @@ class DigestVerifier:
 
 
 class FakeAttestedTransport:
+    supports_persistent_adapter_authority = True
+
     def __init__(self) -> None:
         self.binding = binding()
         self.methods = method_bindings()
@@ -369,6 +371,48 @@ class RuntimeAttestationTests(unittest.TestCase):
             adapter.allow_lease_acquire(lease_params())
         self.assertEqual(transport.calls, [])
 
+    def test_monotonic_deadline_expiry_rejects_adapter_authority(self) -> None:
+        from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
+
+        monotonic = {"now": 10_000}
+        transport = FakeAttestedTransport()
+        adapter = OpenClawAdapter.from_attested_transport(
+            transport,
+            TransportBoundRuntimeAttestor(
+                DigestVerifier(),
+                clock_ms=lambda: NOW_MS,
+                monotonic_ms=lambda: monotonic["now"],
+                nonce_factory=lambda: "challenge-1",
+            ),
+        )
+
+        monotonic["now"] += 60_000
+        with self.assertRaisesRegex(AdapterContractError, "monotonic deadline"):
+            adapter.allow_lease_acquire(lease_params())
+        self.assertEqual(transport.calls, [])
+
+    def test_transport_must_explicitly_claim_persistent_channel_authority(self) -> None:
+        class MissingCapabilityTransport:
+            def __init__(self) -> None:
+                self.inner = FakeAttestedTransport()
+                self.calls = self.inner.calls
+
+            def call(self, method, params):
+                return self.inner.call(method, params)
+
+            def request_runtime_attestation(self, *, challenge, client_process_id):
+                return self.inner.request_runtime_attestation(
+                    challenge=challenge, client_process_id=client_process_id
+                )
+
+            def runtime_identity_snapshot(self):
+                return self.inner.runtime_identity_snapshot()
+
+        transport = MissingCapabilityTransport()
+        with self.assertRaisesRegex(AdapterContractError, "persistent adapter authority"):
+            self._adapter(transport)
+        self.assertEqual(transport.calls, [])
+
     def test_unsigned_status_alias_injection_is_rejected(self) -> None:
         transport = FakeAttestedTransport()
 
@@ -479,6 +523,20 @@ class RuntimeAttestationTests(unittest.TestCase):
         ):
             adapter.sessions_spawn({**request, "unexpected": "field"})
         self.assertEqual(transport.calls, [])
+
+    def test_history_items_without_session_identity_are_rejected(self) -> None:
+        class UnscopedHistoryTransport(FakeAttestedTransport):
+            def call(self, method, params):
+                response = super().call(method, params)
+                if method == "sessions_history":
+                    response["messages"] = [{"role": "assistant", "content": "done"}]
+                return response
+
+        transport = UnscopedHistoryTransport()
+        adapter = self._adapter(transport)
+        session = adapter.sessions_spawn(spawn_params())
+        with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\] identity"):
+            adapter.session_result(session.session_key or "session-1")
 
     def test_duplicate_request_identity_must_return_same_external_identity(self) -> None:
         transport = FakeAttestedTransport()

@@ -47,7 +47,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "fb70bc7ff179aff4967cef2e34e8aed6d5cd2c243c5bc1853394002313a0ca5a"
+    "67eaebe1e9de76b0aca984df7f01fad9018753ede3cf6ed78f855f8c9e61420e"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -299,6 +299,7 @@ def _verified_predecessor_summary(config: Mapping[str, Any]) -> dict[str, Any]:
         raise MonitorError("predecessor DB authority state is ambiguous")
     if validation.get("status") != "pass" or validation.get("receipt_sha256") != lifecycle_sha:
         raise MonitorError("independent validation does not bind the lifecycle receipt")
+    _validate_independent_validation_provenance(config, validation)
 
     return {
         "lifecycle": {
@@ -311,8 +312,34 @@ def _verified_predecessor_summary(config: Mapping[str, Any]) -> dict[str, Any]:
             "path": str(validation_path),
             "sha256": validation_sha,
             "status": validation.get("status"),
+            "verifier_identity": validation["verifier"]["identity"],
+            "implementation_head": validation["implementation_head"],
         },
     }
+
+
+def _validate_independent_validation_provenance(
+    config: Mapping[str, Any], validation: Mapping[str, Any]
+) -> None:
+    verifier = validation.get("verifier")
+    if not isinstance(verifier, Mapping):
+        raise MonitorError("independent validation verifier provenance is missing")
+    for key in ("identity", "role", "session_key"):
+        value = verifier.get(key)
+        if not isinstance(value, str) or not value:
+            raise MonitorError(f"independent validation verifier {key} is missing")
+    if verifier.get("identity") == "lifecycle_producer":
+        raise MonitorError("independent validation must not be self-produced")
+    implementation_head = validation.get("implementation_head")
+    if implementation_head != config["exact_heads"]["implementation_base"]:
+        raise MonitorError("independent validation implementation head mismatch")
+    invocation = validation.get("invocation")
+    if not isinstance(invocation, Mapping):
+        raise MonitorError("independent validation invocation provenance is missing")
+    for key in ("command", "completed_at"):
+        value = invocation.get(key)
+        if not isinstance(value, str) or not value:
+            raise MonitorError(f"independent validation invocation {key} is missing")
 
 
 def _envelope(
@@ -340,9 +367,14 @@ def _envelope(
             receipt = None
     snapshot_doc: dict[str, Any] | None = None
     if snapshot_receipts_path.exists():
-        snapshot_doc = _read_json(snapshot_receipts_path)
-        if snapshot_doc.get("schema_version") != SCHEMA_SNAPSHOTS:
-            raise MonitorError("unsupported runtime snapshot receipt schema")
+        try:
+            snapshot_doc = _read_json(snapshot_receipts_path)
+            if snapshot_doc.get("schema_version") != SCHEMA_SNAPSHOTS:
+                raise MonitorError("unsupported runtime snapshot receipt schema")
+        except MonitorError:
+            if status != "failed_closed":
+                raise
+            snapshot_doc = None
 
     samples = receipt.get("samples", []) if receipt else []
     snapshots = snapshot_doc.get("snapshots", []) if snapshot_doc else []

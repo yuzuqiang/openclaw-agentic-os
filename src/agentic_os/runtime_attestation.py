@@ -29,6 +29,8 @@ class RuntimeAttestationError(ValueError):
 class AttestableOpenClawTransport(Protocol):
     """Application transport plus its challenge-bound identity snapshot."""
 
+    supports_persistent_adapter_authority: bool
+
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
 
@@ -170,6 +172,8 @@ class VerifiedRuntimeAttestation:
     issued_at_epoch_ms: int
     expires_at_epoch_ms: int
     accepted_at_epoch_ms: int
+    accepted_at_monotonic_ms: int
+    monotonic_deadline_ms: int
     max_clock_skew_ms: int
     local_process_id: int
     transport_object_id: int
@@ -488,6 +492,7 @@ class TransportBoundRuntimeAttestor:
         *,
         clock_ms: Callable[[], int] | None = None,
         nonce_factory: Callable[[], str] | None = None,
+        monotonic_ms: Callable[[], int] | None = None,
         max_lifetime_ms: int = 300_000,
         max_clock_skew_ms: int = 30_000,
     ) -> None:
@@ -497,6 +502,7 @@ class TransportBoundRuntimeAttestor:
             raise RuntimeAttestationError("max_clock_skew_ms must be non-negative")
         self._verifier = verifier
         self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
+        self._monotonic_ms = monotonic_ms or (lambda: time.monotonic_ns() // 1_000_000)
         self._nonce_factory = nonce_factory or (lambda: secrets.token_hex(32))
         self._max_lifetime_ms = max_lifetime_ms
         self._max_clock_skew_ms = max_clock_skew_ms
@@ -504,6 +510,10 @@ class TransportBoundRuntimeAttestor:
     @property
     def clock_ms(self) -> Callable[[], int]:
         return self._clock_ms
+
+    @property
+    def monotonic_ms(self) -> Callable[[], int]:
+        return self._monotonic_ms
 
     def attest(
         self, transport: AttestableOpenClawTransport
@@ -553,6 +563,7 @@ class TransportBoundRuntimeAttestor:
         if type(issued) is not int or type(expires) is not int:
             raise RuntimeAttestationError("runtime attestation times must be integer epoch ms")
         now = self._clock_ms()
+        monotonic_now = self._monotonic_ms()
         if issued > now + self._max_clock_skew_ms:
             raise RuntimeAttestationError("runtime attestation issue time is in the future")
         if now < issued - self._max_clock_skew_ms or now >= expires:
@@ -594,6 +605,8 @@ class TransportBoundRuntimeAttestor:
             issued_at_epoch_ms=issued,
             expires_at_epoch_ms=expires,
             accepted_at_epoch_ms=now,
+            accepted_at_monotonic_ms=monotonic_now,
+            monotonic_deadline_ms=monotonic_now + max(0, expires - now),
             max_clock_skew_ms=self._max_clock_skew_ms,
             local_process_id=local_pid,
             transport_object_id=id(transport),
@@ -609,6 +622,7 @@ def assert_attestation_current(
     attestation: VerifiedRuntimeAttestation,
     *,
     clock_ms: Callable[[], int],
+    monotonic_ms: Callable[[], int],
 ) -> None:
     """Reject replay or identity drift before an application RPC is attempted."""
 
@@ -623,6 +637,8 @@ def assert_attestation_current(
         raise RuntimeAttestationError("runtime attestation validity window is in the future")
     if now >= attestation.expires_at_epoch_ms:
         raise RuntimeAttestationError("runtime attestation is expired")
+    if monotonic_ms() >= attestation.monotonic_deadline_ms:
+        raise RuntimeAttestationError("runtime attestation monotonic deadline expired")
     snapshot = _mapping(
         transport.runtime_identity_snapshot(), "runtime identity snapshot"
     )

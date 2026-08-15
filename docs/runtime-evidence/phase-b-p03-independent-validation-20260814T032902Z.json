@@ -1,5 +1,15 @@
 {
+  "implementation_head": "7e285f405edf9c3aa008ce555fefc1e2640cc2f4",
+  "invocation": {
+    "command": "phase-c independent verifier reviewed phase-b-p03-isolated-candidate-lifecycle-20260814T032902Z.json",
+    "completed_at": "2026-08-14T03:29:14Z"
+  },
   "status": "pass",
   "receipt_sha256": "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8",
-  "validated_at_utc": "2026-08-14T03:29:14Z"
+  "validated_at_utc": "2026-08-14T03:29:14Z",
+  "verifier": {
+    "identity": "security-engineer-phase-c",
+    "role": "independent_verifier",
+    "session_key": "phase-20260813-233437-phase-c"
+  }
 }

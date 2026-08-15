@@ -781,6 +781,36 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "pass")
         self.assertFalse(self.database.exists())
 
+    def test_forced_rollback_fails_if_source_path_is_recreated_after_move(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/heartbeat-rollback-path-race.json"
+        original_move = heartbeat_shadow_module._move_database_to_local_backup
+
+        def racing_move(source: Path, backup: Path) -> list[str]:
+            moved = original_move(source, backup)
+            sqlite3.connect(source).close()
+            return moved
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_move_database_to_local_backup",
+            side_effect=racing_move,
+        ):
+            with self.assertRaisesRegex(HeartbeatShadowError, "recreated"):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="path-race",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+
+        self.assertTrue(self.database.exists())
+        self.assertFalse(receipt_path.exists())
+
     def test_forced_rollback_checkpoints_committed_wal_under_final_lock(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/committed-wal-rollback.json"
