@@ -1622,7 +1622,8 @@ def force_heartbeat_file_authority_rollback(
     lock_connection, source_idle = _lock_rollback_source_idle(target)
     source_path_guard: int | None = None
     backup_created = False
-    receipt_written = False
+    rollback_ready_for_receipt = False
+    receipt: dict[str, Any] | None = None
     try:
         snapshot = _locked_rollback_audit_snapshot(target, audit_snapshot, root)
         counts = dict(snapshot["runtime_authority_counts"])
@@ -1692,8 +1693,7 @@ def force_heartbeat_file_authority_rollback(
             "production_authority_mutated": False,
             "production_session_or_lease_authority_left": False,
         }
-        _atomic_write_json(target_receipt, receipt)
-        receipt_written = True
+        rollback_ready_for_receipt = True
     finally:
         active_error = sys.exc_info()[1]
         release_error: BaseException | None = None
@@ -1705,7 +1705,9 @@ def force_heartbeat_file_authority_rollback(
         except BaseException as exc:
             release_error = exc
         finally:
-            if backup_created and not receipt_written:
+            if backup_created and (
+                not rollback_ready_for_receipt or release_error is not None
+            ):
                 if target.exists():
                     _remove_recreated_rollback_source_path(target)
                 try:
@@ -1723,4 +1725,7 @@ def force_heartbeat_file_authority_rollback(
         lock_connection.close()
     if target.exists():
         raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
+    if receipt is None:
+        raise HeartbeatShadowError("Heartbeat rollback receipt was not prepared")
+    _atomic_write_json(target_receipt, receipt)
     return receipt

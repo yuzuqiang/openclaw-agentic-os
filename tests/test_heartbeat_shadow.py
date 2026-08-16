@@ -915,6 +915,39 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertFalse(backup.exists())
         self.assertFalse(receipt_path.exists())
 
+    def test_forced_rollback_does_not_write_pass_receipt_before_guard_cleanup(
+        self,
+    ) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/guard-cleanup-after-pass-rollback.json"
+        backup = (
+            self.root
+            / "state/agentic-os/backups/heartbeat-shadow-rollback/guard-cleanup-after-pass/control.db"
+        )
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_release_rollback_source_path_guard",
+            side_effect=HeartbeatShadowError("simulated guard cleanup failure"),
+        ):
+            with self.assertRaisesRegex(
+                HeartbeatShadowError, "simulated guard cleanup failure"
+            ):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="guard-cleanup-after-pass",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(backup.exists())
+        self.assertFalse(receipt_path.exists())
+
     def test_forced_rollback_checkpoints_committed_wal_under_final_lock(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/committed-wal-rollback.json"

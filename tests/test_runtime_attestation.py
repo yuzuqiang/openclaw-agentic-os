@@ -336,11 +336,11 @@ class RuntimeAttestationTests(unittest.TestCase):
         self.assertTrue(adapter.runtime_authority_verified)
         lease = adapter.allow_lease_acquire(lease_params())
         self.assertEqual(lease.external_id, "lease-1")
-        release = adapter.allow_lease_release(release_params())
-        self.assertEqual(release.external_id, "lease-1")
         metadata = session_metadata()
         session = adapter.sessions_spawn(spawn_params(metadata))
         self.assertEqual(session.external_id, "session-1")
+        release = adapter.allow_lease_release(release_params())
+        self.assertEqual(release.external_id, "lease-1")
         adapter.session_status("session-1")
         self.assertEqual(
             transport.calls[-1], ("session_status", {"sessionKey": "session-1"})
@@ -370,6 +370,46 @@ class RuntimeAttestationTests(unittest.TestCase):
             AdapterContractError, "owner metadata does not match"
         ):
             adapter.allow_lease_release(release_params(run_id="other-run"))
+
+        self.assertEqual(transport.calls, [])
+
+    def test_spawn_requires_cached_live_adapter_lease_before_transport(self) -> None:
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "cached live adapter lease ownership"
+        ):
+            adapter.sessions_spawn(spawn_params())
+
+        self.assertEqual(transport.calls, [])
+
+    def test_spawn_rejects_released_or_mismatched_adapter_lease_before_transport(
+        self,
+    ) -> None:
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+        adapter.allow_lease_release(release_params())
+        transport.calls.clear()
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "cached live adapter lease ownership"
+        ):
+            adapter.sessions_spawn(spawn_params())
+
+        self.assertEqual(transport.calls, [])
+
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+        transport.calls.clear()
+
+        metadata = {**session_metadata(), "run_id": "other-run"}
+        with self.assertRaisesRegex(
+            AdapterContractError, "lease owner metadata does not match"
+        ):
+            adapter.sessions_spawn(spawn_params(metadata))
 
         self.assertEqual(transport.calls, [])
 
@@ -447,6 +487,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             nonce_factory=lambda: "challenge-1",
         )
         adapter = OpenClawAdapter.from_attested_transport(transport, attestor)
+        adapter.allow_lease_acquire(lease_params())
         session = adapter.sessions_spawn(spawn_params())
         self.assertEqual(session.external_id, "session-1")
 
@@ -472,6 +513,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             nonce_factory=lambda: "challenge-1",
         )
         adapter = OpenClawAdapter.from_attested_transport(transport, attestor)
+        adapter.allow_lease_acquire(lease_params())
         adapter.sessions_spawn(spawn_params())
 
         transport.envelope_overrides["owner_scope_id"] = "8" * 64
@@ -577,13 +619,66 @@ class RuntimeAttestationTests(unittest.TestCase):
                 transport.spawn_normalized_override = normalized
                 transport.spawn_raw_override = raw
                 adapter = self._adapter(transport)
+                adapter.allow_lease_acquire(lease_params())
                 with self.assertRaisesRegex(AdapterContractError, message):
                     adapter.sessions_spawn(spawn_params(metadata))
+
+    def test_conflicting_spawn_metadata_aliases_fail_closed(self) -> None:
+        class ConflictingAliasTransport(FakeAttestedTransport):
+            def __init__(self, *, conflict: str) -> None:
+                super().__init__()
+                self.conflict = conflict
+
+            def call(self, method, params):
+                if method != "sessions_spawn":
+                    return super().call(method, params)
+                self.calls.append((method, dict(params)))
+                metadata = dict(params["metadata"])
+                body = {
+                    "metadata_contract_version": "v1",
+                    "contract_version": "v1",
+                    "normalized": metadata,
+                    "normalized_metadata": dict(metadata),
+                    "external_metadata": dict(metadata),
+                    "raw_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                    "raw_metadata_json": json.dumps(
+                        metadata, sort_keys=True, separators=(",", ":")
+                    ),
+                }
+                if self.conflict == "normalized":
+                    body["external_metadata"] = {**metadata, "run_id": "other-run"}
+                elif self.conflict == "raw":
+                    body["raw_metadata_json"] = json.dumps(
+                        {**metadata, "run_id": "other-run"},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                elif self.conflict == "version":
+                    body["contract_version"] = "v2"
+                return {
+                    "session_key": self.spawn_session_key,
+                    "spawn_request_session_key": self.spawn_session_key,
+                    "metadata": body,
+                }
+
+        for conflict, message in (
+            ("normalized", "conflicting normalized metadata aliases"),
+            ("raw", "conflicting raw metadata JSON aliases"),
+            ("version", "conflicting metadata contract version aliases"),
+        ):
+            with self.subTest(conflict=conflict):
+                transport = ConflictingAliasTransport(conflict=conflict)
+                adapter = self._adapter(transport)
+                adapter.allow_lease_acquire(lease_params())
+                with self.assertRaisesRegex(AdapterContractError, message):
+                    adapter.sessions_spawn(spawn_params())
 
     def test_unknown_spawn_outcome_is_never_retried(self) -> None:
         transport = FakeAttestedTransport()
         transport.spawn_error = TimeoutError("unknown outcome")
         adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+        transport.calls.clear()
         with self.assertRaisesRegex(TimeoutError, "unknown outcome"):
             adapter.sessions_spawn(spawn_params())
         self.assertEqual(
@@ -625,6 +720,7 @@ class RuntimeAttestationTests(unittest.TestCase):
 
         transport = UnscopedHistoryTransport()
         adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
         session = adapter.sessions_spawn(spawn_params())
         with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\] identity"):
             adapter.session_result(session.session_key or "session-1")
@@ -632,6 +728,7 @@ class RuntimeAttestationTests(unittest.TestCase):
     def test_duplicate_request_identity_must_return_same_external_identity(self) -> None:
         transport = FakeAttestedTransport()
         adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
         first = adapter.sessions_spawn(spawn_params())
         self.assertEqual(first.external_id, "session-1")
         transport.spawn_session_key = "session-2"

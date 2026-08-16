@@ -143,6 +143,15 @@ _ALLOW_LEASE_OWNER_METADATA_PARAMS = frozenset(
     )
 )
 
+_SPAWN_LEASE_OWNER_METADATA_PARAMS = frozenset(
+    (
+        "run_id",
+        "phase",
+        "transition_id",
+        "agent_id",
+    )
+)
+
 _REQUIRED_RUNTIME_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     **_REQUIRED_ALLOW_LEASE_TOOL_PARAMS,
     **_REQUIRED_SESSION_TOOL_PARAMS,
@@ -655,6 +664,59 @@ def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _consistent_metadata_mapping_alias(
+    label: str,
+    aliases: Iterable[tuple[str, Any]],
+) -> Mapping[str, Any]:
+    present: list[tuple[str, Mapping[str, Any]]] = []
+    for name, value in aliases:
+        if value is None:
+            continue
+        present.append((name, _mapping(value, name)))
+    if not present:
+        raise AdapterContractError(f"{label} is required")
+    canonical = json.dumps(
+        dict(present[0][1]),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    for name, value in present[1:]:
+        candidate = json.dumps(
+            dict(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        if candidate != canonical:
+            raise AdapterContractError(
+                f"conflicting {label} aliases: {present[0][0]} != {name}"
+            )
+    return present[0][1]
+
+
+def _consistent_string_alias(
+    label: str,
+    aliases: Iterable[tuple[str, Any]],
+) -> str:
+    present: list[tuple[str, str]] = []
+    for name, value in aliases:
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value:
+            raise AdapterContractError(f"{name} must be a non-empty string")
+        present.append((name, value))
+    if not present:
+        raise AdapterContractError(f"{label} is required")
+    first_name, first_value = present[0]
+    for name, value in present[1:]:
+        if value != first_value:
+            raise AdapterContractError(
+                f"conflicting {label} aliases: {first_name} != {name}"
+            )
+    return first_value
+
+
 def partial_observation_from_openclaw_response(
     response: Mapping[str, Any],
 ) -> MetadataObservation | None:
@@ -727,22 +789,29 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
     if isinstance(response.get("metadata"), Mapping):
         container = _mapping(response["metadata"], "metadata")
 
-    normalized = (
-        container.get("normalized")
-        or container.get("normalized_metadata")
-        or container.get("external_metadata")
+    normalized = _consistent_metadata_mapping_alias(
+        "normalized metadata",
+        (
+            ("normalized", container.get("normalized")),
+            ("normalized_metadata", container.get("normalized_metadata")),
+            ("external_metadata", container.get("external_metadata")),
+        ),
     )
-    normalized = _mapping(normalized, "normalized metadata")
 
-    raw_json = container.get("raw_json") or container.get("raw_metadata_json")
-    if not isinstance(raw_json, str) or not raw_json:
-        raise AdapterContractError("raw metadata JSON is required")
-
-    version = container.get("metadata_contract_version") or container.get(
-        "contract_version"
+    raw_json = _consistent_string_alias(
+        "raw metadata JSON",
+        (
+            ("raw_json", container.get("raw_json")),
+            ("raw_metadata_json", container.get("raw_metadata_json")),
+        ),
     )
-    if not isinstance(version, str) or not version:
-        raise AdapterContractError("metadata contract version is required")
+    version = _consistent_string_alias(
+        "metadata contract version",
+        (
+            ("metadata_contract_version", container.get("metadata_contract_version")),
+            ("contract_version", container.get("contract_version")),
+        ),
+    )
 
     lease: Mapping[str, Any] | None = None
     if isinstance(response.get("lease"), Mapping):
@@ -1115,6 +1184,7 @@ class OpenClawAdapter:
             )
         except MetadataContractError as exc:
             raise self._metadata_error(exc) from exc
+        self._lease_metadata_by_external_id.pop(gateway_lease_id, None)
         del method
         return observation
 
@@ -1196,6 +1266,27 @@ class OpenClawAdapter:
             )
         except MetadataContractError as exc:
             raise self._metadata_error(exc) from exc
+        try:
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=str(params.get("gateway_lease_id") or "")
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        expected_lease = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected_lease is None:
+            raise AdapterContractError(
+                "sessions_spawn requires cached live adapter lease ownership"
+            )
+        mismatched_lease_fields = [
+            key
+            for key in sorted(_SPAWN_LEASE_OWNER_METADATA_PARAMS)
+            if expected_lease.get(key) != metadata.get(key)
+        ]
+        if mismatched_lease_fields:
+            raise AdapterContractError(
+                "sessions_spawn lease owner metadata does not match cached adapter "
+                f"lease ownership: {', '.join(mismatched_lease_fields)}"
+            )
         method, response = self._call("sessions_spawn", params)
         observation = observation_from_openclaw_response(response)
         try:
