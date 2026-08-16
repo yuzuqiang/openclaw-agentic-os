@@ -49,7 +49,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "ddcc4f0f5df6a794885d3dba7055c3e840f5354909dfcc0c0144532403001536"
+    "b9d2925599abb69e84d545bf354979031d4450860b6a513bee9c934340a38bbc"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -480,10 +480,11 @@ def _envelope(
         last_sampled_at + interval_ms * 2 if isinstance(last_sampled_at, int) else None
     )
     current_pid = os.getpid()
-    pid = _load_pid(pidfile) or current_pid
+    loaded_pid = _load_pid(pidfile)
+    pid = loaded_pid if loaded_pid is not None else current_pid
     terminal_status = status in {"complete", "failed_closed", "rolled_back", "stopped"}
     no_daemon_status = status == "first_sample_pass"
-    process_alive = _pid_alive(pid)
+    process_alive = _pid_alive(pid) if loaded_pid is not None else False
     if (terminal_status or no_daemon_status) and pid == current_pid:
         process_alive = False
     argv = list(config.get("run_argv", [])) or _command(script_path, "run", state_dir)
@@ -590,6 +591,20 @@ def _persist_envelope(
         note=note,
     )
     return _atomic_write_json(_path_from_config(config, "monitor_envelope_path"), envelope)
+
+
+def _running_status_failure(envelope: Mapping[str, Any]) -> tuple[str, str] | None:
+    if envelope.get("status") != "running":
+        return None
+    monitor = envelope.get("monitor")
+    if not isinstance(monitor, Mapping) or monitor.get("process_alive") is not True:
+        return ("monitor_process_dead", "running monitor process is not alive")
+    coverage = envelope.get("coverage")
+    if isinstance(coverage, Mapping):
+        allowed_latest = coverage.get("allowed_latest_epoch_ms")
+        if isinstance(allowed_latest, int) and _epoch_ms() > allowed_latest:
+            return ("coverage_gap", "running monitor sample window is overdue")
+    return None
 
 
 def _write_pidfile(config: Mapping[str, Any]) -> None:
@@ -1093,6 +1108,18 @@ def status(args: argparse.Namespace) -> int:
             sample=sample,
             note=note,
         )
+        running_failure = _running_status_failure(envelope)
+        if running_failure is not None:
+            violation, failure_note = running_failure
+            if violation not in violations:
+                violations.append(violation)
+            envelope = _envelope(
+                config=config,
+                status="failed_closed",
+                violations=violations,
+                sample=sample,
+                note=note or failure_note,
+            )
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
     except MonitorError:
         pass

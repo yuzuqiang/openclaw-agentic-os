@@ -340,6 +340,63 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "signature is missing"):
                 monitor._build_config(self.args)
 
+    def test_committed_default_validation_anchor_is_signed_and_bound(self) -> None:
+        repo_root = SCRIPT_PATH.parents[1]
+        validation_path = (
+            repo_root
+            / "docs/runtime-evidence/phase-b-p03-independent-validation-20260814T032902Z.json"
+        )
+        anchor_path = (
+            repo_root
+            / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260814T032914Z.json"
+        )
+        validation = json.loads(validation_path.read_text(encoding="utf-8"))
+        public_fixture_key = "phase-c-terminal-checkpoint-anchor-20260814T032914Z"
+
+        with mock.patch.dict(
+            os.environ,
+            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: public_fixture_key},
+        ):
+            self.assertEqual(
+                monitor._sha256_file(validation_path),
+                monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,
+            )
+            self.assertEqual(
+                validation["authenticated_record"]["sha256"],
+                monitor._sha256_file(anchor_path),
+            )
+            monitor._validate_independent_validation_anchor(
+                {"exact_heads": {"implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE}},
+                validation,
+            )
+            args = Namespace(
+                state_dir=repo_root / "docs/runtime-evidence/soak/default-anchor-smoke",
+                run_id="default-anchor-smoke",
+                baseline_path=repo_root / "docs/runtime-evidence/soak/baseline.json",
+                heartbeat_file=repo_root / "HEARTBEAT.md",
+                live_config_path=repo_root / "openclaw.json",
+                lifecycle_receipt_path=repo_root
+                / "docs/runtime-evidence/phase-b-p03-isolated-candidate-lifecycle-20260814T032902Z.json",
+                independent_validation_path=validation_path,
+                runtime_head=monitor.EXPECTED_RUNTIME_HEAD,
+                agentic_os_evidence_head=monitor.EXPECTED_AGENTIC_OS_EVIDENCE_HEAD,
+                implementation_base=monitor.EXPECTED_IMPLEMENTATION_BASE,
+                monitor_implementation_head="b" * 40,
+                expected_lifecycle_sha256=monitor.EXPECTED_LIFECYCLE_SHA256,
+                expected_independent_validation_sha256=(
+                    monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256
+                ),
+                duration_hours=24,
+                interval_seconds=300,
+                no_daemon=True,
+            )
+            with mock.patch.object(monitor, "REPO_ROOT", repo_root):
+                config = monitor._build_config(args)
+            self.assertEqual(
+                config["predecessor_receipts"]["independent_validation"]["sha256"],
+                monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,
+            )
+
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
@@ -718,6 +775,86 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["coverage_gap"])
         self.assertEqual(envelope["note"], "gap detected")
         self.assertIs(envelope["coverage"]["coverage_gap_detected"], True)
+
+    def test_status_refresh_fails_closed_when_running_pid_is_dead(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            sample = _pass_sample(1_700_000_000_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, sample)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "running", "violations": [], "latest_sample": sample},
+            )
+            (self.state_dir / "monitor.pid").write_text("12345\n", encoding="utf-8")
+            with mock.patch.object(monitor, "_pid_alive", return_value=False):
+                result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 0)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["monitor_process_dead"])
+        self.assertIs(envelope["monitor"]["process_alive"], False)
+        self.assertEqual(envelope["note"], "running monitor process is not alive")
+
+    def test_status_refresh_fails_closed_when_running_sample_is_overdue(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            sample = _pass_sample(1_700_000_000_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, sample)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "running", "violations": [], "latest_sample": sample},
+            )
+            (self.state_dir / "monitor.pid").write_text("12345\n", encoding="utf-8")
+            with mock.patch.object(monitor, "_pid_alive", return_value=True), mock.patch.object(
+                monitor, "_epoch_ms", return_value=1_700_000_601_000
+            ):
+                result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 0)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["coverage_gap"])
+        self.assertIs(envelope["coverage"]["coverage_gap_detected"], True)
+        self.assertEqual(envelope["note"], "running monitor sample window is overdue")
 
     def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
