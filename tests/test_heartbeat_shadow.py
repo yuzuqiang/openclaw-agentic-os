@@ -948,6 +948,40 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertFalse(backup.exists())
         self.assertFalse(receipt_path.exists())
 
+    def test_forced_rollback_keeps_source_path_guard_through_receipt_write(
+        self,
+    ) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/guarded-receipt-rollback.json"
+        observed_guard_during_write: list[bool] = []
+        original_atomic_write = heartbeat_shadow_module._atomic_write_json
+
+        def observing_atomic_write(path: Path, value):
+            if Path(path) == receipt_path.resolve():
+                observed_guard_during_write.append(self.database.is_dir())
+            return original_atomic_write(path, value)
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_atomic_write_json",
+            side_effect=observing_atomic_write,
+        ):
+            receipt = force_heartbeat_file_authority_rollback(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                database=self.database,
+                authority_input_digest=prior["authority_input_digest"],
+                rollback_id="guarded-receipt",
+                receipt_path=receipt_path,
+                repo_root_path=self.root,
+            )
+
+        self.assertEqual(receipt["status"], "pass")
+        self.assertEqual(observed_guard_during_write, [True])
+        self.assertFalse(self.database.exists())
+        self.assertTrue(receipt_path.exists())
+
     def test_forced_rollback_checkpoints_committed_wal_under_final_lock(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/committed-wal-rollback.json"

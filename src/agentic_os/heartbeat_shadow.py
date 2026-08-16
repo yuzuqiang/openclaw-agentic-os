@@ -1622,7 +1622,7 @@ def force_heartbeat_file_authority_rollback(
     lock_connection, source_idle = _lock_rollback_source_idle(target)
     source_path_guard: int | None = None
     backup_created = False
-    rollback_ready_for_receipt = False
+    rollback_receipt_persisted = False
     receipt: dict[str, Any] | None = None
     try:
         snapshot = _locked_rollback_audit_snapshot(target, audit_snapshot, root)
@@ -1693,11 +1693,13 @@ def force_heartbeat_file_authority_rollback(
             "production_authority_mutated": False,
             "production_session_or_lease_authority_left": False,
         }
-        rollback_ready_for_receipt = True
+        _atomic_write_json(target_receipt, receipt)
+        rollback_receipt_persisted = True
     finally:
         active_error = sys.exc_info()[1]
         release_error: BaseException | None = None
         restore_error: BaseException | None = None
+        receipt_cleanup_error: BaseException | None = None
         try:
             if source_path_guard is not None:
                 _release_rollback_source_path_guard(target, source_path_guard)
@@ -1706,14 +1708,21 @@ def force_heartbeat_file_authority_rollback(
             release_error = exc
         finally:
             if backup_created and (
-                not rollback_ready_for_receipt or release_error is not None
+                not rollback_receipt_persisted or release_error is not None
             ):
+                if rollback_receipt_persisted:
+                    try:
+                        target_receipt.unlink(missing_ok=True)
+                    except BaseException as exc:
+                        receipt_cleanup_error = exc
                 if target.exists():
                     _remove_recreated_rollback_source_path(target)
                 try:
                     _restore_database_from_local_backup(target, backup)
                 except BaseException as exc:
                     restore_error = exc
+        if receipt_cleanup_error is not None:
+            raise receipt_cleanup_error
         if restore_error is not None:
             raise restore_error
         if release_error is not None and active_error is None:
@@ -1727,5 +1736,4 @@ def force_heartbeat_file_authority_rollback(
         raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
     if receipt is None:
         raise HeartbeatShadowError("Heartbeat rollback receipt was not prepared")
-    _atomic_write_json(target_receipt, receipt)
     return receipt

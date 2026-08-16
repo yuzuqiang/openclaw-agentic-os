@@ -953,19 +953,22 @@ def mark_human_review(
     )
     connection.execute(
         "UPDATE external_rpc_intents SET state='human_review_required',resolved_at=?,"
-        "resolved_at_epoch_ms=? WHERE rpc_kind=? AND idempotency_key=?",
+        "resolved_at_epoch_ms=? WHERE rpc_kind=? AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled','human_review_required','failed')",
         (now, now_ms, rpc_kind, key),
     )
     if rpc_kind == "sessions_spawn":
         connection.execute(
             "UPDATE spawn_requests SET state='human_review_required',ambiguity_reason=?,"
-            "updated_at=? WHERE spawn_request_id=?",
+            "updated_at=? WHERE spawn_request_id=? "
+            "AND state NOT IN ('accepted','completed','reconciled','human_review_required','failed')",
             (reason, now, request.spawn_request_id),
         )
     else:
         connection.execute(
             "UPDATE leases SET state='human_review_required',reconciliation_status=? "
-            "WHERE client_lease_id=? AND gateway_lease_id IS NULL",
+            "WHERE client_lease_id=? AND gateway_lease_id IS NULL "
+            "AND state NOT IN ('accepted','acquired','released','human_review_required','failed')",
             (reason, request.client_lease_id),
         )
 

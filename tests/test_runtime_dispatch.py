@@ -129,6 +129,31 @@ class TransportFailingAdapter(ScriptedAdapter):
         return super().sessions_spawn(params)
 
 
+class ConcurrentlyReconciledTimeoutAdapter(ScriptedAdapter):
+    def __init__(self, database: Path, request: DispatchRequest, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.database = database
+        self.request = request
+
+    def sessions_spawn(self, params):
+        self.calls.append("sessions_spawn")
+        self.params.append(("sessions_spawn", dict(params)))
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            with runtime_dispatch.immediate_transaction(connection):
+                runtime_dispatch.persist_spawn_acceptance(
+                    connection,
+                    self.request,
+                    observation(
+                        spawn_metadata(self.request),
+                        external_id="session-key",
+                    ),
+                    "session-key",
+                    reconciled=True,
+                )
+        raise subprocess.TimeoutExpired(cmd=["openclaw", "sessions_spawn"], timeout=30)
+
+
 def observation(metadata: dict[str, object], *, external_id: str) -> MetadataObservation:
     return MetadataObservation(
         metadata_contract_version="v1",
@@ -815,6 +840,42 @@ class RuntimeDispatchTests(unittest.TestCase):
                     "WHERE client_lease_id='client-lease'"
                 ).fetchone(),
                 ("acquired", "not_needed"),
+            )
+
+    def test_spawn_timeout_preserves_concurrent_reconciled_acceptance(self) -> None:
+        adapter = ConcurrentlyReconciledTimeoutAdapter(
+            self.database,
+            self.request,
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "reconciled",
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,session_key FROM spawn_requests "
+                    "WHERE spawn_request_id='spawn'"
+                ).fetchone(),
+                ("accepted", "session-key"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,session_key FROM sessions WHERE session_id=?",
+                    ("session:session-key",),
+                ).fetchone(),
+                ("running", "session-key"),
             )
 
     def test_identical_dispatch_replay_skips_adapter_and_conflicting_reuse_fails(self) -> None:

@@ -1015,6 +1015,41 @@ class OpenClawAdapterTests(unittest.TestCase):
                 ConflictingSpawnRequestAliasTransport()
             ).sessions_spawn({})
 
+    def test_conflicting_top_level_and_nested_metadata_aliases_fail_contract(self) -> None:
+        class ConflictingMetadataContainerTransport:
+            def call(self, method, params):
+                nested_metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                top_level_metadata = dict(nested_metadata)
+                top_level_metadata["run_id"] = "other-run"
+                return {
+                    "session_key": "session-key",
+                    "spawn_request_session_key": "session-key",
+                    "external_metadata": top_level_metadata,
+                    "raw_metadata_json": json.dumps(
+                        top_level_metadata, sort_keys=True, separators=(",", ":")
+                    ),
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": nested_metadata,
+                        "raw_json": json.dumps(
+                            nested_metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "conflicting normalized metadata"):
+            CannedOpenClawAdapter(
+                ConflictingMetadataContainerTransport()
+            ).sessions_spawn({})
+
     def test_gateway_lease_id_is_not_a_session_identity_alias(self) -> None:
         class GatewayEchoSessionTransport:
             def call(self, method, params):

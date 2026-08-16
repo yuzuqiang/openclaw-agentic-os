@@ -785,31 +785,33 @@ def partial_observation_from_openclaw_response(
 def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataObservation:
     """Extract normalized/raw metadata from OpenClaw-shaped raw responses."""
 
-    container: Mapping[str, Any] = response
+    containers: list[tuple[str, Mapping[str, Any]]] = [("response", response)]
     if isinstance(response.get("metadata"), Mapping):
-        container = _mapping(response["metadata"], "metadata")
+        containers.append(("metadata", _mapping(response["metadata"], "metadata")))
 
     normalized = _consistent_metadata_mapping_alias(
         "normalized metadata",
-        (
-            ("normalized", container.get("normalized")),
-            ("normalized_metadata", container.get("normalized_metadata")),
-            ("external_metadata", container.get("external_metadata")),
+        tuple(
+            (f"{container_name}.{alias}", container.get(alias))
+            for container_name, container in containers
+            for alias in ("normalized", "normalized_metadata", "external_metadata")
         ),
     )
 
     raw_json = _consistent_string_alias(
         "raw metadata JSON",
-        (
-            ("raw_json", container.get("raw_json")),
-            ("raw_metadata_json", container.get("raw_metadata_json")),
+        tuple(
+            (f"{container_name}.{alias}", container.get(alias))
+            for container_name, container in containers
+            for alias in ("raw_json", "raw_metadata_json")
         ),
     )
     version = _consistent_string_alias(
         "metadata contract version",
-        (
-            ("metadata_contract_version", container.get("metadata_contract_version")),
-            ("contract_version", container.get("contract_version")),
+        tuple(
+            (f"{container_name}.{alias}", container.get(alias))
+            for container_name, container in containers
+            for alias in ("metadata_contract_version", "contract_version")
         ),
     )
 
