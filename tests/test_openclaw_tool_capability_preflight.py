@@ -302,27 +302,24 @@ def persistent_rpc_transcript_sha256(module, rpc_evidence):
     )
 
 
-def refresh_persistent_rpc_transcript(evidence, module):
-    signed_payload = evidence["attestation"]["response"]["signed_payload"]
-    evidence["rpc_evidence"]["allow_lease_status"]["response"][
-        "runtime_attestation"
-    ] = persistent_status_receipt(signed_payload)
-    evidence["rpc_evidence"]["allow_lease_status"]["raw_response_sha256"] = canonical_sha256(
-        evidence["rpc_evidence"]["allow_lease_status"]["response"]
-    )
-    signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
-        module, evidence["rpc_evidence"]
-    )
-    evidence["rpc_evidence"]["allow_lease_status"]["response"][
-        "runtime_attestation"
-    ] = persistent_status_receipt(signed_payload)
-    evidence["rpc_evidence"]["allow_lease_status"]["raw_response_sha256"] = canonical_sha256(
-        evidence["rpc_evidence"]["allow_lease_status"]["response"]
-    )
-
-
-def build_persistent_evidence(module, root, fixture, key):
+def build_persistent_evidence(
+    module,
+    root,
+    fixture,
+    key,
+    *,
+    issued_at_epoch_ms=None,
+    expires_at_epoch_ms=None,
+    binding_transform=None,
+    status_response_transform=None,
+):
     now_ms = int(time.time() * 1000)
+    issued_at_epoch_ms = issued_at_epoch_ms if issued_at_epoch_ms is not None else now_ms
+    expires_at_epoch_ms = (
+        expires_at_epoch_ms
+        if expires_at_epoch_ms is not None
+        else issued_at_epoch_ms + 60_000
+    )
     method_bindings = module._expected_method_bindings_payload()
     runtime_methods = module._expected_runtime_methods_catalog()
     package_path = os.path.join(root, "package.json")
@@ -336,8 +333,8 @@ def build_persistent_evidence(module, root, fixture, key):
         "online": True,
         "challenge": "challenge-1",
         "nonce": "challenge-1",
-        "issued_at_epoch_ms": now_ms,
-        "expires_at_epoch_ms": now_ms + 60_000,
+        "issued_at_epoch_ms": issued_at_epoch_ms,
+        "expires_at_epoch_ms": expires_at_epoch_ms,
         "client_process_id": "p03-persistent-runner:test",
         "runtime_identity_token_sha256": hashlib.sha256(b"token").hexdigest(),
         "owner_scope_id": hashlib.sha256(b"owner").hexdigest(),
@@ -372,6 +369,8 @@ def build_persistent_evidence(module, root, fixture, key):
         },
         "method_bindings": method_bindings,
     }
+    if binding_transform is not None:
+        binding_transform(signed_payload["binding"])
     tools_catalog = {
         "groups": [
             {
@@ -386,7 +385,10 @@ def build_persistent_evidence(module, root, fixture, key):
     status_response = {
         "status": "ok",
         "leases": [],
+        "runtime_attestation": persistent_status_receipt(signed_payload),
     }
+    if status_response_transform is not None:
+        status_response_transform(status_response)
     rpc_evidence = {
         "tools_catalog": {
             "method": "tools.catalog",
@@ -401,9 +403,14 @@ def build_persistent_evidence(module, root, fixture, key):
             "raw_response_sha256": canonical_sha256(status_response),
         },
     }
+    signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
+        module, rpc_evidence
+    )
     attestation_response = {
         "signature_algorithm": "hmac-sha256",
-        "signature": "0" * 64,
+        "signature": hmac.new(
+            key, canonical_json_bytes(signed_payload), hashlib.sha256
+        ).hexdigest(),
         "signed_payload": signed_payload,
     }
     evidence = {
@@ -441,24 +448,7 @@ def build_persistent_evidence(module, root, fixture, key):
         },
         "rpc_evidence": rpc_evidence,
     }
-    refresh_persistent_rpc_transcript(evidence, module)
-    signature = hmac.new(key, canonical_json_bytes(signed_payload), hashlib.sha256).hexdigest()
-    evidence["attestation"]["response"]["signature"] = signature
-    evidence["attestation"]["response_sha256"] = canonical_sha256(
-        evidence["attestation"]["response"]
-    )
     return evidence
-
-
-def resign_persistent_evidence(evidence, key):
-    module = load_preflight_module()
-    refresh_persistent_rpc_transcript(evidence, module)
-    signed_payload = evidence["attestation"]["response"]["signed_payload"]
-    response = evidence["attestation"]["response"]
-    response["signature"] = hmac.new(
-        key, canonical_json_bytes(signed_payload), hashlib.sha256
-    ).hexdigest()
-    evidence["attestation"]["response_sha256"] = canonical_sha256(response)
 
 
 def run_persistent_preflight(evidence, root, key_path):
@@ -3659,11 +3649,14 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
             key_path, key = write_attestation_key()
-            evidence = build_persistent_evidence(module, install_root, fixture, key)
-            signed_payload = evidence["attestation"]["response"]["signed_payload"]
-            signed_payload["issued_at_epoch_ms"] = int(time.time() * 1000) - 60_000
-            signed_payload["expires_at_epoch_ms"] = int(time.time() * 1000) - 1
-            resign_persistent_evidence(evidence, key)
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                issued_at_epoch_ms=int(time.time() * 1000) - 60_000,
+                expires_at_epoch_ms=int(time.time() * 1000) - 1,
+            )
 
             result = run_persistent_preflight(evidence, install_root, key_path)
 
@@ -3679,16 +3672,19 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
             key_path, key = write_attestation_key()
-            evidence = build_persistent_evidence(module, install_root, fixture, key)
-            signed_payload = evidence["attestation"]["response"]["signed_payload"]
             issued = (
                 int(time.time() * 1000)
                 + module.PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS
                 + 60_000
             )
-            signed_payload["issued_at_epoch_ms"] = issued
-            signed_payload["expires_at_epoch_ms"] = issued + 60_000
-            resign_persistent_evidence(evidence, key)
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                issued_at_epoch_ms=issued,
+                expires_at_epoch_ms=issued + 60_000,
+            )
 
             result = run_persistent_preflight(evidence, install_root, key_path)
 
@@ -3819,11 +3815,18 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
             key_path, key = write_attestation_key()
-            evidence = build_persistent_evidence(module, install_root, fixture, key)
-            binding = evidence["attestation"]["response"]["signed_payload"]["binding"]
-            binding["sources"] = binding["sources"][:-1]
-            binding["sources_sha256"] = canonical_sha256(binding["sources"])
-            resign_persistent_evidence(evidence, key)
+
+            def drop_last_source(binding):
+                binding["sources"] = binding["sources"][:-1]
+                binding["sources_sha256"] = canonical_sha256(binding["sources"])
+
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                binding_transform=drop_last_source,
+            )
 
             result = run_persistent_preflight(evidence, install_root, key_path)
 
@@ -3839,24 +3842,17 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as install_root:
             fixture = write_persistent_runtime_fixture(install_root)
             key_path, key = write_attestation_key()
-            evidence = build_persistent_evidence(module, install_root, fixture, key)
-            evidence["rpc_evidence"]["allow_lease_status"]["response"][
-                "runtime_attestation"
-            ]["endpoint"] = "ws://127.0.0.1:29999"
-            evidence["rpc_evidence"]["allow_lease_status"][
-                "raw_response_sha256"
-            ] = canonical_sha256(
-                evidence["rpc_evidence"]["allow_lease_status"]["response"]
+
+            def drift_status_receipt(status):
+                status["runtime_attestation"]["endpoint"] = "ws://127.0.0.1:29999"
+
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                status_response_transform=drift_status_receipt,
             )
-            signed_payload = evidence["attestation"]["response"]["signed_payload"]
-            signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
-                module, evidence["rpc_evidence"]
-            )
-            response = evidence["attestation"]["response"]
-            response["signature"] = hmac.new(
-                key, canonical_json_bytes(signed_payload), hashlib.sha256
-            ).hexdigest()
-            evidence["attestation"]["response_sha256"] = canonical_sha256(response)
 
             result = run_persistent_preflight(evidence, install_root, key_path)
 
