@@ -552,6 +552,50 @@ def _validate_allow_lease_raw_metadata(
     }
 
 
+def _validated_allow_lease_acquire_identity(
+    payload: Mapping[str, Any],
+    *,
+    expected_owner_metadata: Mapping[str, Any],
+    label: str,
+) -> tuple[str, dict[str, Any]]:
+    payload_map = dict(payload)
+    candidates: list[Mapping[str, Any]] = [payload_map]
+    for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
+        nested = _mapping_path(payload_map, path)
+        if nested is not None:
+            candidates.append(nested)
+    metadata_container = None
+    for candidate in candidates:
+        candidate_map = dict(candidate)
+        metadata_container = _mapping_path(candidate_map, ("metadata",)) or _mapping_path(
+            candidate_map, ("metadata_echo",)
+        )
+        if metadata_container is not None:
+            break
+    if metadata_container is None:
+        raise MetadataContractError(f"{label} did not expose raw allowLease metadata")
+    normalized = _metadata_alias(
+        metadata_container,
+        ("normalized", "normalized_metadata", "external_metadata"),
+        label=f"{label} normalized metadata",
+        expected_type=Mapping,
+    )
+    if not isinstance(normalized, Mapping):
+        raise MetadataContractError(f"{label} normalized metadata is required")
+    gateway_lease_id = normalized.get("gateway_lease_id")
+    if not isinstance(gateway_lease_id, str) or not gateway_lease_id:
+        raise MetadataContractError(
+            f"{label} normalized metadata is missing gateway_lease_id"
+        )
+    raw_metadata = _validate_allow_lease_raw_metadata(
+        payload,
+        expected_metadata={**expected_owner_metadata, "gateway_lease_id": gateway_lease_id},
+        release=False,
+        label=label,
+    )
+    return gateway_lease_id, raw_metadata
+
+
 def _allow_lease_owner_metadata_matches(
     payload: Mapping[str, Any], *, expected_metadata: Mapping[str, Any]
 ) -> bool:
@@ -1247,17 +1291,14 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        for observed_lease_id in _lease_ids_from_response(first):
-            _append_unique(lease_ids_to_release, observed_lease_id)
-        gateway_lease_id = _lease_id_from_response(first)
-        lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
-        _append_unique(lease_ids_to_release, lease_id)
-        acquire_metadata = _validate_allow_lease_raw_metadata(
+        gateway_lease_id, acquire_metadata = _validated_allow_lease_acquire_identity(
             first,
-            expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
-            release=False,
+            expected_owner_metadata=acquire_params,
             label="allowLease acquire proof",
         )
+        lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
+        _append_unique(lease_ids_to_release, lease_id)
+        _lease_id_from_response(first)
         evidence["allow_lease"] = {
             "gateway_lease_id_sha256": _identity_sha256(gateway_lease_id),
             "metadata_contract_version": acquire_metadata["metadata_contract_version"],
@@ -1271,24 +1312,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        for observed_lease_id in _lease_ids_from_response(second):
-            _append_unique(lease_ids_to_release, observed_lease_id)
-        duplicate_gateway_lease_id = _lease_id_from_response(second)
-        if duplicate_gateway_lease_id is None:
-            raise MetadataContractError(
-                "duplicate allowLease acquire did not report lease identity"
-            )
+        duplicate_gateway_lease_id, duplicate_metadata = _validated_allow_lease_acquire_identity(
+            second,
+            expected_owner_metadata=acquire_params,
+            label="duplicate allowLease acquire proof",
+        )
         _append_unique(lease_ids_to_release, duplicate_gateway_lease_id)
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
         )
-        duplicate_metadata = _validate_allow_lease_raw_metadata(
-            second,
-            expected_metadata={**acquire_params, "gateway_lease_id": duplicate_gateway_lease_id},
-            release=False,
-            label="duplicate allowLease acquire proof",
-        )
+        _lease_id_from_response(second)
         evidence["allow_lease"]["duplicate_gateway_lease_id_sha256"] = _identity_sha256(
             duplicate_gateway_lease_id
         )

@@ -624,8 +624,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("acquire proof did not expose raw allowLease metadata", payload["error"])
-        self.assertEqual(released_ids, ["lease-unit"])
-        self.assertTrue(payload["released"])
+        self.assertEqual(released_ids, [])
+        self.assertFalse(payload["lease_acquired"])
+        self.assertTrue(payload["allow_lease_acquire_outcome_unknown"])
+        self.assertFalse(payload["released"])
 
     def test_allow_lease_metadata_rejects_conflicting_normalized_aliases(self) -> None:
         module = load_probe_module()
@@ -648,11 +650,16 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
-        self.assertIn("conflicting allowLease acquire proof normalized metadata", payload["error"])
-        self.assertEqual(released_ids, ["lease-unit"])
-        self.assertEqual(payload["released"], True)
+        self.assertIn(
+            "conflicting allowLease acquire proof normalized metadata aliases",
+            payload["error"],
+        )
+        self.assertEqual(released_ids, [])
+        self.assertFalse(payload["lease_acquired"])
+        self.assertTrue(payload["allow_lease_acquire_outcome_unknown"])
+        self.assertFalse(payload["released"])
 
-    def test_first_acquire_conflicting_aliases_are_queued_for_cleanup(self) -> None:
+    def test_first_acquire_conflicting_aliases_release_only_metadata_bound_lease(self) -> None:
         module = load_probe_module()
         released_ids: list[str] = []
 
@@ -677,7 +684,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("conflicting gateway lease identity aliases", payload["error"])
         self.assertTrue(payload["lease_acquired"])
-        self.assertEqual(released_ids, ["lease-unit", "lease-alias"])
+        self.assertEqual(released_ids, ["lease-unit"])
         self.assertEqual(payload["released"], True)
 
     def test_acquired_lease_aliases_are_recorded_for_cleanup(self) -> None:
@@ -747,7 +754,9 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertEqual(payload["released"], True)
 
-    def test_duplicate_acquire_conflicting_aliases_are_queued_for_cleanup(self) -> None:
+    def test_duplicate_acquire_conflicting_aliases_release_only_metadata_bound_lease(
+        self,
+    ) -> None:
         module = load_probe_module()
         released_ids: list[str] = []
         acquire_calls = 0
@@ -776,7 +785,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("conflicting gateway lease identity aliases", payload["error"])
-        self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
+        self.assertEqual(released_ids, ["lease-unit"])
         self.assertEqual(payload["released"], True)
 
     def test_duplicate_acquire_must_echo_owner_metadata(self) -> None:
@@ -979,7 +988,10 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
-        self.assertIn("duplicate allowLease acquire did not report", payload["error"])
+        self.assertIn(
+            "duplicate allowLease acquire proof did not expose raw allowLease metadata",
+            payload["error"],
+        )
         self.assertEqual(payload["released"], True)
 
     def test_release_false_fails_closed_even_when_identity_matches(self) -> None:
