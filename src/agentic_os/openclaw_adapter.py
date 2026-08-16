@@ -131,6 +131,18 @@ _REQUIRED_ALLOW_LEASE_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     ),
 }
 
+_ALLOW_LEASE_OWNER_METADATA_PARAMS = frozenset(
+    (
+        "client_lease_id",
+        "run_id",
+        "phase",
+        "transition_id",
+        "agent_id",
+        "requester_agent_id",
+        "gateway_lease_id",
+    )
+)
+
 _REQUIRED_RUNTIME_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     **_REQUIRED_ALLOW_LEASE_TOOL_PARAMS,
     **_REQUIRED_SESSION_TOOL_PARAMS,
@@ -1068,8 +1080,26 @@ class OpenClawAdapter:
                 ),
                 metadata_contract_version="v1",
             )
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=str(params.get("gateway_lease_id") or "")
+            )
         except MetadataContractError as exc:
             raise self._metadata_error(exc) from exc
+        expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected is None:
+            raise AdapterContractError(
+                "allowLease release requires cached adapter lease ownership"
+            )
+        mismatched_owner_fields = [
+            key
+            for key in sorted(_ALLOW_LEASE_OWNER_METADATA_PARAMS)
+            if expected.get(key) != params.get(key)
+        ]
+        if mismatched_owner_fields:
+            raise AdapterContractError(
+                "allowLease release owner metadata does not match cached adapter "
+                f"lease ownership: {', '.join(mismatched_owner_fields)}"
+            )
         method, response = self._call("allow_lease_release", params)
         observation = observation_from_openclaw_response(response)
         try:

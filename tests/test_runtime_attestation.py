@@ -301,6 +301,22 @@ def lease_params() -> dict[str, object]:
     }
 
 
+def release_params(**overrides: object) -> dict[str, object]:
+    params = {
+        key: value
+        for key, value in lease_params().items()
+        if key not in {"idempotency_key", "ttl_ms"}
+    }
+    params.update(
+        {
+            "release_idempotency_key": "release-idem",
+            "gateway_lease_id": "lease-1",
+        }
+    )
+    params.update(overrides)
+    return params
+
+
 class RuntimeAttestationTests(unittest.TestCase):
     def _adapter(self, transport: FakeAttestedTransport) -> OpenClawAdapter:
         from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
@@ -320,6 +336,8 @@ class RuntimeAttestationTests(unittest.TestCase):
         self.assertTrue(adapter.runtime_authority_verified)
         lease = adapter.allow_lease_acquire(lease_params())
         self.assertEqual(lease.external_id, "lease-1")
+        release = adapter.allow_lease_release(release_params())
+        self.assertEqual(release.external_id, "lease-1")
         metadata = session_metadata()
         session = adapter.sessions_spawn(spawn_params(metadata))
         self.assertEqual(session.external_id, "session-1")
@@ -328,6 +346,32 @@ class RuntimeAttestationTests(unittest.TestCase):
             transport.calls[-1], ("session_status", {"sessionKey": "session-1"})
         )
         self.assertNotIn("sessions_status", [method for method, _params in transport.calls])
+
+    def test_release_requires_cached_adapter_lease_ownership_before_transport(self) -> None:
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "cached adapter lease ownership"
+        ):
+            adapter.allow_lease_release(release_params(gateway_lease_id="lease-foreign"))
+
+        self.assertEqual(transport.calls, [])
+
+    def test_release_owner_metadata_must_match_cached_acquire_before_transport(
+        self,
+    ) -> None:
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+        transport.calls.clear()
+
+        with self.assertRaisesRegex(
+            AdapterContractError, "owner metadata does not match"
+        ):
+            adapter.allow_lease_release(release_params(run_id="other-run"))
+
+        self.assertEqual(transport.calls, [])
 
     def test_unsigned_mapping_and_offline_attestation_are_rejected(self) -> None:
         transport = FakeAttestedTransport()
