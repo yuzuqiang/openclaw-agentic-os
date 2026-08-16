@@ -250,6 +250,21 @@ class HeartbeatShadowTests(unittest.TestCase):
             )
         self.assertFalse(outside.exists())
 
+        with self.assertRaisesRegex(HeartbeatShadowError, "must not overwrite authority inputs"):
+            run_heartbeat_file_shadow_cycle(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                manifest_path=self.heartbeat_file,
+                run_id="manifest-alias",
+                database=self.database,
+                repo_root_path=self.root,
+            )
+        self.assertEqual(
+            self.heartbeat_file.read_text(encoding="utf-8"),
+            "# Heartbeat\n\n- Check one bounded maintenance item.\n",
+        )
+
         wrong_database = self.root / "state/agentic-os/not-control.db"
         with self.assertRaisesRegex(HeartbeatShadowError, "must use ignored"):
             run_heartbeat_file_shadow_cycle(
@@ -853,6 +868,45 @@ class HeartbeatShadowTests(unittest.TestCase):
                     database=self.database,
                     authority_input_digest=prior["authority_input_digest"],
                     rollback_id="post-move-fail",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(backup.exists())
+        self.assertFalse(receipt_path.exists())
+
+    def test_forced_rollback_restores_database_when_guard_cleanup_fails(self) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/guard-cleanup-fail-rollback.json"
+        backup = (
+            self.root
+            / "state/agentic-os/backups/heartbeat-shadow-rollback/guard-cleanup-fail/control.db"
+        )
+        original_sha256 = heartbeat_shadow_module._sha256_file
+
+        def fail_backup_hash(path: Path) -> str:
+            if Path(path) == backup:
+                raise HeartbeatShadowError("simulated backup hash failure")
+            return original_sha256(path)
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_sha256_file",
+            side_effect=fail_backup_hash,
+        ), mock.patch.object(
+            heartbeat_shadow_module,
+            "_release_rollback_source_path_guard",
+            side_effect=HeartbeatShadowError("simulated guard cleanup failure"),
+        ):
+            with self.assertRaisesRegex(HeartbeatShadowError, "simulated backup hash"):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="guard-cleanup-fail",
                     receipt_path=receipt_path,
                     repo_root_path=self.root,
                 )

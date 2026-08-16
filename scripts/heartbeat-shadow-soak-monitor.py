@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import shlex
@@ -53,6 +54,9 @@ EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
 EXPECTED_IMPLEMENTATION_BASE = "7e285f405edf9c3aa008ce555fefc1e2640cc2f4"
+INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV = (
+    "AGENTIC_OS_INDEPENDENT_VALIDATION_ANCHOR_HMAC_KEY"
+)
 
 
 class MonitorError(RuntimeError):
@@ -78,6 +82,41 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _anchor_signature_payload(record: Mapping[str, Any]) -> bytes:
+    payload = dict(record)
+    payload.pop("authentication", None)
+    return _canonical_json(payload)
+
+
+def _validate_anchor_signature(record: Mapping[str, Any]) -> None:
+    authentication = record.get("authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("independent validation authenticated record signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("independent validation authenticated record signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("independent validation authenticated record signature scheme is invalid")
+    if authentication.get("key_env") != INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV:
+        raise MonitorError("independent validation authenticated record key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("independent validation authenticated record signature is invalid")
+    secret = os.environ.get(INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV)
+    if not secret:
+        raise MonitorError("independent validation authenticated record signature key is unavailable")
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        _anchor_signature_payload(record),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("independent validation authenticated record signature mismatch")
 
 
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> str:
@@ -370,6 +409,7 @@ def _validate_independent_validation_anchor(
     record = _read_json(anchor_path)
     if record.get("schema_version") != "agentic-os.independent-validation-anchor.v1":
         raise MonitorError("independent validation authenticated record schema mismatch")
+    _validate_anchor_signature(record)
     if record.get("record_authority") == "lifecycle_producer":
         raise MonitorError("independent validation authenticated record is self-produced")
     if record.get("validation_verdict") != "pass":
@@ -950,20 +990,32 @@ def run(args: argparse.Namespace) -> int:
             _persist_envelope(config, status="failed_closed", violation="missing_first_sample")
             return 2
         interval_ms = int(config["sample_interval_seconds"]) * 1000
-        last_sampled = samples[-1]["sampled_at_epoch_ms"]
-        due = last_sampled + interval_ms
-        latest = last_sampled + interval_ms * 2
+        last_sampled_epoch = samples[-1]["sampled_at_epoch_ms"]
+        last_sampled_monotonic = samples[-1]["sampled_at_monotonic_ms"]
+        due = last_sampled_epoch + interval_ms
+        due_monotonic = last_sampled_monotonic + interval_ms
+        latest = last_sampled_epoch + interval_ms * 2
+        latest_monotonic = last_sampled_monotonic + interval_ms * 2
         now = _epoch_ms()
-        if now > latest:
+        now_monotonic = time.monotonic_ns() // 1_000_000
+        if now > latest or now_monotonic > latest_monotonic:
             _persist_envelope(config, status="failed_closed", violation="coverage_gap")
             return 2
-        while now < due:
+        while now < due or now_monotonic < due_monotonic:
             if _stop_requested(config):
                 _persist_envelope(config, status="stopped", note="stop_request_observed")
                 return 0
-            time.sleep(min(5.0, max(0.1, (due - now) / 1000)))
+            waits = [
+                max(0, due - now),
+                max(0, due_monotonic - now_monotonic),
+                max(0, latest_monotonic - now_monotonic),
+            ]
+            positive_waits = [item for item in waits if item > 0]
+            wait_ms = min(positive_waits) if positive_waits else 100
+            time.sleep(min(5.0, max(0.1, wait_ms / 1000)))
             now = _epoch_ms()
-            if now > latest:
+            now_monotonic = time.monotonic_ns() // 1_000_000
+            if now > latest or now_monotonic > latest_monotonic:
                 _persist_envelope(config, status="failed_closed", violation="coverage_gap")
                 return 2
         sample = _sample(config, now)

@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 from collections.abc import Mapping
@@ -872,6 +873,15 @@ def run_heartbeat_file_shadow_cycle(
             "Heartbeat shadow DB must use ignored state/agentic-os/control.db"
         )
     target_manifest = _repo_artifact_path(root, manifest_path, "Heartbeat manifest")
+    authority_inputs = {
+        _repo_artifact_path(root, baseline_path, "Heartbeat baseline"),
+        _repo_artifact_path(root, heartbeat_file, "Heartbeat file"),
+        _repo_artifact_path(root, live_config_path, "Heartbeat live config"),
+    }
+    if target_manifest in authority_inputs:
+        raise HeartbeatShadowError(
+            "Heartbeat manifest output must not overwrite authority inputs"
+        )
     manifest = heartbeat_authority_manifest(
         baseline_path,
         heartbeat_file,
@@ -1685,13 +1695,27 @@ def force_heartbeat_file_authority_rollback(
         _atomic_write_json(target_receipt, receipt)
         receipt_written = True
     finally:
-        if source_path_guard is not None:
-            _release_rollback_source_path_guard(target, source_path_guard)
-            source_path_guard = None
-        if backup_created and not receipt_written:
-            if target.exists():
-                _remove_recreated_rollback_source_path(target)
-            _restore_database_from_local_backup(target, backup)
+        active_error = sys.exc_info()[1]
+        release_error: BaseException | None = None
+        restore_error: BaseException | None = None
+        try:
+            if source_path_guard is not None:
+                _release_rollback_source_path_guard(target, source_path_guard)
+                source_path_guard = None
+        except BaseException as exc:
+            release_error = exc
+        finally:
+            if backup_created and not receipt_written:
+                if target.exists():
+                    _remove_recreated_rollback_source_path(target)
+                try:
+                    _restore_database_from_local_backup(target, backup)
+                except BaseException as exc:
+                    restore_error = exc
+        if restore_error is not None:
+            raise restore_error
+        if release_error is not None and active_error is None:
+            raise release_error
         try:
             lock_connection.execute("ROLLBACK")
         except sqlite3.Error:

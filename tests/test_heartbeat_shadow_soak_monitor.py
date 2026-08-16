@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -27,6 +28,22 @@ def _write_json(path: Path, value: dict[str, object]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     path.write_bytes(payload)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _signed_anchor(value: dict[str, object], key: str) -> dict[str, object]:
+    signature = hmac.new(
+        key.encode("utf-8"),
+        monitor._anchor_signature_payload(value),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        **value,
+        "authentication": {
+            "scheme": "hmac-sha256-env",
+            "key_env": monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV,
+            "signature": signature,
+        },
+    }
 
 
 def _pass_sample(
@@ -86,6 +103,13 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.baseline.write_text("{}", encoding="utf-8")
         self.lifecycle = self.root / "docs/runtime-evidence/lifecycle.json"
         self.validation = self.root / "docs/runtime-evidence/validation.json"
+        self.anchor_key = "phase-c-anchor-test-key"
+        env_patch = mock.patch.dict(
+            os.environ,
+            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: self.anchor_key},
+        )
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
         lifecycle = {
             "status": "pass",
             "immutable_inputs": {
@@ -100,18 +124,21 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         }
         lifecycle_sha = _write_json(self.lifecycle, lifecycle)
         self.validation_anchor = self.root / "docs/runtime-evidence/validation-anchor.json"
-        anchor = {
-            "schema_version": "agentic-os.independent-validation-anchor.v1",
-            "record_authority": "phase_c_terminal_checkpoint",
-            "validation_verdict": "pass",
-            "receipt_sha256": lifecycle_sha,
-            "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
-            "verifier": {
-                "identity": "security-engineer-phase-c",
-                "role": "independent_verifier",
-                "session_key": "phase-c-session",
+        anchor = _signed_anchor(
+            {
+                "schema_version": "agentic-os.independent-validation-anchor.v1",
+                "record_authority": "phase_c_terminal_checkpoint",
+                "validation_verdict": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
             },
-        }
+            self.anchor_key,
+        )
         anchor_sha = _write_json(self.validation_anchor, anchor)
         validation_sha = _write_json(
             self.validation,
@@ -269,6 +296,50 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "authenticated record hash"):
                 monitor._build_config(self.args)
 
+    def test_predecessor_validation_rejects_unsigned_authenticated_record(self) -> None:
+        lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
+        unsigned_anchor_sha = _write_json(
+            self.validation_anchor,
+            {
+                "schema_version": "agentic-os.independent-validation-anchor.v1",
+                "record_authority": "phase_c_terminal_checkpoint",
+                "validation_verdict": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
+            },
+        )
+        validation_sha = _write_json(
+            self.validation,
+            {
+                "status": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
+                "invocation": {
+                    "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
+                    "completed_at": "2026-08-15T00:00:00Z",
+                },
+                "authenticated_record": {
+                    "path": str(self.validation_anchor.relative_to(self.root)),
+                    "sha256": unsigned_anchor_sha,
+                },
+            },
+        )
+        self.args.expected_independent_validation_sha256 = validation_sha
+
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(monitor.MonitorError, "signature is missing"):
+                monitor._build_config(self.args)
+
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
@@ -309,6 +380,52 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["coverage_gap"])
         self.assertIs(envelope["coverage"]["coverage_gap_detected"], True)
+
+    def test_run_uses_monotonic_deadline_when_wall_clock_stalls(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            receipt = monitor.append_heartbeat_soak_sample(
+                receipt,
+                _pass_sample(
+                    1_700_000_000_000,
+                    digest,
+                    sampled_at_monotonic_ms=1_000_000,
+                ),
+            )
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            with mock.patch.object(
+                monitor, "_epoch_ms", return_value=1_700_000_000_000
+            ), mock.patch.object(
+                monitor.time,
+                "monotonic_ns",
+                return_value=1_600_001 * 1_000_000,
+            ):
+                result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["coverage_gap"])
 
     def test_interval_bounds_fail_closed_before_start(self) -> None:
         self.args.interval_seconds = 59

@@ -828,6 +828,22 @@ _ADAPTER_AUTHORITIES: "weakref.WeakKeyDictionary[OpenClawAdapter, _AdapterAuthor
 )
 
 
+def _attestation_identity_continuity_error(
+    previous: VerifiedRuntimeAttestation, current: VerifiedRuntimeAttestation
+) -> str | None:
+    comparisons = (
+        ("runtime identity", previous.identity_sha256, current.identity_sha256),
+        ("owner scope", previous.owner_scope_id, current.owner_scope_id),
+        ("transport identity", previous.transport_identity, current.transport_identity),
+        ("Gateway endpoint", previous.gateway_endpoint, current.gateway_endpoint),
+        ("Gateway build", previous.gateway_build_id, current.gateway_build_id),
+    )
+    for label, old_value, new_value in comparisons:
+        if old_value != new_value:
+            return f"{label} changed across runtime attestation refresh"
+    return None
+
+
 class OpenClawAdapter:
     """RPC adapter available only for one freshly attested transport target."""
 
@@ -901,10 +917,27 @@ class OpenClawAdapter:
             raise AdapterContractError(
                 "transport cannot refresh persistent adapter authority without a bound application channel"
             )
+        previous_state = _ADAPTER_AUTHORITIES.get(self)
+        if previous_state is None:
+            raise AdapterContractError(
+                "OpenClawAdapter has no verified transport-bound runtime authority"
+            )
         try:
             attestation = attestor.attest(self._transport)
         except RuntimeAttestationError as exc:
             raise AdapterContractError(str(exc)) from exc
+        continuity_error = _attestation_identity_continuity_error(
+            previous_state.attestation, attestation
+        )
+        if continuity_error is not None:
+            self._lease_metadata_by_external_id.clear()
+            self._lease_identity_by_request.clear()
+            self._session_metadata_by_key.clear()
+            self._session_identity_by_request.clear()
+            _ADAPTER_AUTHORITIES.pop(self, None)
+            raise AdapterContractError(
+                f"{continuity_error}; cached runtime lease/session ownership was cleared"
+            )
         _ADAPTER_AUTHORITIES[self] = _AdapterAuthorityState(
             attestation=attestation,
             clock_ms=attestor.clock_ms,

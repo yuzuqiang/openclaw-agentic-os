@@ -180,6 +180,7 @@ class VerifiedRuntimeAttestation:
     transport_identity: str
     gateway_endpoint: str
     gateway_build_id: str
+    owner_scope_id: str
     method_bindings: Mapping[str, TransportMethodBinding]
 
 
@@ -556,7 +557,7 @@ class TransportBoundRuntimeAttestor:
         )
         if hashlib.sha256(runtime_identity_token.encode("utf-8")).hexdigest() != token_sha256:
             raise RuntimeAttestationError("runtime identity token digest does not match")
-        _sha256(signed_payload["owner_scope_id"], "runtime owner scope")
+        owner_scope_id = _sha256(signed_payload["owner_scope_id"], "runtime owner scope")
 
         issued = signed_payload["issued_at_epoch_ms"]
         expires = signed_payload["expires_at_epoch_ms"]
@@ -613,6 +614,7 @@ class TransportBoundRuntimeAttestor:
             transport_identity=transport_identity,
             gateway_endpoint=endpoint,
             gateway_build_id=build_id,
+            owner_scope_id=owner_scope_id,
             method_bindings=MappingProxyType(dict(methods)),
         )
 

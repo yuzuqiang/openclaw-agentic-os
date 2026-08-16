@@ -417,6 +417,27 @@ class RuntimeAttestationTests(unittest.TestCase):
             transport.calls[-1], ("session_status", {"sessionKey": "session-1"})
         )
 
+    def test_reattestation_rejects_identity_or_owner_scope_changes(self) -> None:
+        from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
+
+        transport = FakeAttestedTransport()
+        attestor = TransportBoundRuntimeAttestor(
+            DigestVerifier(),
+            clock_ms=lambda: NOW_MS,
+            monotonic_ms=lambda: 10_000,
+            nonce_factory=lambda: "challenge-1",
+        )
+        adapter = OpenClawAdapter.from_attested_transport(transport, attestor)
+        adapter.sessions_spawn(spawn_params())
+
+        transport.envelope_overrides["owner_scope_id"] = "8" * 64
+        with self.assertRaisesRegex(AdapterContractError, "owner scope changed"):
+            adapter.refresh_runtime_attestation(attestor)
+
+        self.assertFalse(adapter.runtime_authority_verified)
+        with self.assertRaisesRegex(AdapterContractError, "no verified"):
+            adapter.session_status("session-1")
+
     def test_transport_must_explicitly_claim_persistent_channel_authority(self) -> None:
         class MissingCapabilityTransport:
             def __init__(self) -> None:
