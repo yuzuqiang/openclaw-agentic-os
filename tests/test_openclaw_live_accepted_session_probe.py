@@ -844,6 +844,45 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertFalse(payload["released"])
 
+    def test_duplicate_acquire_cleanup_tracks_identity_before_metadata_validation(
+        self,
+    ) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+        acquire_calls = 0
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            nonlocal acquire_calls
+            if method == "subagents.allowLease.acquire":
+                acquire_calls += 1
+                if acquire_calls == 1:
+                    return lease_acquire_response("lease-unit")
+                return {
+                    "gateway_lease_id": "lease-duplicate",
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "external_metadata": {
+                            "gateway_lease_id": "lease-duplicate"
+                        },
+                        "raw_metadata_json": "{}",
+                    },
+                }
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, isolated_preflight_payload())
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("duplicate allowLease acquire proof", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
+        self.assertEqual(payload["released"], True)
+
     def test_status_must_observe_acquired_lease_before_probe_can_pass(self) -> None:
         module = load_probe_module()
 

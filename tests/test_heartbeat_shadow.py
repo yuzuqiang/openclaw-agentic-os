@@ -948,6 +948,42 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertFalse(backup.exists())
         self.assertFalse(receipt_path.exists())
 
+    def test_forced_rollback_invalidates_pass_receipt_when_source_reappears_after_guard(
+        self,
+    ) -> None:
+        prior = self._file_shadow_cycle()
+        receipt_path = self.root / "artifacts/post-guard-recreate-rollback.json"
+        backup = (
+            self.root
+            / "state/agentic-os/backups/heartbeat-shadow-rollback/post-guard-recreate/control.db"
+        )
+        original_release = heartbeat_shadow_module._release_rollback_source_path_guard
+
+        def recreate_after_release(source: Path, descriptor: int) -> None:
+            original_release(source, descriptor)
+            sqlite3.connect(source).close()
+
+        with mock.patch.object(
+            heartbeat_shadow_module,
+            "_release_rollback_source_path_guard",
+            side_effect=recreate_after_release,
+        ):
+            with self.assertRaisesRegex(HeartbeatShadowError, "remains after rollback"):
+                force_heartbeat_file_authority_rollback(
+                    baseline_path=self.baseline_path,
+                    heartbeat_file=self.heartbeat_file,
+                    live_config_path=self.live_config_path,
+                    database=self.database,
+                    authority_input_digest=prior["authority_input_digest"],
+                    rollback_id="post-guard-recreate",
+                    receipt_path=receipt_path,
+                    repo_root_path=self.root,
+                )
+
+        self.assertTrue(self.database.is_file())
+        self.assertFalse(backup.exists())
+        self.assertFalse(receipt_path.exists())
+
     def test_forced_rollback_keeps_source_path_guard_through_receipt_write(
         self,
     ) -> None:

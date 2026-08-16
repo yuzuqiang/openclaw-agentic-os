@@ -1312,6 +1312,38 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
+        second_payload = dict(second)
+        second_candidates: list[Mapping[str, Any]] = [second_payload]
+        for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
+            nested = _mapping_path(second_payload, path)
+            if nested is not None:
+                second_candidates.append(nested)
+        for candidate in second_candidates:
+            candidate_map = dict(candidate)
+            metadata_container = _mapping_path(
+                candidate_map, ("metadata",)
+            ) or _mapping_path(candidate_map, ("metadata_echo",))
+            if metadata_container is None:
+                continue
+            try:
+                normalized = _metadata_alias(
+                    metadata_container,
+                    ("normalized", "normalized_metadata", "external_metadata"),
+                    label="duplicate allowLease acquire proof normalized metadata",
+                    expected_type=Mapping,
+                )
+                if isinstance(normalized, Mapping):
+                    candidate_lease_id = normalized.get("gateway_lease_id")
+                    if isinstance(candidate_lease_id, str) and candidate_lease_id:
+                        _append_unique(
+                            lease_ids_to_release,
+                            validate_accepted_lease_identity(
+                                gateway_lease_id=candidate_lease_id
+                            ),
+                        )
+            except MetadataContractError:
+                evidence["allow_lease_acquire_outcome_unknown"] = True
+            break
         duplicate_gateway_lease_id, duplicate_metadata = _validated_allow_lease_acquire_identity(
             second,
             expected_owner_metadata=acquire_params,

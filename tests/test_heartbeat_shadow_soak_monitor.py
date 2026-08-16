@@ -815,6 +815,24 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertIs(envelope["monitor"]["process_alive"], False)
         self.assertEqual(envelope["note"], "running monitor process is not alive")
 
+    def test_status_refresh_fails_closed_when_running_config_is_unreadable(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        monitor._atomic_write_json(
+            self.state_dir / "monitor-envelope.json",
+            {"status": "running", "violations": [], "latest_sample": {}},
+        )
+        (self.state_dir / "monitor-config.json").write_text("{", encoding="utf-8")
+
+        result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["monitor_state_unreadable"])
+        self.assertIn("running monitor state is unreadable", envelope["note"])
+
     def test_status_refresh_fails_closed_when_running_sample_is_overdue(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):

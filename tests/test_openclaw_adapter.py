@@ -1173,6 +1173,56 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "session response"):
             adapter.sessions_list()
 
+    def test_list_responses_reject_malformed_items_even_with_one_match(self) -> None:
+        class MalformedItemTransport:
+            def call(self, method, params):
+                if method == "subagents.allowLease.status":
+                    return {
+                        "leases": [
+                            {
+                                "gateway_lease_id": "lease-gateway",
+                                "metadata": {
+                                    "metadata_contract_version": "v1",
+                                    "normalized": {
+                                        "gateway_lease_id": "lease-gateway"
+                                    },
+                                    "raw_json": json.dumps(
+                                        {"gateway_lease_id": "lease-gateway"},
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                },
+                            },
+                            "not-an-object",
+                        ]
+                    }
+                if method == "sessions_list":
+                    return {
+                        "sessions": [
+                            {
+                                "session_key": "session-key",
+                                "spawn_request_session_key": "session-key",
+                                "metadata": {
+                                    "metadata_contract_version": "v1",
+                                    "normalized": {"session_key": "session-key"},
+                                    "raw_json": json.dumps(
+                                        {"session_key": "session-key"},
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                },
+                            },
+                            7,
+                        ]
+                    }
+                raise AssertionError(method)
+
+        adapter = CannedOpenClawAdapter(MalformedItemTransport())
+        with self.assertRaisesRegex(AdapterContractError, "malformed lease item"):
+            adapter.allow_lease_list()
+        with self.assertRaisesRegex(AdapterContractError, "malformed session item"):
+            adapter.sessions_list()
+
 
 if __name__ == "__main__":
     unittest.main()

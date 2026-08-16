@@ -243,6 +243,19 @@ def validate_transient_spawn_descriptor(request: DispatchRequest) -> None:
         )
 
 
+def _replay_transient_descriptor_supplied(request: DispatchRequest) -> bool:
+    return (
+        request.spawn_task is not None
+        or request.spawn_task_name is not None
+        or request.spawn_runtime != "subagent"
+        or request.spawn_mode != "run"
+        or request.spawn_cleanup != "keep"
+        or request.spawn_context != "isolated"
+        or type(request.spawn_light_context) is not bool
+        or request.spawn_light_context is not False
+    )
+
+
 def spawn_rpc_params(
     request: DispatchRequest, gateway_lease_id: str
 ) -> dict[str, Any]:
@@ -275,6 +288,8 @@ def _existing_spawn_replay_result(
     ).fetchone()
     if row is None:
         return None
+    if _replay_transient_descriptor_supplied(request):
+        validate_transient_spawn_descriptor(request)
     expected = (
         request.run_id,
         request.transition_id,

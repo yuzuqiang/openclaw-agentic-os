@@ -1698,6 +1698,7 @@ def force_heartbeat_file_authority_rollback(
     finally:
         active_error = sys.exc_info()[1]
         release_error: BaseException | None = None
+        final_source_error: BaseException | None = None
         restore_error: BaseException | None = None
         receipt_cleanup_error: BaseException | None = None
         try:
@@ -1707,8 +1708,18 @@ def force_heartbeat_file_authority_rollback(
         except BaseException as exc:
             release_error = exc
         finally:
+            if (
+                rollback_receipt_persisted
+                and release_error is None
+                and target.exists()
+            ):
+                final_source_error = HeartbeatShadowError(
+                    "Heartbeat shadow DB remains after rollback"
+                )
             if backup_created and (
-                not rollback_receipt_persisted or release_error is not None
+                not rollback_receipt_persisted
+                or release_error is not None
+                or final_source_error is not None
             ):
                 if rollback_receipt_persisted:
                     try:
@@ -1725,6 +1736,8 @@ def force_heartbeat_file_authority_rollback(
             raise receipt_cleanup_error
         if restore_error is not None:
             raise restore_error
+        if final_source_error is not None:
+            raise final_source_error
         if release_error is not None and active_error is None:
             raise release_error
         try:

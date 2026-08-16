@@ -565,7 +565,11 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
     if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
         raise AdapterContractError(f"{label} response must include {label}")
     observations: list[MetadataObservation] = []
-    for item in items:
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise AdapterContractError(
+                f"{label} response contains malformed {label} item at index {index}"
+            )
         try:
             mapped = _mapping(item, label)
         except AdapterContractError:
@@ -954,6 +958,9 @@ class OpenClawAdapter:
         adapter._transport = transport
         adapter._lease_metadata_by_external_id: dict[str, dict[str, Any]] = {}
         adapter._lease_identity_by_request: dict[tuple[str, str], str] = {}
+        adapter._lease_acquire_request_by_request_identity: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
         adapter._session_metadata_by_key: dict[str, dict[str, str]] = {}
         adapter._session_identity_by_request: dict[tuple[str, str], str] = {}
         _ADAPTER_AUTHORITIES[adapter] = _AdapterAuthorityState(
@@ -1015,6 +1022,7 @@ class OpenClawAdapter:
         if continuity_error is not None:
             self._lease_metadata_by_external_id.clear()
             self._lease_identity_by_request.clear()
+            self._lease_acquire_request_by_request_identity.clear()
             self._session_metadata_by_key.clear()
             self._session_identity_by_request.clear()
             _ADAPTER_AUTHORITIES.pop(self, None)
@@ -1097,6 +1105,13 @@ class OpenClawAdapter:
             set(local_request) - {"ttl_ms"},
             "allowLease acquire",
         )
+        prior_request = self._lease_acquire_request_by_request_identity.get(
+            request_identity
+        )
+        if prior_request is not None and prior_request != local_request:
+            raise AdapterContractError(
+                "duplicate allowLease acquire request changed owner metadata"
+            )
         method, response = self._call("allow_lease_acquire", params)
         observation = observation_from_openclaw_response(response)
         try:
@@ -1118,6 +1133,7 @@ class OpenClawAdapter:
                 "duplicate allowLease acquire returned a different lease identity"
             )
         self._lease_identity_by_request[request_identity] = gateway_lease_id
+        self._lease_acquire_request_by_request_identity[request_identity] = local_request
         self._lease_metadata_by_external_id[gateway_lease_id] = local
         return observation
 

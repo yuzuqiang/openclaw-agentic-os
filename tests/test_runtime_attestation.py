@@ -358,6 +358,20 @@ class RuntimeAttestationTests(unittest.TestCase):
 
         self.assertEqual(transport.calls, [])
 
+    def test_duplicate_acquire_rejects_changed_owner_before_transport(self) -> None:
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+        transport.calls.clear()
+
+        changed = {**lease_params(), "run_id": "other-run"}
+        with self.assertRaisesRegex(
+            AdapterContractError, "changed owner metadata"
+        ):
+            adapter.allow_lease_acquire(changed)
+
+        self.assertEqual(transport.calls, [])
+
     def test_release_owner_metadata_must_match_cached_acquire_before_transport(
         self,
     ) -> None:

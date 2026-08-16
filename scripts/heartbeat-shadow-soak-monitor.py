@@ -1121,8 +1121,25 @@ def status(args: argparse.Namespace) -> int:
                 note=note or failure_note,
             )
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
-    except MonitorError:
-        pass
+    except MonitorError as exc:
+        if str(envelope.get("status", "unknown")) == "running":
+            existing_violations = envelope.get("violations")
+            violations = (
+                [str(item) for item in existing_violations]
+                if isinstance(existing_violations, list)
+                else []
+            )
+            if "monitor_state_unreadable" not in violations:
+                violations.append("monitor_state_unreadable")
+            envelope = {
+                **dict(envelope),
+                "status": "failed_closed",
+                "violations": violations,
+                "note": f"running monitor state is unreadable: {exc}",
+            }
+            _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
+            print(json.dumps(envelope, sort_keys=True, indent=2))
+            return 2
     print(json.dumps(envelope, sort_keys=True, indent=2))
     return 0
 

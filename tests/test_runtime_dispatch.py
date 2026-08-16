@@ -885,8 +885,18 @@ class RuntimeDispatchTests(unittest.TestCase):
         result = dispatch_with_metadata(self.database, replay, self.request)
         self.assertEqual(result.status, "replayed")
         self.assertEqual(replay.calls, [])
+        changed_task = DispatchRequest(
+            **{**self.request.__dict__, "spawn_task": "different task"}
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "task_digest"):
+            dispatch_with_metadata(self.database, ScriptedAdapter(), changed_task)
+        other_task = "other task"
         conflicting = DispatchRequest(
-            **{**self.request.__dict__, "task_digest": "other-task"}
+            **{
+                **self.request.__dict__,
+                "spawn_task": other_task,
+                "task_digest": hashlib.sha256(other_task.encode("utf-8")).hexdigest(),
+            }
         )
         with self.assertRaisesRegex(RuntimeDispatchError, "conflicting reuse"):
             dispatch_with_metadata(self.database, ScriptedAdapter(), conflicting)
