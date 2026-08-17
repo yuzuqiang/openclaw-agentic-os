@@ -1011,6 +1011,9 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertTrue(self.database.is_file())
         self.assertFalse(backup.exists())
         self.assertFalse(receipt_path.exists())
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("ROLLBACK")
 
     def test_forced_rollback_keeps_source_path_guard_through_receipt_write(
         self,

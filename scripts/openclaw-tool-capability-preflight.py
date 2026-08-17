@@ -2608,11 +2608,17 @@ def live_installed_openclaw_catalog(
                 active_parameter_evidence[name]["schema_available"]
             )
             if catalog_schema_available:
-                params = sorted(catalog_params & source_params)
+                params = sorted(catalog_params)
+                status = (
+                    "catalog_schema_matches_installed_source"
+                    if catalog_params == source_params
+                    else "catalog_schema_disagrees_with_installed_source"
+                )
                 parameter_evidence = {
-                    "status": "catalog_schema_intersected_with_installed_source",
+                    "status": status,
                     "catalog_schema_available": True,
                     "catalog_parameters": sorted(catalog_params),
+                    "source_parameters": sorted(source_params),
                     "parameter_authority": [
                         "tools.catalog",
                         "installed_runtime_sources",
@@ -2901,11 +2907,17 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
                 active_parameter_evidence[name]["schema_available"]
             )
             if catalog_schema_available:
-                params = sorted(catalog_params & source_params)
+                params = sorted(catalog_params)
+                status = (
+                    "catalog_schema_matches_installed_source"
+                    if catalog_params == source_params
+                    else "catalog_schema_disagrees_with_installed_source"
+                )
                 parameter_evidence = {
-                    "status": "catalog_schema_intersected_with_installed_source",
+                    "status": status,
                     "catalog_schema_available": True,
                     "catalog_parameters": sorted(catalog_params),
+                    "source_parameters": sorted(source_params),
                     "parameter_authority": [
                         "tools.catalog",
                         "installed_runtime_sources",

@@ -214,6 +214,19 @@ def spawn_metadata(request: DispatchRequest) -> dict[str, str]:
     }
 
 
+def spawn_descriptor_metadata(request: DispatchRequest) -> dict[str, object]:
+    validate_transient_spawn_descriptor(request)
+    return {
+        **spawn_metadata(request),
+        "taskName": request.spawn_task_name,
+        "runtime": request.spawn_runtime,
+        "mode": request.spawn_mode,
+        "cleanup": request.spawn_cleanup,
+        "context": request.spawn_context,
+        "lightContext": request.spawn_light_context,
+    }
+
+
 def _required_spawn_string(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeDispatchError(
@@ -281,7 +294,7 @@ def _existing_spawn_replay_result(
 ) -> DispatchResult | None:
     row = connection.execute(
         "SELECT run_id,transition_id,spawn_request_id,reserve_budget_event_id,"
-        "client_request_id,phase,agent_id,task_digest,state,external_id "
+        "client_request_id,phase,agent_id,task_digest,metadata_json,state,external_id "
         "FROM external_rpc_intents "
         "WHERE rpc_kind='sessions_spawn' AND idempotency_key=?",
         (request.spawn_idempotency_key,),
@@ -302,8 +315,13 @@ def _existing_spawn_replay_result(
     )
     if row[:8] != expected:
         raise RuntimeDispatchError("conflicting reuse of sessions_spawn idempotency key")
-    state = row[8]
-    external_id = row[9]
+    if _replay_transient_descriptor_supplied(request):
+        if row[8] != stable_json(spawn_descriptor_metadata(request)):
+            raise RuntimeDispatchError(
+                "conflicting reuse of sessions_spawn execution descriptor"
+            )
+    state = row[9]
+    external_id = row[10]
     if state in ("accepted", "reconciled"):
         binding = connection.execute(
             "SELECT spawn_request_id,lease_id,run_id,transition_id,phase,agent_id,"
@@ -730,7 +748,7 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             request.phase,
             request.agent_id,
             request.task_digest,
-            stable_json(spawn_metadata(request)),
+            stable_json(spawn_descriptor_metadata(request)),
             "pending",
             spawn_requested_at,
             spawn_requested_at_ms,

@@ -2923,13 +2923,97 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("sessions_spawn", payload["error"])
-        self.assertIn("metadata", payload["error"])
+        self.assertIn("required parameter schema is unproven", payload["error"])
         spawn_tool = next(
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
         )
         self.assertNotIn("metadata", spawn_tool["parameters"])
+        self.assertEqual(
+            spawn_tool["parameter_evidence"]["status"],
+            "catalog_schema_disagrees_with_installed_source",
+        )
         self.assertNotIn(
             "metadata", spawn_tool["parameter_evidence"]["catalog_parameters"]
+        )
+        self.assertIn(
+            "metadata", spawn_tool["parameter_evidence"]["source_parameters"]
+        )
+
+    def test_live_catalog_rejects_active_schema_extra_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", '
+                    'name: "sessions_history", name: "session_status"'
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.ttl_ms },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.gateway_lease_id },"
+                )
+            active_spawn = active_tool_entry("sessions_spawn", include_schema=True)
+            active_spawn["inputSchema"]["properties"]["unexpected"] = {"type": "string"}
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_entries=[
+                    active_spawn,
+                    *[
+                        active_tool_entry(tool_id)
+                        for tool_id in ACTIVE_TOOL_IDS
+                        if tool_id != "sessions_spawn"
+                    ],
+                ],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("sessions_spawn", payload["error"])
+        self.assertIn("required parameter schema is unproven", payload["error"])
+        spawn_tool = next(
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
+        )
+        self.assertIn("unexpected", spawn_tool["parameters"])
+        self.assertEqual(
+            spawn_tool["parameter_evidence"]["status"],
+            "catalog_schema_disagrees_with_installed_source",
+        )
+        self.assertIn(
+            "unexpected", spawn_tool["parameter_evidence"]["catalog_parameters"]
+        )
+        self.assertNotIn(
+            "unexpected", spawn_tool["parameter_evidence"]["source_parameters"]
         )
 
     def test_live_installed_openclaw_requires_matching_active_executable_root(self) -> None:

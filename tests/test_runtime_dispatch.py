@@ -26,6 +26,7 @@ from agentic_os.runtime_dispatch import (
     lease_metadata,
     release_metadata,
     spawn_rpc_params,
+    spawn_descriptor_metadata,
     spawn_metadata,
     stable_json,
 )
@@ -63,6 +64,10 @@ class ScriptedAdapter:
         self.calls.append("allow_lease_release")
         self.params.append(("allow_lease_release", dict(params)))
         return self.release.pop(0)
+
+    def adopt_verified_lease_ownership(self, params, observation):
+        self.calls.append("adopt_verified_lease_ownership")
+        self.params.append(("adopt_verified_lease_ownership", dict(params)))
 
     def sessions_spawn(self, params):
         self.calls.append("sessions_spawn")
@@ -920,6 +925,11 @@ class RuntimeDispatchTests(unittest.TestCase):
         result = dispatch_with_metadata(self.database, replay, self.request)
         self.assertEqual(result.status, "replayed")
         self.assertEqual(replay.calls, [])
+        changed_name = DispatchRequest(
+            **{**self.request.__dict__, "spawn_task_name": "other-task-name"}
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "execution descriptor"):
+            dispatch_with_metadata(self.database, ScriptedAdapter(), changed_name)
         changed_task = DispatchRequest(
             **{**self.request.__dict__, "spawn_task": "different task"}
         )
@@ -1340,7 +1350,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "requested_at_epoch_ms) VALUES('spawn:spawn-idem','run','transition',"
                 "'sessions_spawn','spawn','reserve','client','spawn-idem','phase','agent',"
                 "? ,?,'unknown','now',1800000000003)",
-                (TASK_DIGEST, stable_json(spawn_metadata(self.request))),
+                (TASK_DIGEST, stable_json(spawn_descriptor_metadata(self.request))),
             )
 
     def test_reconcile_unknown_spawn_from_session_list_without_retry(self) -> None:
@@ -1534,7 +1544,7 @@ class RuntimeDispatchTests(unittest.TestCase):
                 "released",
             )
 
-    def test_reconcile_keeps_crash_left_acquired_lease_after_zero_session(self) -> None:
+    def test_reconcile_adopts_crash_left_acquired_lease_before_release(self) -> None:
         class CrashAfterAcquireAdapter(ScriptedAdapter):
             def sessions_spawn(self, params):
                 self.calls.append("sessions_spawn")
@@ -1553,21 +1563,43 @@ class RuntimeDispatchTests(unittest.TestCase):
             dispatch_with_metadata(self.database, crash_adapter, self.request)
         with self._connect() as connection:
             connection.execute(
-                "UPDATE external_rpc_intents SET requested_at='old',requested_at_epoch_ms=2 "
+                "UPDATE external_rpc_intents SET state='human_review_required',"
+                "resolved_at='old',resolved_at_epoch_ms=2 "
                 "WHERE rpc_kind='sessions_spawn'"
             )
+            connection.execute(
+                "UPDATE spawn_requests SET state='human_review_required',"
+                "ambiguity_reason='spawn blocked by allow lease cleanup test' "
+                "WHERE spawn_request_id='spawn'"
+            )
 
-        reconcile_adapter = ScriptedAdapter(release=[self._release_observation()])
+        reconcile_adapter = ScriptedAdapter(
+            leases=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            release=[self._release_observation()],
+        )
         summary = reconcile_unknown_metadata(self.database, reconcile_adapter)
-        self.assertEqual(summary.reconciled, 0)
-        self.assertEqual(summary.human_review_required, 1)
-        self.assertNotIn("allow_lease_release", reconcile_adapter.calls)
+        self.assertEqual(summary.reconciled, 1)
+        self.assertEqual(summary.human_review_required, 0)
+        self.assertEqual(
+            reconcile_adapter.calls,
+            [
+                "sessions_list",
+                "allow_lease_list",
+                "adopt_verified_lease_ownership",
+                "allow_lease_release",
+            ],
+        )
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT state FROM leases WHERE client_lease_id='client-lease'"
                 ).fetchone()[0],
-                "acquired",
+                "released",
             )
 
     def test_cleanup_binding_never_releases_other_same_transition_lease(self) -> None:

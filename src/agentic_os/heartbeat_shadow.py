@@ -1741,19 +1741,22 @@ def force_heartbeat_file_authority_rollback(
                     _restore_database_from_local_backup(target, backup)
                 except BaseException as exc:
                     restore_error = exc
+        deferred_error: BaseException | None = None
         if receipt_cleanup_error is not None:
-            raise receipt_cleanup_error
-        if restore_error is not None:
-            raise restore_error
-        if final_source_error is not None:
-            raise final_source_error
-        if release_error is not None and active_error is None:
-            raise release_error
+            deferred_error = receipt_cleanup_error
+        elif restore_error is not None:
+            deferred_error = restore_error
+        elif final_source_error is not None:
+            deferred_error = final_source_error
+        elif release_error is not None and active_error is None:
+            deferred_error = release_error
         try:
             lock_connection.execute("ROLLBACK")
         except sqlite3.Error:
             pass
         lock_connection.close()
+        if deferred_error is not None:
+            raise deferred_error
     if target.exists():
         raise HeartbeatShadowError("Heartbeat shadow DB remains after rollback")
     if receipt is None:

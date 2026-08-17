@@ -65,6 +65,11 @@ class MetadataCapableOpenClawAdapter(Protocol):
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
         ...
 
+    def adopt_verified_lease_ownership(
+        self, params: Mapping[str, Any], observation: MetadataObservation
+    ) -> None:
+        ...
+
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
         ...
 
@@ -265,7 +270,10 @@ def _split_evidence_authority_errors(
                 and required_tools[name]
                 and isinstance(parameter_evidence, Mapping)
                 and parameter_evidence.get("status")
-                == "unproven_from_catalog_and_installed_sources"
+                in {
+                    "unproven_from_catalog_and_installed_sources",
+                    "catalog_schema_disagrees_with_installed_source",
+                }
             ):
                 unproven_parameter_methods.add(name)
 
@@ -879,6 +887,15 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
             "session external identity",
             (
                 ("external_id", response.get("external_id")),
+                ("externalId", response.get("externalId")),
+                (
+                    "session.external_id",
+                    session.get("external_id") if session is not None else None,
+                ),
+                (
+                    "session.externalId",
+                    session.get("externalId") if session is not None else None,
+                ),
                 ("session_key", session_key),
             ),
         )
@@ -1149,6 +1166,30 @@ class OpenClawAdapter:
         self._lease_acquire_request_by_request_identity[request_identity] = local_request
         self._lease_metadata_by_external_id[gateway_lease_id] = local
         return observation
+
+    def adopt_verified_lease_ownership(
+        self, params: Mapping[str, Any], observation: MetadataObservation
+    ) -> None:
+        self._require_verified_runtime_authority()
+        try:
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=observation.external_id
+            )
+            local = {**dict(params), "gateway_lease_id": gateway_lease_id}
+            validate_allow_lease_observation(
+                local=local,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected is not None and expected != local:
+            raise AdapterContractError(
+                "adopted allowLease ownership conflicts with cached adapter ownership"
+            )
+        self._lease_metadata_by_external_id[gateway_lease_id] = local
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
         method, response = self._call("allow_lease_status", {})
@@ -1458,6 +1499,12 @@ class OpenClawAdapter:
             item_spawn_request_session_key,
             item_external_id,
         ) in _history_item_session_keys(response):
+            if (
+                item_session_key is None
+                and item_spawn_request_session_key is None
+                and item_external_id is None
+            ):
+                continue
             if item_session_key != session_key:
                 raise AdapterContractError(
                     f"{method} {label} identity must match requested session"

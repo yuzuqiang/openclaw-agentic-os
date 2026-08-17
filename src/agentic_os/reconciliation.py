@@ -648,7 +648,33 @@ def reconcile_unknown_metadata(
                     human_review += 1
 
         for item in _acquire_only_cleanup_requests(connection):
+            scan = _matching_leases(item.request, lease_observations)
+            if scan.malformed_matching_observations or len(scan.matches) != 1:
+                with immediate_transaction(connection):
+                    mark_owned_lease_release_review(
+                        connection,
+                        item.request,
+                        item.gateway_lease_id,
+                        reason="malformed-or-ambiguous-lease-observation",
+                    )
+                human_review += 1
+                continue
+            observation, observed_gateway_lease_id = scan.matches[0]
+            if observed_gateway_lease_id != item.gateway_lease_id:
+                with immediate_transaction(connection):
+                    mark_owned_lease_release_review(
+                        connection,
+                        item.request,
+                        item.gateway_lease_id,
+                        reason="conflicting-acquire-only-lease-observation",
+                    )
+                human_review += 1
+                continue
             try:
+                adapter.adopt_verified_lease_ownership(
+                    lease_metadata(item.request, item.gateway_lease_id),
+                    observation,
+                )
                 release_owned_lease(
                     connection, adapter, item.request, item.gateway_lease_id
                 )

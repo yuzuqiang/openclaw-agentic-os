@@ -9,6 +9,7 @@ from typing import Any
 
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
+    MetadataObservation,
     OpenClawAdapter,
     assert_installed_runtime_tools,
     assert_installed_session_tools,
@@ -370,6 +371,37 @@ class OpenClawAdapterTests(unittest.TestCase):
             ),
         )
 
+    def test_history_messages_without_item_identity_are_allowed(self) -> None:
+        class MessageOnlyHistoryTransport(CannedTransport):
+            def call(self, method, params):
+                if method == "sessions_history":
+                    metadata = {
+                        "run_id": "run",
+                        "transition_id": "transition",
+                        "client_request_id": "client",
+                        "idempotency_key": "spawn-idem",
+                        "phase": "phase",
+                        "agent_id": "agent",
+                        "task_digest": TASK_DIGEST,
+                    }
+                    return {
+                        "sessionKey": params["sessionKey"],
+                        "spawnRequestSessionKey": params["sessionKey"],
+                        "messages": [{"role": "assistant", "content": "done"}],
+                        "metadata": {
+                            "metadata_contract_version": "v1",
+                            "normalized": metadata,
+                            "raw_json": json.dumps(
+                                metadata, sort_keys=True, separators=(",", ":")
+                            ),
+                        },
+                    }
+                return super().call(method, params)
+
+        adapter = CannedOpenClawAdapter(MessageOnlyHistoryTransport())
+        result = adapter.session_result("session-key")
+        self.assertEqual(result.session_key, "session-key")
+
     def test_fully_forged_valid_envelope_cannot_mint_runtime_authority(self) -> None:
         with self.assertRaisesRegex(AdapterContractError, "unsigned preflight mapping"):
             OpenClawAdapter.from_preflighted_catalog(
@@ -590,6 +622,68 @@ class OpenClawAdapterTests(unittest.TestCase):
         ):
             adapter.sessions_spawn(spawn_request("lease-two"))
         self.assertEqual(len(calls), 1)
+
+    def test_verified_lease_adoption_restores_release_ownership(self) -> None:
+        acquire_metadata = {
+            "run_id": "run",
+            "transition_id": "transition",
+            "phase": "phase",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+            "client_lease_id": "client-lease",
+            "idempotency_key": "acquire-idem",
+            "ttl_ms": 60000,
+            "gateway_lease_id": "lease-gateway",
+        }
+        release_metadata = {
+            "client_lease_id": "client-lease",
+            "release_idempotency_key": "release-idem",
+            "run_id": "run",
+            "phase": "phase",
+            "transition_id": "transition",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+            "gateway_lease_id": "lease-gateway",
+        }
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def call(logical_name, params):
+            calls.append((logical_name, dict(params)))
+            return (
+                "allow_lease_release",
+                {
+                    "gateway_lease_id": "lease-gateway",
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": dict(release_metadata),
+                        "raw_json": json.dumps(
+                            release_metadata,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                },
+            )
+
+        adapter = object.__new__(OpenClawAdapter)
+        adapter._require_verified_runtime_authority = lambda: SimpleNamespace()
+        adapter._call = call
+        adapter._lease_metadata_by_external_id = {}
+        adapter.adopt_verified_lease_ownership(
+            dict(acquire_metadata),
+            MetadataObservation(
+                metadata_contract_version="v1",
+                normalized=dict(acquire_metadata),
+                raw_json=json.dumps(
+                    acquire_metadata, sort_keys=True, separators=(",", ":")
+                ),
+                external_id="lease-gateway",
+            ),
+        )
+        observation = adapter.allow_lease_release(dict(release_metadata))
+
+        self.assertEqual(observation.external_id, "lease-gateway")
+        self.assertEqual(calls, [("allow_lease_release", release_metadata)])
 
     def test_production_tree_has_no_authority_token_or_test_transport_factory(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -1112,6 +1206,36 @@ class OpenClawAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "conflicting session key"):
             CannedOpenClawAdapter(
                 ConflictingSessionTransport()
+            ).sessions_spawn({})
+
+    def test_conflicting_nested_session_external_id_fails_contract(self) -> None:
+        class ConflictingExternalAliasTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "sessionKey": "session-key",
+                    "spawnRequestSessionKey": "session-key",
+                    "session": {"external_id": "other-session"},
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        with self.assertRaisesRegex(AdapterContractError, "conflicting session external identity"):
+            CannedOpenClawAdapter(
+                ConflictingExternalAliasTransport()
             ).sessions_spawn({})
 
     def test_conflicting_nested_session_aliases_fail_contract(self) -> None:

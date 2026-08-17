@@ -728,7 +728,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             adapter.sessions_spawn({**request, "unexpected": "field"})
         self.assertEqual(transport.calls, [])
 
-    def test_history_items_without_session_identity_are_rejected(self) -> None:
+    def test_history_items_without_session_identity_are_allowed(self) -> None:
         class UnscopedHistoryTransport(FakeAttestedTransport):
             def call(self, method, params):
                 response = super().call(method, params)
@@ -740,8 +740,8 @@ class RuntimeAttestationTests(unittest.TestCase):
         adapter = self._adapter(transport)
         adapter.allow_lease_acquire(lease_params())
         session = adapter.sessions_spawn(spawn_params())
-        with self.assertRaisesRegex(AdapterContractError, "messages\\[0\\] identity"):
-            adapter.session_result(session.session_key or "session-1")
+        result = adapter.session_result(session.session_key or "session-1")
+        self.assertEqual(result.session_key, session.session_key)
 
     def test_duplicate_request_identity_must_return_same_external_identity(self) -> None:
         transport = FakeAttestedTransport()
