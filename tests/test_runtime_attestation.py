@@ -8,7 +8,11 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from agentic_os.openclaw_adapter import AdapterContractError, OpenClawAdapter
+from agentic_os.openclaw_adapter import (
+    AdapterAmbiguousOutcomeError,
+    AdapterContractError,
+    OpenClawAdapter,
+)
 from agentic_os.runtime_attestation import (
     GatewayCliAttestedTransport,
     RuntimeAttestationError,
@@ -746,8 +750,16 @@ class RuntimeAttestationTests(unittest.TestCase):
         first = adapter.sessions_spawn(spawn_params())
         self.assertEqual(first.external_id, "session-1")
         transport.spawn_session_key = "session-2"
-        with self.assertRaisesRegex(AdapterContractError, "different session identity"):
+        with self.assertRaisesRegex(
+            AdapterAmbiguousOutcomeError,
+            "different session identity",
+        ) as context:
             adapter.sessions_spawn(spawn_params())
+        self.assertIsNotNone(context.exception.candidate_observation)
+        self.assertEqual(
+            context.exception.candidate_observation.external_id,
+            "session-2",
+        )
 
     def test_cli_transport_binds_signed_payload_to_local_executable_and_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -988,6 +988,48 @@ def mark_human_review(
         )
 
 
+def persist_ambiguous_spawn_candidate(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    observation: MetadataObservation,
+) -> None:
+    if not observation.external_id:
+        return
+    observed = validate_session_observation(
+        local=spawn_metadata(request),
+        normalized=observation.normalized,
+        raw_json=observation.raw_json,
+        metadata_contract_version=observation.metadata_contract_version,
+    )
+    connection.execute(
+        "UPDATE external_rpc_intents SET metadata_contract_version=COALESCE(?,metadata_contract_version),"
+        "external_metadata_json=COALESCE(?,external_metadata_json),"
+        "external_run_id=COALESCE(?,external_run_id),"
+        "external_transition_id=COALESCE(?,external_transition_id),"
+        "external_client_request_id=COALESCE(?,external_client_request_id),"
+        "external_idempotency_key=COALESCE(?,external_idempotency_key),"
+        "external_phase=COALESCE(?,external_phase),"
+        "external_agent_id=COALESCE(?,external_agent_id),"
+        "external_task_digest=COALESCE(?,external_task_digest),"
+        "external_id=COALESCE(?,external_id) "
+        "WHERE rpc_kind='sessions_spawn' AND idempotency_key=? "
+        "AND state='human_review_required'",
+        (
+            observation.metadata_contract_version,
+            observation.raw_json,
+            observed["run_id"],
+            observed["transition_id"],
+            observed["client_request_id"],
+            observed["idempotency_key"],
+            observed["phase"],
+            observed["agent_id"],
+            observed["task_digest"],
+            observation.external_id,
+            request.spawn_idempotency_key,
+        ),
+    )
+
+
 def mark_unknown(
     connection: sqlite3.Connection,
     request: DispatchRequest,
@@ -1299,6 +1341,9 @@ def dispatch_with_metadata(
                     rpc_kind="sessions_spawn",
                     reason=str(exc),
                 )
+                candidate = getattr(exc, "candidate_observation", None)
+                if isinstance(candidate, MetadataObservation):
+                    persist_ambiguous_spawn_candidate(connection, request, candidate)
             raise RuntimeDispatchError(
                 "sessions_spawn transport outcome unknown; human review required"
             ) from exc

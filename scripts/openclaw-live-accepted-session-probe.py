@@ -510,6 +510,24 @@ def _candidate_lease_ids_for_cleanup(response: Mapping[str, Any]) -> list[str]:
     return lease_ids
 
 
+def _record_unresolved_lease_candidates(
+    evidence: dict[str, Any],
+    response: Mapping[str, Any],
+    *,
+    trusted_lease_ids: Sequence[str] = (),
+) -> None:
+    trusted = set(trusted_lease_ids)
+    candidates = [
+        _identity_proof(candidate)
+        for candidate in _candidate_lease_ids_for_cleanup(response)
+        if candidate not in trusted
+    ]
+    if not candidates:
+        return
+    evidence.setdefault("unresolved_allow_lease_candidates", []).extend(candidates)
+    evidence["allow_lease_acquire_outcome_unknown"] = True
+
+
 def _mapping_path(payload: dict[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
     value = _path_value(payload, path)
     return value if isinstance(value, Mapping) else None
@@ -1359,60 +1377,34 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        second_payload = dict(second)
-        for candidate_lease_id in _candidate_lease_ids_for_cleanup(second_payload):
-            try:
-                cleanup_lease_id = validate_accepted_lease_identity(
-                    gateway_lease_id=candidate_lease_id
-                )
-            except MetadataContractError:
-                continue
-            _append_unique(
-                lease_ids_to_release,
-                cleanup_lease_id,
+        try:
+            duplicate_gateway_lease_id, duplicate_metadata = _validated_allow_lease_acquire_identity(
+                second,
+                expected_owner_metadata=acquire_params,
+                label="duplicate allowLease acquire proof",
             )
-        second_candidates: list[Mapping[str, Any]] = [second_payload]
-        for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
-            nested = _mapping_path(second_payload, path)
-            if nested is not None:
-                second_candidates.append(nested)
-        for candidate in second_candidates:
-            candidate_map = dict(candidate)
-            metadata_container = _mapping_path(
-                candidate_map, ("metadata",)
-            ) or _mapping_path(candidate_map, ("metadata_echo",))
-            if metadata_container is None:
-                continue
-            try:
-                normalized = _metadata_alias(
-                    metadata_container,
-                    ("normalized", "normalized_metadata", "external_metadata"),
-                    label="duplicate allowLease acquire proof normalized metadata",
-                    expected_type=Mapping,
-                )
-                if isinstance(normalized, Mapping):
-                    candidate_lease_id = normalized.get("gateway_lease_id")
-                    if isinstance(candidate_lease_id, str) and candidate_lease_id:
-                        _append_unique(
-                            lease_ids_to_release,
-                            validate_accepted_lease_identity(
-                                gateway_lease_id=candidate_lease_id
-                            ),
-                        )
-            except MetadataContractError:
-                evidence["allow_lease_acquire_outcome_unknown"] = True
-            break
-        duplicate_gateway_lease_id, duplicate_metadata = _validated_allow_lease_acquire_identity(
-            second,
-            expected_owner_metadata=acquire_params,
-            label="duplicate allowLease acquire proof",
-        )
+        except MetadataContractError:
+            _record_unresolved_lease_candidates(evidence, second)
+            raise
         _append_unique(lease_ids_to_release, duplicate_gateway_lease_id)
+        untrusted_duplicate_candidates = [
+            candidate
+            for candidate in _candidate_lease_ids_for_cleanup(second)
+            if candidate != duplicate_gateway_lease_id
+        ]
+        if untrusted_duplicate_candidates:
+            _record_unresolved_lease_candidates(
+                evidence,
+                second,
+                trusted_lease_ids=(duplicate_gateway_lease_id,),
+            )
+            raise MetadataContractError(
+                "duplicate allowLease acquire response exposed unvalidated lease identity aliases"
+            )
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
         )
-        _lease_id_from_response(second)
         evidence["allow_lease"]["duplicate_gateway_lease_id_sha256"] = _identity_sha256(
             duplicate_gateway_lease_id
         )

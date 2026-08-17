@@ -1037,6 +1037,10 @@ def run_heartbeat_dual_write_projection(
         raise HeartbeatShadowError(
             "Heartbeat file-shadow preflight manifest is missing or drifted"
         )
+    prior_manifest_doc = _json_file(
+        prior_manifest,
+        "Heartbeat prior file-shadow manifest",
+    )
     try:
         prior_audit = audit_file_authority_shadow(
             target_database,
@@ -1060,7 +1064,12 @@ def run_heartbeat_dual_write_projection(
         observed_at_epoch_ms=observed_at_epoch_ms,
     )
     authority_digest = _manifest_authority_digest(manifest)
-    if authority_digest != prior_file_shadow_receipt.get("authority_input_digest"):
+    prior_manifest_digest = _manifest_authority_digest(prior_manifest_doc)
+    if prior_manifest_digest != prior_file_shadow_receipt.get("authority_input_digest"):
+        raise HeartbeatShadowError(
+            "Heartbeat file-shadow preflight manifest authority digest is unbound"
+        )
+    if authority_digest != prior_manifest_digest:
         raise HeartbeatShadowError("Heartbeat authority drifted after file-shadow preflight")
     content = {
         "schema_version": "p03-heartbeat-dual-write-projection.v1",

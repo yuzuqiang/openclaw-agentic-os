@@ -474,10 +474,25 @@ def _envelope(
         if isinstance(latest_sample, Mapping)
         else None
     )
+    last_sampled_monotonic = (
+        latest_sample.get("sampled_at_monotonic_ms")
+        if isinstance(latest_sample, Mapping)
+        else None
+    )
     interval_ms = int(config["sample_interval_seconds"]) * 1000
     next_due = last_sampled_at + interval_ms if isinstance(last_sampled_at, int) else None
     allowed_latest = (
         last_sampled_at + interval_ms * 2 if isinstance(last_sampled_at, int) else None
+    )
+    next_due_monotonic = (
+        last_sampled_monotonic + interval_ms
+        if isinstance(last_sampled_monotonic, int)
+        else None
+    )
+    allowed_latest_monotonic = (
+        last_sampled_monotonic + interval_ms * 2
+        if isinstance(last_sampled_monotonic, int)
+        else None
     )
     current_pid = os.getpid()
     loaded_pid = _load_pid(pidfile)
@@ -556,8 +571,11 @@ def _envelope(
         "coverage": {
             "samples_count": len(samples),
             "last_sampled_at_epoch_ms": last_sampled_at,
+            "last_sampled_at_monotonic_ms": last_sampled_monotonic,
             "next_due_epoch_ms": next_due,
+            "next_due_monotonic_ms": next_due_monotonic,
             "allowed_latest_epoch_ms": allowed_latest,
+            "allowed_latest_monotonic_ms": allowed_latest_monotonic,
             "coverage_gap_detected": "coverage_gap" in violations_list,
         },
         "first_sample": first_sample,
@@ -604,6 +622,26 @@ def _running_status_failure(envelope: Mapping[str, Any]) -> tuple[str, str] | No
         allowed_latest = coverage.get("allowed_latest_epoch_ms")
         if isinstance(allowed_latest, int) and _epoch_ms() > allowed_latest:
             return ("coverage_gap", "running monitor sample window is overdue")
+        last_monotonic = coverage.get("last_sampled_at_monotonic_ms")
+        allowed_latest_monotonic = coverage.get("allowed_latest_monotonic_ms")
+        if not isinstance(last_monotonic, int) or not isinstance(
+            allowed_latest_monotonic, int
+        ):
+            return (
+                "coverage_gap",
+                "running monitor sample monotonic deadline is missing",
+            )
+        now_monotonic = time.monotonic_ns() // 1_000_000
+        if now_monotonic < last_monotonic:
+            return (
+                "coverage_gap",
+                "running monitor monotonic clock moved backward or rebooted",
+            )
+        if now_monotonic > allowed_latest_monotonic:
+            return (
+                "coverage_gap",
+                "running monitor sample monotonic window is overdue",
+            )
     return None
 
 

@@ -325,6 +325,34 @@ class HeartbeatShadowTests(unittest.TestCase):
                 repo_root_path=self.root,
             )
 
+    def test_dual_write_binds_prior_manifest_to_authority_digest(self) -> None:
+        prior = self._file_shadow_cycle()
+        self._write_baseline(every="45m")
+        current_manifest = heartbeat_authority_manifest(
+            self.baseline_path,
+            self.heartbeat_file,
+            self.live_config_path,
+            observed_at_epoch_ms=1_700_000_060_000,
+        )
+        current_digest = heartbeat_shadow_module._manifest_authority_digest(
+            current_manifest
+        )
+        self.assertNotEqual(prior["authority_input_digest"], current_digest)
+        tampered = {**prior, "authority_input_digest": current_digest}
+
+        with self.assertRaisesRegex(HeartbeatShadowError, "manifest authority digest"):
+            run_heartbeat_dual_write_projection(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                projection_receipt_path=self.root / "artifacts/rejected-digest.json",
+                run_id="heartbeat-rejected-digest",
+                prior_file_shadow_receipt=tampered,
+                database=self.database,
+                repo_root_path=self.root,
+                observed_at_epoch_ms=1_700_000_060_000,
+            )
+
     def test_parity_samples_complete_only_after_bounded_24_hour_window(self) -> None:
         prior = self._file_shadow_cycle()
         started = 1_700_000_000_000

@@ -905,6 +905,57 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertIs(envelope["coverage"]["coverage_gap_detected"], True)
         self.assertEqual(envelope["note"], "running monitor sample window is overdue")
 
+    def test_status_refresh_checks_monotonic_sample_deadline(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=10_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            sample = _pass_sample(
+                1_700_000_000_000,
+                digest,
+                sampled_at_monotonic_ms=10_000,
+            )
+            receipt = monitor.append_heartbeat_soak_sample(receipt, sample)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "running", "violations": [], "latest_sample": sample},
+            )
+            (self.state_dir / "monitor.pid").write_text("12345\n", encoding="utf-8")
+            with mock.patch.object(monitor, "_pid_alive", return_value=True), mock.patch.object(
+                monitor, "_epoch_ms", return_value=1_700_000_001_000
+            ), mock.patch.object(
+                monitor.time,
+                "monotonic_ns",
+                return_value=611_000 * 1_000_000,
+            ):
+                result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 0)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["coverage_gap"])
+        self.assertEqual(
+            envelope["note"],
+            "running monitor sample monotonic window is overdue",
+        )
+
     def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)

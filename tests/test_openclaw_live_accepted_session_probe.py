@@ -754,7 +754,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertEqual(payload["released"], True)
 
-    def test_duplicate_acquire_conflicting_identity_aliases_release_all_candidates(
+    def test_duplicate_acquire_conflicting_identity_aliases_release_only_metadata_bound_candidate(
         self,
     ) -> None:
         module = load_probe_module()
@@ -784,9 +784,13 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
-        self.assertIn("conflicting gateway lease identity aliases", payload["error"])
-        self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
+        self.assertIn("unvalidated lease identity aliases", payload["error"])
+        self.assertEqual(released_ids, ["lease-unit"])
         self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["unresolved_allow_lease_candidates"],
+            [module._identity_proof("lease-duplicate")],
+        )
 
     def test_duplicate_acquire_must_echo_owner_metadata(self) -> None:
         module = load_probe_module()
@@ -844,7 +848,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertFalse(payload["released"])
 
-    def test_duplicate_acquire_cleanup_tracks_identity_before_metadata_validation(
+    def test_duplicate_acquire_records_unvalidated_identity_without_releasing_it(
         self,
     ) -> None:
         module = load_probe_module()
@@ -880,10 +884,14 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("duplicate allowLease acquire proof", payload["error"])
-        self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
+        self.assertEqual(released_ids, ["lease-unit"])
         self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["unresolved_allow_lease_candidates"],
+            [module._identity_proof("lease-duplicate")],
+        )
 
-    def test_duplicate_acquire_cleanup_tracks_identities_before_alias_validation(
+    def test_duplicate_acquire_records_conflicting_aliases_without_releasing_them(
         self,
     ) -> None:
         module = load_probe_module()
@@ -937,14 +945,17 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         )
         self.assertEqual(
             released_ids,
-            [
-                "lease-unit",
-                "lease-duplicate",
-                "lease-conflicting-alias",
-                "lease-conflicting-raw",
-            ],
+            ["lease-unit"],
         )
         self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["unresolved_allow_lease_candidates"],
+            [
+                module._identity_proof("lease-duplicate"),
+                module._identity_proof("lease-conflicting-alias"),
+                module._identity_proof("lease-conflicting-raw"),
+            ],
+        )
 
     def test_duplicate_acquire_cleanup_collects_metadata_and_echo_containers(
         self,
@@ -1008,16 +1019,19 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertIn("raw allowLease metadata contract invalid", payload["error"])
         self.assertEqual(
             released_ids,
-            [
-                "lease-unit",
-                "lease-duplicate",
-                "lease-metadata-normalized",
-                "lease-metadata-raw",
-                "lease-echo-normalized",
-                "lease-echo-raw",
-            ],
+            ["lease-unit"],
         )
         self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["unresolved_allow_lease_candidates"],
+            [
+                module._identity_proof("lease-duplicate"),
+                module._identity_proof("lease-metadata-normalized"),
+                module._identity_proof("lease-metadata-raw"),
+                module._identity_proof("lease-echo-normalized"),
+                module._identity_proof("lease-echo-raw"),
+            ],
+        )
 
     def test_status_must_observe_acquired_lease_before_probe_can_pass(self) -> None:
         module = load_probe_module()

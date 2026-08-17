@@ -33,6 +33,15 @@ class AdapterContractError(ValueError):
 class AdapterAmbiguousOutcomeError(AdapterContractError):
     """An application RPC may have succeeded but can no longer be verified."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        candidate_observation: MetadataObservation | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.candidate_observation = candidate_observation
+
 
 @dataclass(frozen=True)
 class MetadataObservation:
@@ -1346,8 +1355,10 @@ class OpenClawAdapter:
             raise self._metadata_error(exc) from exc
         prior_identity = self._session_identity_by_request.get(request_identity)
         if prior_identity is not None and prior_identity != session_key:
-            raise AdapterContractError(
-                "duplicate sessions_spawn returned a different session identity"
+            raise AdapterAmbiguousOutcomeError(
+                "duplicate sessions_spawn returned a different session identity; "
+                "observed candidate identity requires human reconciliation",
+                candidate_observation=observation,
             )
         self._session_identity_by_request[request_identity] = session_key
         self._session_spawn_request_by_request_identity[request_identity] = (

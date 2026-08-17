@@ -640,6 +640,41 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ).fetchone()
             )
 
+    def test_ambiguous_spawn_candidate_identity_is_persisted_for_review(self) -> None:
+        candidate = observation(spawn_metadata(self.request), external_id="session-candidate")
+        adapter = TransportFailingAdapter(
+            {
+                "sessions_spawn": AdapterAmbiguousOutcomeError(
+                    "duplicate sessions_spawn returned a different session identity",
+                    candidate_observation=candidate,
+                )
+            },
+            acquire=[
+                observation(
+                    lease_metadata(self.request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            release=[self._release_observation()],
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        self.assertEqual(adapter.calls, ["allow_lease_acquire", "sessions_spawn"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,external_id FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone(),
+                ("human_review_required", "session-candidate"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM leases WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("acquired",),
+            )
+
     def test_spawn_metadata_mismatch_releases_only_owned_lease(self) -> None:
         wrong = dict(spawn_metadata(self.request))
         wrong["task_digest"] = "other-task"
