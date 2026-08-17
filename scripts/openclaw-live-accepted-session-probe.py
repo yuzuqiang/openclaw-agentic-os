@@ -463,6 +463,41 @@ def _lease_ids_from_response(response: Mapping[str, Any]) -> list[str]:
     )
 
 
+def _candidate_lease_ids_for_cleanup(response: Mapping[str, Any]) -> list[str]:
+    """Collect lease identity candidates before metadata validation."""
+    payload_map = dict(response)
+    candidates: list[Mapping[str, Any]] = [payload_map]
+    for path in (
+        ("lease",),
+        ("result",),
+        ("result", "lease"),
+        ("output",),
+        ("output", "lease"),
+    ):
+        nested = _mapping_path(payload_map, path)
+        if nested is not None:
+            candidates.append(nested)
+
+    lease_ids: list[str] = []
+    for candidate in candidates:
+        candidate_map = dict(candidate)
+        for value in _lease_ids_from_response(candidate_map):
+            _append_unique(lease_ids, value)
+        metadata_container = _mapping_path(candidate_map, ("metadata",)) or _mapping_path(
+            candidate_map, ("metadata_echo",)
+        )
+        if metadata_container is None:
+            continue
+        for alias in ("normalized", "normalized_metadata", "external_metadata"):
+            value = metadata_container.get(alias)
+            if not isinstance(value, Mapping):
+                continue
+            gateway_lease_id = value.get("gateway_lease_id")
+            if isinstance(gateway_lease_id, str) and gateway_lease_id:
+                _append_unique(lease_ids, gateway_lease_id)
+    return lease_ids
+
+
 def _mapping_path(payload: dict[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
     value = _path_value(payload, path)
     return value if isinstance(value, Mapping) else None
@@ -1313,6 +1348,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
         second_payload = dict(second)
+        for candidate_lease_id in _candidate_lease_ids_for_cleanup(second_payload):
+            try:
+                cleanup_lease_id = validate_accepted_lease_identity(
+                    gateway_lease_id=candidate_lease_id
+                )
+            except MetadataContractError:
+                continue
+            _append_unique(
+                lease_ids_to_release,
+                cleanup_lease_id,
+            )
         second_candidates: list[Mapping[str, Any]] = [second_payload]
         for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
             nested = _mapping_path(second_payload, path)

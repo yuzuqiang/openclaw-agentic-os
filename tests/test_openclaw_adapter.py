@@ -4,6 +4,7 @@ import hashlib
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from agentic_os.openclaw_adapter import (
@@ -425,6 +426,86 @@ class OpenClawAdapterTests(unittest.TestCase):
                 ):
                     call()
                 self.assertEqual(transport.calls, [])
+
+    def test_duplicate_sessions_spawn_changed_descriptor_rejected_before_rpc(
+        self,
+    ) -> None:
+        metadata = {
+            "run_id": "run",
+            "transition_id": "transition",
+            "client_request_id": "client",
+            "idempotency_key": "spawn-idem",
+            "phase": "phase",
+            "agent_id": "agent",
+            "task_digest": TASK_DIGEST,
+        }
+
+        def spawn_request(gateway_lease_id: str) -> dict[str, Any]:
+            return {
+                "task": TASK,
+                "taskName": "task-name",
+                "runtime": "subagent",
+                "mode": "run",
+                "agentId": "agent",
+                "cleanup": "delete",
+                "context": "isolated",
+                "lightContext": False,
+                "client_request_id": "client",
+                "idempotency_key": "spawn-idem",
+                "gateway_lease_id": gateway_lease_id,
+                "metadata": dict(metadata),
+            }
+
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def call(logical_name, params):
+            calls.append((logical_name, dict(params)))
+            return (
+                "sessions_spawn",
+                {
+                    "session": {
+                        "session_key": "session-key",
+                        "spawn_request_session_key": "session-key",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": dict(metadata),
+                        "raw_json": json.dumps(
+                            metadata,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                },
+            )
+
+        adapter = object.__new__(OpenClawAdapter)
+        adapter._require_verified_runtime_authority = lambda: SimpleNamespace(
+            attestation=SimpleNamespace(
+                method_bindings={
+                    "sessions_spawn": SimpleNamespace(
+                        parameter_names=tuple(SPAWN_RPC_PROPERTIES)
+                    )
+                }
+            )
+        )
+        adapter._call = call
+        adapter._lease_metadata_by_external_id = {
+            "lease-one": {**metadata, "gateway_lease_id": "lease-one"},
+            "lease-two": {**metadata, "gateway_lease_id": "lease-two"},
+        }
+        adapter._session_metadata_by_key = {}
+        adapter._session_identity_by_request = {}
+        adapter._session_spawn_request_by_request_identity = {}
+
+        observation = adapter.sessions_spawn(spawn_request("lease-one"))
+        self.assertEqual(observation.session_key, "session-key")
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "duplicate sessions_spawn request changed execution descriptor",
+        ):
+            adapter.sessions_spawn(spawn_request("lease-two"))
+        self.assertEqual(len(calls), 1)
 
     def test_production_tree_has_no_authority_token_or_test_transport_factory(self) -> None:
         root = Path(__file__).resolve().parents[1]

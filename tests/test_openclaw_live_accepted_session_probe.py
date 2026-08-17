@@ -754,7 +754,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertEqual(payload["released"], True)
 
-    def test_duplicate_acquire_conflicting_aliases_release_only_metadata_bound_lease(
+    def test_duplicate_acquire_conflicting_identity_aliases_release_all_candidates(
         self,
     ) -> None:
         module = load_probe_module()
@@ -785,7 +785,7 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("conflicting gateway lease identity aliases", payload["error"])
-        self.assertEqual(released_ids, ["lease-unit"])
+        self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
         self.assertEqual(payload["released"], True)
 
     def test_duplicate_acquire_must_echo_owner_metadata(self) -> None:
@@ -881,6 +881,57 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
         self.assertIn("duplicate allowLease acquire proof", payload["error"])
         self.assertEqual(released_ids, ["lease-unit", "lease-duplicate"])
+        self.assertEqual(payload["released"], True)
+
+    def test_duplicate_acquire_cleanup_tracks_identities_before_alias_validation(
+        self,
+    ) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+        acquire_calls = 0
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            nonlocal acquire_calls
+            if method == "subagents.allowLease.acquire":
+                acquire_calls += 1
+                if acquire_calls == 1:
+                    return lease_acquire_response("lease-unit")
+                owner = acquire_owner()
+                return {
+                    "gateway_lease_id": "lease-duplicate",
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": {
+                            **owner,
+                            "gateway_lease_id": "lease-duplicate",
+                        },
+                        "external_metadata": {
+                            **owner,
+                            "gateway_lease_id": "lease-conflicting-alias",
+                        },
+                        "raw_metadata_json": "{}",
+                    },
+                }
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, isolated_preflight_payload())
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn(
+            "conflicting duplicate allowLease acquire proof normalized metadata aliases",
+            payload["error"],
+        )
+        self.assertEqual(
+            released_ids,
+            ["lease-unit", "lease-duplicate", "lease-conflicting-alias"],
+        )
         self.assertEqual(payload["released"], True)
 
     def test_status_must_observe_acquired_lease_before_probe_can_pass(self) -> None:

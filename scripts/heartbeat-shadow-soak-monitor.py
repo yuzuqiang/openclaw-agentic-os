@@ -1121,7 +1121,7 @@ def status(args: argparse.Namespace) -> int:
                 note=note or failure_note,
             )
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
-    except MonitorError as exc:
+    except (HeartbeatShadowError, MonitorError) as exc:
         if str(envelope.get("status", "unknown")) == "running":
             existing_violations = envelope.get("violations")
             violations = (

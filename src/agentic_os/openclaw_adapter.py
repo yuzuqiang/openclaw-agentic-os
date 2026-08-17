@@ -963,6 +963,9 @@ class OpenClawAdapter:
         ] = {}
         adapter._session_metadata_by_key: dict[str, dict[str, str]] = {}
         adapter._session_identity_by_request: dict[tuple[str, str], str] = {}
+        adapter._session_spawn_request_by_request_identity: dict[
+            tuple[str, str], str
+        ] = {}
         _ADAPTER_AUTHORITIES[adapter] = _AdapterAuthorityState(
             attestation=attestation,
             clock_ms=attestor.clock_ms,
@@ -1025,6 +1028,7 @@ class OpenClawAdapter:
             self._lease_acquire_request_by_request_identity.clear()
             self._session_metadata_by_key.clear()
             self._session_identity_by_request.clear()
+            self._session_spawn_request_by_request_identity.clear()
             _ADAPTER_AUTHORITIES.pop(self, None)
             raise AdapterContractError(
                 f"{continuity_error}; cached runtime lease/session ownership was cleared"
@@ -1208,6 +1212,7 @@ class OpenClawAdapter:
 
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
         authority = self._require_verified_runtime_authority()
+        local_request = dict(params)
         expected_parameters = set(
             authority.attestation.method_bindings["sessions_spawn"].parameter_names
         )
@@ -1274,6 +1279,24 @@ class OpenClawAdapter:
             params, "client_request_id", "idempotency_key", "sessions_spawn"
         )
         try:
+            request_fingerprint = json.dumps(
+                local_request,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise AdapterContractError(
+                "sessions_spawn request must be JSON serializable"
+            ) from exc
+        prior_request = self._session_spawn_request_by_request_identity.get(
+            request_identity
+        )
+        if prior_request is not None and prior_request != request_fingerprint:
+            raise AdapterContractError(
+                "duplicate sessions_spawn request changed execution descriptor"
+            )
+        try:
             validate_session_observation(
                 local=metadata,
                 normalized=metadata,
@@ -1327,6 +1350,9 @@ class OpenClawAdapter:
                 "duplicate sessions_spawn returned a different session identity"
             )
         self._session_identity_by_request[request_identity] = session_key
+        self._session_spawn_request_by_request_identity[request_identity] = (
+            request_fingerprint
+        )
         self._session_metadata_by_key[session_key] = dict(metadata)
         del method
         return observation
