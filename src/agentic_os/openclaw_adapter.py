@@ -1337,6 +1337,9 @@ class OpenClawAdapter:
                 "sessions_spawn lease owner metadata does not match cached adapter "
                 f"lease ownership: {', '.join(mismatched_lease_fields)}"
             )
+        self._session_spawn_request_by_request_identity.setdefault(
+            request_identity, request_fingerprint
+        )
         method, response = self._call("sessions_spawn", params)
         observation = observation_from_openclaw_response(response)
         try:
@@ -1361,9 +1364,6 @@ class OpenClawAdapter:
                 candidate_observation=observation,
             )
         self._session_identity_by_request[request_identity] = session_key
-        self._session_spawn_request_by_request_identity[request_identity] = (
-            request_fingerprint
-        )
         self._session_metadata_by_key[session_key] = dict(metadata)
         del method
         return observation
