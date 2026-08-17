@@ -483,18 +483,30 @@ def _candidate_lease_ids_for_cleanup(response: Mapping[str, Any]) -> list[str]:
         candidate_map = dict(candidate)
         for value in _lease_ids_from_response(candidate_map):
             _append_unique(lease_ids, value)
-        metadata_container = _mapping_path(candidate_map, ("metadata",)) or _mapping_path(
-            candidate_map, ("metadata_echo",)
-        )
-        if metadata_container is None:
-            continue
-        for alias in ("normalized", "normalized_metadata", "external_metadata"):
-            value = metadata_container.get(alias)
-            if not isinstance(value, Mapping):
+        for container_name in ("metadata", "metadata_echo"):
+            metadata_container = _mapping_path(candidate_map, (container_name,))
+            if metadata_container is None:
                 continue
-            gateway_lease_id = value.get("gateway_lease_id")
-            if isinstance(gateway_lease_id, str) and gateway_lease_id:
-                _append_unique(lease_ids, gateway_lease_id)
+            for alias in ("normalized", "normalized_metadata", "external_metadata"):
+                value = metadata_container.get(alias)
+                if not isinstance(value, Mapping):
+                    continue
+                gateway_lease_id = value.get("gateway_lease_id")
+                if isinstance(gateway_lease_id, str) and gateway_lease_id:
+                    _append_unique(lease_ids, gateway_lease_id)
+            for alias in ("raw_json", "raw_metadata_json"):
+                raw_json = metadata_container.get(alias)
+                if not isinstance(raw_json, str):
+                    continue
+                try:
+                    raw = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(raw, Mapping):
+                    continue
+                gateway_lease_id = raw.get("gateway_lease_id")
+                if isinstance(gateway_lease_id, str) and gateway_lease_id:
+                    _append_unique(lease_ids, gateway_lease_id)
     return lease_ids
 
 

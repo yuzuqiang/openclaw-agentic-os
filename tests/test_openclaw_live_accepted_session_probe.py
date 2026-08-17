@@ -909,7 +909,14 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
                             **owner,
                             "gateway_lease_id": "lease-conflicting-alias",
                         },
-                        "raw_metadata_json": "{}",
+                        "raw_metadata_json": json.dumps(
+                            {
+                                **owner,
+                                "gateway_lease_id": "lease-conflicting-raw",
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
                     },
                 }
             if method == "subagents.allowLease.release":
@@ -930,7 +937,85 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
         )
         self.assertEqual(
             released_ids,
-            ["lease-unit", "lease-duplicate", "lease-conflicting-alias"],
+            [
+                "lease-unit",
+                "lease-duplicate",
+                "lease-conflicting-alias",
+                "lease-conflicting-raw",
+            ],
+        )
+        self.assertEqual(payload["released"], True)
+
+    def test_duplicate_acquire_cleanup_collects_metadata_and_echo_containers(
+        self,
+    ) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+        acquire_calls = 0
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            nonlocal acquire_calls
+            if method == "subagents.allowLease.acquire":
+                acquire_calls += 1
+                if acquire_calls == 1:
+                    return lease_acquire_response("lease-unit")
+                owner = acquire_owner()
+                return {
+                    "gateway_lease_id": "lease-duplicate",
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "external_metadata": {
+                            **owner,
+                            "gateway_lease_id": "lease-metadata-normalized",
+                        },
+                        "raw_metadata_json": json.dumps(
+                            {
+                                **owner,
+                                "gateway_lease_id": "lease-metadata-raw",
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                    "metadata_echo": {
+                        "metadata_contract_version": "v1",
+                        "external_metadata": {
+                            **owner,
+                            "gateway_lease_id": "lease-echo-normalized",
+                        },
+                        "raw_metadata_json": json.dumps(
+                            {
+                                **owner,
+                                "gateway_lease_id": "lease-echo-raw",
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, isolated_preflight_payload())
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("raw allowLease metadata contract invalid", payload["error"])
+        self.assertEqual(
+            released_ids,
+            [
+                "lease-unit",
+                "lease-duplicate",
+                "lease-metadata-normalized",
+                "lease-metadata-raw",
+                "lease-echo-normalized",
+                "lease-echo-raw",
+            ],
         )
         self.assertEqual(payload["released"], True)
 
