@@ -935,6 +935,15 @@ class RuntimeDispatchTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeDispatchError, "task_digest"):
             dispatch_with_metadata(self.database, ScriptedAdapter(), changed_task)
+        descriptorless = DispatchRequest(
+            **{
+                **self.request.__dict__,
+                "spawn_task": None,
+                "spawn_task_name": None,
+            }
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "transient task"):
+            dispatch_with_metadata(self.database, ScriptedAdapter(), descriptorless)
         other_task = "other task"
         conflicting = DispatchRequest(
             **{

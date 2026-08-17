@@ -1615,7 +1615,10 @@ def force_heartbeat_file_authority_rollback(
         raise HeartbeatShadowError("Heartbeat rollback authority digest is invalid")
     root = Path(repo_root_path or repository_root()).resolve()
     target_receipt = _repo_artifact_path(root, receipt_path, "Heartbeat rollback receipt")
-    target = database.expanduser().resolve()
+    database_input = database.expanduser()
+    if database_input.is_symlink():
+        raise HeartbeatShadowError("Heartbeat rollback target cannot be a symlink")
+    target = database_input.resolve()
     expected = heartbeat_control_database(root)
     if target != expected:
         raise HeartbeatShadowError("Heartbeat rollback target is not the ignored control DB")

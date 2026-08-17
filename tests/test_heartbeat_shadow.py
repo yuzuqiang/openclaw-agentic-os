@@ -1147,6 +1147,32 @@ class HeartbeatShadowTests(unittest.TestCase):
             ).exists()
         )
 
+    def test_forced_rollback_rejects_symlink_source_before_resolving(self) -> None:
+        prior = self._file_shadow_cycle()
+        real_database = self.database.parent / "real-control.db"
+        self.database.rename(real_database)
+        try:
+            self.database.symlink_to(real_database)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        receipt_path = self.root / "artifacts/symlink-rollback.json"
+
+        with self.assertRaisesRegex(HeartbeatShadowError, "symlink"):
+            force_heartbeat_file_authority_rollback(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                database=self.database,
+                authority_input_digest=prior["authority_input_digest"],
+                rollback_id="symlink-source",
+                receipt_path=receipt_path,
+                repo_root_path=self.root,
+            )
+
+        self.assertTrue(self.database.is_symlink())
+        self.assertTrue(real_database.exists())
+        self.assertFalse(receipt_path.exists())
+
     def test_forced_rollback_rejects_shadow_parity_drift(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/rejected-parity.json"

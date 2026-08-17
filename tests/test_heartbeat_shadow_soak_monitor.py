@@ -578,6 +578,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "first_sample_pass")
         self.assertNotIn("process_alive", envelope["monitor"])
 
+    def test_start_rejects_stale_stop_request_before_first_sample(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            self.state_dir / "stop-request.json",
+            {"schema_version": monitor.SCHEMA_STOP, "requested_at": "stale"},
+        )
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_first_sample", side_effect=AssertionError("must not sample")
+        ):
+            with self.assertRaisesRegex(monitor.MonitorError, "stale stop request"):
+                monitor.start(self.args)
+
     def test_daemon_readiness_accepts_child_running_envelope(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
             monitor, "_assert_start_git_contract"

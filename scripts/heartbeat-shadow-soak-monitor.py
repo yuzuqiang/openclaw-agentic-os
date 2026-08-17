@@ -686,6 +686,8 @@ def _assert_no_active_monitor(state_dir: Path) -> None:
     pid = _load_pid(pidfile)
     if pid is not None and _pid_alive(pid):
         raise MonitorError(f"monitor already active with pid {pid}")
+    if (state_dir / "stop-request.json").exists():
+        raise MonitorError("stale stop request blocks monitor start")
 
 
 def _build_config(args: argparse.Namespace) -> dict[str, Any]:

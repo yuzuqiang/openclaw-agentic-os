@@ -269,6 +269,26 @@ def _replay_transient_descriptor_supplied(request: DispatchRequest) -> bool:
     )
 
 
+def _stored_spawn_descriptor_requires_transient_descriptor(metadata_json: str | None) -> bool:
+    if metadata_json is None:
+        return False
+    try:
+        metadata = json.loads(metadata_json)
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(metadata, dict):
+        return True
+    descriptor_keys = {
+        "taskName",
+        "runtime",
+        "mode",
+        "cleanup",
+        "context",
+        "lightContext",
+    }
+    return any(key in metadata for key in descriptor_keys)
+
+
 def spawn_rpc_params(
     request: DispatchRequest, gateway_lease_id: str
 ) -> dict[str, Any]:
@@ -301,7 +321,11 @@ def _existing_spawn_replay_result(
     ).fetchone()
     if row is None:
         return None
-    if _replay_transient_descriptor_supplied(request):
+    descriptor_json = row[8]
+    descriptor_required = _stored_spawn_descriptor_requires_transient_descriptor(
+        descriptor_json
+    )
+    if _replay_transient_descriptor_supplied(request) or descriptor_required:
         validate_transient_spawn_descriptor(request)
     expected = (
         request.run_id,
@@ -315,8 +339,8 @@ def _existing_spawn_replay_result(
     )
     if row[:8] != expected:
         raise RuntimeDispatchError("conflicting reuse of sessions_spawn idempotency key")
-    if _replay_transient_descriptor_supplied(request):
-        if row[8] != stable_json(spawn_descriptor_metadata(request)):
+    if _replay_transient_descriptor_supplied(request) or descriptor_required:
+        if descriptor_json != stable_json(spawn_descriptor_metadata(request)):
             raise RuntimeDispatchError(
                 "conflicting reuse of sessions_spawn execution descriptor"
             )

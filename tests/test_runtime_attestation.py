@@ -743,6 +743,30 @@ class RuntimeAttestationTests(unittest.TestCase):
         result = adapter.session_result(session.session_key or "session-1")
         self.assertEqual(result.session_key, session.session_key)
 
+    def test_history_items_with_partial_matching_identity_are_allowed(self) -> None:
+        for identity_key in ("external_id", "spawn_request_session_key"):
+            with self.subTest(identity_key=identity_key):
+
+                class PartialIdentityHistoryTransport(FakeAttestedTransport):
+                    def call(self, method, params):
+                        response = super().call(method, params)
+                        if method == "sessions_history":
+                            response["messages"] = [
+                                {
+                                    "role": "assistant",
+                                    "content": "done",
+                                    identity_key: params["sessionKey"],
+                                }
+                            ]
+                        return response
+
+                transport = PartialIdentityHistoryTransport()
+                adapter = self._adapter(transport)
+                adapter.allow_lease_acquire(lease_params())
+                session = adapter.sessions_spawn(spawn_params())
+                result = adapter.session_result(session.session_key or "session-1")
+                self.assertEqual(result.session_key, session.session_key)
+
     def test_duplicate_request_identity_must_return_same_external_identity(self) -> None:
         transport = FakeAttestedTransport()
         adapter = self._adapter(transport)

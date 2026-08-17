@@ -1505,7 +1505,7 @@ class OpenClawAdapter:
                 and item_external_id is None
             ):
                 continue
-            if item_session_key != session_key:
+            if item_session_key is not None and item_session_key != session_key:
                 raise AdapterContractError(
                     f"{method} {label} identity must match requested session"
                 )
