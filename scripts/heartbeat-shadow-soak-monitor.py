@@ -42,6 +42,7 @@ SCHEMA_CONFIG = "p03-heartbeat-shadow-monitor-config.v1"
 SCHEMA_ENVELOPE = "p03-heartbeat-shadow-monitor-envelope.v1"
 SCHEMA_SNAPSHOTS = "p03-heartbeat-shadow-runtime-snapshot-receipts.v1"
 SCHEMA_STOP = "p03-heartbeat-shadow-monitor-stop-request.v1"
+SCHEMA_START_RESERVATION = "p03-heartbeat-shadow-monitor-start-reservation.v1"
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 DAEMON_READY_TIMEOUT_SECONDS = 2.0
@@ -356,6 +357,15 @@ def _verified_predecessor_summary(config: Mapping[str, Any]) -> dict[str, Any]:
             "implementation_head": validation["implementation_head"],
         },
     }
+
+
+def _validate_resume_predecessor_receipts(config: Mapping[str, Any]) -> None:
+    expected = config.get("predecessor_receipts")
+    if not isinstance(expected, Mapping):
+        raise MonitorError("saved predecessor receipt summary is missing")
+    current = _verified_predecessor_summary(config)
+    if current != dict(expected):
+        raise MonitorError("saved predecessor receipt summary mismatch")
 
 
 def _validate_independent_validation_provenance(
@@ -688,6 +698,34 @@ def _assert_no_active_monitor(state_dir: Path) -> None:
         raise MonitorError(f"monitor already active with pid {pid}")
     if (state_dir / "stop-request.json").exists():
         raise MonitorError("stale stop request blocks monitor start")
+    if (state_dir / "monitor-start-reservation.json").exists():
+        raise MonitorError("monitor start reservation already exists")
+
+
+def _reserve_monitor_state(state_dir: Path) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    reservation = state_dir / "monitor-start-reservation.json"
+    payload = _canonical_json(
+        {
+            "schema_version": SCHEMA_START_RESERVATION,
+            "status": "reserved",
+            "reserved_at": _utc_now(),
+            "pid": os.getpid(),
+        }
+    )
+    try:
+        fd = os.open(str(reservation), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise MonitorError("monitor start reservation already exists") from exc
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+    except Exception:
+        try:
+            reservation.unlink()
+        finally:
+            raise
+    return reservation
 
 
 def _build_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -918,6 +956,7 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
 def start(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     _assert_no_active_monitor(state_dir)
+    reservation = _reserve_monitor_state(state_dir)
     config = _build_config(args)
     _assert_start_git_contract(config)
     first = _first_sample(config)
@@ -934,6 +973,7 @@ def start(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+        reservation.unlink(missing_ok=True)
         return 0
 
     log_path = _path_from_config(config, "daemon_log_path")
@@ -948,6 +988,7 @@ def start(args: argparse.Namespace) -> int:
         start_new_session=True,
     )
     _path_from_config(config, "pidfile_path").write_text(f"{process.pid}\n", encoding="utf-8")
+    reservation.unlink(missing_ok=True)
     try:
         _wait_for_daemon_ready(config, process)
     except MonitorError as exc:
@@ -1003,6 +1044,16 @@ def run(args: argparse.Namespace) -> int:
             config,
             status="failed_closed",
             violation="monitor_git_identity_invalid",
+            note=str(exc),
+        )
+        return 2
+    try:
+        _validate_resume_predecessor_receipts(config)
+    except MonitorError as exc:
+        _persist_envelope(
+            config,
+            status="failed_closed",
+            violation="monitor_resume_identity_invalid",
             note=str(exc),
         )
         return 2

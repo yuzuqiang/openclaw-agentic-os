@@ -425,6 +425,49 @@ class RuntimeDispatchTests(unittest.TestCase):
                 (1001, 1002),
             )
 
+    def test_locally_expired_acquired_lease_blocks_spawn_rpc(self) -> None:
+        times = iter(
+            [
+                ("1970-01-01T00:00:01Z", 1000),
+                ("1970-01-01T00:00:01Z", 1000),
+                ("1970-01-01T00:00:02Z", 2000),
+                ("1970-01-01T00:00:02Z", 2000),
+            ]
+        )
+        original_now = runtime_dispatch.now_utc
+        runtime_dispatch.now_utc = lambda: next(times)
+        request = DispatchRequest(**{**self.request.__dict__, "ttl_ms": 1})
+        adapter = ScriptedAdapter(
+            acquire=[
+                observation(
+                    lease_metadata(request, "lease-gateway"),
+                    external_id="lease-gateway",
+                )
+            ],
+            spawn=[observation(spawn_metadata(request), external_id="session-key")],
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeDispatchError, "expired before sessions_spawn"):
+                dispatch_with_metadata(self.database, adapter, request)
+        finally:
+            runtime_dispatch.now_utc = original_now
+        self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,reconciliation_status FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                ("expired", "lease expired before sessions_spawn"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents "
+                    "WHERE rpc_kind='sessions_spawn'"
+                ).fetchone(),
+                ("human_review_required",),
+            )
+
     def test_runtime_schema_verification_runs_before_adapter_call(self) -> None:
         bad_dir = Path(self.tmp.name) / "bad"
         bad_dir.mkdir()

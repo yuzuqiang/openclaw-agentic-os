@@ -581,7 +581,7 @@ class MigrationTests(unittest.TestCase):
             "self_bootstrap_empty",
         )
 
-        self.assertEqual(apply_migrations(self.database), (13, 14, 15))
+        self.assertEqual(apply_migrations(self.database), (13, 14, 15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -617,7 +617,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14, 15))
+        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14, 15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -986,7 +986,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
         )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
@@ -1086,7 +1086,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
         )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -1111,6 +1111,7 @@ class MigrationTests(unittest.TestCase):
                     (13, current_hash),
                     (14, current_hash),
                     (15, current_hash),
+                    (16, current_hash),
                 ],
             )
 
@@ -1176,7 +1177,7 @@ class MigrationTests(unittest.TestCase):
                 (14, v14_hash),
             )
 
-        self.assertEqual(apply_migrations(self.database), (15,))
+        self.assertEqual(apply_migrations(self.database), (15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -1184,7 +1185,7 @@ class MigrationTests(unittest.TestCase):
                     "WHERE query_name=? ORDER BY schema_version",
                     (query_name,),
                 ).fetchall()[-2:],
-                [(14, v14_hash), (15, current_hash)],
+                [(15, current_hash), (16, current_hash)],
             )
 
     def test_strict_prior_reserve_migration_aborts_on_active_trust(self) -> None:
@@ -1589,6 +1590,7 @@ class MigrationTests(unittest.TestCase):
                 "trust_promotion_binding",
                 "db_authority_canary_binding",
                 "strict_prior_reserve_slo_identity",
+                "expired_lease_spawn_guard",
             ],
         )
         for migration in migrations:
@@ -1613,7 +1615,7 @@ class MigrationTests(unittest.TestCase):
         before_mtime = verify_target.stat().st_mtime_ns
         self.assertEqual(
             verify_database(verify_target),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
         )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
@@ -2252,7 +2254,7 @@ class MigrationTests(unittest.TestCase):
                     ),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (14, 15))
+        self.assertEqual(apply_migrations(self.database), (14, 15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -7641,12 +7643,13 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(connection.close)
         connection.execute("PRAGMA foreign_keys=ON")
         contract = SLO_QUERY_CONTRACTS[0]
+        future_version = max(migration.version for migration in load_migrations()) + 1
         migration_sha = "9" * 64
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(16,'future_contract',?,'now')",
-            (migration_sha,),
+            "VALUES(?,'future_contract',?,'now')",
+            (future_version, migration_sha),
         )
         connection.execute(
             "INSERT INTO slo_queries(query_name,schema_version,migration_sha256,"
@@ -7654,7 +7657,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                16,
+                future_version,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -7668,7 +7671,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (16,),
+            (future_version,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -7880,6 +7883,7 @@ class MigrationTests(unittest.TestCase):
                 (13, "trust_promotion_binding"),
                 (14, "db_authority_canary_binding"),
                 (15, "strict_prior_reserve_slo_identity"),
+                (16, "expired_lease_spawn_guard"),
             ],
         )
 

@@ -895,6 +895,50 @@ def persist_acquired_lease(
         raise RuntimeDispatchError("allow_lease_acquire lease update did not match exactly one row")
 
 
+def expire_locally_expired_lease_before_spawn(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    gateway_lease_id: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT expires_at_epoch_ms FROM leases WHERE client_lease_id=? "
+        "AND run_id=? AND transition_id=? AND gateway_lease_id=? "
+        "AND state='acquired'",
+        (
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    ).fetchone()
+    if row is None or type(row[0]) is not int:
+        raise RuntimeDispatchError("missing acquired lease expiry before sessions_spawn")
+    _, now_ms = now_utc()
+    if row[0] > now_ms:
+        return False
+    lease_cursor = connection.execute(
+        "UPDATE leases SET state='expired',reconciliation_status=? "
+        "WHERE client_lease_id=? AND run_id=? AND transition_id=? "
+        "AND gateway_lease_id=? AND state='acquired'",
+        (
+            "lease expired before sessions_spawn",
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    )
+    if lease_cursor.rowcount != 1:
+        raise RuntimeDispatchError("expired lease update did not match exactly one row")
+    mark_human_review(
+        connection,
+        request,
+        rpc_kind="sessions_spawn",
+        reason="spawn blocked by locally expired allow lease",
+    )
+    return True
+
+
 def persist_spawn_acceptance(
     connection: sqlite3.Connection,
     request: DispatchRequest,
@@ -1363,6 +1407,13 @@ def dispatch_with_metadata(
                     reason="spawn blocked by allow lease metadata failure",
                 )
             raise RuntimeDispatchError("allow lease metadata validation failed") from exc
+
+        with immediate_transaction(connection):
+            lease_expired = expire_locally_expired_lease_before_spawn(
+                connection, request, gateway_lease_id
+            )
+        if lease_expired:
+            raise RuntimeDispatchError("allow lease expired before sessions_spawn")
 
         try:
             spawn_observation = adapter.sessions_spawn(

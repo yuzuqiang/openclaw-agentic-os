@@ -438,6 +438,26 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["coverage_gap"])
         self.assertIs(envelope["coverage"]["coverage_gap_detected"], True)
 
+    def test_run_revalidates_saved_predecessor_receipts_before_resuming(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_write_pidfile", side_effect=AssertionError("must not resume")
+        ):
+            config = monitor._build_config(self.args)
+            config["predecessor_receipts"]["lifecycle"]["sha256"] = "0" * 64
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["monitor_resume_identity_invalid"])
+        self.assertIn("predecessor receipt summary mismatch", envelope["note"])
+
     def test_run_uses_monotonic_deadline_when_wall_clock_stalls(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
@@ -591,6 +611,43 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(monitor.MonitorError, "stale stop request"):
                 monitor.start(self.args)
+
+    def test_start_rejects_existing_state_reservation_before_first_sample(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            self.state_dir / "monitor-start-reservation.json",
+            {"schema_version": monitor.SCHEMA_START_RESERVATION, "status": "reserved"},
+        )
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_first_sample", side_effect=AssertionError("must not sample")
+        ):
+            with self.assertRaisesRegex(monitor.MonitorError, "start reservation"):
+                monitor.start(self.args)
+
+    def test_start_reserves_state_before_first_sample_and_releases_after_no_daemon(
+        self,
+    ) -> None:
+        digest = "a" * 64
+        first = _pass_sample(1_700_000_000_000, digest)
+        reservation = self.state_dir / "monitor-start-reservation.json"
+
+        def first_sample(config: dict[str, object]) -> dict[str, object]:
+            self.assertTrue(reservation.exists())
+            self.assertEqual(
+                json.loads(reservation.read_text(encoding="utf-8"))["schema_version"],
+                monitor.SCHEMA_START_RESERVATION,
+            )
+            return first
+
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(monitor, "_first_sample", side_effect=first_sample):
+            result = monitor.start(self.args)
+
+        self.assertEqual(result, 0)
+        self.assertFalse(reservation.exists())
 
     def test_daemon_readiness_accepts_child_running_envelope(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(

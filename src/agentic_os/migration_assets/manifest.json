@@ -89,6 +89,12 @@
       "name": "strict_prior_reserve_slo_identity",
       "file": "0015_strict_prior_reserve_slo_identity.sql",
       "sha256": "1f507fe32cb18f733134c1de42a898fcbd4f8fce01ab0020af9f43f3fb433163"
+    },
+    {
+      "version": 16,
+      "name": "expired_lease_spawn_guard",
+      "file": "0016_expired_lease_spawn_guard.sql",
+      "sha256": "6ab326841430b4887d27fb4006b7d037511d2287b3c1a6344ecb1b14f7799246"
     }
   ]
 }
