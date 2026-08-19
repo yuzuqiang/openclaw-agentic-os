@@ -468,15 +468,25 @@ def _envelope(
     if snapshot_receipts_path.exists():
         try:
             snapshot_doc = _read_json(snapshot_receipts_path)
-            if snapshot_doc.get("schema_version") != SCHEMA_SNAPSHOTS:
-                raise MonitorError("unsupported runtime snapshot receipt schema")
         except MonitorError:
             if status != "failed_closed":
                 raise
             snapshot_doc = None
 
     samples = receipt.get("samples", []) if receipt else []
-    snapshots = snapshot_doc.get("snapshots", []) if snapshot_doc else []
+    if snapshot_doc:
+        try:
+            snapshots = _validate_runtime_snapshot_receipts(
+                config,
+                snapshot_doc,
+                samples=samples if receipt else None,
+            )
+        except MonitorError:
+            if status != "failed_closed":
+                raise
+            snapshots = []
+    else:
+        snapshots = []
     first_sample = samples[0] if samples else None
     latest_sample = sample if sample is not None else (samples[-1] if samples else None)
     last_sampled_at = (
@@ -846,17 +856,95 @@ def _runtime_snapshot_path(config: Mapping[str, Any], sampled_at_epoch_ms: int) 
     return snapshot_dir / f"sample-{sampled_at_epoch_ms}.db"
 
 
+def _snapshot_epoch(snapshot_database: object) -> int:
+    if not isinstance(snapshot_database, str) or "/" not in snapshot_database:
+        raise MonitorError("runtime snapshot database path is invalid")
+    name = Path(snapshot_database).name
+    if not name.startswith("sample-") or not name.endswith(".db"):
+        raise MonitorError("runtime snapshot database path is not sample-bound")
+    try:
+        return int(name.removeprefix("sample-").removesuffix(".db"))
+    except ValueError as exc:
+        raise MonitorError("runtime snapshot database epoch is invalid") from exc
+
+
+def _validate_runtime_snapshot_entry(
+    config: Mapping[str, Any],
+    entry: object,
+    *,
+    sample: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(entry, Mapping):
+        raise MonitorError("runtime snapshot entry must be an object")
+    if entry.get("schema_version") != "p03-heartbeat-runtime-authority-snapshot.v1":
+        raise MonitorError("runtime snapshot entry schema is invalid")
+    if (
+        entry.get("status") != "pass"
+        or entry.get("authority") != "file_artifacts"
+        or entry.get("db_authority_enabled") is not False
+        or entry.get("source_database") != "state/agentic-os/control.db"
+        or entry.get("snapshot_sidecars_present") is not False
+        or entry.get("local_recovery_only") is not True
+        or entry.get("packaging_retrieval_denied") is not True
+    ):
+        raise MonitorError("runtime snapshot entry contract is invalid")
+    snapshot_database = entry.get("snapshot_database")
+    epoch = _snapshot_epoch(snapshot_database)
+    if sample is not None and sample.get("sampled_at_epoch_ms") != epoch:
+        raise MonitorError("runtime snapshot entry does not match its sample")
+    expected_path = _runtime_snapshot_path(config, epoch).resolve()
+    raw_path = Path(str(snapshot_database))
+    observed_path = _resolve_inside_repo(
+        raw_path if raw_path.is_absolute() else REPO_ROOT / raw_path,
+        REPO_ROOT,
+        "runtime snapshot",
+    )
+    if observed_path != expected_path:
+        raise MonitorError("runtime snapshot path does not match the monitor config")
+    if not observed_path.is_file() or observed_path.is_symlink():
+        raise MonitorError("runtime snapshot file is missing or unsafe")
+    if entry.get("snapshot_sha256") != _sha256_file(observed_path):
+        raise MonitorError("runtime snapshot file hash mismatch")
+    return dict(entry)
+
+
+def _validate_runtime_snapshot_receipts(
+    config: Mapping[str, Any],
+    document: Mapping[str, Any],
+    *,
+    samples: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if document.get("schema_version") != SCHEMA_SNAPSHOTS:
+        raise MonitorError("unsupported runtime snapshot receipt schema")
+    if document.get("run_id") != config.get("run_id"):
+        raise MonitorError("runtime snapshot receipts run_id mismatch")
+    if document.get("scope") != "local_recovery_only":
+        raise MonitorError("runtime snapshot receipts scope is invalid")
+    raw_snapshots = document.get("snapshots")
+    if not isinstance(raw_snapshots, list):
+        raise MonitorError("runtime snapshot receipts must be a list")
+    if samples is not None and len(raw_snapshots) != len(samples):
+        raise MonitorError("runtime snapshot receipts do not match sample count")
+    snapshots: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for index, raw_entry in enumerate(raw_snapshots):
+        sample = samples[index] if samples is not None else None
+        entry = _validate_runtime_snapshot_entry(config, raw_entry, sample=sample)
+        snapshot_database = str(entry["snapshot_database"])
+        if snapshot_database in seen_paths:
+            raise MonitorError("duplicate runtime snapshot receipt path")
+        seen_paths.add(snapshot_database)
+        snapshots.append(entry)
+    return snapshots
+
+
 def _append_runtime_snapshot_receipt(
     config: Mapping[str, Any], snapshot: Mapping[str, Any]
 ) -> None:
     path = _path_from_config(config, "runtime_snapshot_receipts_path")
     if path.exists():
         document = _read_json(path)
-        if document.get("schema_version") != SCHEMA_SNAPSHOTS:
-            raise MonitorError("unsupported runtime snapshot receipt schema")
-        snapshots = document.get("snapshots")
-        if not isinstance(snapshots, list):
-            raise MonitorError("runtime snapshot receipts must be a list")
+        snapshots = _validate_runtime_snapshot_receipts(config, document)
     else:
         document = {
             "schema_version": SCHEMA_SNAPSHOTS,
@@ -867,6 +955,7 @@ def _append_runtime_snapshot_receipt(
         snapshots = document["snapshots"]
     snapshots.append(dict(snapshot))
     document["snapshots"] = snapshots
+    _validate_runtime_snapshot_receipts(config, document)
     document["updated_at"] = _utc_now()
     _atomic_write_json(path, document)
 

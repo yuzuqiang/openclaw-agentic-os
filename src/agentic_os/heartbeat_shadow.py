@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -58,6 +59,8 @@ SAFE_SCHEDULER_FIELDS = {
     "every": str,
     "target": str,
 }
+SAFE_SCHEDULER_TARGETS = frozenset({"last", "main", "none", "owner"})
+SAFE_SCHEDULER_EVERY_RE = re.compile(r"^(0|[1-9][0-9]{0,3})([smhd])$")
 SOAK_SAMPLE_FIELDS = {
     "authority_mode",
     "counters",
@@ -184,6 +187,16 @@ def _safe_scheduler_projection(value: object, label: str) -> dict[str, str]:
             or len(item) > 200
         ):
             raise HeartbeatShadowError(f"{label}.{key} must be bounded non-empty text")
+        if key == "every":
+            match = SAFE_SCHEDULER_EVERY_RE.fullmatch(item)
+            if match is None:
+                raise HeartbeatShadowError(f"{label}.every must use bounded duration syntax")
+            amount = int(match.group(1))
+            multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+            if amount * multiplier > 72 * 3600:
+                raise HeartbeatShadowError(f"{label}.every exceeds the bounded duration")
+        if key == "target" and item not in SAFE_SCHEDULER_TARGETS:
+            raise HeartbeatShadowError(f"{label}.target is not an allowed runtime target")
         result[key] = item
     if _contains_sensitive_key(result):
         raise HeartbeatShadowError(f"{label} contains sensitive keys")
@@ -239,6 +252,26 @@ def heartbeat_control_database(repo_root_path: Path | None = None) -> Path:
     database = (root / HEARTBEAT_CONTROL_DB).resolve()
     assert_privacy_preflight(root, database_paths=(database,))
     return database
+
+
+def _resolved_heartbeat_control_database(
+    database: Path | str | None,
+    *,
+    root: Path,
+    label: str,
+    require_existing: bool = True,
+) -> Path:
+    expected = heartbeat_control_database(root)
+    raw = Path(database or expected).expanduser()
+    candidate = raw if raw.is_absolute() else root / raw
+    if candidate.is_symlink():
+        raise HeartbeatShadowError(f"{label} cannot be a symlink")
+    resolved = candidate.resolve()
+    if resolved != expected:
+        raise HeartbeatShadowError(f"{label} is not the ignored control DB")
+    if require_existing and (not resolved.is_file() or resolved.is_symlink()):
+        raise HeartbeatShadowError(f"{label} is missing or unsafe")
+    return resolved
 
 
 def _validate_baseline(
@@ -455,12 +488,11 @@ def snapshot_heartbeat_runtime_authority_database(
 
     _assert_db_authority_disabled()
     root = Path(repo_root_path or repository_root()).resolve()
-    expected_database = heartbeat_control_database(root)
-    source = source_database.expanduser().resolve()
-    if source != expected_database:
-        raise HeartbeatShadowError("Heartbeat snapshot source is not the ignored control DB")
-    if not source.is_file() or source.is_symlink():
-        raise HeartbeatShadowError("Heartbeat snapshot source DB is missing or unsafe")
+    source = _resolved_heartbeat_control_database(
+        source_database,
+        root=root,
+        label="Heartbeat snapshot source DB",
+    )
     target = _repo_local_recovery_database_path(
         root, snapshot_database, "Heartbeat runtime authority snapshot"
     )
@@ -866,12 +898,12 @@ def run_heartbeat_file_shadow_cycle(
     observed_at_epoch_ms: int | None = None,
 ) -> dict[str, Any]:
     root = Path(repo_root_path or repository_root()).resolve()
-    expected_database = heartbeat_control_database(root)
-    target_database = Path(database or expected_database).expanduser().resolve()
-    if target_database != expected_database:
-        raise HeartbeatShadowError(
-            "Heartbeat shadow DB must use ignored state/agentic-os/control.db"
-        )
+    target_database = _resolved_heartbeat_control_database(
+        database,
+        root=root,
+        label="Heartbeat shadow DB",
+        require_existing=False,
+    )
     target_manifest = _repo_artifact_path(root, manifest_path, "Heartbeat manifest")
     authority_inputs = {
         _repo_artifact_path(root, baseline_path, "Heartbeat baseline"),
@@ -1017,10 +1049,11 @@ def run_heartbeat_dual_write_projection(
 
     _validate_file_shadow_receipt(prior_file_shadow_receipt)
     root = Path(repo_root_path or repository_root()).resolve()
-    expected_database = heartbeat_control_database(root)
-    target_database = Path(database or expected_database).expanduser().resolve()
-    if target_database != expected_database:
-        raise HeartbeatShadowError("Heartbeat dual-write DB placement is invalid")
+    target_database = _resolved_heartbeat_control_database(
+        database,
+        root=root,
+        label="Heartbeat dual-write DB",
+    )
     target_projection = _repo_artifact_path(
         root, projection_receipt_path, "Heartbeat dual-write projection"
     )
@@ -1147,10 +1180,11 @@ def heartbeat_parity_sample(
         raise HeartbeatShadowError("sample authority input digest must be SHA-256")
     _required_identity("sample run_id", run_id)
     root = Path(repo_root_path or repository_root()).resolve()
-    expected_database = heartbeat_control_database(root)
-    target_database = database.expanduser().resolve()
-    if target_database != expected_database:
-        raise HeartbeatShadowError("Heartbeat sample DB placement is invalid")
+    target_database = _resolved_heartbeat_control_database(
+        database,
+        root=root,
+        label="Heartbeat sample DB",
+    )
     audit_database = target_database
     if runtime_audit_database is not None:
         audit_database = _repo_local_recovery_database_path(

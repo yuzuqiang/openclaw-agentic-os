@@ -3150,6 +3150,15 @@ class MigrationTests(unittest.TestCase):
                 "UPDATE leases SET state='release_not_required', gateway_lease_id=NULL "
                 "WHERE lease_id='acquired-live'"
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "expiry is immutable"):
+            connection.execute(
+                "UPDATE leases SET expires_at_epoch_ms=1 WHERE lease_id='acquired-live'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "expiry is immutable"):
+            connection.execute(
+                "UPDATE leases SET expires_at='past', expires_at_epoch_ms=1 "
+                "WHERE lease_id='acquired-live'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
             connection.execute(
                 "UPDATE leases SET state='expired' WHERE lease_id='acquired-live'"

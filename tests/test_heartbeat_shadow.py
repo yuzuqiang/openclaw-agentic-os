@@ -224,6 +224,43 @@ class HeartbeatShadowTests(unittest.TestCase):
                 self.baseline_path, self.heartbeat_file, self.live_config_path
             )
 
+        unsafe = self._baseline()
+        unsafe["scheduler_projection"]["value"]["target"] = "Bearer sk-secret"
+        unsafe["scheduler_projection"]["canonical_json_sha256"] = hashlib.sha256(
+            _canonical_json(unsafe["scheduler_projection"]["value"]).rstrip(b"\n")
+        ).hexdigest()
+        self.baseline_path.write_bytes(_canonical_json(unsafe))
+        self.live_config_path.write_bytes(
+            _canonical_json(
+                {
+                    "agents": {
+                        "defaults": {
+                            "heartbeat": {
+                                "every": "30m",
+                                "target": "Bearer sk-secret",
+                            }
+                        }
+                    }
+                }
+            )
+        )
+        with self.assertRaisesRegex(HeartbeatShadowError, "allowed runtime target"):
+            heartbeat_authority_manifest(
+                self.baseline_path, self.heartbeat_file, self.live_config_path
+            )
+
+        unsafe = self._baseline(every="9999d")
+        self.baseline_path.write_bytes(_canonical_json(unsafe))
+        self.live_config_path.write_bytes(
+            _canonical_json(
+                {"agents": {"defaults": {"heartbeat": {"every": "9999d", "target": "main"}}}}
+            )
+        )
+        with self.assertRaisesRegex(HeartbeatShadowError, "bounded duration"):
+            heartbeat_authority_manifest(
+                self.baseline_path, self.heartbeat_file, self.live_config_path
+            )
+
         self._write_baseline()
         self.live_config_path.write_bytes(
             _canonical_json(
@@ -266,7 +303,7 @@ class HeartbeatShadowTests(unittest.TestCase):
         )
 
         wrong_database = self.root / "state/agentic-os/not-control.db"
-        with self.assertRaisesRegex(HeartbeatShadowError, "must use ignored"):
+        with self.assertRaisesRegex(HeartbeatShadowError, "ignored control DB"):
             run_heartbeat_file_shadow_cycle(
                 baseline_path=self.baseline_path,
                 heartbeat_file=self.heartbeat_file,
@@ -274,6 +311,24 @@ class HeartbeatShadowTests(unittest.TestCase):
                 manifest_path=self.manifest_path,
                 run_id="wrong-db",
                 database=wrong_database,
+                repo_root_path=self.root,
+            )
+
+        real_database = self.database.parent / "real-control.db"
+        real_database.parent.mkdir(parents=True, exist_ok=True)
+        sqlite3.connect(real_database).close()
+        try:
+            self.database.symlink_to(real_database)
+        except (NotImplementedError, OSError) as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+        with self.assertRaisesRegex(HeartbeatShadowError, "symlink"):
+            run_heartbeat_file_shadow_cycle(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                manifest_path=self.manifest_path,
+                run_id="symlink-db",
+                database=self.database,
                 repo_root_path=self.root,
             )
 

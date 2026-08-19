@@ -190,6 +190,31 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 int(kwargs["sampled_at_monotonic_ms"]),
             )
 
+        def snapshot_side_effect(**kwargs: object) -> dict[str, object]:
+            snapshot_database = Path(kwargs["snapshot_database"])
+            snapshot_database.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_database.write_bytes(b"runtime snapshot")
+            return {
+                "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
+                "status": "pass",
+                "authority": "file_artifacts",
+                "db_authority_enabled": False,
+                "source_database": "state/agentic-os/control.db",
+                "source_sidecars_observed": ["control.db-wal"],
+                "snapshot_database": snapshot_database.relative_to(self.root).as_posix(),
+                "snapshot_sha256": hashlib.sha256(b"runtime snapshot").hexdigest(),
+                "snapshot_sidecars_present": False,
+                "local_recovery_only": True,
+                "packaging_retrieval_denied": True,
+                "runtime_authority_counts": {
+                    "lease_rows": 0,
+                    "spawn_request_rows": 0,
+                    "session_rows": 0,
+                    "lifecycle_rpc_intent_rows": 0,
+                    "duplicate_spawn_identity_groups": 0,
+                },
+            }
+
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
             with mock.patch.object(
@@ -203,26 +228,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             ), mock.patch.object(
                 monitor,
                 "snapshot_heartbeat_runtime_authority_database",
-                return_value={
-                    "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
-                    "status": "pass",
-                    "authority": "file_artifacts",
-                    "db_authority_enabled": False,
-                    "source_database": "state/agentic-os/control.db",
-                    "source_sidecars_observed": ["control.db-wal"],
-                    "snapshot_database": "state/agentic-os/backups/test/sample.db",
-                    "snapshot_sha256": "b" * 64,
-                    "snapshot_sidecars_present": False,
-                    "local_recovery_only": True,
-                    "packaging_retrieval_denied": True,
-                    "runtime_authority_counts": {
-                        "lease_rows": 0,
-                        "spawn_request_rows": 0,
-                        "session_rows": 0,
-                        "lifecycle_rpc_intent_rows": 0,
-                        "duplicate_spawn_identity_groups": 0,
-                    },
-                },
+                side_effect=snapshot_side_effect,
             ), mock.patch.object(
                 monitor, "heartbeat_parity_sample", side_effect=sample_side_effect
             ):
@@ -774,6 +780,75 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["snapshot_ledger_corrupt"])
         self.assertEqual(envelope["runtime_snapshots"]["snapshots_count"], 0)
+
+    def test_runtime_snapshot_ledger_is_bound_to_run_file_hash_and_sample(self) -> None:
+        digest = "a" * 64
+        epoch = 1_700_000_000_123
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = monitor._runtime_snapshot_path(config, epoch)
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_bytes(b"snapshot-ledger")
+            entry = {
+                "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
+                "status": "pass",
+                "authority": "file_artifacts",
+                "db_authority_enabled": False,
+                "source_database": "state/agentic-os/control.db",
+                "source_sidecars_observed": [],
+                "snapshot_database": snapshot_path.relative_to(self.root).as_posix(),
+                "snapshot_sha256": hashlib.sha256(b"snapshot-ledger").hexdigest(),
+                "snapshot_sidecars_present": False,
+                "local_recovery_only": True,
+                "packaging_retrieval_denied": True,
+                "runtime_authority_counts": {
+                    "lease_rows": 0,
+                    "spawn_request_rows": 0,
+                    "session_rows": 0,
+                    "lifecycle_rpc_intent_rows": 0,
+                    "duplicate_spawn_identity_groups": 0,
+                },
+            }
+            ledger_path = Path(config["runtime_snapshot_receipts_path"])
+            _write_json(
+                ledger_path,
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": "other-run",
+                    "scope": "local_recovery_only",
+                    "snapshots": [entry],
+                },
+            )
+            with self.assertRaisesRegex(monitor.MonitorError, "run_id mismatch"):
+                monitor._append_runtime_snapshot_receipt(config, entry)
+
+            drifted = {**entry, "snapshot_sha256": "b" * 64}
+            _write_json(
+                ledger_path,
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [drifted],
+                },
+            )
+            with self.assertRaisesRegex(monitor.MonitorError, "hash mismatch"):
+                monitor._append_runtime_snapshot_receipt(config, entry)
+
+            document = {
+                "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                "run_id": config["run_id"],
+                "scope": "local_recovery_only",
+                "snapshots": [entry],
+            }
+            with self.assertRaisesRegex(monitor.MonitorError, "does not match its sample"):
+                monitor._validate_runtime_snapshot_receipts(
+                    config,
+                    document,
+                    samples=[_pass_sample(epoch + 1, digest)],
+                )
 
     def test_run_rejects_core_receipt_from_other_monitor_config(self) -> None:
         digest = "a" * 64
