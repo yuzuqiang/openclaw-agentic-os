@@ -2111,10 +2111,20 @@ def _validate_persistent_attestation(
         "persistent runtime binding",
     )
     executable = _require_record(binding.get("executable"), "persistent executable binding")
+    _require_exact_keys(
+        executable,
+        ("path_sha256", "content_sha256"),
+        "persistent executable binding",
+    )
     install = _require_record(binding.get("install"), "persistent install binding")
     catalog = _require_record(binding.get("catalog"), "persistent catalog binding")
     gateway = _require_record(binding.get("gateway"), "persistent gateway binding")
     transport = _require_record(binding.get("transport"), "persistent transport binding")
+    executable_path_digest = _require_sha256(
+        executable.get("path_sha256"), "persistent executable path digest"
+    )
+    if executable_path_digest != runtime_identity_catalog.get("active_executable_path_sha256"):
+        raise AdapterContractError("persistent executable path digest does not match active runtime")
     executable_digest = _require_sha256(
         executable.get("content_sha256"), "persistent executable digest"
     )

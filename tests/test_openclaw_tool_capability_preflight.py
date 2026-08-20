@@ -3919,6 +3919,32 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("signed runtime sources do not match active source snapshot", payload["error"])
 
+    def test_persistent_attested_preflight_rejects_executable_path_digest_mismatch(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+
+            def drift_executable_path(binding):
+                binding["executable"]["path_sha256"] = "9" * 64
+
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                binding_transform=drift_executable_path,
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("executable path digest", payload["error"])
+
     def test_persistent_attested_preflight_rejects_status_receipt_mismatch(
         self,
     ) -> None:

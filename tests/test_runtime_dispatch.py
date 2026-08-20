@@ -1344,6 +1344,51 @@ class RuntimeDispatchTests(unittest.TestCase):
                 0,
             )
 
+    def test_local_acquire_persistence_error_preserves_candidate_for_reconcile(self) -> None:
+        original_persist = runtime_dispatch.persist_acquired_lease
+
+        def fail_persistence(*args, **kwargs):
+            raise sqlite3.IntegrityError("local acquire write failed")
+
+        runtime_dispatch.persist_acquired_lease = fail_persistence
+        adapter = self._accepted_adapter()
+        try:
+            with self.assertRaisesRegex(RuntimeDispatchError, "allow lease metadata"):
+                dispatch_with_metadata(self.database, adapter, self.request)
+        finally:
+            runtime_dispatch.persist_acquired_lease = original_persist
+        self.assertEqual(adapter.calls, ["allow_lease_acquire"])
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,external_id,external_metadata_json FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone(),
+                (
+                    "unknown",
+                    "lease-gateway",
+                    stable_json(lease_metadata(self.request, "lease-gateway")),
+                ),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,gateway_lease_id,reconciliation_status FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                (
+                    "acquire_pending",
+                    None,
+                    "validated allow lease candidate after local persistence failure: "
+                    "local acquire write failed",
+                ),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM external_rpc_intents WHERE rpc_kind='sessions_spawn'"
+                ).fetchone()[0],
+                "human_review_required",
+            )
+
     def test_runtime_database_privacy_preflight_runs_before_open(self) -> None:
         with tempfile.TemporaryDirectory() as outside:
             database = Path(outside) / "control.db"

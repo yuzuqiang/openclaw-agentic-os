@@ -103,7 +103,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.baseline.write_text("{}", encoding="utf-8")
         self.lifecycle = self.root / "docs/runtime-evidence/lifecycle.json"
         self.validation = self.root / "docs/runtime-evidence/validation.json"
-        self.anchor_key = "phase-c-anchor-test-key"
+        self.anchor_key = "phase-c-anchor-test-key-with-32-byte-floor"
         env_patch = mock.patch.dict(
             os.environ,
             {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: self.anchor_key},
@@ -344,6 +344,57 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             with self.assertRaisesRegex(monitor.MonitorError, "signature is missing"):
+                monitor._build_config(self.args)
+
+    def test_predecessor_validation_rejects_weak_anchor_hmac_key(self) -> None:
+        lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
+        weak_key = "x"
+        anchor_sha = _write_json(
+            self.validation_anchor,
+            _signed_anchor(
+                {
+                    "schema_version": "agentic-os.independent-validation-anchor.v1",
+                    "record_authority": "phase_c_terminal_checkpoint",
+                    "validation_verdict": "pass",
+                    "receipt_sha256": lifecycle_sha,
+                    "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                    "verifier": {
+                        "identity": "security-engineer-phase-c",
+                        "role": "independent_verifier",
+                        "session_key": "phase-c-session",
+                    },
+                },
+                weak_key,
+            ),
+        )
+        validation_sha = _write_json(
+            self.validation,
+            {
+                "status": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
+                "invocation": {
+                    "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
+                    "completed_at": "2026-08-15T00:00:00Z",
+                },
+                "authenticated_record": {
+                    "path": str(self.validation_anchor.relative_to(self.root)),
+                    "sha256": anchor_sha,
+                },
+            },
+        )
+        self.args.expected_independent_validation_sha256 = validation_sha
+
+        with mock.patch.dict(
+            os.environ,
+            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: weak_key},
+        ), mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(monitor.MonitorError, "signature key is too weak"):
                 monitor._build_config(self.args)
 
     def test_committed_default_validation_anchor_is_signed_and_bound(self) -> None:
@@ -653,6 +704,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             result = monitor.start(self.args)
 
         self.assertEqual(result, 0)
+        self.assertFalse(reservation.exists())
+
+    def test_start_releases_state_reservation_when_git_contract_fails(self) -> None:
+        reservation = self.state_dir / "monitor-start-reservation.json"
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor,
+            "_assert_start_git_contract",
+            side_effect=monitor.MonitorError("dirty worktree"),
+        ), mock.patch.object(
+            monitor, "_first_sample", side_effect=AssertionError("must not sample")
+        ):
+            with self.assertRaisesRegex(monitor.MonitorError, "dirty worktree"):
+                monitor.start(self.args)
+
         self.assertFalse(reservation.exists())
 
     def test_daemon_readiness_accepts_child_running_envelope(self) -> None:

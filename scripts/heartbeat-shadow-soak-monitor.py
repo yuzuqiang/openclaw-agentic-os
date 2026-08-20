@@ -58,6 +58,7 @@ EXPECTED_IMPLEMENTATION_BASE = "7e285f405edf9c3aa008ce555fefc1e2640cc2f4"
 INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV = (
     "AGENTIC_OS_INDEPENDENT_VALIDATION_ANCHOR_HMAC_KEY"
 )
+INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES = 32
 
 
 class MonitorError(RuntimeError):
@@ -111,8 +112,13 @@ def _validate_anchor_signature(record: Mapping[str, Any]) -> None:
     secret = os.environ.get(INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV)
     if not secret:
         raise MonitorError("independent validation authenticated record signature key is unavailable")
+    secret_bytes = secret.encode("utf-8")
+    if len(secret_bytes) < INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES:
+        raise MonitorError(
+            "independent validation authenticated record signature key is too weak"
+        )
     expected = hmac.new(
-        secret.encode("utf-8"),
+        secret_bytes,
         _anchor_signature_payload(record),
         hashlib.sha256,
     ).hexdigest()
@@ -1046,37 +1052,43 @@ def start(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     _assert_no_active_monitor(state_dir)
     reservation = _reserve_monitor_state(state_dir)
-    config = _build_config(args)
-    _assert_start_git_contract(config)
-    first = _first_sample(config)
-    if args.no_daemon:
-        _persist_envelope(
-            config,
-            status="first_sample_pass",
-            sample=first,
-            note="daemon not started",
-        )
-        print(
-            json.dumps(
-                {"status": "first_sample_pass", "daemon_started": False},
-                sort_keys=True,
+    try:
+        config = _build_config(args)
+        _assert_start_git_contract(config)
+        first = _first_sample(config)
+        if args.no_daemon:
+            _persist_envelope(
+                config,
+                status="first_sample_pass",
+                sample=first,
+                note="daemon not started",
             )
-        )
-        reservation.unlink(missing_ok=True)
-        return 0
+            print(
+                json.dumps(
+                    {"status": "first_sample_pass", "daemon_started": False},
+                    sort_keys=True,
+                )
+            )
+            reservation.unlink(missing_ok=True)
+            return 0
 
-    log_path = _path_from_config(config, "daemon_log_path")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("ab")
-    process = subprocess.Popen(
-        list(config["run_argv"]),
-        cwd=REPO_ROOT,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    _path_from_config(config, "pidfile_path").write_text(f"{process.pid}\n", encoding="utf-8")
+        log_path = _path_from_config(config, "daemon_log_path")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = log_path.open("ab")
+        process = subprocess.Popen(
+            list(config["run_argv"]),
+            cwd=REPO_ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        _path_from_config(config, "pidfile_path").write_text(
+            f"{process.pid}\n", encoding="utf-8"
+        )
+    except Exception:
+        reservation.unlink(missing_ok=True)
+        raise
     reservation.unlink(missing_ok=True)
     try:
         _wait_for_daemon_ready(config, process)

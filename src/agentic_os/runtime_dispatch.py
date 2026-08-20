@@ -895,6 +895,54 @@ def persist_acquired_lease(
         raise RuntimeDispatchError("allow_lease_acquire lease update did not match exactly one row")
 
 
+def persist_unknown_acquired_lease_candidate(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    observation: MetadataObservation,
+    gateway_lease_id: str,
+    *,
+    reason: str,
+) -> None:
+    now, now_ms = now_utc()
+    observed = validate_allow_lease_observation(
+        local=lease_metadata(request, gateway_lease_id),
+        normalized=observation.normalized,
+        raw_json=observation.raw_json,
+        metadata_contract_version=observation.metadata_contract_version,
+    )
+    connection.execute(
+        "UPDATE external_rpc_intents SET state='unknown',resolved_at=?,"
+        "resolved_at_epoch_ms=?,metadata_contract_version=?,external_metadata_json=?,"
+        "external_run_id=?,external_transition_id=?,external_client_request_id=?,"
+        "external_idempotency_key=?,external_phase=?,external_agent_id=?,"
+        "external_requester_agent_id=?,external_ttl_ms=?,external_id=? "
+        "WHERE rpc_kind='allow_lease_acquire' AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled','human_review_required','failed')",
+        (
+            now,
+            now_ms,
+            observation.metadata_contract_version,
+            observation.raw_json,
+            observed["run_id"],
+            observed["transition_id"],
+            observed["client_lease_id"],
+            observed["idempotency_key"],
+            observed["phase"],
+            observed["agent_id"],
+            observed["requester_agent_id"],
+            observed["ttl_ms"],
+            gateway_lease_id,
+            request.acquire_idempotency_key,
+        ),
+    )
+    connection.execute(
+        "UPDATE leases SET reconciliation_status=? "
+        "WHERE client_lease_id=? AND gateway_lease_id IS NULL "
+        "AND state='acquire_pending'",
+        (reason, request.client_lease_id),
+    )
+
+
 def expire_locally_expired_lease_before_spawn(
     connection: sqlite3.Connection,
     request: DispatchRequest,
@@ -1357,6 +1405,8 @@ def dispatch_with_metadata(
             validate_transient_spawn_descriptor(request)
             insert_pending_dispatch(connection, request)
 
+        acquire_observation: MetadataObservation | None = None
+        gateway_lease_id: str | None = None
         try:
             acquire_observation = adapter.allow_lease_acquire(
                 {
@@ -1394,12 +1444,32 @@ def dispatch_with_metadata(
             raise RuntimeDispatchError("allow lease transport outcome unknown") from exc
         except METADATA_RUNTIME_ERRORS as exc:
             with immediate_transaction(connection):
-                mark_human_review(
-                    connection,
-                    request,
-                    rpc_kind="allow_lease_acquire",
-                    reason=str(exc),
-                )
+                if acquire_observation is not None and gateway_lease_id is not None:
+                    try:
+                        persist_unknown_acquired_lease_candidate(
+                            connection,
+                            request,
+                            acquire_observation,
+                            gateway_lease_id,
+                            reason=(
+                                "validated allow lease candidate after local persistence failure: "
+                                f"{exc}"
+                            ),
+                        )
+                    except MetadataContractError:
+                        mark_human_review(
+                            connection,
+                            request,
+                            rpc_kind="allow_lease_acquire",
+                            reason=str(exc),
+                        )
+                else:
+                    mark_human_review(
+                        connection,
+                        request,
+                        rpc_kind="allow_lease_acquire",
+                        reason=str(exc),
+                    )
                 mark_human_review(
                     connection,
                     request,
