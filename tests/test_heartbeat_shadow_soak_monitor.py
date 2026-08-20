@@ -732,6 +732,23 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "start reservation"):
                 monitor.start(self.args)
 
+    def test_start_rejects_symlinked_state_dir_before_reservation_write(self) -> None:
+        outside_parent = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_parent.cleanup)
+        outside_state_dir = Path(outside_parent.name) / "outside-state"
+        state_link = self.root / "docs/runtime-evidence/soak-link"
+        state_link.symlink_to(outside_state_dir, target_is_directory=True)
+        args = Namespace(**{**self.args.__dict__, "state_dir": state_link})
+
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_first_sample", side_effect=AssertionError("must not sample")
+        ):
+            with self.assertRaisesRegex(monitor.MonitorError, "state_dir.*symlink"):
+                monitor.start(args)
+
+        self.assertFalse(outside_state_dir.exists())
+        self.assertFalse((outside_state_dir / "monitor-start-reservation.json").exists())
+
     def test_start_reserves_state_before_first_sample_and_releases_after_no_daemon(
         self,
     ) -> None:
@@ -1483,6 +1500,36 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             result = monitor.run(Namespace(state_dir=self.state_dir))
 
         self.assertEqual(result, 2)
+        self.assertFalse((self.state_dir / "monitor.pid").exists())
+
+    def test_resume_rejects_self_consistent_authority_path_tamper_before_sampling(
+        self,
+    ) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            stale_config = self.root / "docs/runtime-evidence/soak/stale-openclaw.json"
+            stale_config.write_text(
+                self.live_config.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            config["live_config_path"] = str(stale_config.resolve())
+            config["authority_input_paths"] = monitor._authority_input_path_identities(
+                baseline_path=self.baseline,
+                heartbeat_file=self.heartbeat,
+                live_config_path=stale_config,
+            )
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+
+            with mock.patch.object(
+                monitor, "_assert_start_git_contract"
+            ) as git_contract, mock.patch.object(
+                monitor, "_sample", side_effect=AssertionError("must not sample")
+            ) as sample:
+                result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        git_contract.assert_not_called()
+        sample.assert_not_called()
         self.assertFalse((self.state_dir / "monitor.pid").exists())
 
     def test_start_rejects_symlinked_output_before_first_sample(self) -> None:

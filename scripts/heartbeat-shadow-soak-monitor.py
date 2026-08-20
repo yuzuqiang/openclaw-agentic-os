@@ -43,6 +43,9 @@ SCHEMA_ENVELOPE = "p03-heartbeat-shadow-monitor-envelope.v1"
 SCHEMA_SNAPSHOTS = "p03-heartbeat-shadow-runtime-snapshot-receipts.v1"
 SCHEMA_STOP = "p03-heartbeat-shadow-monitor-stop-request.v1"
 SCHEMA_START_RESERVATION = "p03-heartbeat-shadow-monitor-start-reservation.v1"
+SCHEMA_AUTHORITY_INPUT_PATH_BINDING = (
+    "p03-heartbeat-shadow-monitor-authority-input-path-binding.v1"
+)
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 DAEMON_READY_TIMEOUT_SECONDS = 2.0
@@ -110,14 +113,9 @@ def _validate_anchor_signature(record: Mapping[str, Any]) -> None:
         or any(character not in "0123456789abcdef" for character in signature)
     ):
         raise MonitorError("independent validation authenticated record signature is invalid")
-    secret = os.environ.get(INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV)
-    if not secret:
-        raise MonitorError("independent validation authenticated record signature key is unavailable")
-    secret_bytes = secret.encode("utf-8")
-    if len(secret_bytes) < INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES:
-        raise MonitorError(
-            "independent validation authenticated record signature key is too weak"
-        )
+    secret_bytes = _hmac_secret_bytes(
+        "independent validation authenticated record signature key"
+    )
     expected = hmac.new(
         secret_bytes,
         _anchor_signature_payload(record),
@@ -125,6 +123,16 @@ def _validate_anchor_signature(record: Mapping[str, Any]) -> None:
     ).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise MonitorError("independent validation authenticated record signature mismatch")
+
+
+def _hmac_secret_bytes(label: str) -> bytes:
+    secret = os.environ.get(INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV)
+    if not secret:
+        raise MonitorError(f"{label} is unavailable")
+    secret_bytes = secret.encode("utf-8")
+    if len(secret_bytes) < INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES:
+        raise MonitorError(f"{label} is too weak")
+    return secret_bytes
 
 
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> str:
@@ -300,6 +308,57 @@ def _authority_input_path_identities(
     }
 
 
+def _authority_input_path_binding_payload(config: Mapping[str, Any]) -> dict[str, Any]:
+    saved = config.get("authority_input_paths")
+    if not isinstance(saved, Mapping):
+        raise MonitorError("monitor authority input path identity is missing")
+    return {
+        "schema_version": SCHEMA_AUTHORITY_INPUT_PATH_BINDING,
+        "run_id": config.get("run_id"),
+        "repo_root": config.get("repo_root"),
+        "authority_input_paths": dict(saved),
+    }
+
+
+def _authority_input_path_authentication(config: Mapping[str, Any]) -> dict[str, str]:
+    signature = hmac.new(
+        _hmac_secret_bytes("monitor authority input path identity signature key"),
+        _canonical_json(_authority_input_path_binding_payload(config)),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "scheme": "hmac-sha256-env",
+        "key_env": INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "signature": signature,
+    }
+
+
+def _validate_authority_input_path_authentication(config: Mapping[str, Any]) -> None:
+    authentication = config.get("authority_input_paths_authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("monitor authority input path identity signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("monitor authority input path identity signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("monitor authority input path identity signature scheme is invalid")
+    if authentication.get("key_env") != INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV:
+        raise MonitorError("monitor authority input path identity signature key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("monitor authority input path identity signature is invalid")
+    expected = hmac.new(
+        _hmac_secret_bytes("monitor authority input path identity signature key"),
+        _canonical_json(_authority_input_path_binding_payload(config)),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("monitor authority input path identity signature mismatch")
+
+
 def _validate_authority_input_path_identity(config: Mapping[str, Any]) -> None:
     saved = config.get("authority_input_paths")
     if not isinstance(saved, Mapping):
@@ -313,6 +372,7 @@ def _validate_authority_input_path_identity(config: Mapping[str, Any]) -> None:
         expected_sha = record.get("path_sha256")
         if expected != observed or expected_sha != _sha256_text(observed):
             raise MonitorError(f"monitor authority input path identity mismatch: {key}")
+    _validate_authority_input_path_authentication(config)
 
 
 def _validate_rollback_receipt_config_binding(
@@ -926,6 +986,13 @@ def _assert_no_active_monitor(state_dir: Path) -> None:
         raise MonitorError("monitor start reservation already exists")
 
 
+def _resolve_start_state_dir(state_dir: Path, repo_root: Path) -> Path:
+    raw = state_dir.expanduser()
+    if raw.is_symlink():
+        raise MonitorError("state_dir must not be a symlink")
+    return _resolve_inside_repo(raw, repo_root, "state_dir")
+
+
 def _reserve_monitor_state(state_dir: Path) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
     reservation = state_dir / "monitor-start-reservation.json"
@@ -1045,6 +1112,9 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         },
         "run_argv": _command(script_path, "run", state_dir),
     }
+    config["authority_input_paths_authentication"] = (
+        _authority_input_path_authentication(config)
+    )
     config["predecessor_receipts"] = _verified_predecessor_summary(config)
     return config
 
@@ -1274,7 +1344,7 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def start(args: argparse.Namespace) -> int:
-    state_dir = args.state_dir.expanduser().resolve()
+    state_dir = _resolve_start_state_dir(args.state_dir, REPO_ROOT.resolve())
     _assert_no_active_monitor(state_dir)
     reservation = _reserve_monitor_state(state_dir)
     process: subprocess.Popen[bytes] | None = None
