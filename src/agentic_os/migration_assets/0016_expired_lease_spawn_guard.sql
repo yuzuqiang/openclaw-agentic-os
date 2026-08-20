@@ -1260,7 +1260,7 @@ BEGIN
 END;
 
 CREATE TRIGGER leases_preserve_live_gateway_state_update
-BEFORE UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, release_idempotency_key, gateway_lease_id, expires_at_epoch_ms ON leases
+BEFORE UPDATE OF state, run_id, phase, transition_id, agent_id, requester_agent_id, client_lease_id, acquire_idempotency_key, release_idempotency_key, gateway_lease_id, ttl_ms, metadata_contract_version, metadata_observed_at, external_metadata_json, external_client_lease_id, external_idempotency_key, external_run_id, external_phase, external_transition_id, external_agent_id, external_requester_agent_id, external_ttl_ms, expires_at, expires_at_epoch_ms ON leases
 WHEN OLD.state IN ('acquired','release_pending')
   AND OLD.gateway_lease_id IS NOT NULL
   AND OLD.gateway_lease_id <> ''
@@ -1272,12 +1272,51 @@ WHEN OLD.state IN ('acquired','release_pending')
     OR NEW.agent_id<>OLD.agent_id
     OR NEW.requester_agent_id<>OLD.requester_agent_id
     OR NEW.client_lease_id<>OLD.client_lease_id
-    OR NEW.release_idempotency_key<>OLD.release_idempotency_key
+    OR NEW.acquire_idempotency_key<>OLD.acquire_idempotency_key
+    OR NOT (NEW.release_idempotency_key IS OLD.release_idempotency_key)
+    OR NEW.ttl_ms<>OLD.ttl_ms
+    OR NOT (NEW.metadata_contract_version IS OLD.metadata_contract_version)
+    OR NOT (NEW.metadata_observed_at IS OLD.metadata_observed_at)
+    OR NOT (NEW.external_metadata_json IS OLD.external_metadata_json)
+    OR NOT (NEW.external_client_lease_id IS OLD.external_client_lease_id)
+    OR NOT (NEW.external_idempotency_key IS OLD.external_idempotency_key)
+    OR NOT (NEW.external_run_id IS OLD.external_run_id)
+    OR NOT (NEW.external_phase IS OLD.external_phase)
+    OR NOT (NEW.external_transition_id IS OLD.external_transition_id)
+    OR NOT (NEW.external_agent_id IS OLD.external_agent_id)
+    OR NOT (NEW.external_requester_agent_id IS OLD.external_requester_agent_id)
+    OR NOT (NEW.external_ttl_ms IS OLD.external_ttl_ms)
+    OR NEW.expires_at<>OLD.expires_at
+    OR NEW.expires_at_epoch_ms<>OLD.expires_at_epoch_ms
     OR NEW.gateway_lease_id IS NULL
     OR NEW.gateway_lease_id<>OLD.gateway_lease_id
   )
   AND NOT (
     NEW.state='expired'
+    AND OLD.state IN ('acquired','release_pending')
+    AND NEW.run_id=OLD.run_id
+    AND NEW.phase=OLD.phase
+    AND NEW.transition_id=OLD.transition_id
+    AND NEW.agent_id=OLD.agent_id
+    AND NEW.requester_agent_id=OLD.requester_agent_id
+    AND NEW.client_lease_id=OLD.client_lease_id
+    AND NEW.acquire_idempotency_key=OLD.acquire_idempotency_key
+    AND NEW.release_idempotency_key IS OLD.release_idempotency_key
+    AND NEW.gateway_lease_id=OLD.gateway_lease_id
+    AND NEW.ttl_ms=OLD.ttl_ms
+    AND NEW.metadata_contract_version IS OLD.metadata_contract_version
+    AND NEW.metadata_observed_at IS OLD.metadata_observed_at
+    AND NEW.external_metadata_json IS OLD.external_metadata_json
+    AND NEW.external_client_lease_id IS OLD.external_client_lease_id
+    AND NEW.external_idempotency_key IS OLD.external_idempotency_key
+    AND NEW.external_run_id IS OLD.external_run_id
+    AND NEW.external_phase IS OLD.external_phase
+    AND NEW.external_transition_id IS OLD.external_transition_id
+    AND NEW.external_agent_id IS OLD.external_agent_id
+    AND NEW.external_requester_agent_id IS OLD.external_requester_agent_id
+    AND NEW.external_ttl_ms IS OLD.external_ttl_ms
+    AND NEW.expires_at=OLD.expires_at
+    AND NEW.expires_at_epoch_ms=OLD.expires_at_epoch_ms
     AND typeof(NEW.expires_at_epoch_ms)='integer'
     AND NEW.expires_at_epoch_ms <= CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
   )

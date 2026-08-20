@@ -94,7 +94,7 @@
       "version": 16,
       "name": "expired_lease_spawn_guard",
       "file": "0016_expired_lease_spawn_guard.sql",
-      "sha256": "bc0436498073794738592bca08ebaf7155e74d71d8c82bd899b70ff6778ff32a"
+      "sha256": "16cf579310ab1c84dac3a131dfdd54f932e4e910f0af9c2fc7744967c109da87"
     }
   ]
 }

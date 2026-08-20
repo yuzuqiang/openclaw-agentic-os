@@ -30,8 +30,8 @@ not evidence of production OpenClaw authority.
 - Historical installed-runtime negative baseline, retained byte-for-byte:
   [`docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json`](docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json)
 - Base DDL migration SHA-256: `2a06f894952629523a4c1671148ce47dd7345a2340128713143fdff904486a01`
-- Current latest migration SHA-256: `bc0436498073794738592bca08ebaf7155e74d71d8c82bd899b70ff6778ff32a`
-- Current migration manifest SHA-256: `63fbabfe3478971de92147e52934c34299307d1cf349556eb09b34d9a2d26c93`
+- Current latest migration SHA-256: `16cf579310ab1c84dac3a131dfdd54f932e4e910f0af9c2fc7744967c109da87`
+- Current migration manifest SHA-256: `fb006e5a8d96d3e806f413cbf08e082688ad6fc418f09b8a348521b958e9514e`
 - Design contract: 27 baseline SQLite tables plus one compatibility archive table, one settlement proof table, three legacy import evidence tables, one runtime dispatch binding table, one trust-promotion binding overlay, one canary rollback proof table, one canary binding immutability overlay, and 30 executable SLO queries
 - Completed bounded slices: privacy preflight, package/retrieval denylist,
   migration/package parity, file-authority shadow, dual-write shadow, synthetic

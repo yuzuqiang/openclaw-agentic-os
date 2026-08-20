@@ -274,6 +274,43 @@ def _load_config(state_dir: Path) -> dict[str, Any]:
     return config
 
 
+def _validate_resume_config_paths(state_dir: Path, config: Mapping[str, Any]) -> None:
+    repo_root = REPO_ROOT.resolve()
+    safe_state_dir = _resolve_inside_repo(state_dir, repo_root, "state_dir")
+    run_id = config.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise MonitorError("resume monitor config run_id is invalid")
+    script_path = Path(__file__).resolve()
+    expected_paths = {
+        "repo_root": repo_root,
+        "state_dir": safe_state_dir,
+        "script_path": script_path,
+        "database_path": repo_root / "state/agentic-os/control.db",
+        "manifest_path": safe_state_dir / "heartbeat-authority-manifest.json",
+        "file_shadow_cycle_receipt_path": safe_state_dir
+        / "file-shadow-cycle-receipt.json",
+        "core_soak_receipt_path": safe_state_dir / "core-soak-receipt.json",
+        "first_sample_path": safe_state_dir / "first-sample.json",
+        "monitor_envelope_path": safe_state_dir / "monitor-envelope.json",
+        "stop_request_path": safe_state_dir / "stop-request.json",
+        "rollback_receipt_path": safe_state_dir / "rollback-receipt.json",
+        "pidfile_path": safe_state_dir / "monitor.pid",
+        "daemon_log_path": safe_state_dir / "monitor-daemon.log",
+        "sample_dir": safe_state_dir / "samples",
+        "runtime_snapshot_dir": repo_root
+        / "state/agentic-os/backups/heartbeat-shadow-soak"
+        / run_id,
+        "runtime_snapshot_receipts_path": safe_state_dir
+        / "runtime-snapshot-receipts.json",
+    }
+    for key, expected in expected_paths.items():
+        observed = config.get(key)
+        if not isinstance(observed, str) or Path(observed).expanduser().resolve() != expected:
+            raise MonitorError(f"resume monitor config path mismatch: {key}")
+    if config.get("run_argv") != _command(script_path, "run", safe_state_dir):
+        raise MonitorError("resume monitor config command mismatch")
+
+
 def _path_from_config(config: Mapping[str, Any], key: str) -> Path:
     value = config.get(key)
     if not isinstance(value, str) or not value:
@@ -744,6 +781,17 @@ def _reserve_monitor_state(state_dir: Path) -> Path:
     return reservation
 
 
+def _terminate_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=DAEMON_READY_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def _build_config(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = REPO_ROOT.resolve()
     state_dir = _resolve_inside_repo(args.state_dir, repo_root, "state_dir")
@@ -1052,6 +1100,8 @@ def start(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     _assert_no_active_monitor(state_dir)
     reservation = _reserve_monitor_state(state_dir)
+    process: subprocess.Popen[bytes] | None = None
+    log: Any | None = None
     try:
         config = _build_config(args)
         _assert_start_git_contract(config)
@@ -1083,18 +1133,23 @@ def start(args: argparse.Namespace) -> int:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        log.close()
+        log = None
         _path_from_config(config, "pidfile_path").write_text(
             f"{process.pid}\n", encoding="utf-8"
         )
     except Exception:
+        if log is not None:
+            log.close()
+        if process is not None:
+            _terminate_process(process)
         reservation.unlink(missing_ok=True)
         raise
     reservation.unlink(missing_ok=True)
     try:
         _wait_for_daemon_ready(config, process)
     except MonitorError as exc:
-        if process.poll() is None:
-            process.terminate()
+        _terminate_process(process)
         raise MonitorError("monitor daemon did not become ready") from exc
     print(
         json.dumps(
@@ -1138,6 +1193,10 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     config = _load_config(state_dir)
+    try:
+        _validate_resume_config_paths(state_dir, config)
+    except MonitorError:
+        return 2
     try:
         _assert_start_git_contract(config)
     except MonitorError as exc:

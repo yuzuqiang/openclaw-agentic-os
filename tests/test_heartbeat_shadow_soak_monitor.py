@@ -515,6 +515,22 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["monitor_resume_identity_invalid"])
         self.assertIn("predecessor receipt summary mismatch", envelope["note"])
 
+    def test_run_rejects_tampered_resume_paths_before_pidfile_write(self) -> None:
+        attacker_pidfile = self.root.parent / "attacker-monitor.pid"
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract", side_effect=AssertionError("must not git")
+        ), mock.patch.object(
+            monitor, "_write_pidfile", side_effect=AssertionError("must not write pid")
+        ):
+            config = monitor._build_config(self.args)
+            config["pidfile_path"] = str(attacker_pidfile)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        self.assertFalse(attacker_pidfile.exists())
+
     def test_run_uses_monotonic_deadline_when_wall_clock_stalls(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
@@ -719,6 +735,32 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 monitor.start(self.args)
 
         self.assertFalse(reservation.exists())
+
+    def test_start_terminates_daemon_when_pidfile_publication_fails(self) -> None:
+        digest = "a" * 64
+        first = _pass_sample(1_700_000_000_000, digest)
+        args = Namespace(**{**self.args.__dict__, "no_daemon": False})
+        process = mock.Mock(pid=12345)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_first_sample", return_value=first
+        ), mock.patch.object(
+            monitor.subprocess, "Popen", return_value=process
+        ), mock.patch.object(
+            Path, "write_text", side_effect=OSError("pid write failed")
+        ), mock.patch.object(
+            monitor, "_wait_for_daemon_ready", side_effect=AssertionError("not ready")
+        ):
+            with self.assertRaisesRegex(OSError, "pid write failed"):
+                monitor.start(args)
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=monitor.DAEMON_READY_TIMEOUT_SECONDS)
+        self.assertFalse((self.state_dir / "monitor-start-reservation.json").exists())
 
     def test_daemon_readiness_accepts_child_running_envelope(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(

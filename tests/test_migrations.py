@@ -3163,6 +3163,61 @@ class MigrationTests(unittest.TestCase):
             connection.execute(
                 "UPDATE leases SET state='expired' WHERE lease_id='acquired-live'"
             )
+        acquire_expired_metadata = json.dumps(
+            {
+                "client_lease_id": "client-expired",
+                "idempotency_key": "idem-expired",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
+                "gateway_lease_id": "gateway-expired",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,"
+            "external_id,requested_at,requested_at_epoch_ms) VALUES('acquire-expired','run',"
+            "'transition','allow_lease_acquire','phase','agent','requester',60000,"
+            "'client-expired','idem-expired','v1','{}',?,'run','phase','transition','agent',"
+            "'requester',60000,"
+            "'client-expired','idem-expired','accepted','gateway-expired','now',1000)",
+            (acquire_expired_metadata,),
+        )
+        acquired_expired = (
+            "acquired-expired", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway-expired", "client-expired", "idem-expired", 60000,
+            "v1", "now", acquire_expired_metadata, "client-expired", "idem-expired",
+            "run", "phase", "transition", "agent", "requester", 60000, "past", 1,
+        )
+        connection.execute(
+            f"INSERT INTO leases({acquire_fields}) VALUES("
+            + ",".join("?" for _ in acquired_expired)
+            + ")",
+            acquired_expired,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
+            connection.execute(
+                "UPDATE leases SET state='expired', ttl_ms=1, "
+                "metadata_contract_version=NULL, external_metadata_json=NULL "
+                "WHERE lease_id='acquired-expired'"
+            )
+        connection.execute(
+            "UPDATE leases SET state='expired' WHERE lease_id='acquired-expired'"
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT state,ttl_ms,metadata_contract_version,external_metadata_json "
+                "FROM leases WHERE lease_id='acquired-expired'"
+            ).fetchone(),
+            ("expired", 60000, "v1", acquire_expired_metadata),
+        )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
             connection.execute(
                 "UPDATE leases SET state='human_review_required', gateway_lease_id=NULL "
