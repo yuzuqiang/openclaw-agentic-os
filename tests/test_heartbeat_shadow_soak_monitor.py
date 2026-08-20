@@ -1273,6 +1273,94 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
         self.assertIn("run_id", envelope["note"])
 
+    def test_status_requires_rollback_receipt_for_rolled_back_envelope(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "rolled_back", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_rollback_receipt_invalid"])
+        self.assertIn("terminal monitor status requires rollback receipt", envelope["note"])
+
+    def test_status_rejects_forged_rollback_receipt_for_rolled_back_envelope(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "rollback-receipt.json",
+                {
+                    "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
+                    "status": "pass",
+                    "workflow": "heartbeat",
+                    "authority": "file_artifacts",
+                    "db_authority_enabled": False,
+                    "authority_input_digest": "b" * 64,
+                    "file_authority_view_recreated": True,
+                    "shadow_database_removed": True,
+                    "recoverable_local_backup_created": True,
+                    "parity_percent": 100,
+                    "parity": {"status": "pass", "percent": 100, "mismatch_count": 0},
+                },
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "rolled_back", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_rollback_receipt_invalid"])
+        self.assertIn("authority digest", envelope["note"])
+
+    def test_resume_rejects_tampered_authority_input_paths_before_sampling(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            stale_config = self.root / "docs/runtime-evidence/soak/stale-openclaw.json"
+            stale_config.write_text(self.live_config.read_text(encoding="utf-8"), encoding="utf-8")
+            config["live_config_path"] = str(stale_config)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        self.assertFalse((self.state_dir / "monitor.pid").exists())
+
+    def test_start_rejects_symlinked_output_before_first_sample(self) -> None:
+        outside = self.root / "outside-monitor-config.json"
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "run_heartbeat_file_shadow_cycle"
+        ) as first_sample:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            (self.state_dir / "monitor-config.json").symlink_to(outside)
+
+            with self.assertRaisesRegex(monitor.MonitorError, "monitor_config_path"):
+                monitor.start(self.args)
+
+        first_sample.assert_not_called()
+        self.assertFalse(outside.exists())
+
     def test_stop_revalidates_saved_paths_before_writing_request(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)

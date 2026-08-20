@@ -258,6 +258,88 @@ def _validate_receipt_config_binding(
         raise MonitorError("core receipt sample interval does not match monitor config")
 
 
+def _path_identity(path: Path) -> dict[str, str]:
+    resolved = path.expanduser().resolve()
+    path_text = resolved.as_posix()
+    return {
+        "path": path_text,
+        "path_sha256": _sha256_text(path_text),
+    }
+
+
+def _authority_input_path_identities(
+    *,
+    baseline_path: Path,
+    heartbeat_file: Path,
+    live_config_path: Path,
+) -> dict[str, dict[str, str]]:
+    return {
+        "baseline_path": _path_identity(baseline_path),
+        "heartbeat_file": _path_identity(heartbeat_file),
+        "live_config_path": _path_identity(live_config_path),
+    }
+
+
+def _validate_authority_input_path_identity(config: Mapping[str, Any]) -> None:
+    saved = config.get("authority_input_paths")
+    if not isinstance(saved, Mapping):
+        raise MonitorError("monitor authority input path identity is missing")
+    for key in ("baseline_path", "heartbeat_file", "live_config_path"):
+        record = saved.get(key)
+        if not isinstance(record, Mapping):
+            raise MonitorError(f"monitor authority input path identity missing: {key}")
+        observed = _path_from_config(config, key).as_posix()
+        expected = record.get("path")
+        expected_sha = record.get("path_sha256")
+        if expected != observed or expected_sha != _sha256_text(observed):
+            raise MonitorError(f"monitor authority input path identity mismatch: {key}")
+
+
+def _validate_rollback_receipt_config_binding(
+    config: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    if receipt.get("schema_version") != "p03-heartbeat-forced-rollback-receipt.v1":
+        raise MonitorError("rollback receipt schema is invalid")
+    if receipt.get("status") != "pass":
+        raise MonitorError("rollback receipt status is not pass")
+    if receipt.get("workflow") != "heartbeat":
+        raise MonitorError("rollback receipt workflow mismatch")
+    if receipt.get("authority") != "file_artifacts":
+        raise MonitorError("rollback receipt authority mismatch")
+    if receipt.get("db_authority_enabled") is not False:
+        raise MonitorError("rollback receipt db authority state mismatch")
+    if receipt.get("authority_input_digest") != config.get("authority_input_digest"):
+        raise MonitorError("rollback receipt authority digest does not match monitor config")
+    if receipt.get("file_authority_view_recreated") is not True:
+        raise MonitorError("rollback receipt did not recreate file authority")
+    if receipt.get("shadow_database_removed") is not True:
+        raise MonitorError("rollback receipt did not remove the shadow database")
+    if receipt.get("recoverable_local_backup_created") is not True:
+        raise MonitorError("rollback receipt did not create a recoverable backup")
+    if receipt.get("parity_percent") != 100:
+        raise MonitorError("rollback receipt parity percent is not 100")
+    parity = receipt.get("parity")
+    if not isinstance(parity, Mapping) or parity.get("status") != "pass":
+        raise MonitorError("rollback receipt parity proof is invalid")
+    if parity.get("percent") != 100 or parity.get("mismatch_count") != 0:
+        raise MonitorError("rollback receipt parity proof is not exact")
+    root = _path_from_config(config, "repo_root")
+    backup_path = receipt.get("recoverable_local_backup_path")
+    backup_sha = receipt.get("recoverable_local_backup_sha256")
+    if not isinstance(backup_path, str) or not _is_sha256(backup_sha):
+        raise MonitorError("rollback receipt backup proof is invalid")
+    backup = _resolve_inside_repo(root / backup_path, root, "rollback backup path")
+    if not backup.is_file() or _sha256_file(backup) != backup_sha:
+        raise MonitorError("rollback receipt backup hash mismatch")
+    snapshot_path = receipt.get("audit_snapshot_database")
+    snapshot_sha = receipt.get("audit_snapshot_sha256")
+    if not isinstance(snapshot_path, str) or not _is_sha256(snapshot_sha):
+        raise MonitorError("rollback receipt audit snapshot proof is invalid")
+    snapshot = _resolve_inside_repo(root / snapshot_path, root, "rollback audit snapshot path")
+    if not snapshot.is_file() or _sha256_file(snapshot) != snapshot_sha:
+        raise MonitorError("rollback receipt audit snapshot hash mismatch")
+
+
 def _require_sha256(label: str, value: str) -> None:
     if not _is_sha256(value):
         raise MonitorError(f"{label} must be a full lowercase SHA-256")
@@ -278,6 +360,7 @@ def _load_config(state_dir: Path) -> dict[str, Any]:
 def _load_validated_resume_config(state_dir: Path) -> dict[str, Any]:
     config = _load_config(state_dir)
     _validate_resume_config_paths(state_dir, config)
+    _validate_authority_input_path_identity(config)
     return config
 
 
@@ -323,6 +406,32 @@ def _path_from_config(config: Mapping[str, Any], key: str) -> Path:
     if not isinstance(value, str) or not value:
         raise MonitorError(f"config missing path: {key}")
     return Path(value).expanduser().resolve()
+
+
+def _assert_start_output_paths_available(config: Mapping[str, Any]) -> None:
+    state_dir = _path_from_config(config, "state_dir")
+    output_paths = {
+        "monitor_config_path": state_dir / "monitor-config.json",
+        "manifest_path": _path_from_config(config, "manifest_path"),
+        "file_shadow_cycle_receipt_path": _path_from_config(
+            config, "file_shadow_cycle_receipt_path"
+        ),
+        "core_soak_receipt_path": _path_from_config(config, "core_soak_receipt_path"),
+        "first_sample_path": _path_from_config(config, "first_sample_path"),
+        "monitor_envelope_path": _path_from_config(config, "monitor_envelope_path"),
+        "stop_request_path": _path_from_config(config, "stop_request_path"),
+        "rollback_receipt_path": _path_from_config(config, "rollback_receipt_path"),
+        "pidfile_path": _path_from_config(config, "pidfile_path"),
+        "daemon_log_path": _path_from_config(config, "daemon_log_path"),
+        "sample_dir": _path_from_config(config, "sample_dir"),
+        "runtime_snapshot_receipts_path": _path_from_config(
+            config, "runtime_snapshot_receipts_path"
+        ),
+    }
+    for key, path in output_paths.items():
+        raw_path = Path(str(config.get(key, path))).expanduser()
+        if path.exists() or raw_path.is_symlink():
+            raise MonitorError(f"start output path already exists: {key}")
 
 
 def _command(script: Path, subcommand: str, state_dir: Path) -> list[str]:
@@ -508,6 +617,12 @@ def _envelope(
     receipt: dict[str, Any] | None = None
     if status == "complete" and not core_receipt_path.exists():
         raise MonitorError("terminal monitor status requires core receipt")
+    rollback_receipt_path = _path_from_config(config, "rollback_receipt_path")
+    if status == "rolled_back":
+        if not rollback_receipt_path.exists():
+            raise MonitorError("terminal monitor status requires rollback receipt")
+        rollback_receipt = _read_json(rollback_receipt_path)
+        _validate_rollback_receipt_config_binding(config, rollback_receipt)
     if core_receipt_path.exists():
         try:
             receipt = _read_json(core_receipt_path)
@@ -871,6 +986,11 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "lifecycle_receipt_path": str(lifecycle),
         "independent_validation_path": str(validation),
+        "authority_input_paths": _authority_input_path_identities(
+            baseline_path=baseline,
+            heartbeat_file=heartbeat,
+            live_config_path=live_config,
+        ),
         "exact_heads": {
             "runtime_head": args.runtime_head,
             "agentic_os_evidence_head": args.agentic_os_evidence_head,
@@ -884,6 +1004,7 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _sample(config: Mapping[str, Any], sampled_at_epoch_ms: int) -> dict[str, Any]:
+    _validate_authority_input_path_identity(config)
     sampled_at_monotonic_ms = time.monotonic_ns() // 1_000_000
     snapshot_path = _runtime_snapshot_path(config, sampled_at_epoch_ms)
     try:
@@ -1114,6 +1235,7 @@ def start(args: argparse.Namespace) -> int:
     log: Any | None = None
     try:
         config = _build_config(args)
+        _assert_start_output_paths_available(config)
         _assert_start_git_contract(config)
         first = _first_sample(config)
         if args.no_daemon:
@@ -1389,17 +1511,22 @@ def status(args: argparse.Namespace) -> int:
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
     except (HeartbeatShadowError, MonitorError) as exc:
         current_status = str(envelope.get("status", "unknown"))
-        if current_status in {"running", "complete"}:
+        if current_status in {"running", "complete", "rolled_back"}:
             existing_violations = envelope.get("violations")
             violations = (
                 [str(item) for item in existing_violations]
                 if isinstance(existing_violations, list)
                 else []
             )
+            terminal_violation = (
+                "terminal_rollback_receipt_invalid"
+                if current_status == "rolled_back"
+                else "terminal_core_receipt_invalid"
+            )
             violation = (
                 "monitor_state_unreadable"
                 if current_status == "running"
-                else "terminal_core_receipt_invalid"
+                else terminal_violation
             )
             if violation not in violations:
                 violations.append(violation)

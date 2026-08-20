@@ -682,10 +682,41 @@ class OpenClawLiveAcceptedSessionProbeTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "fail_closed")
         self.assertEqual(payload["reason"], "live_probe_contract_failed")
-        self.assertIn("conflicting gateway lease identity aliases", payload["error"])
+        self.assertIn("unvalidated lease identity aliases", payload["error"])
         self.assertTrue(payload["lease_acquired"])
         self.assertEqual(released_ids, ["lease-unit"])
         self.assertEqual(payload["released"], True)
+
+    def test_first_acquire_rejects_metadata_conflicting_top_level_alias(self) -> None:
+        module = load_probe_module()
+        released_ids: list[str] = []
+
+        def fake_gateway(_openclaw_executable, method, params, *, timeout_ms):
+            if method == "subagents.allowLease.acquire":
+                return {
+                    "external_id": "lease-alias",
+                    **metadata_contract({**acquire_owner(), "gateway_lease_id": "lease-unit"}),
+                }
+            if method == "subagents.allowLease.release":
+                released_ids.append(params["gateway_lease_id"])
+                return release_response(params)
+            raise AssertionError(method)
+
+        with mock.patch.object(
+            module, "_preflight", return_value=(True, isolated_preflight_payload())
+        ), mock.patch.object(module, "_gateway_call", side_effect=fake_gateway):
+            payload = run_probe(module, args())
+
+        self.assertEqual(payload["status"], "fail_closed")
+        self.assertEqual(payload["reason"], "live_probe_contract_failed")
+        self.assertIn("unvalidated lease identity aliases", payload["error"])
+        self.assertTrue(payload["lease_acquired"])
+        self.assertEqual(released_ids, ["lease-unit"])
+        self.assertEqual(payload["released"], True)
+        self.assertEqual(
+            payload["unresolved_allow_lease_candidates"],
+            [module._identity_proof("lease-alias")],
+        )
 
     def test_acquired_lease_aliases_are_recorded_for_cleanup(self) -> None:
         module = load_probe_module()

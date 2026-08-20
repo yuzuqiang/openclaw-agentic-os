@@ -661,6 +661,27 @@ def _validated_allow_lease_acquire_identity(
     return gateway_lease_id, raw_metadata
 
 
+def _reject_unvalidated_allow_lease_identity_aliases(
+    payload: Mapping[str, Any],
+    *,
+    trusted_lease_id: str,
+    evidence: dict[str, Any],
+    message: str,
+) -> None:
+    untrusted_candidates = [
+        candidate
+        for candidate in _candidate_lease_ids_for_cleanup(payload)
+        if candidate != trusted_lease_id
+    ]
+    if untrusted_candidates:
+        _record_unresolved_lease_candidates(
+            evidence,
+            payload,
+            trusted_lease_ids=(trusted_lease_id,),
+        )
+        raise MetadataContractError(message)
+
+
 def _allow_lease_owner_metadata_matches(
     payload: Mapping[str, Any], *, expected_metadata: Mapping[str, Any]
 ) -> bool:
@@ -1363,7 +1384,14 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
         _append_unique(lease_ids_to_release, lease_id)
-        _lease_id_from_response(first)
+        _reject_unvalidated_allow_lease_identity_aliases(
+            first,
+            trusted_lease_id=gateway_lease_id,
+            evidence=evidence,
+            message=(
+                "allowLease acquire response exposed unvalidated lease identity aliases"
+            ),
+        )
         evidence["allow_lease"] = {
             "gateway_lease_id_sha256": _identity_sha256(gateway_lease_id),
             "metadata_contract_version": acquire_metadata["metadata_contract_version"],
@@ -1387,20 +1415,14 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             _record_unresolved_lease_candidates(evidence, second)
             raise
         _append_unique(lease_ids_to_release, duplicate_gateway_lease_id)
-        untrusted_duplicate_candidates = [
-            candidate
-            for candidate in _candidate_lease_ids_for_cleanup(second)
-            if candidate != duplicate_gateway_lease_id
-        ]
-        if untrusted_duplicate_candidates:
-            _record_unresolved_lease_candidates(
-                evidence,
-                second,
-                trusted_lease_ids=(duplicate_gateway_lease_id,),
-            )
-            raise MetadataContractError(
+        _reject_unvalidated_allow_lease_identity_aliases(
+            second,
+            trusted_lease_id=duplicate_gateway_lease_id,
+            evidence=evidence,
+            message=(
                 "duplicate allowLease acquire response exposed unvalidated lease identity aliases"
-            )
+            ),
+        )
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
