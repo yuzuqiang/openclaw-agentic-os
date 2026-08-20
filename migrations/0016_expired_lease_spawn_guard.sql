@@ -1183,11 +1183,6 @@ AFTER INSERT ON leases
 WHEN NEW.state IN ('expired','human_review_required')
   AND NEW.gateway_lease_id IS NOT NULL
   AND NEW.gateway_lease_id <> ''
-  AND NOT (
-    NEW.state='expired'
-    AND typeof(NEW.expires_at_epoch_ms)='integer'
-    AND NEW.expires_at_epoch_ms <= CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
-  )
   AND NOT EXISTS (
     SELECT 1 FROM external_rpc_intents eri
     WHERE eri.rpc_kind='allow_lease_release'

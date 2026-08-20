@@ -243,6 +243,25 @@ def _git_text(repo_root: Path, args: list[str], label: str) -> str:
     return result.stdout.strip()
 
 
+def _git_check(repo_root: Path, args: list[str]) -> bool:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def _predecessor_receipts_are_content_bound(config: Mapping[str, Any]) -> bool:
+    try:
+        _verified_predecessor_summary(config)
+    except MonitorError:
+        return False
+    return True
+
+
 def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
     repo_root = Path(str(config["repo_root"])).resolve()
     status = _git_text(repo_root, ["status", "--porcelain=v1"], "status")
@@ -254,22 +273,26 @@ def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
     head = _git_text(repo_root, ["rev-parse", "HEAD"], "rev-parse HEAD")
     if head != exact_heads.get("monitor_implementation_head"):
         raise MonitorError("monitor implementation head does not match Git HEAD")
-    for key in (
-        "agentic_os_evidence_head",
-        "implementation_base",
-        "monitor_implementation_head",
-    ):
-        commit = str(exact_heads.get(key, ""))
-        _git_text(repo_root, ["cat-file", "-e", f"{commit}^{{commit}}"], key)
     _git_text(
+        repo_root,
+        ["cat-file", "-e", f"{head}^{{commit}}"],
+        "monitor implementation head",
+    )
+    implementation_base = str(exact_heads["implementation_base"])
+    if _git_check(
         repo_root,
         [
             "merge-base",
             "--is-ancestor",
-            str(exact_heads["implementation_base"]),
-            str(exact_heads["monitor_implementation_head"]),
+            implementation_base,
+            head,
         ],
-        "implementation ancestry",
+    ):
+        return
+    if _predecessor_receipts_are_content_bound(config):
+        return
+    raise MonitorError(
+        "implementation base is neither an ancestor nor content-bound predecessor evidence"
     )
 
 
@@ -418,6 +441,23 @@ def _validate_rollback_receipt_config_binding(
     snapshot = _resolve_inside_repo(root / snapshot_path, root, "rollback audit snapshot path")
     if not snapshot.is_file() or _sha256_file(snapshot) != snapshot_sha:
         raise MonitorError("rollback receipt audit snapshot hash mismatch")
+    _assert_shadow_database_absent(config)
+
+
+def _sqlite_related_paths(database: Path) -> tuple[Path, ...]:
+    return (
+        database,
+        database.with_name(f"{database.name}-wal"),
+        database.with_name(f"{database.name}-shm"),
+        database.with_name(f"{database.name}-journal"),
+    )
+
+
+def _assert_shadow_database_absent(config: Mapping[str, Any]) -> None:
+    database = _path_from_config(config, "database_path")
+    existing = [path for path in _sqlite_related_paths(database) if path.exists()]
+    if existing:
+        raise MonitorError("rollback receipt is stale because the shadow database exists")
 
 
 def _require_sha256(label: str, value: str) -> None:
@@ -645,6 +685,11 @@ def _verifier_session_key_sha256(verifier: Mapping[str, Any], label: str) -> str
 def _validate_independent_validation_anchor(
     config: Mapping[str, Any], validation: Mapping[str, Any]
 ) -> None:
+    repo_root = (
+        _path_from_config(config, "repo_root")
+        if isinstance(config.get("repo_root"), str)
+        else REPO_ROOT.resolve()
+    )
     anchor = validation.get("authenticated_record")
     if not isinstance(anchor, Mapping):
         raise MonitorError("independent validation authenticated record is missing")
@@ -653,11 +698,11 @@ def _validate_independent_validation_anchor(
         raise MonitorError("independent validation authenticated record path is missing")
     anchor_path = Path(raw_path)
     if not anchor_path.is_absolute():
-        anchor_path = (REPO_ROOT / anchor_path).resolve()
+        anchor_path = (repo_root / anchor_path).resolve()
     else:
         anchor_path = anchor_path.resolve()
     try:
-        anchor_path.relative_to(REPO_ROOT.resolve())
+        anchor_path.relative_to(repo_root)
     except ValueError as exc:
         raise MonitorError(
             "independent validation authenticated record must be repo-bound"
@@ -1224,6 +1269,10 @@ def _validate_runtime_snapshot_receipts(
     raw_snapshots = document.get("snapshots")
     if not isinstance(raw_snapshots, list):
         raise MonitorError("runtime snapshot receipts must be a list")
+    trailing_snapshot: object | None = None
+    if samples is not None and len(raw_snapshots) == len(samples) + 1:
+        trailing_snapshot = raw_snapshots[-1]
+        raw_snapshots = raw_snapshots[:-1]
     if samples is not None and len(raw_snapshots) != len(samples):
         raise MonitorError("runtime snapshot receipts do not match sample count")
     snapshots: list[dict[str, Any]] = []
@@ -1236,6 +1285,18 @@ def _validate_runtime_snapshot_receipts(
             raise MonitorError("duplicate runtime snapshot receipt path")
         seen_paths.add(snapshot_database)
         snapshots.append(entry)
+    if trailing_snapshot is not None:
+        entry = _validate_runtime_snapshot_entry(config, trailing_snapshot)
+        snapshot_database = str(entry["snapshot_database"])
+        if snapshot_database in seen_paths:
+            raise MonitorError("duplicate runtime snapshot receipt path")
+        if samples:
+            latest_sampled_at = samples[-1].get("sampled_at_epoch_ms")
+            if (
+                isinstance(latest_sampled_at, int)
+                and _snapshot_epoch(entry["snapshot_database"]) <= latest_sampled_at
+            ):
+                raise MonitorError("runtime snapshot trailing receipt is not newer than samples")
     return snapshots
 
 

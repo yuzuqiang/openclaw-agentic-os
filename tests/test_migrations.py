@@ -2946,6 +2946,28 @@ class MigrationTests(unittest.TestCase):
                 + ")",
                 released_without_proof,
             )
+        expired_without_proof = (
+            "expired-no-proof", "run", "phase", "transition", "agent", "requester",
+            "expired", "gateway-expired-no-proof", "client-expired-no-proof",
+            "idem-expired-no-proof", 60000, "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-expired-no-proof",
+                    "idempotency_key": "idem-expired-no-proof",
+                    "gateway_lease_id": "gateway-expired-no-proof",
+                }
+            ),
+            "client-expired-no-proof", "idem-expired-no-proof", "run", "phase",
+            "transition", "agent", "requester", 60000, "past", 1,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
+            connection.execute(
+                f"INSERT INTO leases({acquire_fields}) VALUES("
+                + ",".join("?" for _ in expired_without_proof)
+                + ")",
+                expired_without_proof,
+            )
         released_fields = (
             f"{acquire_fields},release_idempotency_key,release_requested_at,released_at"
         )

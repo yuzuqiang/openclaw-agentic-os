@@ -83,6 +83,31 @@ def _pass_sample(
     }
 
 
+def _snapshot_entry(root: Path, snapshot_database: Path, payload: bytes = b"runtime snapshot") -> dict[str, object]:
+    snapshot_database.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_database.write_bytes(payload)
+    return {
+        "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
+        "status": "pass",
+        "authority": "file_artifacts",
+        "db_authority_enabled": False,
+        "source_database": "state/agentic-os/control.db",
+        "source_sidecars_observed": ["control.db-wal"],
+        "snapshot_database": snapshot_database.relative_to(root).as_posix(),
+        "snapshot_sha256": hashlib.sha256(payload).hexdigest(),
+        "snapshot_sidecars_present": False,
+        "local_recovery_only": True,
+        "packaging_retrieval_denied": True,
+        "runtime_authority_counts": {
+            "lease_rows": 0,
+            "spawn_request_rows": 0,
+            "session_rows": 0,
+            "lifecycle_rpc_intent_rows": 0,
+            "duplicate_spawn_identity_groups": 0,
+        },
+    }
+
+
 class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
     def setUp(self) -> None:
         monitor._ACTIVE_SIGNAL_CONFIG = None
@@ -197,29 +222,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             )
 
         def snapshot_side_effect(**kwargs: object) -> dict[str, object]:
-            snapshot_database = Path(kwargs["snapshot_database"])
-            snapshot_database.parent.mkdir(parents=True, exist_ok=True)
-            snapshot_database.write_bytes(b"runtime snapshot")
-            return {
-                "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
-                "status": "pass",
-                "authority": "file_artifacts",
-                "db_authority_enabled": False,
-                "source_database": "state/agentic-os/control.db",
-                "source_sidecars_observed": ["control.db-wal"],
-                "snapshot_database": snapshot_database.relative_to(self.root).as_posix(),
-                "snapshot_sha256": hashlib.sha256(b"runtime snapshot").hexdigest(),
-                "snapshot_sidecars_present": False,
-                "local_recovery_only": True,
-                "packaging_retrieval_denied": True,
-                "runtime_authority_counts": {
-                    "lease_rows": 0,
-                    "spawn_request_rows": 0,
-                    "session_rows": 0,
-                    "lifecycle_rpc_intent_rows": 0,
-                    "duplicate_spawn_identity_groups": 0,
-                },
-            }
+            return _snapshot_entry(self.root, Path(kwargs["snapshot_database"]))
 
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
@@ -268,6 +271,55 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertIn(" stop ", envelope["monitor"]["stop_command"])
         self.assertIn(" rollback ", envelope["monitor"]["rollback_command"])
+
+    def test_runtime_snapshot_trailing_receipt_is_reconciled_with_core_samples(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=str(config["run_id"]),
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            sample = _pass_sample(1_700_000_300_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, sample)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            first_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000300000.db",
+            )
+            trailing_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000600000.db",
+                b"trailing snapshot",
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [first_snapshot, trailing_snapshot],
+                },
+            )
+
+            envelope = monitor._envelope(config=config, status="running")
+
+        self.assertEqual(envelope["runtime_snapshots"]["snapshots_count"], 1)
 
     def test_predecessor_validation_requires_independent_provenance(self) -> None:
         lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
@@ -659,7 +711,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 return str(heads["monitor_implementation_head"])
             return ""
 
-        with mock.patch.object(monitor, "_git_text", side_effect=clean_git):
+        with mock.patch.object(monitor, "_git_text", side_effect=clean_git), mock.patch.object(
+            monitor, "_git_check", return_value=True
+        ) as git_check:
             monitor._assert_start_git_contract(config)
 
         self.assertIn(
@@ -670,14 +724,14 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             ],
             clean_calls,
         )
-        self.assertIn(
+        git_check.assert_called_with(
+            self.root,
             [
                 "merge-base",
                 "--is-ancestor",
                 heads["implementation_base"],
                 heads["monitor_implementation_head"],
             ],
-            clean_calls,
         )
 
         with mock.patch.object(monitor, "_git_text", return_value=" M changed.py"):
@@ -694,6 +748,29 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         with mock.patch.object(monitor, "_git_text", side_effect=mismatch_git):
             with self.assertRaisesRegex(monitor.MonitorError, "does not match"):
                 monitor._assert_start_git_contract(config)
+
+    def test_start_git_contract_accepts_content_bound_squash_equivalent_head(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+        heads = config["exact_heads"]
+
+        def squash_git(_repo_root: Path, argv: list[str], _label: str) -> str:
+            if argv == ["status", "--porcelain=v1"]:
+                return ""
+            if argv == ["rev-parse", "HEAD"]:
+                return str(heads["monitor_implementation_head"])
+            if argv == [
+                "cat-file",
+                "-e",
+                f"{heads['monitor_implementation_head']}^{{commit}}",
+            ]:
+                return ""
+            raise AssertionError(f"unexpected git text call: {argv}")
+
+        with mock.patch.object(monitor, "_git_text", side_effect=squash_git), mock.patch.object(
+            monitor, "_git_check", return_value=False
+        ):
+            monitor._assert_start_git_contract(config)
 
     def test_no_daemon_start_persists_first_sample_without_running_process(self) -> None:
         digest = "a" * 64
@@ -1495,6 +1572,61 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["terminal_rollback_receipt_invalid"])
         self.assertIn("authority digest", envelope["note"])
+
+    def test_status_rejects_rolled_back_when_shadow_database_reappears(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            backup = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/recreated/control.db"
+            )
+            snapshot = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/recreated/audit.db"
+            )
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_bytes(b"backup")
+            snapshot.write_bytes(b"snapshot")
+            monitor._atomic_write_json(
+                self.state_dir / "rollback-receipt.json",
+                {
+                    "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
+                    "status": "pass",
+                    "workflow": "heartbeat",
+                    "authority": "file_artifacts",
+                    "db_authority_enabled": False,
+                    "authority_input_digest": digest,
+                    "file_authority_view_recreated": True,
+                    "shadow_database_removed": True,
+                    "recoverable_local_backup_created": True,
+                    "recoverable_local_backup_path": backup.relative_to(self.root).as_posix(),
+                    "recoverable_local_backup_sha256": hashlib.sha256(b"backup").hexdigest(),
+                    "audit_snapshot_database": snapshot.relative_to(self.root).as_posix(),
+                    "audit_snapshot_sha256": hashlib.sha256(b"snapshot").hexdigest(),
+                    "parity_percent": 100,
+                    "parity": {"status": "pass", "percent": 100, "mismatch_count": 0},
+                },
+            )
+            (self.root / "state/agentic-os").mkdir(parents=True, exist_ok=True)
+            (self.root / "state/agentic-os/control.db").write_bytes(b"recreated")
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "rolled_back", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_rollback_receipt_invalid"])
+        self.assertIn("shadow database exists", envelope["note"])
 
     def test_resume_rejects_tampered_authority_input_paths_before_sampling(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
