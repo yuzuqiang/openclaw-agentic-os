@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -61,11 +62,40 @@ class HmacSha256Verifier:
     @classmethod
     def from_key_file(cls, path: str | os.PathLike[str]) -> "HmacSha256Verifier":
         key_path = os.fspath(path)
-        mode = os.stat(key_path).st_mode & 0o777
-        if mode != 0o600:
-            raise RuntimeAttestationError("runtime attestation HMAC key file must be mode 0600")
-        with open(key_path, "rb") as handle:
-            return cls(handle.read())
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(key_path, flags)
+        except OSError as exc:
+            raise RuntimeAttestationError(
+                "runtime attestation HMAC key file is unreadable"
+            ) from exc
+        try:
+            descriptor = os.fstat(fd)
+            if not stat.S_ISREG(descriptor.st_mode):
+                raise RuntimeAttestationError(
+                    "runtime attestation HMAC key file must be a regular file"
+                )
+            if descriptor.st_uid != os.getuid():
+                raise RuntimeAttestationError(
+                    "runtime attestation HMAC key file must be owned by the current user"
+                )
+            if descriptor.st_nlink != 1:
+                raise RuntimeAttestationError(
+                    "runtime attestation HMAC key file must have exactly one link"
+                )
+            mode = descriptor.st_mode & 0o777
+            if mode != 0o600:
+                raise RuntimeAttestationError(
+                    "runtime attestation HMAC key file must be mode 0600"
+                )
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                return cls(handle.read())
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
     def verify(self, *, payload: bytes, signature: str, algorithm: str) -> bool:
         if algorithm != "hmac-sha256":

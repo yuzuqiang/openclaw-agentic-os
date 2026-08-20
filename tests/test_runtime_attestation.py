@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import os
 import tempfile
 import unittest
 from copy import deepcopy
@@ -15,6 +17,7 @@ from agentic_os.openclaw_adapter import (
 )
 from agentic_os.runtime_attestation import (
     GatewayCliAttestedTransport,
+    HmacSha256Verifier,
     RuntimeAttestationError,
     canonical_json_bytes,
 )
@@ -144,6 +147,49 @@ class DigestVerifier:
         return algorithm == "ed25519" and signature == hashlib.sha256(
             b"test-verifier:" + payload
         ).hexdigest()
+
+
+class HmacSha256VerifierTests(unittest.TestCase):
+    def test_key_file_is_verified_and_read_through_single_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            original_open = os.open
+            observed: dict[str, int] = {}
+
+            def checked_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = original_open(path, flags, mode, dir_fd=dir_fd)
+                observed["fd"] = fd
+                os.replace(key_path, key_path.with_name("rotated.key"))
+                key_path.write_bytes(b"b" * 32)
+                key_path.chmod(0o600)
+                return fd
+
+            with patch("agentic_os.runtime_attestation.os.open", side_effect=checked_open):
+                verifier = HmacSha256Verifier.from_key_file(key_path)
+
+        payload = b"payload"
+        signature = hmac.new(b"a" * 32, payload, hashlib.sha256).hexdigest()
+        self.assertIn("fd", observed)
+        self.assertTrue(
+            verifier.verify(
+                payload=payload,
+                signature=signature,
+                algorithm="hmac-sha256",
+            )
+        )
+
+    def test_key_file_rejects_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target.key"
+            target.write_bytes(b"a" * 32)
+            target.chmod(0o600)
+            link = Path(directory) / "attestation.key"
+            link.symlink_to(target)
+
+            with self.assertRaisesRegex(RuntimeAttestationError, "unreadable"):
+                HmacSha256Verifier.from_key_file(link)
 
 
 class FakeAttestedTransport:

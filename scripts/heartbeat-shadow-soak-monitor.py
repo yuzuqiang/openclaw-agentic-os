@@ -59,6 +59,7 @@ INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV = (
     "AGENTIC_OS_INDEPENDENT_VALIDATION_ANCHOR_HMAC_KEY"
 )
 INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES = 32
+_ACTIVE_SIGNAL_CONFIG: Mapping[str, Any] | None = None
 
 
 class MonitorError(RuntimeError):
@@ -271,6 +272,12 @@ def _load_config(state_dir: Path) -> dict[str, Any]:
     config = _read_json(state_dir / "monitor-config.json")
     if config.get("schema_version") != SCHEMA_CONFIG:
         raise MonitorError("unsupported monitor config schema")
+    return config
+
+
+def _load_validated_resume_config(state_dir: Path) -> dict[str, Any]:
+    config = _load_config(state_dir)
+    _validate_resume_config_paths(state_dir, config)
     return config
 
 
@@ -505,6 +512,7 @@ def _envelope(
         try:
             receipt = _read_json(core_receipt_path)
             validate_heartbeat_soak_receipt(receipt)
+            _validate_receipt_config_binding(config, receipt)
         except (HeartbeatShadowError, MonitorError):
             if status != "failed_closed":
                 raise
@@ -1179,7 +1187,11 @@ def _handle_signal(signum: int, frame: object) -> None:
     state_dir = Path(os.environ.get("HEARTBEAT_SHADOW_MONITOR_STATE_DIR", ""))
     if state_dir:
         try:
-            config = _load_config(state_dir)
+            config = (
+                _ACTIVE_SIGNAL_CONFIG
+                if _ACTIVE_SIGNAL_CONFIG is not None
+                else _load_validated_resume_config(state_dir)
+            )
             status = "stopped" if _stop_requested(config) else "failed_closed"
             violation = None if status == "stopped" else f"signal_{signum}"
             exit_code = 0 if status == "stopped" else 2
@@ -1190,15 +1202,16 @@ def _handle_signal(signum: int, frame: object) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    global _ACTIVE_SIGNAL_CONFIG
     state_dir = args.state_dir.expanduser().resolve()
     os.environ["HEARTBEAT_SHADOW_MONITOR_STATE_DIR"] = str(state_dir)
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
-    config = _load_config(state_dir)
     try:
-        _validate_resume_config_paths(state_dir, config)
+        config = _load_validated_resume_config(state_dir)
     except MonitorError:
         return 2
+    _ACTIVE_SIGNAL_CONFIG = config
     try:
         _assert_start_git_contract(config)
     except MonitorError as exc:
@@ -1311,8 +1324,7 @@ def run(args: argparse.Namespace) -> int:
 
 def stop(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
-    config = _load_config(state_dir)
-    _validate_resume_config_paths(state_dir, config)
+    config = _load_validated_resume_config(state_dir)
     request = {
         "schema_version": SCHEMA_STOP,
         "status": "requested",
@@ -1344,7 +1356,7 @@ def status(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     envelope = _read_json(state_dir / "monitor-envelope.json")
     try:
-        config = _load_config(state_dir)
+        config = _load_validated_resume_config(state_dir)
         refreshed_status = str(envelope.get("status", "unknown"))
         existing_violations = envelope.get("violations")
         violations = (
@@ -1406,7 +1418,7 @@ def status(args: argparse.Namespace) -> int:
 
 def rollback(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
-    config = _load_config(state_dir)
+    config = _load_validated_resume_config(state_dir)
     pid = _load_pid(_path_from_config(config, "pidfile_path"))
     if pid and _pid_alive(pid) and not args.allow_running:
         raise MonitorError("refusing rollback while monitor process is active")

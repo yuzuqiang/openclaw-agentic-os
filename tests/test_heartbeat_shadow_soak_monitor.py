@@ -84,6 +84,8 @@ def _pass_sample(
 
 class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
     def setUp(self) -> None:
+        monitor._ACTIVE_SIGNAL_CONFIG = None
+        self.addCleanup(setattr, monitor, "_ACTIVE_SIGNAL_CONFIG", None)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
@@ -1229,6 +1231,48 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
         self.assertIn("terminal monitor status requires core receipt", envelope["note"])
 
+    def test_status_rejects_terminal_receipt_from_other_monitor_config(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id="other-run",
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=3600,
+            )
+            for index in range(25):
+                sampled_at = 1_700_000_000_000 + index * 3_600_000
+                receipt = monitor.append_heartbeat_soak_sample(
+                    receipt,
+                    _pass_sample(sampled_at, digest, sampled_at),
+                )
+            self.assertEqual(receipt["status"], "complete")
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
+        self.assertIn("run_id", envelope["note"])
+
     def test_stop_revalidates_saved_paths_before_writing_request(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
@@ -1247,6 +1291,29 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 )
 
         self.assertFalse(tampered_stop_path.exists())
+
+    def test_rollback_revalidates_saved_paths_before_receipt_or_mutation(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            tampered_envelope = self.root / "outside-monitor-envelope.json"
+            config["monitor_envelope_path"] = str(tampered_envelope)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+
+            with mock.patch.object(
+                monitor, "force_heartbeat_file_authority_rollback"
+            ) as rollback:
+                with self.assertRaisesRegex(monitor.MonitorError, "monitor_envelope_path"):
+                    monitor.rollback(
+                        Namespace(
+                            state_dir=self.state_dir,
+                            rollback_id="tampered-config",
+                            allow_running=True,
+                        )
+                    )
+
+        rollback.assert_not_called()
+        self.assertFalse(tampered_envelope.exists())
 
     def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
@@ -1274,7 +1341,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             os.environ,
             {"HEARTBEAT_SHADOW_MONITOR_STATE_DIR": str(self.state_dir)},
         ), mock.patch.object(
-            monitor, "_load_config", return_value={"state_dir": str(self.state_dir)}
+            monitor,
+            "_load_validated_resume_config",
+            return_value={"state_dir": str(self.state_dir)},
         ), mock.patch.object(
             monitor, "_stop_requested", return_value=False
         ), mock.patch.object(
@@ -1295,7 +1364,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             os.environ,
             {"HEARTBEAT_SHADOW_MONITOR_STATE_DIR": str(self.state_dir)},
         ), mock.patch.object(
-            monitor, "_load_config", return_value={"state_dir": str(self.state_dir)}
+            monitor,
+            "_load_validated_resume_config",
+            return_value={"state_dir": str(self.state_dir)},
         ), mock.patch.object(
             monitor, "_stop_requested", return_value=True
         ), mock.patch.object(
@@ -1309,6 +1380,34 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {"state_dir": str(self.state_dir)},
             status="stopped",
             violation=None,
+        )
+
+    def test_signal_uses_active_validated_config_when_disk_config_is_tampered(self) -> None:
+        active_config = {
+            "state_dir": str(self.state_dir),
+            "stop_request_path": str(self.state_dir / "stop-request.json"),
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"HEARTBEAT_SHADOW_MONITOR_STATE_DIR": str(self.state_dir)},
+        ), mock.patch.object(
+            monitor, "_ACTIVE_SIGNAL_CONFIG", active_config
+        ), mock.patch.object(
+            monitor, "_load_validated_resume_config"
+        ) as load_config, mock.patch.object(
+            monitor, "_stop_requested", return_value=False
+        ), mock.patch.object(
+            monitor, "_persist_envelope"
+        ) as persist:
+            with self.assertRaises(SystemExit) as raised:
+                monitor._handle_signal(signal.SIGTERM, None)
+
+        self.assertEqual(raised.exception.code, 2)
+        load_config.assert_not_called()
+        persist.assert_called_once_with(
+            active_config,
+            status="failed_closed",
+            violation=f"signal_{signal.SIGTERM}",
         )
 
 
