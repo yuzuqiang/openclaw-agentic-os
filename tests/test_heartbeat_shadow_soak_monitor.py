@@ -112,6 +112,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        self.verifier_session_key_sha256 = hashlib.sha256(
+            b"phase-c-session"
+        ).hexdigest()
         lifecycle = {
             "status": "pass",
             "immutable_inputs": {
@@ -136,7 +139,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
-                    "session_key": "phase-c-session",
+                    "session_key_sha256": self.verifier_session_key_sha256,
                 },
             },
             self.anchor_key,
@@ -151,7 +154,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
-                    "session_key": "phase-c-session",
+                    "session_key_sha256": self.verifier_session_key_sha256,
                 },
                 "invocation": {
                     "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
@@ -287,7 +290,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
-                    "session_key": "phase-c-session",
+                    "session_key_sha256": self.verifier_session_key_sha256,
                 },
                 "invocation": {
                     "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
@@ -304,6 +307,34 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "authenticated record hash"):
                 monitor._build_config(self.args)
 
+    def test_predecessor_validation_rejects_plaintext_verifier_session_key(self) -> None:
+        lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
+        validation_sha = _write_json(
+            self.validation,
+            {
+                "status": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key": "phase-c-session",
+                },
+                "invocation": {
+                    "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
+                    "completed_at": "2026-08-15T00:00:00Z",
+                },
+                "authenticated_record": {
+                    "path": str(self.validation_anchor.relative_to(self.root)),
+                    "sha256": hashlib.sha256(b"irrelevant").hexdigest(),
+                },
+            },
+        )
+        self.args.expected_independent_validation_sha256 = validation_sha
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(monitor.MonitorError, "must redact session_key"):
+                monitor._build_config(self.args)
+
     def test_predecessor_validation_rejects_unsigned_authenticated_record(self) -> None:
         lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
         unsigned_anchor_sha = _write_json(
@@ -317,7 +348,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
-                    "session_key": "phase-c-session",
+                    "session_key_sha256": self.verifier_session_key_sha256,
                 },
             },
         )
@@ -330,7 +361,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
-                    "session_key": "phase-c-session",
+                    "session_key_sha256": self.verifier_session_key_sha256,
                 },
                 "invocation": {
                     "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
@@ -363,7 +394,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "verifier": {
                         "identity": "security-engineer-phase-c",
                         "role": "independent_verifier",
-                        "session_key": "phase-c-session",
+                        "session_key_sha256": self.verifier_session_key_sha256,
                     },
                 },
                 weak_key,
@@ -378,7 +409,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
-                    "session_key": "phase-c-session",
+                    "session_key_sha256": self.verifier_session_key_sha256,
                 },
                 "invocation": {
                     "command": "python -m unittest tests.test_heartbeat_shadow_soak_monitor",
@@ -1078,7 +1109,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         (self.state_dir / "monitor-config.json").write_text("{", encoding="utf-8")
 
-        result = monitor.status(Namespace(state_dir=self.state_dir))
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            result = monitor.status(Namespace(state_dir=self.state_dir))
 
         self.assertEqual(result, 2)
         envelope = json.loads(
@@ -1230,6 +1262,112 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
         self.assertIn("terminal monitor status requires core receipt", envelope["note"])
+
+    def test_status_requires_complete_core_receipt_for_complete_envelope(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            receipt = monitor.append_heartbeat_soak_sample(
+                receipt,
+                _pass_sample(1_700_000_000_000, digest),
+            )
+            self.assertEqual(receipt["status"], "in_progress")
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [],
+                },
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
+        self.assertIn("requires complete core receipt", envelope["note"])
+
+    def test_status_requires_snapshot_ledger_for_complete_envelope(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            for index in range(289):
+                sampled_at = 1_700_000_000_000 + index * 300_000
+                receipt = monitor.append_heartbeat_soak_sample(
+                    receipt,
+                    _pass_sample(sampled_at, digest, sampled_at),
+                )
+            self.assertEqual(receipt["status"], "complete")
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
+        self.assertIn("requires runtime snapshot ledger", envelope["note"])
+
+    def test_status_rejects_symlinked_envelope_before_read_or_write(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        outside = self.root / "outside-envelope.json"
+        outside.write_text('{"status":"running"}', encoding="utf-8")
+        try:
+            (self.state_dir / "monitor-envelope.json").symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"symlink unavailable: {exc}")
+
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(monitor.MonitorError, "must not be a symlink"):
+                monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(outside.read_text(encoding="utf-8"), '{"status":"running"}')
 
     def test_status_rejects_terminal_receipt_from_other_monitor_config(self) -> None:
         digest = "a" * 64

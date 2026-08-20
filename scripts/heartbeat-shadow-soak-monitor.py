@@ -50,11 +50,11 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "b9d2925599abb69e84d545bf354979031d4450860b6a513bee9c934340a38bbc"
+    "73f894f16573f3d90d87bd1ddf8c0c2f0715adcf551bc793ca5a635f28be2554"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
-EXPECTED_IMPLEMENTATION_BASE = "7e285f405edf9c3aa008ce555fefc1e2640cc2f4"
+EXPECTED_IMPLEMENTATION_BASE = "5e9178e804b7690d831103b4fadf733e0bcf6ffa"
 INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV = (
     "AGENTIC_OS_INDEPENDENT_VALIDATION_ANCHOR_HMAC_KEY"
 )
@@ -160,6 +160,26 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise MonitorError(f"JSON object required: {path}")
     return value
+
+
+def _assert_status_read_paths_safe(state_dir: Path) -> Path:
+    raw_state_dir = state_dir.expanduser()
+    if raw_state_dir.is_symlink():
+        raise MonitorError("status state_dir must not be a symlink")
+    resolved_state_dir = _resolve_inside_repo(
+        raw_state_dir,
+        REPO_ROOT.resolve(),
+        "status state_dir",
+    )
+    if not resolved_state_dir.is_dir():
+        raise MonitorError("status state_dir is missing")
+    envelope_path = raw_state_dir / "monitor-envelope.json"
+    if envelope_path.is_symlink():
+        raise MonitorError("status monitor envelope must not be a symlink")
+    resolved_envelope = resolved_state_dir / "monitor-envelope.json"
+    if not resolved_envelope.exists():
+        raise MonitorError("status monitor envelope is missing")
+    return resolved_state_dir
 
 
 def _sha256_file(path: Path) -> str:
@@ -533,10 +553,11 @@ def _validate_independent_validation_provenance(
     verifier = validation.get("verifier")
     if not isinstance(verifier, Mapping):
         raise MonitorError("independent validation verifier provenance is missing")
-    for key in ("identity", "role", "session_key"):
+    for key in ("identity", "role"):
         value = verifier.get(key)
         if not isinstance(value, str) or not value:
             raise MonitorError(f"independent validation verifier {key} is missing")
+    _verifier_session_key_sha256(verifier, "independent validation verifier")
     if verifier.get("identity") == "lifecycle_producer":
         raise MonitorError("independent validation must not be self-produced")
     implementation_head = validation.get("implementation_head")
@@ -550,6 +571,15 @@ def _validate_independent_validation_provenance(
         if not isinstance(value, str) or not value:
             raise MonitorError(f"independent validation invocation {key} is missing")
     _validate_independent_validation_anchor(config, validation)
+
+
+def _verifier_session_key_sha256(verifier: Mapping[str, Any], label: str) -> str:
+    digest = verifier.get("session_key_sha256")
+    if _is_sha256(digest):
+        return str(digest)
+    if "session_key" in verifier:
+        raise MonitorError(f"{label} must redact session_key to session_key_sha256")
+    raise MonitorError(f"{label} session_key_sha256 is missing")
 
 
 def _validate_independent_validation_anchor(
@@ -593,11 +623,23 @@ def _validate_independent_validation_anchor(
     record_verifier = record.get("verifier")
     if not isinstance(record_verifier, Mapping):
         raise MonitorError("independent validation authenticated record verifier missing")
-    for key in ("identity", "role", "session_key"):
+    for key in ("identity", "role"):
         if record_verifier.get(key) != verifier.get(key):
             raise MonitorError(
                 f"independent validation authenticated record verifier {key} mismatch"
             )
+    record_session_digest = _verifier_session_key_sha256(
+        record_verifier,
+        "independent validation authenticated record verifier",
+    )
+    validation_session_digest = _verifier_session_key_sha256(
+        verifier,
+        "independent validation verifier",
+    )
+    if record_session_digest != validation_session_digest:
+        raise MonitorError(
+            "independent validation authenticated record verifier session digest mismatch"
+        )
 
 
 def _envelope(
@@ -628,6 +670,10 @@ def _envelope(
             receipt = _read_json(core_receipt_path)
             validate_heartbeat_soak_receipt(receipt)
             _validate_receipt_config_binding(config, receipt)
+            if status == "complete" and receipt.get("status") != "complete":
+                raise MonitorError("terminal monitor status requires complete core receipt")
+            if status == "complete" and not snapshot_receipts_path.exists():
+                raise MonitorError("terminal monitor status requires runtime snapshot ledger")
         except (HeartbeatShadowError, MonitorError):
             if status != "failed_closed":
                 raise
@@ -1475,7 +1521,7 @@ def stop(args: argparse.Namespace) -> int:
 
 
 def status(args: argparse.Namespace) -> int:
-    state_dir = args.state_dir.expanduser().resolve()
+    state_dir = _assert_status_read_paths_safe(args.state_dir)
     envelope = _read_json(state_dir / "monitor-envelope.json")
     try:
         config = _load_validated_resume_config(state_dir)
