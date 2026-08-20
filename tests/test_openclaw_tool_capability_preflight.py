@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -3758,9 +3759,114 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["status"], "fail")
             self.assertFalse(payload["runtime_ready"])
-            self.assertIn("attestation key file is unreadable", payload["error"])
+            self.assertIn("attestation key file must be a regular file", payload["error"])
             with open(evidence_path, encoding="utf-8") as handle:
                 self.assertEqual(json.load(handle), payload)
+
+    def test_persistent_attested_preflight_key_file_rejects_symlink(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target.key"
+            target.write_bytes(b"a" * 32)
+            target.chmod(0o600)
+            link = Path(directory) / "attestation.key"
+            link.symlink_to(target)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(link)},
+            ):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file is unreadable",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_rejects_wrong_mode(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o644)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file must be mode 0600",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_rejects_hardlink(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            linked_key_path = Path(directory) / "linked-attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            os.link(key_path, linked_key_path)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file must have exactly one link",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_rejects_wrong_owner(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            descriptor = mock.Mock(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=os.getuid() + 1,
+                st_nlink=1,
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ), mock.patch.object(module.os, "fstat", return_value=descriptor):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file must be owned by the current user",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_uses_single_descriptor(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            original_open = module.os.open
+            observed: dict[str, int] = {}
+
+            def checked_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = original_open(path, flags, mode, dir_fd=dir_fd)
+                observed["fd"] = fd
+                os.replace(key_path, key_path.with_name("rotated.key"))
+                key_path.write_bytes(b"b" * 32)
+                key_path.chmod(0o600)
+                return fd
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ), mock.patch.object(module.os, "open", side_effect=checked_open):
+                key = module._read_attestation_key_from_env()
+
+        self.assertIn("fd", observed)
+        self.assertEqual(key, b"a" * 32)
 
     def test_persistent_attested_preflight_rejects_forged_hmac_despite_status_pass(
         self,

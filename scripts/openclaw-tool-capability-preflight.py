@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -1815,21 +1816,51 @@ def _read_attestation_key_from_env() -> bytes:
     key_path = os.environ.get("OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE", "").strip()
     if not key_path:
         raise AdapterContractError("persistent preflight requires attestation key file")
-    path = Path(key_path).resolve()
+    path = Path(key_path).expanduser()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        mode = path.stat().st_mode & 0o777
+        fd = os.open(path, flags)
     except OSError as exc:
         raise AdapterContractError(
             "persistent preflight attestation key file is unreadable"
         ) from exc
-    if mode != 0o600:
-        raise AdapterContractError("persistent preflight attestation key file must be mode 0600")
     try:
-        key = path.read_bytes()
-    except OSError as exc:
-        raise AdapterContractError(
-            "persistent preflight attestation key file is unreadable"
-        ) from exc
+        try:
+            descriptor = os.fstat(fd)
+        except OSError as exc:
+            raise AdapterContractError(
+                "persistent preflight attestation key file is unreadable"
+            ) from exc
+        if not stat.S_ISREG(descriptor.st_mode):
+            raise AdapterContractError(
+                "persistent preflight attestation key file must be a regular file"
+            )
+        if descriptor.st_uid != os.getuid():
+            raise AdapterContractError(
+                "persistent preflight attestation key file must be owned by the current user"
+            )
+        if descriptor.st_nlink != 1:
+            raise AdapterContractError(
+                "persistent preflight attestation key file must have exactly one link"
+            )
+        mode = descriptor.st_mode & 0o777
+        if mode != 0o600:
+            raise AdapterContractError(
+                "persistent preflight attestation key file must be mode 0600"
+            )
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                key = handle.read()
+        except OSError as exc:
+            raise AdapterContractError(
+                "persistent preflight attestation key file is unreadable"
+            ) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if len(key) != 32:
         raise AdapterContractError("persistent preflight attestation key must be 32 bytes")
     return key
