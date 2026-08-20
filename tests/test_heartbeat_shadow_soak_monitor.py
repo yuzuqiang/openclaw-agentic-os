@@ -9,6 +9,7 @@ import signal
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -434,19 +435,26 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         repo_root = SCRIPT_PATH.parents[1]
         validation_path = (
             repo_root
-            / "docs/runtime-evidence/phase-b-p03-independent-validation-20260814T032902Z.json"
+            / "docs/runtime-evidence/phase-b-p03-independent-validation-20260820T165825Z.json"
         )
         anchor_path = (
             repo_root
-            / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260814T032914Z.json"
+            / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260820T165825Z.json"
         )
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
-        public_fixture_key = "phase-c-terminal-checkpoint-anchor-20260814T032914Z"
+        public_fixture_key = "phase-c-terminal-checkpoint-anchor-20260820T165825Z"
+        completed_at = datetime.fromisoformat(
+            validation["validated_at_utc"].replace("Z", "+00:00")
+        )
+        implementation_committed_at = datetime.fromisoformat(
+            validation["invocation"]["implementation_commit_committed_at"]
+        )
 
         with mock.patch.dict(
             os.environ,
             {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: public_fixture_key},
         ):
+            self.assertGreaterEqual(completed_at, implementation_committed_at)
             self.assertEqual(
                 monitor._sha256_file(validation_path),
                 monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,

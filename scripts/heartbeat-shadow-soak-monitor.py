@@ -53,7 +53,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "73f894f16573f3d90d87bd1ddf8c0c2f0715adcf551bc793ca5a635f28be2554"
+    "be0b11df5636c53f9beb83b7a8f9370bf31a1cc609ccb9507616cb703a95971a"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -1702,7 +1702,7 @@ def parser() -> argparse.ArgumentParser:
         "--independent-validation-path",
         type=Path,
         default=REPO_ROOT
-        / "docs/runtime-evidence/phase-b-p03-independent-validation-20260814T032902Z.json",
+        / "docs/runtime-evidence/phase-b-p03-independent-validation-20260820T165825Z.json",
     )
     start_cmd.add_argument("--runtime-head", default=EXPECTED_RUNTIME_HEAD)
     start_cmd.add_argument(
