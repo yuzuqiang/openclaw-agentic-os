@@ -1816,10 +1816,20 @@ def _read_attestation_key_from_env() -> bytes:
     if not key_path:
         raise AdapterContractError("persistent preflight requires attestation key file")
     path = Path(key_path).resolve()
-    mode = path.stat().st_mode & 0o777
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError as exc:
+        raise AdapterContractError(
+            "persistent preflight attestation key file is unreadable"
+        ) from exc
     if mode != 0o600:
         raise AdapterContractError("persistent preflight attestation key file must be mode 0600")
-    key = path.read_bytes()
+    try:
+        key = path.read_bytes()
+    except OSError as exc:
+        raise AdapterContractError(
+            "persistent preflight attestation key file is unreadable"
+        ) from exc
     if len(key) != 32:
         raise AdapterContractError("persistent preflight attestation key must be 32 bytes")
     return key

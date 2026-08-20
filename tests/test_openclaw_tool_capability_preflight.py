@@ -451,7 +451,7 @@ def build_persistent_evidence(
     return evidence
 
 
-def run_persistent_preflight(evidence, root, key_path):
+def run_persistent_preflight(evidence, root, key_path, write_evidence_path=None):
     with tempfile.TemporaryDirectory(prefix="persistent-evidence-") as evidence_dir:
         evidence_path = os.path.join(evidence_dir, "persistent-evidence.json")
         with open(evidence_path, "w", encoding="utf-8") as handle:
@@ -460,14 +460,17 @@ def run_persistent_preflight(evidence, root, key_path):
         env["OPENCLAW_INSTALL_ROOT"] = root
         env["OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE"] = key_path
         env["PATH"] = os.path.join(root, "bin") + os.pathsep + env.get("PATH", "")
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "--persistent-attested-preflight-json-file",
+            evidence_path,
+            "--json",
+        ]
+        if write_evidence_path is not None:
+            command.extend(["--write-evidence", write_evidence_path])
         return subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPT),
-                "--persistent-attested-preflight-json-file",
-                evidence_path,
-                "--json",
-            ],
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -3706,6 +3709,58 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             rpc_evidence["subagents.allowLease.status"]["live_reachability"],
             "reachable",
         )
+
+    def test_persistent_attested_preflight_missing_key_file_writes_fail_closed_evidence(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            _key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence_path = os.path.join(install_root, "fail-evidence.json")
+
+            result = run_persistent_preflight(
+                evidence,
+                install_root,
+                os.path.join(install_root, "missing-attestation.key"),
+                write_evidence_path=evidence_path,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["runtime_ready"])
+            self.assertIn("attestation key file is unreadable", payload["error"])
+            with open(evidence_path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), payload)
+
+    def test_persistent_attested_preflight_unreadable_key_file_writes_fail_closed_evidence(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            _key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            key_directory = os.path.join(install_root, "attestation-key-dir")
+            os.mkdir(key_directory, 0o600)
+            evidence_path = os.path.join(install_root, "fail-evidence.json")
+
+            result = run_persistent_preflight(
+                evidence,
+                install_root,
+                key_directory,
+                write_evidence_path=evidence_path,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["runtime_ready"])
+            self.assertIn("attestation key file is unreadable", payload["error"])
+            with open(evidence_path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), payload)
 
     def test_persistent_attested_preflight_rejects_forged_hmac_despite_status_pass(
         self,

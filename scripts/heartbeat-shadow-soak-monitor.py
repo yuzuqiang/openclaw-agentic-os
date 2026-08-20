@@ -499,6 +499,8 @@ def _envelope(
     core_receipt_path = _path_from_config(config, "core_soak_receipt_path")
     snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
     receipt: dict[str, Any] | None = None
+    if status == "complete" and not core_receipt_path.exists():
+        raise MonitorError("terminal monitor status requires core receipt")
     if core_receipt_path.exists():
         try:
             receipt = _read_json(core_receipt_path)
@@ -1310,6 +1312,7 @@ def run(args: argparse.Namespace) -> int:
 def stop(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     config = _load_config(state_dir)
+    _validate_resume_config_paths(state_dir, config)
     request = {
         "schema_version": SCHEMA_STOP,
         "status": "requested",
@@ -1373,20 +1376,26 @@ def status(args: argparse.Namespace) -> int:
             )
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
     except (HeartbeatShadowError, MonitorError) as exc:
-        if str(envelope.get("status", "unknown")) == "running":
+        current_status = str(envelope.get("status", "unknown"))
+        if current_status in {"running", "complete"}:
             existing_violations = envelope.get("violations")
             violations = (
                 [str(item) for item in existing_violations]
                 if isinstance(existing_violations, list)
                 else []
             )
-            if "monitor_state_unreadable" not in violations:
-                violations.append("monitor_state_unreadable")
+            violation = (
+                "monitor_state_unreadable"
+                if current_status == "running"
+                else "terminal_core_receipt_invalid"
+            )
+            if violation not in violations:
+                violations.append(violation)
             envelope = {
                 **dict(envelope),
                 "status": "failed_closed",
                 "violations": violations,
-                "note": f"running monitor state is unreadable: {exc}",
+                "note": f"{current_status} monitor state is unreadable: {exc}",
             }
             _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
             print(json.dumps(envelope, sort_keys=True, indent=2))

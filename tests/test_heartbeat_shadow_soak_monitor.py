@@ -1209,6 +1209,45 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             "running monitor sample monotonic window is overdue",
         )
 
+    def test_status_requires_core_receipt_for_complete_envelope(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
+        self.assertIn("terminal monitor status requires core receipt", envelope["note"])
+
+    def test_stop_revalidates_saved_paths_before_writing_request(self) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            tampered_stop_path = self.root / "outside-stop-request.json"
+            config["stop_request_path"] = str(tampered_stop_path)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+
+            with self.assertRaisesRegex(monitor.MonitorError, "stop_request_path"):
+                monitor.stop(
+                    Namespace(
+                        state_dir=self.state_dir,
+                        reason="test",
+                        wait_seconds=0,
+                    )
+                )
+
+        self.assertFalse(tampered_stop_path.exists())
+
     def test_rollback_refuses_active_monitor_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
