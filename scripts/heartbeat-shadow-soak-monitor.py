@@ -254,14 +254,6 @@ def _git_check(repo_root: Path, args: list[str]) -> bool:
     return result.returncode == 0
 
 
-def _predecessor_receipts_are_content_bound(config: Mapping[str, Any]) -> bool:
-    try:
-        _verified_predecessor_summary(config)
-    except MonitorError:
-        return False
-    return True
-
-
 def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
     repo_root = Path(str(config["repo_root"])).resolve()
     status = _git_text(repo_root, ["status", "--porcelain=v1"], "status")
@@ -289,10 +281,8 @@ def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
         ],
     ):
         return
-    if _predecessor_receipts_are_content_bound(config):
-        return
     raise MonitorError(
-        "implementation base is neither an ancestor nor content-bound predecessor evidence"
+        "implementation base must be an ancestor of the monitor implementation head"
     )
 
 
@@ -799,6 +789,7 @@ def _envelope(
                 config,
                 snapshot_doc,
                 samples=samples if receipt else None,
+                allow_trailing=status != "complete",
             )
         except MonitorError:
             if status != "failed_closed":
@@ -1259,6 +1250,7 @@ def _validate_runtime_snapshot_receipts(
     document: Mapping[str, Any],
     *,
     samples: Sequence[Mapping[str, Any]] | None = None,
+    allow_trailing: bool = True,
 ) -> list[dict[str, Any]]:
     if document.get("schema_version") != SCHEMA_SNAPSHOTS:
         raise MonitorError("unsupported runtime snapshot receipt schema")
@@ -1271,6 +1263,8 @@ def _validate_runtime_snapshot_receipts(
         raise MonitorError("runtime snapshot receipts must be a list")
     trailing_snapshot: object | None = None
     if samples is not None and len(raw_snapshots) == len(samples) + 1:
+        if not allow_trailing:
+            raise MonitorError("runtime snapshot trailing receipt is unreconciled")
         trailing_snapshot = raw_snapshots[-1]
         raw_snapshots = raw_snapshots[:-1]
     if samples is not None and len(raw_snapshots) != len(samples):
@@ -1300,13 +1294,103 @@ def _validate_runtime_snapshot_receipts(
     return snapshots
 
 
+def _runtime_snapshot_orphans_path(config: Mapping[str, Any]) -> Path:
+    return _path_from_config(config, "runtime_snapshot_receipts_path").with_name(
+        "runtime-snapshot-orphans.json"
+    )
+
+
+def _archive_runtime_snapshot_orphan(
+    config: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    *,
+    reason: str,
+) -> None:
+    path = _runtime_snapshot_orphans_path(config)
+    if path.exists():
+        document = _read_json(path)
+        if document.get("schema_version") != f"{SCHEMA_SNAPSHOTS}.orphans":
+            raise MonitorError("runtime snapshot orphan archive schema is invalid")
+        if document.get("run_id") != config.get("run_id"):
+            raise MonitorError("runtime snapshot orphan archive run_id mismatch")
+        orphans = document.get("orphans")
+        if not isinstance(orphans, list):
+            raise MonitorError("runtime snapshot orphan archive must be a list")
+    else:
+        document = {
+            "schema_version": f"{SCHEMA_SNAPSHOTS}.orphans",
+            "run_id": config["run_id"],
+            "scope": "local_recovery_only",
+            "orphans": [],
+        }
+        orphans = document["orphans"]
+    snapshot_database = str(entry.get("snapshot_database"))
+    snapshot_sha256 = str(entry.get("snapshot_sha256"))
+    for orphan in orphans:
+        if not isinstance(orphan, Mapping):
+            raise MonitorError("runtime snapshot orphan archive entry is invalid")
+        archived = orphan.get("snapshot")
+        if not isinstance(archived, Mapping):
+            raise MonitorError("runtime snapshot orphan archive entry is invalid")
+        if (
+            orphan.get("reason") == reason
+            and archived.get("snapshot_database") == snapshot_database
+            and archived.get("snapshot_sha256") == snapshot_sha256
+        ):
+            document["updated_at"] = _utc_now()
+            _atomic_write_json(path, document)
+            return
+    orphans.append(
+        {
+            "reason": reason,
+            "archived_at": _utc_now(),
+            "snapshot": dict(entry),
+        }
+    )
+    document["updated_at"] = _utc_now()
+    _atomic_write_json(path, document)
+
+
+def _core_samples_for_snapshot_reconciliation(
+    config: Mapping[str, Any],
+) -> list[Mapping[str, Any]] | None:
+    core_receipt_path = _path_from_config(config, "core_soak_receipt_path")
+    if not core_receipt_path.exists():
+        return None
+    receipt = _read_json(core_receipt_path)
+    validate_heartbeat_soak_receipt(receipt)
+    _validate_receipt_config_binding(config, receipt)
+    samples = receipt.get("samples")
+    if not isinstance(samples, list):
+        raise MonitorError("core receipt samples are invalid")
+    return samples
+
+
 def _append_runtime_snapshot_receipt(
     config: Mapping[str, Any], snapshot: Mapping[str, Any]
 ) -> None:
     path = _path_from_config(config, "runtime_snapshot_receipts_path")
     if path.exists():
         document = _read_json(path)
-        snapshots = _validate_runtime_snapshot_receipts(config, document)
+        samples = _core_samples_for_snapshot_reconciliation(config)
+        snapshots = _validate_runtime_snapshot_receipts(
+            config,
+            document,
+            samples=samples,
+        )
+        raw_snapshots = document.get("snapshots")
+        if (
+            samples is not None
+            and isinstance(raw_snapshots, list)
+            and len(raw_snapshots) == len(samples) + 1
+        ):
+            trailing = _validate_runtime_snapshot_entry(config, raw_snapshots[-1])
+            _archive_runtime_snapshot_orphan(
+                config,
+                trailing,
+                reason="unmatched_trailing_before_append",
+            )
+            document["snapshots"] = snapshots
     else:
         document = {
             "schema_version": SCHEMA_SNAPSHOTS,

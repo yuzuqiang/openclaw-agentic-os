@@ -321,6 +321,90 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
         self.assertEqual(envelope["runtime_snapshots"]["snapshots_count"], 1)
 
+    def test_runtime_snapshot_trailing_receipt_is_archived_before_next_append(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=str(config["run_id"]),
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            first_sample = _pass_sample(1_700_000_300_000, digest)
+            next_sample = _pass_sample(1_700_000_900_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, first_sample)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            first_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000300000.db",
+            )
+            orphan_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000600000.db",
+                b"orphan snapshot",
+            )
+            new_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000900000.db",
+                b"new snapshot",
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [first_snapshot, orphan_snapshot],
+                },
+            )
+
+            monitor._append_runtime_snapshot_receipt(config, new_snapshot)
+
+            ledger = json.loads(
+                (self.state_dir / "runtime-snapshot-receipts.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            archive = json.loads(
+                (self.state_dir / "runtime-snapshot-orphans.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            validated = monitor._validate_runtime_snapshot_receipts(
+                config,
+                ledger,
+                samples=[first_sample, next_sample],
+            )
+
+        self.assertEqual(
+            [item["snapshot_database"] for item in ledger["snapshots"]],
+            [first_snapshot["snapshot_database"], new_snapshot["snapshot_database"]],
+        )
+        self.assertEqual(len(archive["orphans"]), 1)
+        self.assertEqual(
+            archive["orphans"][0]["reason"],
+            "unmatched_trailing_before_append",
+        )
+        self.assertEqual(
+            archive["orphans"][0]["snapshot"]["snapshot_database"],
+            orphan_snapshot["snapshot_database"],
+        )
+        self.assertEqual(len(validated), 2)
+
     def test_predecessor_validation_requires_independent_provenance(self) -> None:
         lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
         weak_validation_sha = _write_json(
@@ -749,12 +833,12 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "does not match"):
                 monitor._assert_start_git_contract(config)
 
-    def test_start_git_contract_accepts_content_bound_squash_equivalent_head(self) -> None:
+    def test_start_git_contract_rejects_non_ancestor_despite_valid_predecessor_receipts(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
         heads = config["exact_heads"]
 
-        def squash_git(_repo_root: Path, argv: list[str], _label: str) -> str:
+        def non_ancestor_git(_repo_root: Path, argv: list[str], _label: str) -> str:
             if argv == ["status", "--porcelain=v1"]:
                 return ""
             if argv == ["rev-parse", "HEAD"]:
@@ -767,10 +851,17 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 return ""
             raise AssertionError(f"unexpected git text call: {argv}")
 
-        with mock.patch.object(monitor, "_git_text", side_effect=squash_git), mock.patch.object(
+        with mock.patch.object(
+            monitor, "_git_text", side_effect=non_ancestor_git
+        ), mock.patch.object(
             monitor, "_git_check", return_value=False
+        ), mock.patch.object(
+            monitor,
+            "_verified_predecessor_summary",
+            side_effect=AssertionError("predecessor receipt fallback is unsafe"),
         ):
-            monitor._assert_start_git_contract(config)
+            with self.assertRaisesRegex(monitor.MonitorError, "must be an ancestor"):
+                monitor._assert_start_git_contract(config)
 
     def test_no_daemon_start_persists_first_sample_without_running_process(self) -> None:
         digest = "a" * 64
@@ -1455,6 +1546,76 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
         self.assertIn("requires runtime snapshot ledger", envelope["note"])
+
+    def test_status_rejects_trailing_snapshot_on_complete_envelope(self) -> None:
+        digest = "a" * 64
+        args = Namespace(**{**self.args.__dict__, "interval_seconds": 3600})
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=3600,
+            )
+            snapshots = []
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            for index in range(25):
+                sampled_at = 1_700_000_000_000 + index * 3_600_000
+                receipt = monitor.append_heartbeat_soak_sample(
+                    receipt,
+                    _pass_sample(sampled_at, digest, sampled_at),
+                )
+                snapshots.append(
+                    _snapshot_entry(
+                        self.root,
+                        snapshot_root / f"sample-{sampled_at}.db",
+                        f"snapshot-{index}".encode("utf-8"),
+                    )
+                )
+            self.assertEqual(receipt["status"], "complete")
+            trailing_epoch = 1_700_000_000_000 + 25 * 3_600_000
+            trailing = _snapshot_entry(
+                self.root,
+                snapshot_root / f"sample-{trailing_epoch}.db",
+                b"unmatched terminal trailing snapshot",
+            )
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [*snapshots, trailing],
+                },
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
+        self.assertIn("trailing receipt is unreconciled", envelope["note"])
 
     def test_status_rejects_symlinked_envelope_before_read_or_write(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
