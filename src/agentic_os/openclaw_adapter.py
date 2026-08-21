@@ -1409,6 +1409,15 @@ class OpenClawAdapter:
                 "observed candidate identity requires human reconciliation",
                 candidate_observation=observation,
             )
+        prior_session_metadata = self._session_metadata_by_key.get(session_key)
+        if (
+            prior_session_metadata is not None
+            and prior_session_metadata != dict(metadata)
+        ):
+            raise AdapterContractError(
+                "sessions_spawn session identity is already cached for different "
+                "request metadata"
+            )
         self._session_identity_by_request[request_identity] = session_key
         self._session_metadata_by_key[session_key] = dict(metadata)
         del method
@@ -1509,7 +1518,9 @@ class OpenClawAdapter:
                 and item_spawn_request_session_key is None
                 and item_external_id is None
             ):
-                continue
+                raise AdapterContractError(
+                    f"{method} {label} must include requested session identity"
+                )
             if item_session_key is not None and item_session_key != session_key:
                 raise AdapterContractError(
                     f"{method} {label} identity must match requested session"

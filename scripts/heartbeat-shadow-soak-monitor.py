@@ -46,6 +46,9 @@ SCHEMA_START_RESERVATION = "p03-heartbeat-shadow-monitor-start-reservation.v1"
 SCHEMA_AUTHORITY_INPUT_PATH_BINDING = (
     "p03-heartbeat-shadow-monitor-authority-input-path-binding.v1"
 )
+SCHEMA_CORE_RECEIPT_AUTHENTICATION = (
+    "p03-heartbeat-shadow-core-receipt-authentication.v1"
+)
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 DAEMON_READY_TIMEOUT_SECONDS = 2.0
@@ -53,7 +56,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "34893f84f7bbd23fc4c809c3c42014c895664f513957f8b01be783dac9d4c8f2"
+    "e9fbbb4790e8b8ae2808fa97ea8790d9fbba44966c1b9dfc120258079310e097"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -388,6 +391,78 @@ def _validate_authority_input_path_identity(config: Mapping[str, Any]) -> None:
     _validate_authority_input_path_authentication(config)
 
 
+def _core_receipt_authentication_payload(config: Mapping[str, Any]) -> dict[str, Any]:
+    receipt_path = _path_from_config(config, "core_soak_receipt_path")
+    snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
+    return {
+        "schema_version": SCHEMA_CORE_RECEIPT_AUTHENTICATION,
+        "run_id": config["run_id"],
+        "authority": "file_artifacts",
+        "authority_mode": "file_authority_shadow",
+        "exact_heads": dict(config["exact_heads"]),
+        "authority_input_digest": config["authority_input_digest"],
+        "core_soak_receipt_sha256": _sha256_file(receipt_path),
+        "runtime_snapshot_receipts_sha256": _sha256_file(snapshot_receipts_path),
+    }
+
+
+def _core_receipt_authentication(config: Mapping[str, Any]) -> dict[str, str]:
+    signature = hmac.new(
+        _hmac_secret_bytes("core soak receipt terminal signature key"),
+        _canonical_json(_core_receipt_authentication_payload(config)),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "scheme": "hmac-sha256-env",
+        "key_env": INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "signature": signature,
+    }
+
+
+def _write_core_receipt_authentication(config: Mapping[str, Any]) -> None:
+    payload = _core_receipt_authentication_payload(config)
+    _atomic_write_json(
+        _path_from_config(config, "core_soak_receipt_authentication_path"),
+        {**payload, "authentication": _core_receipt_authentication(config)},
+    )
+
+
+def _validate_core_receipt_authentication(config: Mapping[str, Any]) -> None:
+    authentication_path = _path_from_config(
+        config, "core_soak_receipt_authentication_path"
+    )
+    if not authentication_path.exists():
+        raise MonitorError("core soak receipt terminal signature is missing")
+    record = _read_json(authentication_path)
+    payload = _core_receipt_authentication_payload(config)
+    observed_payload = {key: record.get(key) for key in payload}
+    if observed_payload != payload:
+        raise MonitorError("core soak receipt terminal signature payload mismatch")
+    authentication = record.get("authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("core soak receipt terminal signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("core soak receipt terminal signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("core soak receipt terminal signature scheme is invalid")
+    if authentication.get("key_env") != INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV:
+        raise MonitorError("core soak receipt terminal signature key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("core soak receipt terminal signature is invalid")
+    expected = hmac.new(
+        _hmac_secret_bytes("core soak receipt terminal signature key"),
+        _canonical_json(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("core soak receipt terminal signature mismatch")
+
+
 def _validate_rollback_receipt_config_binding(
     config: Mapping[str, Any], receipt: Mapping[str, Any]
 ) -> None:
@@ -490,6 +565,8 @@ def _validate_resume_config_paths(state_dir: Path, config: Mapping[str, Any]) ->
         "file_shadow_cycle_receipt_path": safe_state_dir
         / "file-shadow-cycle-receipt.json",
         "core_soak_receipt_path": safe_state_dir / "core-soak-receipt.json",
+        "core_soak_receipt_authentication_path": safe_state_dir
+        / "core-soak-receipt-authentication.json",
         "first_sample_path": safe_state_dir / "first-sample.json",
         "monitor_envelope_path": safe_state_dir / "monitor-envelope.json",
         "stop_request_path": safe_state_dir / "stop-request.json",
@@ -782,7 +859,6 @@ def _envelope(
             if status != "failed_closed":
                 raise
             snapshot_doc = None
-
     samples = receipt.get("samples", []) if receipt else []
     if snapshot_doc:
         try:
@@ -798,6 +874,8 @@ def _envelope(
             snapshots = []
     else:
         snapshots = []
+    if status == "complete":
+        _validate_core_receipt_authentication(config)
     first_sample = samples[0] if samples else None
     latest_sample = sample if sample is not None else (samples[-1] if samples else None)
     last_sampled_at = (
@@ -886,6 +964,9 @@ def _envelope(
             "manifest_path": config["manifest_path"],
             "file_shadow_cycle_receipt_path": config["file_shadow_cycle_receipt_path"],
             "core_soak_receipt_path": config["core_soak_receipt_path"],
+            "core_soak_receipt_authentication_path": config[
+                "core_soak_receipt_authentication_path"
+            ],
             "first_sample_path": config["first_sample_path"],
             "monitor_envelope_path": config["monitor_envelope_path"],
             "runtime_snapshot_receipts_path": config["runtime_snapshot_receipts_path"],
@@ -1116,6 +1197,9 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         "manifest_path": str(state_dir / "heartbeat-authority-manifest.json"),
         "file_shadow_cycle_receipt_path": str(state_dir / "file-shadow-cycle-receipt.json"),
         "core_soak_receipt_path": str(state_dir / "core-soak-receipt.json"),
+        "core_soak_receipt_authentication_path": str(
+            state_dir / "core-soak-receipt-authentication.json"
+        ),
         "first_sample_path": str(state_dir / "first-sample.json"),
         "monitor_envelope_path": str(state_dir / "monitor-envelope.json"),
         "stop_request_path": str(state_dir / "stop-request.json"),
@@ -1703,6 +1787,7 @@ def run(args: argparse.Namespace) -> int:
             _persist_envelope(config, status="failed_closed", violation="sample_failed", sample=sample)
             return 2
         if updated["status"] == "complete":
+            _write_core_receipt_authentication(config)
             _persist_envelope(config, status="complete", sample=sample)
             return 0
         _persist_envelope(config, status="running", sample=sample)

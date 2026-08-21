@@ -371,7 +371,7 @@ class OpenClawAdapterTests(unittest.TestCase):
             ),
         )
 
-    def test_history_messages_without_item_identity_are_allowed(self) -> None:
+    def test_history_messages_without_item_identity_fail_contract(self) -> None:
         class MessageOnlyHistoryTransport(CannedTransport):
             def call(self, method, params):
                 if method == "sessions_history":
@@ -399,8 +399,10 @@ class OpenClawAdapterTests(unittest.TestCase):
                 return super().call(method, params)
 
         adapter = CannedOpenClawAdapter(MessageOnlyHistoryTransport())
-        result = adapter.session_result("session-key")
-        self.assertEqual(result.session_key, "session-key")
+        with self.assertRaisesRegex(
+            AdapterContractError, "messages\\[0\\] must include requested session identity"
+        ):
+            adapter.session_result("session-key")
 
     def test_fully_forged_valid_envelope_cannot_mint_runtime_authority(self) -> None:
         with self.assertRaisesRegex(AdapterContractError, "unsigned preflight mapping"):
@@ -622,6 +624,96 @@ class OpenClawAdapterTests(unittest.TestCase):
         ):
             adapter.sessions_spawn(spawn_request("lease-two"))
         self.assertEqual(len(calls), 1)
+
+    def test_sessions_spawn_rejects_session_key_cached_for_another_request(
+        self,
+    ) -> None:
+        metadata_one = {
+            "run_id": "run",
+            "transition_id": "transition",
+            "client_request_id": "client-one",
+            "idempotency_key": "spawn-idem-one",
+            "phase": "phase",
+            "agent_id": "agent",
+            "task_digest": TASK_DIGEST,
+        }
+        metadata_two = {
+            **metadata_one,
+            "client_request_id": "client-two",
+            "idempotency_key": "spawn-idem-two",
+        }
+        metadata_by_lease = {
+            "lease-one": metadata_one,
+            "lease-two": metadata_two,
+        }
+
+        def spawn_request(gateway_lease_id: str) -> dict[str, Any]:
+            metadata = metadata_by_lease[gateway_lease_id]
+            return {
+                "task": TASK,
+                "taskName": f"task-name-{gateway_lease_id}",
+                "runtime": "subagent",
+                "mode": "run",
+                "agentId": "agent",
+                "cleanup": "delete",
+                "context": "isolated",
+                "lightContext": False,
+                "client_request_id": metadata["client_request_id"],
+                "idempotency_key": metadata["idempotency_key"],
+                "gateway_lease_id": gateway_lease_id,
+                "metadata": dict(metadata),
+            }
+
+        def call(logical_name, params):
+            metadata = metadata_by_lease[params["gateway_lease_id"]]
+            return (
+                "sessions_spawn",
+                {
+                    "session": {
+                        "session_key": "shared-session-key",
+                        "spawn_request_session_key": "shared-session-key",
+                    },
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": dict(metadata),
+                        "raw_json": json.dumps(
+                            metadata,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    },
+                },
+            )
+
+        adapter = object.__new__(OpenClawAdapter)
+        adapter._require_verified_runtime_authority = lambda: SimpleNamespace(
+            attestation=SimpleNamespace(
+                method_bindings={
+                    "sessions_spawn": SimpleNamespace(
+                        parameter_names=tuple(SPAWN_RPC_PROPERTIES)
+                    )
+                }
+            )
+        )
+        adapter._call = call
+        adapter._lease_metadata_by_external_id = {
+            lease: {**metadata, "gateway_lease_id": lease}
+            for lease, metadata in metadata_by_lease.items()
+        }
+        adapter._session_metadata_by_key = {}
+        adapter._session_identity_by_request = {}
+        adapter._session_spawn_request_by_request_identity = {}
+
+        observation = adapter.sessions_spawn(spawn_request("lease-one"))
+        self.assertEqual(observation.session_key, "shared-session-key")
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "session identity is already cached for different request metadata",
+        ):
+            adapter.sessions_spawn(spawn_request("lease-two"))
+        self.assertEqual(
+            adapter._session_metadata_by_key["shared-session-key"], metadata_one
+        )
 
     def test_verified_lease_adoption_restores_release_ownership(self) -> None:
         acquire_metadata = {

@@ -103,6 +103,14 @@ class CannedOpenClawAdapter:
             item_spawn_request_session_key,
             item_external_id,
         ) in _history_item_session_keys(response):
+            if (
+                item_session_key is None
+                and item_spawn_request_session_key is None
+                and item_external_id is None
+            ):
+                raise AdapterContractError(
+                    f"sessions_history {label} must include requested session identity"
+                )
             if item_session_key is not None and item_session_key != session_key:
                 raise AdapterContractError(
                     f"sessions_history {label} identity must match requested session"

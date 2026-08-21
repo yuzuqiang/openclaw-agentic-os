@@ -639,7 +639,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "signature key is too weak"):
                 monitor._build_config(self.args)
 
-    def test_committed_default_validation_anchor_is_signed_and_bound(self) -> None:
+    def test_committed_default_validation_anchor_is_externally_signed_and_bound(
+        self,
+    ) -> None:
         repo_root = SCRIPT_PATH.parents[1]
         validation_path = (
             repo_root
@@ -650,7 +652,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260821T065433Z.json"
         )
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
-        public_fixture_key = "phase-c-terminal-checkpoint-anchor-20260821T065433Z"
+        invalid_hmac_key = "not-the-independent-validation-anchor-signature-key"
         completed_at = datetime.fromisoformat(
             validation["validated_at_utc"].replace("Z", "+00:00")
         )
@@ -658,40 +660,61 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             validation["invocation"]["implementation_commit_committed_at"]
         )
 
+        self.assertGreaterEqual(completed_at, implementation_committed_at)
+        for head_key in ("reviewed_head", "review_merge_head"):
+            self.assertEqual(
+                subprocess.run(
+                    [
+                        "git",
+                        "merge-base",
+                        "--is-ancestor",
+                        monitor.EXPECTED_IMPLEMENTATION_BASE,
+                        validation["invocation"][head_key],
+                    ],
+                    cwd=repo_root,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode,
+                0,
+            )
+        self.assertEqual(
+            monitor._sha256_file(validation_path),
+            monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,
+        )
+        self.assertEqual(
+            validation["authenticated_record"]["sha256"],
+            monitor._sha256_file(anchor_path),
+        )
         with mock.patch.dict(
             os.environ,
-            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: public_fixture_key},
+            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: invalid_hmac_key},
         ):
-            self.assertGreaterEqual(completed_at, implementation_committed_at)
-            for head_key in ("reviewed_head", "review_merge_head"):
-                self.assertEqual(
-                    subprocess.run(
-                        [
-                            "git",
-                            "merge-base",
-                            "--is-ancestor",
-                            monitor.EXPECTED_IMPLEMENTATION_BASE,
-                            validation["invocation"][head_key],
-                        ],
-                        cwd=repo_root,
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    ).returncode,
-                    0,
+            with self.assertRaisesRegex(monitor.MonitorError, "signature mismatch"):
+                monitor._validate_independent_validation_anchor(
+                    {
+                        "exact_heads": {
+                            "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE
+                        }
+                    },
+                    validation,
                 )
-            self.assertEqual(
-                monitor._sha256_file(validation_path),
-                monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,
-            )
-            self.assertEqual(
-                validation["authenticated_record"]["sha256"],
-                monitor._sha256_file(anchor_path),
-            )
-            monitor._validate_independent_validation_anchor(
-                {"exact_heads": {"implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE}},
-                validation,
-            )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(
+                monitor.MonitorError, "signature key is unavailable"
+            ):
+                monitor._validate_independent_validation_anchor(
+                    {
+                        "exact_heads": {
+                            "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE
+                        }
+                    },
+                    validation,
+                )
+        with mock.patch.dict(
+            os.environ,
+            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: invalid_hmac_key},
+        ):
             args = Namespace(
                 state_dir=repo_root / "docs/runtime-evidence/soak/default-anchor-smoke",
                 run_id="default-anchor-smoke",
@@ -714,11 +737,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 no_daemon=True,
             )
             with mock.patch.object(monitor, "REPO_ROOT", repo_root):
-                config = monitor._build_config(args)
-            self.assertEqual(
-                config["predecessor_receipts"]["independent_validation"]["sha256"],
-                monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,
-            )
+                with self.assertRaisesRegex(monitor.MonitorError, "signature mismatch"):
+                    monitor._build_config(args)
 
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
         digest = "a" * 64
@@ -1705,6 +1725,132 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
         self.assertIn("trailing receipt is unreconciled", envelope["note"])
+
+    def test_status_requires_authenticated_complete_core_receipt(self) -> None:
+        digest = "a" * 64
+        args = Namespace(**{**self.args.__dict__, "interval_seconds": 3600})
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=3600,
+            )
+            snapshots = []
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            for index in range(25):
+                sampled_at = 1_700_000_000_000 + index * 3_600_000
+                receipt = monitor.append_heartbeat_soak_sample(
+                    receipt,
+                    _pass_sample(sampled_at, digest, sampled_at),
+                )
+                snapshots.append(
+                    _snapshot_entry(
+                        self.root,
+                        snapshot_root / f"sample-{sampled_at}.db",
+                        f"snapshot-{index}".encode("utf-8"),
+                    )
+                )
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": snapshots,
+                },
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["terminal_core_receipt_invalid"])
+        self.assertIn("terminal signature", envelope["note"])
+
+    def test_status_accepts_authenticated_complete_core_receipt(self) -> None:
+        digest = "a" * 64
+        args = Namespace(**{**self.args.__dict__, "interval_seconds": 3600})
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=3600,
+            )
+            snapshots = []
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            for index in range(25):
+                sampled_at = 1_700_000_000_000 + index * 3_600_000
+                receipt = monitor.append_heartbeat_soak_sample(
+                    receipt,
+                    _pass_sample(sampled_at, digest, sampled_at),
+                )
+                snapshots.append(
+                    _snapshot_entry(
+                        self.root,
+                        snapshot_root / f"sample-{sampled_at}.db",
+                        f"snapshot-{index}".encode("utf-8"),
+                    )
+                )
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": snapshots,
+                },
+            )
+            monitor._write_core_receipt_authentication(config)
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {"status": "complete", "violations": []},
+            )
+
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 0)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "complete")
+        self.assertEqual(envelope["violations"], [])
 
     def test_status_rejects_symlinked_envelope_before_read_or_write(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)

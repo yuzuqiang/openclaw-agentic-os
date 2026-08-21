@@ -800,7 +800,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             adapter.sessions_spawn({**request, "unexpected": "field"})
         self.assertEqual(transport.calls, [])
 
-    def test_history_items_without_session_identity_are_allowed(self) -> None:
+    def test_history_items_without_session_identity_fail_contract(self) -> None:
         class UnscopedHistoryTransport(FakeAttestedTransport):
             def call(self, method, params):
                 response = super().call(method, params)
@@ -812,8 +812,11 @@ class RuntimeAttestationTests(unittest.TestCase):
         adapter = self._adapter(transport)
         adapter.allow_lease_acquire(lease_params())
         session = adapter.sessions_spawn(spawn_params())
-        result = adapter.session_result(session.session_key or "session-1")
-        self.assertEqual(result.session_key, session.session_key)
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "sessions_history messages\\[0\\] must include requested session identity",
+        ):
+            adapter.session_result(session.session_key or "session-1")
 
     def test_history_items_with_partial_matching_identity_are_allowed(self) -> None:
         for identity_key in ("external_id", "spawn_request_session_key"):
