@@ -1162,6 +1162,11 @@ class OpenClawAdapter:
             raise AdapterContractError(
                 "duplicate allowLease acquire returned a different lease identity"
             )
+        expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected is not None and expected != local:
+            raise AdapterContractError(
+                "allowLease acquire ownership conflicts with cached adapter ownership"
+            )
         self._lease_identity_by_request[request_identity] = gateway_lease_id
         self._lease_acquire_request_by_request_identity[request_identity] = local_request
         self._lease_metadata_by_external_id[gateway_lease_id] = local

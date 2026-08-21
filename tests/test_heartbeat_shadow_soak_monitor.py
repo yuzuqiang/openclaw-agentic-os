@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import signal
+import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
@@ -405,6 +406,77 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertEqual(len(validated), 2)
 
+    def test_runtime_snapshot_orphan_archive_rejects_symlink(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=str(config["run_id"]),
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            first_sample = _pass_sample(1_700_000_300_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, first_sample)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            first_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000300000.db",
+            )
+            orphan_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000600000.db",
+                b"orphan snapshot",
+            )
+            new_snapshot = _snapshot_entry(
+                self.root,
+                snapshot_root / "sample-1700000900000.db",
+                b"new snapshot",
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [first_snapshot, orphan_snapshot],
+                },
+            )
+            external_archive = self.root / "outside-orphan-archive.json"
+            monitor._atomic_write_json(
+                external_archive,
+                {
+                    "schema_version": f"{monitor.SCHEMA_SNAPSHOTS}.orphans",
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "orphans": [],
+                },
+            )
+            external_before = external_archive.read_text(encoding="utf-8")
+            (self.state_dir / "runtime-snapshot-orphans.json").symlink_to(
+                external_archive
+            )
+
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "orphan archive path must not be a symlink",
+            ):
+                monitor._append_runtime_snapshot_receipt(config, new_snapshot)
+
+        self.assertEqual(external_archive.read_text(encoding="utf-8"), external_before)
+
     def test_predecessor_validation_requires_independent_provenance(self) -> None:
         lifecycle_sha = hashlib.sha256(self.lifecycle.read_bytes()).hexdigest()
         weak_validation_sha = _write_json(
@@ -571,14 +643,14 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         repo_root = SCRIPT_PATH.parents[1]
         validation_path = (
             repo_root
-            / "docs/runtime-evidence/phase-b-p03-independent-validation-20260820T165825Z.json"
+            / "docs/runtime-evidence/phase-b-p03-independent-validation-20260821T065433Z.json"
         )
         anchor_path = (
             repo_root
-            / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260820T165825Z.json"
+            / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260821T065433Z.json"
         )
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
-        public_fixture_key = "phase-c-terminal-checkpoint-anchor-20260820T165825Z"
+        public_fixture_key = "phase-c-terminal-checkpoint-anchor-20260821T065433Z"
         completed_at = datetime.fromisoformat(
             validation["validated_at_utc"].replace("Z", "+00:00")
         )
@@ -591,6 +663,23 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: public_fixture_key},
         ):
             self.assertGreaterEqual(completed_at, implementation_committed_at)
+            for head_key in ("reviewed_head", "review_merge_head"):
+                self.assertEqual(
+                    subprocess.run(
+                        [
+                            "git",
+                            "merge-base",
+                            "--is-ancestor",
+                            monitor.EXPECTED_IMPLEMENTATION_BASE,
+                            validation["invocation"][head_key],
+                        ],
+                        cwd=repo_root,
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    ).returncode,
+                    0,
+                )
             self.assertEqual(
                 monitor._sha256_file(validation_path),
                 monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,

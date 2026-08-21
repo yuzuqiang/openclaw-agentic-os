@@ -422,6 +422,32 @@ class RuntimeAttestationTests(unittest.TestCase):
 
         self.assertEqual(transport.calls, [])
 
+    def test_duplicate_gateway_lease_id_rejects_changed_owner_without_cache_overwrite(
+        self,
+    ) -> None:
+        transport = FakeAttestedTransport()
+        adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+
+        changed = {
+            **lease_params(),
+            "client_lease_id": "client-lease-2",
+            "idempotency_key": "lease-idem-2",
+            "run_id": "other-run",
+        }
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "ownership conflicts with cached adapter ownership",
+        ):
+            adapter.allow_lease_acquire(changed)
+
+        release = adapter.allow_lease_release(release_params())
+        self.assertEqual(release.external_id, "lease-1")
+        self.assertEqual(
+            transport.calls[-1],
+            ("subagents.allowLease.release", release_params()),
+        )
+
     def test_release_owner_metadata_must_match_cached_acquire_before_transport(
         self,
     ) -> None:

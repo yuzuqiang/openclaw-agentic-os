@@ -53,11 +53,11 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "be0b11df5636c53f9beb83b7a8f9370bf31a1cc609ccb9507616cb703a95971a"
+    "34893f84f7bbd23fc4c809c3c42014c895664f513957f8b01be783dac9d4c8f2"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
-EXPECTED_IMPLEMENTATION_BASE = "5e9178e804b7690d831103b4fadf733e0bcf6ffa"
+EXPECTED_IMPLEMENTATION_BASE = "bf06585a9b8603001050a47af2840586d38c0a8d"
 INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV = (
     "AGENTIC_OS_INDEPENDENT_VALIDATION_ANCHOR_HMAC_KEY"
 )
@@ -537,6 +537,7 @@ def _assert_start_output_paths_available(config: Mapping[str, Any]) -> None:
         "runtime_snapshot_receipts_path": _path_from_config(
             config, "runtime_snapshot_receipts_path"
         ),
+        "runtime_snapshot_orphans_path": _runtime_snapshot_orphans_path(config),
     }
     for key, path in output_paths.items():
         raw_path = Path(str(config.get(key, path))).expanduser()
@@ -1307,6 +1308,8 @@ def _archive_runtime_snapshot_orphan(
     reason: str,
 ) -> None:
     path = _runtime_snapshot_orphans_path(config)
+    if path.is_symlink():
+        raise MonitorError("runtime snapshot orphan archive path must not be a symlink")
     if path.exists():
         document = _read_json(path)
         if document.get("schema_version") != f"{SCHEMA_SNAPSHOTS}.orphans":
@@ -1847,7 +1850,7 @@ def parser() -> argparse.ArgumentParser:
         "--independent-validation-path",
         type=Path,
         default=REPO_ROOT
-        / "docs/runtime-evidence/phase-b-p03-independent-validation-20260820T165825Z.json",
+        / "docs/runtime-evidence/phase-b-p03-independent-validation-20260821T065433Z.json",
     )
     start_cmd.add_argument("--runtime-head", default=EXPECTED_RUNTIME_HEAD)
     start_cmd.add_argument(
