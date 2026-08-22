@@ -49,6 +49,9 @@ SCHEMA_AUTHORITY_INPUT_PATH_BINDING = (
 SCHEMA_CORE_RECEIPT_AUTHENTICATION = (
     "p03-heartbeat-shadow-core-receipt-authentication.v1"
 )
+SCHEMA_SAMPLE_AUTHENTICATION = (
+    "p03-heartbeat-shadow-monitor-sample-authentication.v1"
+)
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 DAEMON_READY_TIMEOUT_SECONDS = 2.0
@@ -56,7 +59,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "e9fbbb4790e8b8ae2808fa97ea8790d9fbba44966c1b9dfc120258079310e097"
+    "ab2396f23b68f1b46d6ed2ea57bd6f8cb9dbd01fdf085ae03aa8d3b0cdc26eb1"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -410,6 +413,7 @@ def _validate_authority_input_path_identity(config: Mapping[str, Any]) -> None:
 def _core_receipt_authentication_payload(config: Mapping[str, Any]) -> dict[str, Any]:
     receipt_path = _path_from_config(config, "core_soak_receipt_path")
     snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
+    sample_authentication_path = _path_from_config(config, "sample_authentication_path")
     return {
         "schema_version": SCHEMA_CORE_RECEIPT_AUTHENTICATION,
         "run_id": config["run_id"],
@@ -419,6 +423,7 @@ def _core_receipt_authentication_payload(config: Mapping[str, Any]) -> dict[str,
         "authority_input_digest": config["authority_input_digest"],
         "core_soak_receipt_sha256": _sha256_file(receipt_path),
         "runtime_snapshot_receipts_sha256": _sha256_file(snapshot_receipts_path),
+        "sample_authentication_sha256": _sha256_file(sample_authentication_path),
     }
 
 
@@ -490,6 +495,213 @@ def _require_core_receipt_authentication(config: Mapping[str, Any]) -> None:
         "core soak receipt terminal signature is missing; reconstructed terminal "
         "evidence must not be authenticated during recovery"
     )
+
+
+def _sample_authentication_path(config: Mapping[str, Any]) -> Path:
+    return _path_from_config(config, "sample_authentication_path")
+
+
+def _sample_authentication_payload(
+    config: Mapping[str, Any],
+    *,
+    sample_index: int,
+    sample: Mapping[str, Any],
+    previous_signature: str | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_SAMPLE_AUTHENTICATION,
+        "run_id": config["run_id"],
+        "authority": "file_artifacts",
+        "authority_mode": "file_authority_shadow",
+        "exact_heads": dict(config["exact_heads"]),
+        "authority_input_digest": config["authority_input_digest"],
+        "sample_index": sample_index,
+        "sample_sha256": _sha256_text(
+            json.dumps(
+                dict(sample),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        ),
+        "previous_signature": previous_signature,
+    }
+
+
+def _sample_authentication_signature(payload: Mapping[str, Any]) -> str:
+    return hmac.new(
+        _monitor_hmac_secret_bytes("sample authentication chain signature key"),
+        _canonical_json(payload),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _load_sample_authentication_entries(
+    config: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    path = _sample_authentication_path(config)
+    if not path.exists():
+        return []
+    record = _read_json(path)
+    if record.get("schema_version") != SCHEMA_SAMPLE_AUTHENTICATION:
+        raise MonitorError("sample authentication journal schema is invalid")
+    if record.get("run_id") != config.get("run_id"):
+        raise MonitorError("sample authentication journal run_id mismatch")
+    if record.get("authority_input_digest") != config.get("authority_input_digest"):
+        raise MonitorError("sample authentication journal authority digest mismatch")
+    entries = record.get("entries")
+    if not isinstance(entries, list):
+        raise MonitorError("sample authentication journal entries are invalid")
+    return entries
+
+
+def _validate_sample_authentication_entries(
+    config: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    entries = _load_sample_authentication_entries(config)
+    if len(entries) != len(samples):
+        raise MonitorError("sample authentication journal does not cover core samples")
+    previous_signature: str | None = None
+    for index, (entry, sample) in enumerate(zip(entries, samples), start=1):
+        if not isinstance(entry, Mapping):
+            raise MonitorError("sample authentication journal entry is invalid")
+        payload = _sample_authentication_payload(
+            config,
+            sample_index=index,
+            sample=sample,
+            previous_signature=previous_signature,
+        )
+        observed_payload = {key: entry.get(key) for key in payload}
+        if observed_payload != payload:
+            raise MonitorError("sample authentication journal payload mismatch")
+        authentication = entry.get("authentication")
+        if not isinstance(authentication, Mapping):
+            raise MonitorError("sample authentication journal signature is missing")
+        if set(authentication) != {"scheme", "key_env", "signature"}:
+            raise MonitorError("sample authentication journal signature shape is invalid")
+        if authentication.get("scheme") != "hmac-sha256-env":
+            raise MonitorError("sample authentication journal signature scheme is invalid")
+        if authentication.get("key_env") != MONITOR_HMAC_ENV:
+            raise MonitorError("sample authentication journal key authority is invalid")
+        signature = authentication.get("signature")
+        if (
+            not isinstance(signature, str)
+            or len(signature) != 64
+            or any(character not in "0123456789abcdef" for character in signature)
+        ):
+            raise MonitorError("sample authentication journal signature is invalid")
+        expected = _sample_authentication_signature(payload)
+        if not hmac.compare_digest(signature, expected):
+            raise MonitorError("sample authentication journal signature mismatch")
+        previous_signature = signature
+    return entries
+
+
+def _append_sample_authentication(
+    config: Mapping[str, Any], sample_index: int, sample: Mapping[str, Any]
+) -> None:
+    entries = list(_load_sample_authentication_entries(config))
+    if len(entries) != sample_index - 1:
+        raise MonitorError("sample authentication journal append point is invalid")
+    previous_signature = None
+    if entries:
+        authentication = entries[-1].get("authentication")
+        if not isinstance(authentication, Mapping):
+            raise MonitorError("sample authentication journal signature is missing")
+        previous_signature = authentication.get("signature")
+        if not isinstance(previous_signature, str):
+            raise MonitorError("sample authentication journal signature is invalid")
+    payload = _sample_authentication_payload(
+        config,
+        sample_index=sample_index,
+        sample=sample,
+        previous_signature=previous_signature,
+    )
+    entries.append(
+        {
+            **payload,
+            "authentication": {
+                "scheme": "hmac-sha256-env",
+                "key_env": MONITOR_HMAC_ENV,
+                "signature": _sample_authentication_signature(payload),
+            },
+        }
+    )
+    _atomic_write_json(
+        _sample_authentication_path(config),
+        {
+            "schema_version": SCHEMA_SAMPLE_AUTHENTICATION,
+            "run_id": config["run_id"],
+            "authority_input_digest": config["authority_input_digest"],
+            "entries": entries,
+        },
+    )
+
+
+def _validate_core_sample_authentication(
+    config: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    samples = receipt.get("samples")
+    if not isinstance(samples, list):
+        raise MonitorError("core receipt samples are invalid")
+    _validate_sample_authentication_entries(config, samples)
+
+
+def _stop_request_payload(
+    config: Mapping[str, Any], *, requested_at: str, reason: str
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_STOP,
+        "status": "requested",
+        "run_id": config["run_id"],
+        "authority_input_digest": config["authority_input_digest"],
+        "exact_heads": dict(config["exact_heads"]),
+        "requested_at": requested_at,
+        "reason": reason,
+        "scope": "local_artifact_monitor_only",
+    }
+
+
+def _stop_request_authentication(payload: Mapping[str, Any]) -> dict[str, str]:
+    signature = hmac.new(
+        _monitor_hmac_secret_bytes("stop request signature key"),
+        _canonical_json(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    return {"scheme": "hmac-sha256-env", "key_env": MONITOR_HMAC_ENV, "signature": signature}
+
+
+def _validate_stop_request(config: Mapping[str, Any], request: Mapping[str, Any]) -> None:
+    requested_at = request.get("requested_at")
+    reason = request.get("reason")
+    if not isinstance(requested_at, str) or not requested_at:
+        raise MonitorError("stop request timestamp is invalid")
+    if not isinstance(reason, str):
+        raise MonitorError("stop request reason is invalid")
+    payload = _stop_request_payload(config, requested_at=requested_at, reason=reason)
+    observed_payload = {key: request.get(key) for key in payload}
+    if observed_payload != payload:
+        raise MonitorError("stop request payload mismatch")
+    authentication = request.get("authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("stop request signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("stop request signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("stop request signature scheme is invalid")
+    if authentication.get("key_env") != MONITOR_HMAC_ENV:
+        raise MonitorError("stop request signature key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("stop request signature is invalid")
+    expected = _stop_request_authentication(payload)["signature"]
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("stop request signature mismatch")
 
 
 def _validate_rollback_receipt_config_binding(
@@ -596,6 +808,7 @@ def _validate_resume_config_paths(state_dir: Path, config: Mapping[str, Any]) ->
         "core_soak_receipt_path": safe_state_dir / "core-soak-receipt.json",
         "core_soak_receipt_authentication_path": safe_state_dir
         / "core-soak-receipt-authentication.json",
+        "sample_authentication_path": safe_state_dir / "sample-authentication.json",
         "first_sample_path": safe_state_dir / "first-sample.json",
         "monitor_envelope_path": safe_state_dir / "monitor-envelope.json",
         "stop_request_path": safe_state_dir / "stop-request.json",
@@ -633,6 +846,9 @@ def _assert_start_output_paths_available(config: Mapping[str, Any]) -> None:
             config, "file_shadow_cycle_receipt_path"
         ),
         "core_soak_receipt_path": _path_from_config(config, "core_soak_receipt_path"),
+        "sample_authentication_path": _path_from_config(
+            config, "sample_authentication_path"
+        ),
         "first_sample_path": _path_from_config(config, "first_sample_path"),
         "monitor_envelope_path": _path_from_config(config, "monitor_envelope_path"),
         "stop_request_path": _path_from_config(config, "stop_request_path"),
@@ -876,6 +1092,8 @@ def _envelope(
                 raise MonitorError("terminal monitor status requires complete core receipt")
             if status == "complete" and not snapshot_receipts_path.exists():
                 raise MonitorError("terminal monitor status requires runtime snapshot ledger")
+            if status in {"running", "complete", "first_sample_pass"}:
+                _validate_core_sample_authentication(config, receipt)
         except (HeartbeatShadowError, MonitorError):
             if status != "failed_closed":
                 raise
@@ -996,6 +1214,7 @@ def _envelope(
             "core_soak_receipt_authentication_path": config[
                 "core_soak_receipt_authentication_path"
             ],
+            "sample_authentication_path": config["sample_authentication_path"],
             "first_sample_path": config["first_sample_path"],
             "monitor_envelope_path": config["monitor_envelope_path"],
             "runtime_snapshot_receipts_path": config["runtime_snapshot_receipts_path"],
@@ -1229,6 +1448,7 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         "core_soak_receipt_authentication_path": str(
             state_dir / "core-soak-receipt-authentication.json"
         ),
+        "sample_authentication_path": str(state_dir / "sample-authentication.json"),
         "first_sample_path": str(state_dir / "first-sample.json"),
         "monitor_envelope_path": str(state_dir / "monitor-envelope.json"),
         "stop_request_path": str(state_dir / "stop-request.json"),
@@ -1598,6 +1818,7 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
     )
     _atomic_write_json(_path_from_config(config, "first_sample_path"), first)
     _persist_sample(config, 1, first)
+    _append_sample_authentication(config, 1, first)
     if first.get("status") != "pass":
         _persist_envelope(config, status="failed_closed", violation="first_sample_failed", sample=first)
         raise MonitorError("first sample failed closed")
@@ -1677,7 +1898,12 @@ def start(args: argparse.Namespace) -> int:
 
 
 def _stop_requested(config: Mapping[str, Any]) -> bool:
-    return _path_from_config(config, "stop_request_path").exists()
+    path = _path_from_config(config, "stop_request_path")
+    if not path.exists():
+        return False
+    request = _read_json(path)
+    _validate_stop_request(config, request)
+    return True
 
 
 def _handle_signal(signum: int, frame: object) -> None:
@@ -1691,7 +1917,17 @@ def _handle_signal(signum: int, frame: object) -> None:
                 if _ACTIVE_SIGNAL_CONFIG is not None
                 else _load_validated_resume_config(state_dir)
             )
-            status = "stopped" if _stop_requested(config) else "failed_closed"
+            try:
+                requested_stop = _stop_requested(config)
+            except (HeartbeatShadowError, MonitorError) as exc:
+                _persist_envelope(
+                    config,
+                    status="failed_closed",
+                    violation="stop_request_invalid",
+                    note=str(exc),
+                )
+                raise SystemExit(2) from exc
+            status = "stopped" if requested_stop else "failed_closed"
             violation = None if status == "stopped" else f"signal_{signum}"
             exit_code = 0 if status == "stopped" else 2
             _persist_envelope(config, status=status, violation=violation)
@@ -1748,6 +1984,7 @@ def run(args: argparse.Namespace) -> int:
             receipt = _read_json(receipt_path)
             validate_heartbeat_soak_receipt(receipt)
             _validate_receipt_config_binding(config, receipt)
+            _validate_core_sample_authentication(config, receipt)
         except (HeartbeatShadowError, MonitorError) as exc:
             _persist_envelope(
                 config,
@@ -1772,7 +2009,17 @@ def run(args: argparse.Namespace) -> int:
         if receipt["status"] == "failed":
             _persist_envelope(config, status="failed_closed", violation="core_receipt_failed")
             return 2
-        if _stop_requested(config):
+        try:
+            requested_stop = _stop_requested(config)
+        except (HeartbeatShadowError, MonitorError) as exc:
+            _persist_envelope(
+                config,
+                status="failed_closed",
+                violation="stop_request_invalid",
+                note=str(exc),
+            )
+            return 2
+        if requested_stop:
             _persist_envelope(config, status="stopped", note="stop_request_observed")
             return 0
         samples = receipt["samples"]
@@ -1792,7 +2039,17 @@ def run(args: argparse.Namespace) -> int:
             _persist_envelope(config, status="failed_closed", violation="coverage_gap")
             return 2
         while now < due or now_monotonic < due_monotonic:
-            if _stop_requested(config):
+            try:
+                requested_stop = _stop_requested(config)
+            except (HeartbeatShadowError, MonitorError) as exc:
+                _persist_envelope(
+                    config,
+                    status="failed_closed",
+                    violation="stop_request_invalid",
+                    note=str(exc),
+                )
+                return 2
+            if requested_stop:
                 _persist_envelope(config, status="stopped", note="stop_request_observed")
                 return 0
             waits = [
@@ -1822,6 +2079,7 @@ def run(args: argparse.Namespace) -> int:
             return 2
         persist_heartbeat_soak_receipt(receipt_path, updated, repo_root_path=REPO_ROOT)
         _persist_sample(config, len(updated["samples"]), sample)
+        _append_sample_authentication(config, len(updated["samples"]), sample)
         if updated["status"] == "failed":
             _persist_envelope(config, status="failed_closed", violation="sample_failed", sample=sample)
             return 2
@@ -1835,13 +2093,8 @@ def run(args: argparse.Namespace) -> int:
 def stop(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     config = _load_validated_resume_config(state_dir)
-    request = {
-        "schema_version": SCHEMA_STOP,
-        "status": "requested",
-        "requested_at": _utc_now(),
-        "reason": args.reason,
-        "scope": "local_artifact_monitor_only",
-    }
+    payload = _stop_request_payload(config, requested_at=_utc_now(), reason=args.reason)
+    request = {**payload, "authentication": _stop_request_authentication(payload)}
     _atomic_write_json(_path_from_config(config, "stop_request_path"), request)
     deadline = time.monotonic() + args.wait_seconds
     pid = _load_pid(_path_from_config(config, "pidfile_path"))
@@ -1899,7 +2152,7 @@ def status(args: argparse.Namespace) -> int:
         _atomic_write_json(state_dir / "monitor-envelope.json", envelope)
     except (HeartbeatShadowError, MonitorError) as exc:
         current_status = str(envelope.get("status", "unknown"))
-        if current_status in {"running", "complete", "rolled_back"}:
+        if current_status in {"running", "complete", "rolled_back", "first_sample_pass"}:
             existing_violations = envelope.get("violations")
             violations = (
                 [str(item) for item in existing_violations]
@@ -1913,7 +2166,7 @@ def status(args: argparse.Namespace) -> int:
             )
             violation = (
                 "monitor_state_unreadable"
-                if current_status == "running"
+                if current_status in {"running", "first_sample_pass"}
                 else terminal_violation
             )
             if violation not in violations:

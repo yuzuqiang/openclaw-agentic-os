@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from agentic_os.openclaw_adapter import (
+    AdapterAmbiguousOutcomeError,
     AdapterContractError,
     MetadataObservation,
     OpenClawAdapter,
@@ -707,10 +708,11 @@ class OpenClawAdapterTests(unittest.TestCase):
         observation = adapter.sessions_spawn(spawn_request("lease-one"))
         self.assertEqual(observation.session_key, "shared-session-key")
         with self.assertRaisesRegex(
-            AdapterContractError,
-            "session identity is already cached for different request metadata",
-        ):
+            AdapterAmbiguousOutcomeError,
+            "observed candidate identity requires human reconciliation",
+        ) as raised:
             adapter.sessions_spawn(spawn_request("lease-two"))
+        self.assertEqual(raised.exception.candidate_observation.session_key, "shared-session-key")
         self.assertEqual(
             adapter._session_metadata_by_key["shared-session-key"], metadata_one
         )

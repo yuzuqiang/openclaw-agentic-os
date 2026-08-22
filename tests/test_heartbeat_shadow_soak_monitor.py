@@ -109,6 +109,11 @@ def _snapshot_entry(root: Path, snapshot_database: Path, payload: bytes = b"runt
     }
 
 
+def _write_sample_authentication(config: dict[str, object], receipt: dict[str, object]) -> None:
+    for index, sample in enumerate(receipt["samples"], start=1):
+        monitor._append_sample_authentication(config, index, sample)
+
+
 class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
     def setUp(self) -> None:
         monitor._ACTIVE_SIGNAL_CONFIG = None
@@ -321,6 +326,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "snapshots": [first_snapshot, trailing_snapshot],
                 },
             )
+            _write_sample_authentication(config, receipt)
 
             envelope = monitor._envelope(config=config, status="running")
 
@@ -865,6 +871,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            _write_sample_authentication(config, receipt)
             with mock.patch.object(
                 monitor, "_epoch_ms", return_value=1_700_000_000_000
             ), mock.patch.object(
@@ -1393,6 +1400,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "snapshots": snapshots,
                 },
             )
+            _write_sample_authentication(config, receipt)
 
             result = monitor.run(Namespace(state_dir=self.state_dir))
 
@@ -1408,6 +1416,59 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             envelope["violations"], ["core_receipt_authentication_recovery_failed"]
         )
         self.assertIn("reconstructed terminal evidence", envelope["note"])
+
+    def test_run_rejects_forged_unsigned_samples_before_terminal_signing(self) -> None:
+        digest = "a" * 64
+        args = Namespace(**{**self.args.__dict__, "interval_seconds": 3600})
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_sample", side_effect=AssertionError("must not append")
+        ):
+            config = monitor._build_config(args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=3600,
+            )
+            first_sample = _pass_sample(1_700_000_000_000, digest, 1_700_000_000_000)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, first_sample)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            _write_sample_authentication(config, receipt)
+            forged = dict(receipt)
+            forged["samples"] = [
+                _pass_sample(1_700_000_000_000 + index * 3_600_000, digest)
+                for index in range(25)
+            ]
+            forged["status"] = "complete"
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                forged,
+                repo_root_path=self.root,
+            )
+
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        self.assertFalse(
+            (self.state_dir / "core-soak-receipt-authentication.json").exists()
+        )
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
+        self.assertIn("sample authentication journal", envelope["note"])
 
     def test_status_refresh_preserves_failed_closed_audit_fields(self) -> None:
         digest = "a" * 64
@@ -1471,6 +1532,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            _write_sample_authentication(config, receipt)
             monitor._atomic_write_json(
                 self.state_dir / "monitor-envelope.json",
                 {"status": "running", "violations": [], "latest_sample": sample},
@@ -1506,6 +1568,25 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failed_closed")
         self.assertEqual(envelope["violations"], ["monitor_state_unreadable"])
         self.assertIn("running monitor state is unreadable", envelope["note"])
+
+    def test_status_refresh_fails_closed_when_first_sample_state_is_unreadable(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        monitor._atomic_write_json(
+            self.state_dir / "monitor-envelope.json",
+            {"status": "first_sample_pass", "violations": [], "latest_sample": {}},
+        )
+        (self.state_dir / "monitor-config.json").write_text("{", encoding="utf-8")
+
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            result = monitor.status(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["monitor_state_unreadable"])
+        self.assertIn("first_sample_pass monitor state is unreadable", envelope["note"])
 
     def test_status_refresh_fails_closed_when_running_core_receipt_contract_invalid(
         self,
@@ -1560,6 +1641,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            _write_sample_authentication(config, receipt)
             monitor._atomic_write_json(
                 self.state_dir / "monitor-envelope.json",
                 {"status": "running", "violations": [], "latest_sample": sample},
@@ -1605,6 +1687,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            _write_sample_authentication(config, receipt)
             monitor._atomic_write_json(
                 self.state_dir / "monitor-envelope.json",
                 {"status": "running", "violations": [], "latest_sample": sample},
@@ -1796,6 +1879,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "snapshots": [*snapshots, trailing],
                 },
             )
+            _write_sample_authentication(config, receipt)
             monitor._atomic_write_json(
                 self.state_dir / "monitor-envelope.json",
                 {"status": "complete", "violations": []},
@@ -1859,6 +1943,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "snapshots": snapshots,
                 },
             )
+            _write_sample_authentication(config, receipt)
             monitor._atomic_write_json(
                 self.state_dir / "monitor-envelope.json",
                 {"status": "complete", "violations": []},
@@ -1922,6 +2007,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "snapshots": snapshots,
                 },
             )
+            _write_sample_authentication(config, receipt)
             monitor._write_core_receipt_authentication(config)
             monitor._atomic_write_json(
                 self.state_dir / "monitor-envelope.json",
@@ -2191,6 +2277,69 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 )
 
         self.assertFalse(tampered_stop_path.exists())
+
+    def test_run_rejects_unsigned_stop_request_before_accepting_stop(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            sample = _pass_sample(1_700_000_000_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, sample)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            _write_sample_authentication(config, receipt)
+            monitor._atomic_write_json(
+                self.state_dir / "stop-request.json",
+                {"schema_version": monitor.SCHEMA_STOP, "status": "requested"},
+            )
+
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["stop_request_invalid"])
+        self.assertIn("stop request", envelope["note"])
+
+    def test_stop_writes_run_bound_signed_request(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json", {"status": "running"}
+            )
+
+            result = monitor.stop(
+                Namespace(state_dir=self.state_dir, reason="test", wait_seconds=0)
+            )
+
+        self.assertEqual(result, 0)
+        request = json.loads(
+            (self.state_dir / "stop-request.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(request["run_id"], config["run_id"])
+        self.assertEqual(request["authentication"]["key_env"], monitor.MONITOR_HMAC_ENV)
+        monitor._validate_stop_request(config, request)
 
     def test_rollback_revalidates_saved_paths_before_receipt_or_mutation(self) -> None:
         with mock.patch.object(monitor, "REPO_ROOT", self.root):

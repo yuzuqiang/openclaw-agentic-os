@@ -1415,9 +1415,11 @@ class OpenClawAdapter:
             prior_session_metadata is not None
             and prior_session_metadata != dict(metadata)
         ):
-            raise AdapterContractError(
+            raise AdapterAmbiguousOutcomeError(
                 "sessions_spawn session identity is already cached for different "
-                "request metadata"
+                "request metadata; observed candidate identity requires human "
+                "reconciliation",
+                candidate_observation=observation,
             )
         self._session_identity_by_request[request_identity] = session_key
         self._session_metadata_by_key[session_key] = dict(metadata)
