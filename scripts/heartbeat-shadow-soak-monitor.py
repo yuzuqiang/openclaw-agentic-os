@@ -463,6 +463,39 @@ def _validate_core_receipt_authentication(config: Mapping[str, Any]) -> None:
         raise MonitorError("core soak receipt terminal signature mismatch")
 
 
+def _recover_missing_core_receipt_authentication(
+    config: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> None:
+    authentication_path = _path_from_config(
+        config, "core_soak_receipt_authentication_path"
+    )
+    if authentication_path.exists():
+        _validate_core_receipt_authentication(config)
+        return
+    if receipt.get("status") != "complete":
+        raise MonitorError(
+            "core soak receipt terminal recovery requires complete receipt"
+        )
+    validate_heartbeat_soak_receipt(receipt)
+    _validate_receipt_config_binding(config, receipt)
+    snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
+    if not snapshot_receipts_path.exists():
+        raise MonitorError("core soak receipt terminal recovery requires snapshot ledger")
+    snapshot_doc = _read_json(snapshot_receipts_path)
+    samples = receipt.get("samples")
+    if not isinstance(samples, list):
+        raise MonitorError("core soak receipt terminal recovery samples are invalid")
+    _validate_runtime_snapshot_receipts(
+        config,
+        snapshot_doc,
+        samples=samples,
+        allow_trailing=False,
+    )
+    _write_core_receipt_authentication(config)
+    _validate_core_receipt_authentication(config)
+
+
 def _validate_rollback_receipt_config_binding(
     config: Mapping[str, Any], receipt: Mapping[str, Any]
 ) -> None:
@@ -1728,6 +1761,16 @@ def run(args: argparse.Namespace) -> int:
             )
             return 2
         if receipt["status"] == "complete":
+            try:
+                _recover_missing_core_receipt_authentication(config, receipt)
+            except (HeartbeatShadowError, MonitorError) as exc:
+                _persist_envelope(
+                    config,
+                    status="failed_closed",
+                    violation="core_receipt_authentication_recovery_failed",
+                    note=str(exc),
+                )
+                return 2
             _persist_envelope(config, status="complete", note="core_receipt_complete")
             return 0
         if receipt["status"] == "failed":

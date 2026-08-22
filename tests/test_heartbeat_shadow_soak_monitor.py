@@ -1324,6 +1324,70 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
         self.assertIn("run_id", envelope["note"])
 
+    def test_run_recovers_missing_complete_core_receipt_authentication(self) -> None:
+        digest = "a" * 64
+        args = Namespace(**{**self.args.__dict__, "interval_seconds": 3600})
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ):
+            config = monitor._build_config(args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=3600,
+            )
+            snapshots = []
+            snapshot_root = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
+            )
+            for index in range(25):
+                sampled_at = 1_700_000_000_000 + index * 3_600_000
+                receipt = monitor.append_heartbeat_soak_sample(
+                    receipt,
+                    _pass_sample(sampled_at, digest, sampled_at),
+                )
+                snapshots.append(
+                    _snapshot_entry(
+                        self.root,
+                        snapshot_root / f"sample-{sampled_at}.db",
+                        f"snapshot-{index}".encode("utf-8"),
+                    )
+                )
+            self.assertEqual(receipt["status"], "complete")
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "runtime-snapshot-receipts.json",
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": snapshots,
+                },
+            )
+
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 0)
+        self.assertTrue(
+            (self.state_dir / "core-soak-receipt-authentication.json").exists()
+        )
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "complete")
+        self.assertEqual(envelope["violations"], [])
+
     def test_status_refresh_preserves_failed_closed_audit_fields(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
