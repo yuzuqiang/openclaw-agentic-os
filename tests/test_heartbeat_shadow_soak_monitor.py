@@ -1324,7 +1324,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
         self.assertIn("run_id", envelope["note"])
 
-    def test_run_recovers_missing_complete_core_receipt_authentication(self) -> None:
+    def test_run_rejects_missing_complete_core_receipt_authentication(self) -> None:
         digest = "a" * 64
         args = Namespace(**{**self.args.__dict__, "interval_seconds": 3600})
         with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
@@ -1378,15 +1378,18 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
             result = monitor.run(Namespace(state_dir=self.state_dir))
 
-        self.assertEqual(result, 0)
-        self.assertTrue(
+        self.assertEqual(result, 2)
+        self.assertFalse(
             (self.state_dir / "core-soak-receipt-authentication.json").exists()
         )
         envelope = json.loads(
             (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(envelope["status"], "complete")
-        self.assertEqual(envelope["violations"], [])
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(
+            envelope["violations"], ["core_receipt_authentication_recovery_failed"]
+        )
+        self.assertIn("reconstructed terminal evidence", envelope["note"])
 
     def test_status_refresh_preserves_failed_closed_audit_fields(self) -> None:
         digest = "a" * 64

@@ -463,37 +463,17 @@ def _validate_core_receipt_authentication(config: Mapping[str, Any]) -> None:
         raise MonitorError("core soak receipt terminal signature mismatch")
 
 
-def _recover_missing_core_receipt_authentication(
-    config: Mapping[str, Any],
-    receipt: Mapping[str, Any],
-) -> None:
+def _require_core_receipt_authentication(config: Mapping[str, Any]) -> None:
     authentication_path = _path_from_config(
         config, "core_soak_receipt_authentication_path"
     )
     if authentication_path.exists():
         _validate_core_receipt_authentication(config)
         return
-    if receipt.get("status") != "complete":
-        raise MonitorError(
-            "core soak receipt terminal recovery requires complete receipt"
-        )
-    validate_heartbeat_soak_receipt(receipt)
-    _validate_receipt_config_binding(config, receipt)
-    snapshot_receipts_path = _path_from_config(config, "runtime_snapshot_receipts_path")
-    if not snapshot_receipts_path.exists():
-        raise MonitorError("core soak receipt terminal recovery requires snapshot ledger")
-    snapshot_doc = _read_json(snapshot_receipts_path)
-    samples = receipt.get("samples")
-    if not isinstance(samples, list):
-        raise MonitorError("core soak receipt terminal recovery samples are invalid")
-    _validate_runtime_snapshot_receipts(
-        config,
-        snapshot_doc,
-        samples=samples,
-        allow_trailing=False,
+    raise MonitorError(
+        "core soak receipt terminal signature is missing; reconstructed terminal "
+        "evidence must not be authenticated during recovery"
     )
-    _write_core_receipt_authentication(config)
-    _validate_core_receipt_authentication(config)
 
 
 def _validate_rollback_receipt_config_binding(
@@ -1762,7 +1742,7 @@ def run(args: argparse.Namespace) -> int:
             return 2
         if receipt["status"] == "complete":
             try:
-                _recover_missing_core_receipt_authentication(config, receipt)
+                _require_core_receipt_authentication(config)
             except (HeartbeatShadowError, MonitorError) as exc:
                 _persist_envelope(
                     config,
