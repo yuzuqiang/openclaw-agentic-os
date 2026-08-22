@@ -64,7 +64,8 @@ EXPECTED_IMPLEMENTATION_BASE = "bf06585a9b8603001050a47af2840586d38c0a8d"
 INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV = (
     "AGENTIC_OS_INDEPENDENT_VALIDATION_ANCHOR_HMAC_KEY"
 )
-INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES = 32
+MONITOR_HMAC_ENV = "AGENTIC_OS_HEARTBEAT_SHADOW_MONITOR_HMAC_KEY"
+HMAC_MIN_BYTES = 32
 _ACTIVE_SIGNAL_CONFIG: Mapping[str, Any] | None = None
 
 
@@ -117,7 +118,8 @@ def _validate_anchor_signature(record: Mapping[str, Any]) -> None:
     ):
         raise MonitorError("independent validation authenticated record signature is invalid")
     secret_bytes = _hmac_secret_bytes(
-        "independent validation authenticated record signature key"
+        INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "independent validation authenticated record signature key",
     )
     expected = hmac.new(
         secret_bytes,
@@ -128,13 +130,23 @@ def _validate_anchor_signature(record: Mapping[str, Any]) -> None:
         raise MonitorError("independent validation authenticated record signature mismatch")
 
 
-def _hmac_secret_bytes(label: str) -> bytes:
-    secret = os.environ.get(INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV)
+def _hmac_secret_bytes(env_name: str, label: str) -> bytes:
+    secret = os.environ.get(env_name)
     if not secret:
         raise MonitorError(f"{label} is unavailable")
     secret_bytes = secret.encode("utf-8")
-    if len(secret_bytes) < INDEPENDENT_VALIDATION_ANCHOR_HMAC_MIN_BYTES:
+    if len(secret_bytes) < HMAC_MIN_BYTES:
         raise MonitorError(f"{label} is too weak")
+    return secret_bytes
+
+
+def _monitor_hmac_secret_bytes(label: str) -> bytes:
+    secret_bytes = _hmac_secret_bytes(MONITOR_HMAC_ENV, label)
+    anchor_secret = os.environ.get(INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV)
+    if anchor_secret and hmac.compare_digest(secret_bytes, anchor_secret.encode("utf-8")):
+        raise MonitorError(
+            f"{label} must not reuse independent validation anchor key"
+        )
     return secret_bytes
 
 
@@ -338,13 +350,15 @@ def _authority_input_path_binding_payload(config: Mapping[str, Any]) -> dict[str
 
 def _authority_input_path_authentication(config: Mapping[str, Any]) -> dict[str, str]:
     signature = hmac.new(
-        _hmac_secret_bytes("monitor authority input path identity signature key"),
+        _monitor_hmac_secret_bytes(
+            "monitor authority input path identity signature key"
+        ),
         _canonical_json(_authority_input_path_binding_payload(config)),
         hashlib.sha256,
     ).hexdigest()
     return {
         "scheme": "hmac-sha256-env",
-        "key_env": INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "key_env": MONITOR_HMAC_ENV,
         "signature": signature,
     }
 
@@ -357,7 +371,7 @@ def _validate_authority_input_path_authentication(config: Mapping[str, Any]) -> 
         raise MonitorError("monitor authority input path identity signature shape is invalid")
     if authentication.get("scheme") != "hmac-sha256-env":
         raise MonitorError("monitor authority input path identity signature scheme is invalid")
-    if authentication.get("key_env") != INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV:
+    if authentication.get("key_env") != MONITOR_HMAC_ENV:
         raise MonitorError("monitor authority input path identity signature key authority is invalid")
     signature = authentication.get("signature")
     if (
@@ -367,7 +381,9 @@ def _validate_authority_input_path_authentication(config: Mapping[str, Any]) -> 
     ):
         raise MonitorError("monitor authority input path identity signature is invalid")
     expected = hmac.new(
-        _hmac_secret_bytes("monitor authority input path identity signature key"),
+        _monitor_hmac_secret_bytes(
+            "monitor authority input path identity signature key"
+        ),
         _canonical_json(_authority_input_path_binding_payload(config)),
         hashlib.sha256,
     ).hexdigest()
@@ -408,13 +424,13 @@ def _core_receipt_authentication_payload(config: Mapping[str, Any]) -> dict[str,
 
 def _core_receipt_authentication(config: Mapping[str, Any]) -> dict[str, str]:
     signature = hmac.new(
-        _hmac_secret_bytes("core soak receipt terminal signature key"),
+        _monitor_hmac_secret_bytes("core soak receipt terminal signature key"),
         _canonical_json(_core_receipt_authentication_payload(config)),
         hashlib.sha256,
     ).hexdigest()
     return {
         "scheme": "hmac-sha256-env",
-        "key_env": INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "key_env": MONITOR_HMAC_ENV,
         "signature": signature,
     }
 
@@ -445,7 +461,7 @@ def _validate_core_receipt_authentication(config: Mapping[str, Any]) -> None:
         raise MonitorError("core soak receipt terminal signature shape is invalid")
     if authentication.get("scheme") != "hmac-sha256-env":
         raise MonitorError("core soak receipt terminal signature scheme is invalid")
-    if authentication.get("key_env") != INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV:
+    if authentication.get("key_env") != MONITOR_HMAC_ENV:
         raise MonitorError("core soak receipt terminal signature key authority is invalid")
     signature = authentication.get("signature")
     if (
@@ -455,7 +471,7 @@ def _validate_core_receipt_authentication(config: Mapping[str, Any]) -> None:
     ):
         raise MonitorError("core soak receipt terminal signature is invalid")
     expected = hmac.new(
-        _hmac_secret_bytes("core soak receipt terminal signature key"),
+        _monitor_hmac_secret_bytes("core soak receipt terminal signature key"),
         _canonical_json(payload),
         hashlib.sha256,
     ).hexdigest()

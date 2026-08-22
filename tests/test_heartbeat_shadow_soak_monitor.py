@@ -133,9 +133,13 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.lifecycle = self.root / "docs/runtime-evidence/lifecycle.json"
         self.validation = self.root / "docs/runtime-evidence/validation.json"
         self.anchor_key = "phase-c-anchor-test-key-with-32-byte-floor"
+        self.monitor_key = "heartbeat-shadow-monitor-key-with-32-byte-floor"
         env_patch = mock.patch.dict(
             os.environ,
-            {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: self.anchor_key},
+            {
+                monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: self.anchor_key,
+                monitor.MONITOR_HMAC_ENV: self.monitor_key,
+            },
         )
         env_patch.start()
         self.addCleanup(env_patch.stop)
@@ -637,6 +641,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: weak_key},
         ), mock.patch.object(monitor, "REPO_ROOT", self.root):
             with self.assertRaisesRegex(monitor.MonitorError, "signature key is too weak"):
+                monitor._build_config(self.args)
+
+    def test_monitor_signing_key_must_not_reuse_verifier_anchor_key(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                monitor.INDEPENDENT_VALIDATION_ANCHOR_HMAC_ENV: self.anchor_key,
+                monitor.MONITOR_HMAC_ENV: self.anchor_key,
+            },
+        ), mock.patch.object(monitor, "REPO_ROOT", self.root):
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "must not reuse independent validation anchor key",
+            ):
                 monitor._build_config(self.args)
 
     def test_committed_default_validation_anchor_is_externally_signed_and_bound(
@@ -1918,6 +1936,12 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertEqual(envelope["status"], "complete")
         self.assertEqual(envelope["violations"], [])
+        authentication = json.loads(
+            (self.state_dir / "core-soak-receipt-authentication.json").read_text(
+                encoding="utf-8"
+            )
+        )["authentication"]
+        self.assertEqual(authentication["key_env"], monitor.MONITOR_HMAC_ENV)
 
     def test_status_rejects_symlinked_envelope_before_read_or_write(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)

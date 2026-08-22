@@ -1108,6 +1108,43 @@ class OpenClawAdapterTests(unittest.TestCase):
                 DifferentHistoryItemResultTransport()
             ).session_result("session-key")
 
+    def test_session_result_accepts_history_item_top_level_key_alias(self) -> None:
+        class TopLevelKeyHistoryItemTransport:
+            def call(self, method, params):
+                metadata = {
+                    "run_id": "run",
+                    "transition_id": "transition",
+                    "client_request_id": "client",
+                    "idempotency_key": "spawn-idem",
+                    "phase": "phase",
+                    "agent_id": "agent",
+                    "task_digest": "task",
+                }
+                return {
+                    "sessionKey": params["sessionKey"],
+                    "spawnRequestSessionKey": params["sessionKey"],
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "done",
+                            "key": params["sessionKey"],
+                        }
+                    ],
+                    "metadata": {
+                        "metadata_contract_version": "v1",
+                        "normalized": metadata,
+                        "raw_json": json.dumps(
+                            metadata, sort_keys=True, separators=(",", ":")
+                        ),
+                    },
+                }
+
+        result = CannedOpenClawAdapter(
+            TopLevelKeyHistoryItemTransport()
+        ).session_result("session-key")
+
+        self.assertEqual(result.session_key, "session-key")
+
     def test_session_result_different_history_item_external_id_fails_contract(
         self,
     ) -> None:

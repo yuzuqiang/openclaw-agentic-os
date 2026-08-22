@@ -626,6 +626,7 @@ def _history_item_session_keys(
                 (
                     (f"{label}.session_key", item.get("session_key")),
                     (f"{label}.sessionKey", item.get("sessionKey")),
+                    (f"{label}.key", item.get("key")),
                     (f"{label}.session.session_key", session.get("session_key")),
                     (f"{label}.session.sessionKey", session.get("sessionKey")),
                     (f"{label}.session.key", session.get("key")),
