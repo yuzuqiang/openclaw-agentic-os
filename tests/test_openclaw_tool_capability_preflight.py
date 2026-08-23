@@ -3711,6 +3711,31 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "reachable",
         )
 
+    def test_persistent_attested_preflight_rejects_dirty_agentic_os_worktree(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        dirty_path = repository_root() / ".persistent-preflight-dirty-agentic-os-test"
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            try:
+                dirty_path.write_text("dirty\n", encoding="utf-8")
+                result = run_persistent_preflight(evidence, install_root, key_path)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    dirty_path.unlink()
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertFalse(payload["runtime_ready"])
+        self.assertIn(
+            "persistent preflight Agentic OS worktree must be clean",
+            payload["error"],
+        )
+
     def test_persistent_attested_preflight_missing_key_file_writes_fail_closed_evidence(
         self,
     ) -> None:

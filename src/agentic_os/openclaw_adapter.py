@@ -595,10 +595,14 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
             observations.append(observation_from_openclaw_response(mapped))
         except AdapterContractError:
             partial = partial_observation_from_openclaw_response(mapped)
-            if partial is not None:
-                observations.append(
-                    replace(partial, metadata_contract_version=None, raw_json=None)
+            if partial is None:
+                raise AdapterContractError(
+                    f"{label} response contains identity-less malformed "
+                    f"{label} item at index {index}"
                 )
+            observations.append(
+                replace(partial, metadata_contract_version=None, raw_json=None)
+            )
     return tuple(observations)
 
 

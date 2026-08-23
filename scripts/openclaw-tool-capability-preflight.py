@@ -1891,6 +1891,7 @@ def _validate_runtime_and_agentic_heads(evidence: Mapping[str, Any]) -> tuple[Pa
         raise AdapterContractError("persistent preflight Agentic OS worktree mismatch")
     if _require_valid_git_revision(script_root, "HEAD") != expected_agentic_head:
         raise AdapterContractError("persistent preflight Agentic OS head mismatch")
+    _require_clean_persistent_agentic_os_worktree(script_root)
     return runtime_worktree, agentic_os_worktree
 
 
@@ -1900,6 +1901,18 @@ def _require_clean_persistent_runtime_worktree(runtime_worktree: Path) -> None:
         raise AdapterContractError("persistent preflight runtime worktree status unavailable")
     if status.strip():
         raise AdapterContractError("persistent preflight runtime worktree must be clean")
+
+
+def _require_clean_persistent_agentic_os_worktree(agentic_os_worktree: Path) -> None:
+    status = _git_status_porcelain(agentic_os_worktree)
+    if status is None:
+        raise AdapterContractError(
+            "persistent preflight Agentic OS worktree status unavailable"
+        )
+    if status.strip():
+        raise AdapterContractError(
+            "persistent preflight Agentic OS worktree must be clean"
+        )
 
 
 def _git_committed_blob_digest(root: Path, path: Path, revision: str = "HEAD") -> str:

@@ -1501,7 +1501,7 @@ class OpenClawAdapterTests(unittest.TestCase):
         self.assertEqual(observation.external_id, "session-key")
         self.assertEqual(observation.session_key, "session-key")
 
-    def test_list_responses_skip_malformed_unrelated_entries(self) -> None:
+    def test_list_responses_reject_identity_less_entries_even_with_one_match(self) -> None:
         class LegacyListTransport:
             def call(self, method, params):
                 lease_metadata = {
@@ -1564,17 +1564,17 @@ class OpenClawAdapterTests(unittest.TestCase):
                     }
                 raise AssertionError(method)
 
-        adapter = CannedOpenClawAdapter(
-            LegacyListTransport()
-        )
-        self.assertEqual(
-            [observation.external_id for observation in adapter.allow_lease_list()],
-            ["lease-gateway"],
-        )
-        self.assertEqual(
-            [observation.external_id for observation in adapter.sessions_list()],
-            ["session-key"],
-        )
+        adapter = CannedOpenClawAdapter(LegacyListTransport())
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "lease response contains identity-less malformed lease item",
+        ):
+            adapter.allow_lease_list()
+        with self.assertRaisesRegex(
+            AdapterContractError,
+            "session response contains identity-less malformed session item",
+        ):
+            adapter.sessions_list()
 
     def test_list_responses_reject_malformed_top_level_containers(self) -> None:
         class MalformedListTransport:
