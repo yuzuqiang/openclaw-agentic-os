@@ -52,6 +52,9 @@ SCHEMA_CORE_RECEIPT_AUTHENTICATION = (
 SCHEMA_SAMPLE_AUTHENTICATION = (
     "p03-heartbeat-shadow-monitor-sample-authentication.v1"
 )
+SCHEMA_ROLLBACK_AUTHENTICATION_INTENT = (
+    "p03-heartbeat-shadow-rollback-authentication-intent.v1"
+)
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 DAEMON_READY_TIMEOUT_SECONDS = 2.0
@@ -315,6 +318,64 @@ def _validate_receipt_config_binding(
         raise MonitorError("core receipt duration does not match monitor config")
     if receipt.get("sample_interval_seconds") != config.get("sample_interval_seconds"):
         raise MonitorError("core receipt sample interval does not match monitor config")
+    timing = _soak_timing_payload(config)
+    for key in (
+        "started_at_epoch_ms",
+        "started_at_monotonic_ms",
+        "deadline_epoch_ms",
+        "deadline_monotonic_ms",
+        "duration_hours",
+        "sample_interval_seconds",
+    ):
+        if receipt.get(key) != timing.get(key):
+            raise MonitorError(f"core receipt {key} does not match authenticated run timing")
+
+
+def _bind_soak_timing_config(
+    config: dict[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    config["soak_timing"] = {
+        "started_at_epoch_ms": receipt.get("started_at_epoch_ms"),
+        "started_at_monotonic_ms": receipt.get("started_at_monotonic_ms"),
+        "deadline_epoch_ms": receipt.get("deadline_epoch_ms"),
+        "deadline_monotonic_ms": receipt.get("deadline_monotonic_ms"),
+        "duration_hours": receipt.get("duration_hours"),
+        "sample_interval_seconds": receipt.get("sample_interval_seconds"),
+    }
+
+
+def _soak_timing_payload(config: Mapping[str, Any]) -> dict[str, Any]:
+    timing = config.get("soak_timing")
+    if not isinstance(timing, Mapping):
+        raise MonitorError("monitor authenticated run timing is missing")
+    expected = {
+        "started_at_epoch_ms",
+        "started_at_monotonic_ms",
+        "deadline_epoch_ms",
+        "deadline_monotonic_ms",
+        "duration_hours",
+        "sample_interval_seconds",
+    }
+    if set(timing) != expected:
+        raise MonitorError("monitor authenticated run timing shape is invalid")
+    payload = {key: timing.get(key) for key in expected}
+    if any(type(value) is not int or value <= 0 for value in payload.values()):
+        raise MonitorError("monitor authenticated run timing values are invalid")
+    if payload["duration_hours"] != config.get("duration_hours"):
+        raise MonitorError("monitor authenticated run duration mismatch")
+    if payload["sample_interval_seconds"] != config.get("sample_interval_seconds"):
+        raise MonitorError("monitor authenticated run interval mismatch")
+    expected_epoch_deadline = (
+        payload["started_at_epoch_ms"] + payload["duration_hours"] * 3_600_000
+    )
+    expected_monotonic_deadline = (
+        payload["started_at_monotonic_ms"] + payload["duration_hours"] * 3_600_000
+    )
+    if payload["deadline_epoch_ms"] != expected_epoch_deadline:
+        raise MonitorError("monitor authenticated epoch deadline mismatch")
+    if payload["deadline_monotonic_ms"] != expected_monotonic_deadline:
+        raise MonitorError("monitor authenticated monotonic deadline mismatch")
+    return payload
 
 
 def _path_identity(path: Path) -> dict[str, str]:
@@ -455,6 +516,85 @@ def _rollback_receipt_authentication_payload(config: Mapping[str, Any]) -> dict[
     }
 
 
+def _rollback_authentication_intent_path(config: Mapping[str, Any]) -> Path:
+    return _path_from_config(config, "state_dir") / "rollback-authentication-intent.json"
+
+
+def _rollback_authentication_intent_payload(
+    config: Mapping[str, Any], rollback_id: str
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_ROLLBACK_AUTHENTICATION_INTENT,
+        "run_id": config["run_id"],
+        "authority_input_digest": config["authority_input_digest"],
+        "rollback_id": rollback_id,
+        "rollback_receipt_path": _relative_to_repo(
+            _path_from_config(config, "rollback_receipt_path")
+        ),
+        "rollback_receipt_authentication_path": _relative_to_repo(
+            _path_from_config(config, "rollback_receipt_authentication_path")
+        ),
+    }
+
+
+def _rollback_authentication_intent_signature(
+    payload: Mapping[str, Any]
+) -> dict[str, str]:
+    signature = hmac.new(
+        _monitor_hmac_secret_bytes("rollback authentication recovery intent key"),
+        _canonical_json(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "scheme": "hmac-sha256-env",
+        "key_env": MONITOR_HMAC_ENV,
+        "signature": signature,
+    }
+
+
+def _write_rollback_authentication_intent(
+    config: Mapping[str, Any], rollback_id: str
+) -> None:
+    payload = _rollback_authentication_intent_payload(config, rollback_id)
+    _atomic_write_json(
+        _rollback_authentication_intent_path(config),
+        {**payload, "authentication": _rollback_authentication_intent_signature(payload)},
+    )
+
+
+def _validate_rollback_authentication_intent(
+    config: Mapping[str, Any], intent: Mapping[str, Any], rollback_id: str | None = None
+) -> str:
+    observed_rollback_id = intent.get("rollback_id")
+    if not isinstance(observed_rollback_id, str) or not observed_rollback_id:
+        raise MonitorError("rollback authentication recovery intent rollback_id is invalid")
+    if rollback_id is not None and observed_rollback_id != rollback_id:
+        raise MonitorError("rollback authentication recovery intent rollback_id mismatch")
+    payload = _rollback_authentication_intent_payload(config, observed_rollback_id)
+    if {key: intent.get(key) for key in payload} != payload:
+        raise MonitorError("rollback authentication recovery intent payload mismatch")
+    authentication = intent.get("authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("rollback authentication recovery intent signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("rollback authentication recovery intent signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("rollback authentication recovery intent signature scheme is invalid")
+    if authentication.get("key_env") != MONITOR_HMAC_ENV:
+        raise MonitorError("rollback authentication recovery intent key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("rollback authentication recovery intent signature is invalid")
+    expected = _rollback_authentication_intent_signature(payload)["signature"]
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("rollback authentication recovery intent signature mismatch")
+    return observed_rollback_id
+
+
 def _rollback_receipt_authentication(config: Mapping[str, Any]) -> dict[str, str]:
     signature = hmac.new(
         _monitor_hmac_secret_bytes("rollback receipt terminal signature key"),
@@ -584,6 +724,7 @@ def _sample_authentication_payload(
         "authority_mode": "file_authority_shadow",
         "exact_heads": dict(config["exact_heads"]),
         "authority_input_digest": config["authority_input_digest"],
+        "soak_timing": _soak_timing_payload(config),
         "sample_index": sample_index,
         "sample_sha256": _sha256_text(
             json.dumps(
@@ -836,7 +977,10 @@ def _validate_stop_request(config: Mapping[str, Any], request: Mapping[str, Any]
 
 
 def _validate_rollback_receipt_config_binding(
-    config: Mapping[str, Any], receipt: Mapping[str, Any]
+    config: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    require_authentication: bool = True,
 ) -> None:
     if receipt.get("schema_version") != "p03-heartbeat-forced-rollback-receipt.v1":
         raise MonitorError("rollback receipt schema is invalid")
@@ -881,7 +1025,31 @@ def _validate_rollback_receipt_config_binding(
     if not snapshot.is_file() or _sha256_file(snapshot) != snapshot_sha:
         raise MonitorError("rollback receipt audit snapshot hash mismatch")
     _assert_shadow_database_absent(config)
-    _validate_rollback_receipt_authentication(config)
+    if require_authentication:
+        _validate_rollback_receipt_authentication(config)
+
+
+def _recover_rollback_receipt_authentication(
+    config: Mapping[str, Any], rollback_id: str | None = None
+) -> dict[str, Any]:
+    intent_path = _rollback_authentication_intent_path(config)
+    if not intent_path.exists():
+        raise MonitorError("rollback authentication recovery intent is missing")
+    observed_rollback_id = _validate_rollback_authentication_intent(
+        config, _read_json(intent_path), rollback_id=rollback_id
+    )
+    receipt_path = _path_from_config(config, "rollback_receipt_path")
+    if not receipt_path.exists():
+        raise MonitorError("rollback receipt is missing")
+    receipt = _read_json(receipt_path)
+    if receipt.get("rollback_id") != observed_rollback_id:
+        raise MonitorError("rollback receipt recovery intent rollback_id mismatch")
+    _validate_rollback_receipt_config_binding(
+        config, receipt, require_authentication=False
+    )
+    _write_rollback_receipt_authentication(config)
+    _validate_rollback_receipt_config_binding(config, receipt)
+    return dict(receipt)
 
 
 def _sqlite_related_paths(database: Path) -> tuple[Path, ...]:
@@ -1230,7 +1398,12 @@ def _envelope(
         if not rollback_receipt_path.exists():
             raise MonitorError("terminal monitor status requires rollback receipt")
         rollback_receipt = _read_json(rollback_receipt_path)
-        _validate_rollback_receipt_config_binding(config, rollback_receipt)
+        try:
+            _validate_rollback_receipt_config_binding(config, rollback_receipt)
+        except MonitorError as exc:
+            if "terminal signature is missing" not in str(exc):
+                raise
+            rollback_receipt = _recover_rollback_receipt_authentication(config)
     if core_receipt_path.exists():
         try:
             receipt = _read_json(core_receipt_path)
@@ -1951,7 +2124,6 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
     )
     _atomic_write_json(_path_from_config(config, "file_shadow_cycle_receipt_path"), cycle)
     config["authority_input_digest"] = cycle["authority_input_digest"]
-    _atomic_write_json(state_dir / "monitor-config.json", config)
     receipt = new_heartbeat_soak_receipt(
         run_id=str(config["run_id"]),
         authority_input_digest=str(config["authority_input_digest"]),
@@ -1960,6 +2132,8 @@ def _first_sample(config: dict[str, Any]) -> dict[str, Any]:
         duration_hours=int(config["duration_hours"]),
         sample_interval_seconds=int(config["sample_interval_seconds"]),
     )
+    _bind_soak_timing_config(config, receipt)
+    _atomic_write_json(state_dir / "monitor-config.json", config)
     first = _sample(config, _epoch_ms())
     receipt = append_heartbeat_soak_sample(receipt, first)
     persist_heartbeat_soak_receipt(
@@ -2352,6 +2526,26 @@ def rollback(args: argparse.Namespace) -> int:
         raise MonitorError("refusing rollback while monitor process is active")
     receipt = _read_json(_path_from_config(config, "core_soak_receipt_path"))
     validate_heartbeat_soak_receipt(receipt)
+    rollback_receipt_path = _path_from_config(config, "rollback_receipt_path")
+    rollback_authentication_path = _path_from_config(
+        config, "rollback_receipt_authentication_path"
+    )
+    if rollback_receipt_path.exists():
+        if not rollback_authentication_path.exists():
+            result = _recover_rollback_receipt_authentication(
+                config, rollback_id=args.rollback_id
+            )
+        else:
+            result = _read_json(rollback_receipt_path)
+            _validate_rollback_receipt_config_binding(config, result)
+        _persist_envelope(
+            config,
+            status="rolled_back",
+            note="local shadow db rollback complete",
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    _write_rollback_authentication_intent(config, args.rollback_id)
     result = force_heartbeat_file_authority_rollback(
         baseline_path=_path_from_config(config, "baseline_path"),
         heartbeat_file=_path_from_config(config, "heartbeat_file"),
@@ -2359,7 +2553,7 @@ def rollback(args: argparse.Namespace) -> int:
         database=_path_from_config(config, "database_path"),
         authority_input_digest=str(receipt["authority_input_digest"]),
         rollback_id=args.rollback_id,
-        receipt_path=_path_from_config(config, "rollback_receipt_path"),
+        receipt_path=rollback_receipt_path,
         monitor_run_id=str(config["run_id"]),
         repo_root_path=REPO_ROOT,
     )

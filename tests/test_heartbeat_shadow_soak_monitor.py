@@ -110,6 +110,12 @@ def _snapshot_entry(root: Path, snapshot_database: Path, payload: bytes = b"runt
 
 
 def _write_sample_authentication(config: dict[str, object], receipt: dict[str, object]) -> None:
+    if "soak_timing" not in config:
+        monitor._bind_soak_timing_config(config, receipt)
+    monitor._atomic_write_json(
+        Path(str(config["state_dir"])) / "monitor-config.json",
+        config,
+    )
     for index, sample in enumerate(receipt["samples"], start=1):
         monitor._append_sample_authentication(config, index, sample)
 
@@ -354,6 +360,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            monitor._bind_soak_timing_config(config, receipt)
             monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
             snapshot_root = (
                 self.root
@@ -437,6 +444,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            monitor._bind_soak_timing_config(config, receipt)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
             snapshot_root = (
                 self.root
                 / "state/agentic-os/backups/heartbeat-shadow-soak/phase-b-test-soak"
@@ -1508,6 +1517,78 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
         self.assertIn("sample authentication journal", envelope["note"])
 
+    def test_run_rejects_duration_shortening_after_authenticated_sample(self) -> None:
+        digest = "a" * 64
+        args = Namespace(
+            **{
+                **self.args.__dict__,
+                "duration_hours": 25,
+                "interval_seconds": 3600,
+            }
+        )
+        with mock.patch.object(monitor, "REPO_ROOT", self.root), mock.patch.object(
+            monitor, "_assert_start_git_contract"
+        ), mock.patch.object(
+            monitor, "_sample", side_effect=AssertionError("must not append")
+        ):
+            config = monitor._build_config(args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=25,
+                sample_interval_seconds=3600,
+            )
+            first_sample = _pass_sample(1_700_000_000_000, digest, 1_700_000_000_000)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, first_sample)
+            monitor._bind_soak_timing_config(config, receipt)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            _write_sample_authentication(config, receipt)
+
+            forged_config = dict(config)
+            forged_timing = dict(forged_config["soak_timing"])
+            forged_timing["duration_hours"] = 24
+            forged_timing["deadline_epoch_ms"] = (
+                forged_timing["started_at_epoch_ms"] + 24 * 3_600_000
+            )
+            forged_timing["deadline_monotonic_ms"] = (
+                forged_timing["started_at_monotonic_ms"] + 24 * 3_600_000
+            )
+            forged_config["duration_hours"] = 24
+            forged_config["soak_timing"] = forged_timing
+            forged_receipt = dict(receipt)
+            forged_receipt["duration_hours"] = 24
+            forged_receipt["deadline_epoch_ms"] = forged_timing["deadline_epoch_ms"]
+            forged_receipt["deadline_monotonic_ms"] = forged_timing[
+                "deadline_monotonic_ms"
+            ]
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-config.json", forged_config
+            )
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                forged_receipt,
+                repo_root_path=self.root,
+            )
+
+            result = monitor.run(Namespace(state_dir=self.state_dir))
+
+        self.assertEqual(result, 2)
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "failed_closed")
+        self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
+        self.assertIn("sample authentication journal", envelope["note"])
+
     def test_sample_authentication_trailing_crash_entry_is_reconciled(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
@@ -1530,6 +1611,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
+            monitor._bind_soak_timing_config(config, receipt)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
             monitor._append_sample_authentication(config, 1, first)
             monitor._append_sample_authentication(config, 2, second)
 
@@ -1824,6 +1907,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 _pass_sample(1_700_000_000_000, digest),
             )
             self.assertEqual(receipt["status"], "in_progress")
+            monitor._bind_soak_timing_config(config, receipt)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
             monitor.persist_heartbeat_soak_receipt(
                 self.state_dir / "core-soak-receipt.json",
                 receipt,
@@ -1875,6 +1960,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     _pass_sample(sampled_at, digest, sampled_at),
                 )
             self.assertEqual(receipt["status"], "complete")
+            monitor._bind_soak_timing_config(config, receipt)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
             monitor.persist_heartbeat_soak_receipt(
                 self.state_dir / "core-soak-receipt.json",
                 receipt,
@@ -2489,6 +2576,116 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     )
 
         rollback.assert_not_called()
+
+    def test_rollback_recovers_missing_authentication_after_receipt_crash(
+        self,
+    ) -> None:
+        digest = "a" * 64
+        rollback_id = "crash-window"
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            monitor._bind_soak_timing_config(config, receipt)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            backup = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/crash-window/control.db"
+            )
+            snapshot = (
+                self.root
+                / "state/agentic-os/backups/heartbeat-shadow-rollback/crash-window/audit.db"
+            )
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_bytes(b"backup")
+            snapshot.write_bytes(b"snapshot")
+            rollback_receipt = {
+                "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
+                "status": "pass",
+                "workflow": "heartbeat",
+                "authority": "file_artifacts",
+                "db_authority_enabled": False,
+                "authority_input_digest": digest,
+                "rollback_id": rollback_id,
+                "monitor_run_id": config["run_id"],
+                "file_authority_view_recreated": True,
+                "shadow_database_removed": True,
+                "recoverable_local_backup_created": True,
+                "recoverable_local_backup_path": backup.relative_to(self.root).as_posix(),
+                "recoverable_local_backup_sha256": hashlib.sha256(b"backup").hexdigest(),
+                "audit_snapshot_database": snapshot.relative_to(self.root).as_posix(),
+                "audit_snapshot_sha256": hashlib.sha256(b"snapshot").hexdigest(),
+                "parity_percent": 100,
+                "parity": {"status": "pass", "percent": 100, "mismatch_count": 0},
+            }
+
+            def crash_after_receipt(**kwargs: object) -> dict[str, object]:
+                del kwargs
+                monitor._atomic_write_json(
+                    self.state_dir / "rollback-receipt.json",
+                    rollback_receipt,
+                )
+                return rollback_receipt
+
+            with mock.patch.object(
+                monitor,
+                "force_heartbeat_file_authority_rollback",
+                side_effect=crash_after_receipt,
+            ), mock.patch.object(
+                monitor,
+                "_write_rollback_receipt_authentication",
+                side_effect=RuntimeError("crash before auth"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before auth"):
+                    monitor.rollback(
+                        Namespace(
+                            state_dir=self.state_dir,
+                            rollback_id=rollback_id,
+                            allow_running=True,
+                        )
+                    )
+
+            self.assertTrue(
+                (self.state_dir / "rollback-authentication-intent.json").exists()
+            )
+            self.assertFalse(
+                (self.state_dir / "rollback-receipt-authentication.json").exists()
+            )
+            with mock.patch.object(
+                monitor,
+                "force_heartbeat_file_authority_rollback",
+                side_effect=AssertionError("must not mutate again"),
+            ):
+                result = monitor.rollback(
+                    Namespace(
+                        state_dir=self.state_dir,
+                        rollback_id=rollback_id,
+                        allow_running=True,
+                    )
+                )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(
+            (self.state_dir / "rollback-receipt-authentication.json").exists()
+        )
+        envelope = json.loads(
+            (self.state_dir / "monitor-envelope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(envelope["status"], "rolled_back")
+        self.assertEqual(envelope["violations"], [])
 
     def test_unrequested_signal_exits_nonzero_after_failed_closed_envelope(self) -> None:
         with mock.patch.dict(
