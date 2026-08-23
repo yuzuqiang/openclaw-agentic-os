@@ -227,6 +227,40 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             no_daemon=True,
         )
 
+    def _valid_rollback_receipt(
+        self, config: dict[str, object], digest: str, rollback_id: str
+    ) -> dict[str, object]:
+        backup = (
+            self.root
+            / f"state/agentic-os/backups/heartbeat-shadow-rollback/{rollback_id}/control.db"
+        )
+        snapshot = (
+            self.root
+            / f"state/agentic-os/backups/heartbeat-shadow-rollback/{rollback_id}/audit.db"
+        )
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_bytes(b"backup")
+        snapshot.write_bytes(b"snapshot")
+        return {
+            "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
+            "status": "pass",
+            "workflow": "heartbeat",
+            "authority": "file_artifacts",
+            "db_authority_enabled": False,
+            "authority_input_digest": digest,
+            "rollback_id": rollback_id,
+            "monitor_run_id": config["run_id"],
+            "file_authority_view_recreated": True,
+            "shadow_database_removed": True,
+            "recoverable_local_backup_created": True,
+            "recoverable_local_backup_path": backup.relative_to(self.root).as_posix(),
+            "recoverable_local_backup_sha256": hashlib.sha256(b"backup").hexdigest(),
+            "audit_snapshot_database": snapshot.relative_to(self.root).as_posix(),
+            "audit_snapshot_sha256": hashlib.sha256(b"snapshot").hexdigest(),
+            "parity_percent": 100,
+            "parity": {"status": "pass", "percent": 100, "mismatch_count": 0},
+        }
+
     def test_first_sample_writes_core_receipt_and_sanitized_envelope(self) -> None:
         digest = "a" * 64
 
@@ -672,9 +706,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             ):
                 monitor._build_config(self.args)
 
-    def test_committed_default_validation_anchor_is_externally_signed_and_bound(
+    def test_committed_validation_anchor_is_externally_signed_but_not_default(
         self,
     ) -> None:
+        start_parser = next(
+            action for action in monitor.parser()._actions if action.dest == "command"
+        ).choices["start"]
+        actions = {
+            option: action
+            for action in start_parser._actions
+            for option in action.option_strings
+        }
+        self.assertTrue(actions["--independent-validation-path"].required)
+        self.assertTrue(actions["--expected-independent-validation-sha256"].required)
+
         repo_root = SCRIPT_PATH.parents[1]
         validation_path = (
             repo_root
@@ -2601,43 +2646,18 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 receipt,
                 repo_root_path=self.root,
             )
-            backup = (
-                self.root
-                / "state/agentic-os/backups/heartbeat-shadow-rollback/crash-window/control.db"
+            rollback_receipt = self._valid_rollback_receipt(
+                config, digest, rollback_id
             )
-            snapshot = (
-                self.root
-                / "state/agentic-os/backups/heartbeat-shadow-rollback/crash-window/audit.db"
-            )
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            backup.write_bytes(b"backup")
-            snapshot.write_bytes(b"snapshot")
-            rollback_receipt = {
-                "schema_version": "p03-heartbeat-forced-rollback-receipt.v1",
-                "status": "pass",
-                "workflow": "heartbeat",
-                "authority": "file_artifacts",
-                "db_authority_enabled": False,
-                "authority_input_digest": digest,
-                "rollback_id": rollback_id,
-                "monitor_run_id": config["run_id"],
-                "file_authority_view_recreated": True,
-                "shadow_database_removed": True,
-                "recoverable_local_backup_created": True,
-                "recoverable_local_backup_path": backup.relative_to(self.root).as_posix(),
-                "recoverable_local_backup_sha256": hashlib.sha256(b"backup").hexdigest(),
-                "audit_snapshot_database": snapshot.relative_to(self.root).as_posix(),
-                "audit_snapshot_sha256": hashlib.sha256(b"snapshot").hexdigest(),
-                "parity_percent": 100,
-                "parity": {"status": "pass", "percent": 100, "mismatch_count": 0},
-            }
 
             def crash_after_receipt(**kwargs: object) -> dict[str, object]:
-                del kwargs
                 monitor._atomic_write_json(
                     self.state_dir / "rollback-receipt.json",
                     rollback_receipt,
                 )
+                callback = kwargs["rollback_receipt_persisted_callback"]
+                assert callable(callback)
+                callback(rollback_receipt)
                 return rollback_receipt
 
             with mock.patch.object(
@@ -2660,6 +2680,15 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
             self.assertTrue(
                 (self.state_dir / "rollback-authentication-intent.json").exists()
+            )
+            intent = json.loads(
+                (self.state_dir / "rollback-authentication-intent.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                intent["rollback_receipt_sha256"],
+                monitor._sha256_file(self.state_dir / "rollback-receipt.json"),
             )
             self.assertFalse(
                 (self.state_dir / "rollback-receipt-authentication.json").exists()
@@ -2686,6 +2715,70 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertEqual(envelope["status"], "rolled_back")
         self.assertEqual(envelope["violations"], [])
+
+    def test_rollback_recovery_rejects_receipt_without_bound_intent(self) -> None:
+        digest = "a" * 64
+        rollback_id = "unsigned-reconstruction"
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            rollback_receipt = self._valid_rollback_receipt(
+                config, digest, rollback_id
+            )
+            monitor._atomic_write_json(
+                self.state_dir / "rollback-receipt.json",
+                rollback_receipt,
+            )
+            monitor._write_rollback_authentication_intent(config, rollback_id)
+
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "rollback authentication recovery intent receipt hash is missing",
+            ):
+                monitor._recover_rollback_receipt_authentication(
+                    config, rollback_id=rollback_id
+                )
+
+        self.assertFalse(
+            (self.state_dir / "rollback-receipt-authentication.json").exists()
+        )
+
+    def test_rollback_recovery_rejects_tampered_receipt_after_bound_intent(
+        self,
+    ) -> None:
+        digest = "a" * 64
+        rollback_id = "tampered-reconstruction"
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            rollback_receipt = self._valid_rollback_receipt(
+                config, digest, rollback_id
+            )
+            receipt_path = self.state_dir / "rollback-receipt.json"
+            monitor._atomic_write_json(receipt_path, rollback_receipt)
+            monitor._write_rollback_authentication_intent(
+                config,
+                rollback_id,
+                rollback_receipt_sha256=monitor._sha256_file(receipt_path),
+            )
+            monitor._atomic_write_json(
+                receipt_path,
+                {**rollback_receipt, "authority_input_digest": "b" * 64},
+            )
+
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "rollback authentication recovery intent receipt hash mismatch",
+            ):
+                monitor._recover_rollback_receipt_authentication(
+                    config, rollback_id=rollback_id
+                )
+
+        self.assertFalse(
+            (self.state_dir / "rollback-receipt-authentication.json").exists()
+        )
 
     def test_unrequested_signal_exits_nonzero_after_failed_closed_envelope(self) -> None:
         with mock.patch.dict(

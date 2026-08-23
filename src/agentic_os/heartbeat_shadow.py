@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -1662,6 +1662,9 @@ def force_heartbeat_file_authority_rollback(
     monitor_run_id: str | None = None,
     observed_at_epoch_ms: int | None = None,
     repo_root_path: Path | None = None,
+    rollback_receipt_persisted_callback: (
+        Callable[[Mapping[str, Any]], None] | None
+    ) = None,
 ) -> dict[str, Any]:
     """Recoverably remove the shadow DB and prove the file view is unchanged."""
 
@@ -1768,6 +1771,8 @@ def force_heartbeat_file_authority_rollback(
         }
         _atomic_write_json(target_receipt, receipt)
         rollback_receipt_persisted = True
+        if rollback_receipt_persisted_callback is not None:
+            rollback_receipt_persisted_callback(receipt)
     finally:
         active_error = sys.exc_info()[1]
         release_error: BaseException | None = None
