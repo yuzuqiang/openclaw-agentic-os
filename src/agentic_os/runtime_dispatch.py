@@ -1129,12 +1129,16 @@ def persist_ambiguous_spawn_candidate(
 ) -> None:
     if not observation.external_id:
         return
-    observed = validate_session_observation(
-        local=spawn_metadata(request),
-        normalized=observation.normalized,
-        raw_json=observation.raw_json,
-        metadata_contract_version=observation.metadata_contract_version,
-    )
+    try:
+        observed = validate_session_observation(
+            local=spawn_metadata(request),
+            normalized=observation.normalized,
+            raw_json=observation.raw_json,
+            metadata_contract_version=observation.metadata_contract_version,
+        )
+    except MetadataContractError:
+        observed = {}
+    external_metadata_json = observation.raw_json if observed else None
     connection.execute(
         "UPDATE external_rpc_intents SET metadata_contract_version=COALESCE(?,metadata_contract_version),"
         "external_metadata_json=COALESCE(?,external_metadata_json),"
@@ -1150,14 +1154,14 @@ def persist_ambiguous_spawn_candidate(
         "AND state='human_review_required'",
         (
             observation.metadata_contract_version,
-            observation.raw_json,
-            observed["run_id"],
-            observed["transition_id"],
-            observed["client_request_id"],
-            observed["idempotency_key"],
-            observed["phase"],
-            observed["agent_id"],
-            observed["task_digest"],
+            external_metadata_json,
+            observed.get("run_id"),
+            observed.get("transition_id"),
+            observed.get("client_request_id"),
+            observed.get("idempotency_key"),
+            observed.get("phase"),
+            observed.get("agent_id"),
+            observed.get("task_digest"),
             observation.external_id,
             request.spawn_idempotency_key,
         ),
@@ -1429,12 +1433,36 @@ def dispatch_with_metadata(
                 )
         except AMBIGUOUS_TRANSPORT_ERRORS as exc:
             with immediate_transaction(connection):
-                mark_unknown(
-                    connection,
-                    request,
-                    rpc_kind="allow_lease_acquire",
-                    reason=str(exc),
-                )
+                candidate = getattr(exc, "candidate_observation", None)
+                if isinstance(candidate, MetadataObservation):
+                    try:
+                        candidate_lease_id = validate_accepted_lease_identity(
+                            gateway_lease_id=candidate.external_id
+                        )
+                        persist_unknown_acquired_lease_candidate(
+                            connection,
+                            request,
+                            candidate,
+                            candidate_lease_id,
+                            reason=(
+                                "ambiguous allow lease candidate preserved for "
+                                f"human reconciliation: {exc}"
+                            ),
+                        )
+                    except MetadataContractError:
+                        mark_unknown(
+                            connection,
+                            request,
+                            rpc_kind="allow_lease_acquire",
+                            reason=str(exc),
+                        )
+                else:
+                    mark_unknown(
+                        connection,
+                        request,
+                        rpc_kind="allow_lease_acquire",
+                        reason=str(exc),
+                    )
                 mark_human_review(
                     connection,
                     request,
@@ -1489,13 +1517,22 @@ def dispatch_with_metadata(
             spawn_observation = adapter.sessions_spawn(
                 spawn_rpc_params(request, gateway_lease_id)
             )
-            session_key = validate_accepted_session_identity(
-                external_id=spawn_observation.external_id,
-                spawn_request_session_key=spawn_observation.spawn_request_session_key,
-                session_key=spawn_observation.session_key,
-            )
-            with immediate_transaction(connection):
-                persist_spawn_acceptance(connection, request, spawn_observation, session_key)
+            try:
+                session_key = validate_accepted_session_identity(
+                    external_id=spawn_observation.external_id,
+                    spawn_request_session_key=spawn_observation.spawn_request_session_key,
+                    session_key=spawn_observation.session_key,
+                )
+                with immediate_transaction(connection):
+                    persist_spawn_acceptance(
+                        connection, request, spawn_observation, session_key
+                    )
+            except MetadataContractError as exc:
+                raise AdapterAmbiguousOutcomeError(
+                    "sessions_spawn returned unverifiable metadata after the "
+                    "application RPC; observed candidate requires human reconciliation",
+                    candidate_observation=spawn_observation,
+                ) from exc
         except AMBIGUOUS_TRANSPORT_ERRORS as exc:
             with immediate_transaction(connection):
                 mark_human_review(

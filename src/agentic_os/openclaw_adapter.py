@@ -1426,7 +1426,19 @@ class OpenClawAdapter:
             request_identity, request_fingerprint
         )
         method, response = self._call("sessions_spawn", params)
-        observation = observation_from_openclaw_response(response)
+        try:
+            observation = observation_from_openclaw_response(response)
+        except AdapterContractError as exc:
+            raise AdapterAmbiguousOutcomeError(
+                "sessions_spawn returned an unverifiable response after the "
+                "application RPC; raw candidate requires human reconciliation",
+                candidate_observation=MetadataObservation(
+                    metadata_contract_version=None,
+                    normalized=None,
+                    raw_json=None,
+                    raw_response_json=_json_object(response),
+                ),
+            ) from exc
         try:
             validate_session_observation(
                 local=metadata,
@@ -1440,7 +1452,11 @@ class OpenClawAdapter:
                 session_key=observation.session_key,
             )
         except MetadataContractError as exc:
-            raise self._metadata_error(exc) from exc
+            raise AdapterAmbiguousOutcomeError(
+                "sessions_spawn returned unverifiable metadata after the application "
+                "RPC; observed candidate requires human reconciliation",
+                candidate_observation=observation,
+            ) from exc
         prior_identity = self._session_identity_by_request.get(request_identity)
         if prior_identity is not None and prior_identity != session_key:
             raise AdapterAmbiguousOutcomeError(

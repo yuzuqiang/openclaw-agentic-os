@@ -526,6 +526,7 @@ class TransportBoundRuntimeAttestor:
         monotonic_ms: Callable[[], int] | None = None,
         max_lifetime_ms: int = 300_000,
         max_clock_skew_ms: int = 30_000,
+        approved_runtime_identity_sha256: str | None = None,
     ) -> None:
         if type(max_lifetime_ms) is not int or max_lifetime_ms <= 0:
             raise RuntimeAttestationError("max_lifetime_ms must be positive")
@@ -537,6 +538,14 @@ class TransportBoundRuntimeAttestor:
         self._nonce_factory = nonce_factory or (lambda: secrets.token_hex(32))
         self._max_lifetime_ms = max_lifetime_ms
         self._max_clock_skew_ms = max_clock_skew_ms
+        self._approved_runtime_identity_sha256 = (
+            _sha256(
+                approved_runtime_identity_sha256,
+                "approved runtime identity binding digest",
+            )
+            if approved_runtime_identity_sha256 is not None
+            else None
+        )
 
     @property
     def clock_ms(self) -> Callable[[], int]:
@@ -630,6 +639,14 @@ class TransportBoundRuntimeAttestor:
         identity_sha256 = hashlib.sha256(
             canonical_json_bytes(expected_snapshot)
         ).hexdigest()
+        if self._approved_runtime_identity_sha256 is None:
+            raise RuntimeAttestationError(
+                "approved runtime identity binding digest is required"
+            )
+        if identity_sha256 != self._approved_runtime_identity_sha256:
+            raise RuntimeAttestationError(
+                "signed runtime binding is not an approved runtime identity"
+            )
         return VerifiedRuntimeAttestation(
             payload_sha256=hashlib.sha256(signed_bytes).hexdigest(),
             identity_sha256=identity_sha256,

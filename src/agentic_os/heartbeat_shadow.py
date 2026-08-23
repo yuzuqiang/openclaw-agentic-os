@@ -269,9 +269,31 @@ def _resolved_heartbeat_control_database(
     resolved = candidate.resolve()
     if resolved != expected:
         raise HeartbeatShadowError(f"{label} is not the ignored control DB")
-    if require_existing and (not resolved.is_file() or resolved.is_symlink()):
-        raise HeartbeatShadowError(f"{label} is missing or unsafe")
+    _assert_private_sqlite_database_path(
+        resolved, label=label, require_existing=require_existing
+    )
     return resolved
+
+
+def _assert_private_sqlite_database_path(
+    database: Path, *, label: str, require_existing: bool
+) -> None:
+    paths = [database, *[Path(f"{database}{suffix}") for suffix in SQLITE_SIDECAR_SUFFIXES]]
+    for path in paths:
+        if not path.exists():
+            if path == database and require_existing:
+                raise HeartbeatShadowError(f"{label} is missing or unsafe")
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise HeartbeatShadowError(f"{label} is missing or unsafe")
+        try:
+            link_count = path.stat().st_nlink
+        except OSError as exc:
+            raise HeartbeatShadowError(f"{label} is missing or unsafe") from exc
+        if link_count != 1:
+            raise HeartbeatShadowError(
+                f"{label} and SQLite sidecars must not be hard-linked"
+            )
 
 
 def _validate_baseline(
@@ -591,6 +613,9 @@ def _assert_no_live_rollback_sidecars(database: Path) -> None:
 def _lock_rollback_source_idle(database: Path) -> tuple[sqlite3.Connection, dict[str, Any]]:
     connection: sqlite3.Connection | None = None
     try:
+        _assert_private_sqlite_database_path(
+            database, label="Heartbeat rollback target", require_existing=True
+        )
         connection = sqlite3.connect(database, isolation_level=None, timeout=0.1)
         connection.execute("PRAGMA busy_timeout=100")
         checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
@@ -1634,6 +1659,7 @@ def force_heartbeat_file_authority_rollback(
     authority_input_digest: str,
     rollback_id: str,
     receipt_path: Path,
+    monitor_run_id: str | None = None,
     observed_at_epoch_ms: int | None = None,
     repo_root_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -1714,6 +1740,7 @@ def force_heartbeat_file_authority_rollback(
             "db_authority_enabled": False,
             "authority_input_digest": recreated_digest,
             "rollback_id": rollback_id,
+            "monitor_run_id": monitor_run_id,
             "file_authority_view_recreated": True,
             "parity": parity,
             "parity_percent": 100,

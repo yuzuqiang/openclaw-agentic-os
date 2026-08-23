@@ -59,7 +59,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "cc4755fce21ac0876b4136f55674454381a3d019e520ad2756e347c06e740959"
+    "29f8be87091a945f53a667afcc481989a1e5b057c043a24bace1d08cd9bef39d"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -326,6 +326,10 @@ def _path_identity(path: Path) -> dict[str, str]:
     }
 
 
+def _relative_to_repo(path: Path) -> str:
+    return path.expanduser().resolve().relative_to(REPO_ROOT).as_posix()
+
+
 def _authority_input_path_identities(
     *,
     baseline_path: Path,
@@ -438,6 +442,71 @@ def _core_receipt_authentication(config: Mapping[str, Any]) -> dict[str, str]:
         "key_env": MONITOR_HMAC_ENV,
         "signature": signature,
     }
+
+
+def _rollback_receipt_authentication_payload(config: Mapping[str, Any]) -> dict[str, Any]:
+    rollback_receipt_path = _path_from_config(config, "rollback_receipt_path")
+    return {
+        "schema_version": "p03-heartbeat-shadow-rollback-receipt-authentication.v1",
+        "run_id": config["run_id"],
+        "authority_input_digest": config["authority_input_digest"],
+        "rollback_receipt_path": _relative_to_repo(rollback_receipt_path),
+        "rollback_receipt_sha256": _sha256_file(rollback_receipt_path),
+    }
+
+
+def _rollback_receipt_authentication(config: Mapping[str, Any]) -> dict[str, str]:
+    signature = hmac.new(
+        _monitor_hmac_secret_bytes("rollback receipt terminal signature key"),
+        _canonical_json(_rollback_receipt_authentication_payload(config)),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "scheme": "hmac-sha256-env",
+        "key_env": MONITOR_HMAC_ENV,
+        "signature": signature,
+    }
+
+
+def _write_rollback_receipt_authentication(config: Mapping[str, Any]) -> None:
+    payload = _rollback_receipt_authentication_payload(config)
+    _atomic_write_json(
+        _path_from_config(config, "rollback_receipt_authentication_path"),
+        {**payload, "authentication": _rollback_receipt_authentication(config)},
+    )
+
+
+def _validate_rollback_receipt_authentication(config: Mapping[str, Any]) -> None:
+    path = _path_from_config(config, "rollback_receipt_authentication_path")
+    if not path.exists():
+        raise MonitorError("rollback receipt terminal signature is missing")
+    record = _read_json(path)
+    payload = _rollback_receipt_authentication_payload(config)
+    if {key: record.get(key) for key in payload} != payload:
+        raise MonitorError("rollback receipt terminal signature payload mismatch")
+    authentication = record.get("authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("rollback receipt terminal signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("rollback receipt terminal signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("rollback receipt terminal signature scheme is invalid")
+    if authentication.get("key_env") != MONITOR_HMAC_ENV:
+        raise MonitorError("rollback receipt terminal signature key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("rollback receipt terminal signature is invalid")
+    expected = hmac.new(
+        _monitor_hmac_secret_bytes("rollback receipt terminal signature key"),
+        _canonical_json(payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("rollback receipt terminal signature mismatch")
 
 
 def _write_core_receipt_authentication(config: Mapping[str, Any]) -> None:
@@ -781,6 +850,8 @@ def _validate_rollback_receipt_config_binding(
         raise MonitorError("rollback receipt db authority state mismatch")
     if receipt.get("authority_input_digest") != config.get("authority_input_digest"):
         raise MonitorError("rollback receipt authority digest does not match monitor config")
+    if receipt.get("monitor_run_id") != config.get("run_id"):
+        raise MonitorError("rollback receipt run_id does not match monitor config")
     if receipt.get("file_authority_view_recreated") is not True:
         raise MonitorError("rollback receipt did not recreate file authority")
     if receipt.get("shadow_database_removed") is not True:
@@ -810,6 +881,7 @@ def _validate_rollback_receipt_config_binding(
     if not snapshot.is_file() or _sha256_file(snapshot) != snapshot_sha:
         raise MonitorError("rollback receipt audit snapshot hash mismatch")
     _assert_shadow_database_absent(config)
+    _validate_rollback_receipt_authentication(config)
 
 
 def _sqlite_related_paths(database: Path) -> tuple[Path, ...]:
@@ -875,6 +947,8 @@ def _validate_resume_config_paths(state_dir: Path, config: Mapping[str, Any]) ->
         "monitor_envelope_path": safe_state_dir / "monitor-envelope.json",
         "stop_request_path": safe_state_dir / "stop-request.json",
         "rollback_receipt_path": safe_state_dir / "rollback-receipt.json",
+        "rollback_receipt_authentication_path": safe_state_dir
+        / "rollback-receipt-authentication.json",
         "pidfile_path": safe_state_dir / "monitor.pid",
         "daemon_log_path": safe_state_dir / "monitor-daemon.log",
         "sample_dir": safe_state_dir / "samples",
@@ -1527,6 +1601,9 @@ def _build_config(args: argparse.Namespace) -> dict[str, Any]:
         "monitor_envelope_path": str(state_dir / "monitor-envelope.json"),
         "stop_request_path": str(state_dir / "stop-request.json"),
         "rollback_receipt_path": str(state_dir / "rollback-receipt.json"),
+        "rollback_receipt_authentication_path": str(
+            state_dir / "rollback-receipt-authentication.json"
+        ),
         "pidfile_path": str(state_dir / "monitor.pid"),
         "daemon_log_path": str(state_dir / "monitor-daemon.log"),
         "sample_dir": str(state_dir / "samples"),
@@ -2283,8 +2360,10 @@ def rollback(args: argparse.Namespace) -> int:
         authority_input_digest=str(receipt["authority_input_digest"]),
         rollback_id=args.rollback_id,
         receipt_path=_path_from_config(config, "rollback_receipt_path"),
+        monitor_run_id=str(config["run_id"]),
         repo_root_path=REPO_ROOT,
     )
+    _write_rollback_receipt_authentication(config)
     _persist_envelope(config, status="rolled_back", note="local shadow db rollback complete")
     print(json.dumps(result, sort_keys=True))
     return 0

@@ -616,9 +616,10 @@ class OpenClawAdapterTests(unittest.TestCase):
         adapter._session_spawn_request_by_request_identity = {}
 
         with self.assertRaisesRegex(
-            AdapterContractError, "raw external metadata is missing required fields"
-        ):
+            AdapterAmbiguousOutcomeError, "returned unverifiable metadata"
+        ) as raised:
             adapter.sessions_spawn(spawn_request("lease-one"))
+        self.assertIsNotNone(raised.exception.candidate_observation.raw_json)
         with self.assertRaisesRegex(
             AdapterContractError,
             "duplicate sessions_spawn request changed execution descriptor",

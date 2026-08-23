@@ -31,7 +31,6 @@ from agentic_os.runtime_dispatch import (
     mark_owned_lease_release_unknown,
     now_utc,
     persist_acquired_lease,
-    persist_released_lease,
     persist_spawn_acceptance,
     release_metadata,
     release_owned_lease,
@@ -559,23 +558,21 @@ def reconcile_unknown_metadata(
                 item.request, item.gateway_lease_id, lease_observations
             )
             with immediate_transaction(connection):
-                if scan.malformed_matching_observations or len(scan.matches) != 1:
-                    mark_owned_lease_release_review(
-                        connection,
-                        item.request,
-                        item.gateway_lease_id,
-                        reason="malformed-or-ambiguous-release-observation",
+                if scan.malformed_matching_observations or scan.matches:
+                    reason = (
+                        "release-still-visible-in-live-lease-status"
+                        if scan.matches
+                        else "malformed-release-status-observation"
                     )
-                    human_review += 1
-                    continue
-                persist_released_lease(
+                else:
+                    reason = "release-terminal-proof-unavailable"
+                mark_owned_lease_release_review(
                     connection,
                     item.request,
-                    scan.matches[0],
                     item.gateway_lease_id,
-                    reconciled=True,
+                    reason=reason,
                 )
-                reconciled += 1
+                human_review += 1
 
         for request in _unknown_lease_requests(connection, pending_cutoff_ms):
             scan = _matching_leases(request, lease_observations)

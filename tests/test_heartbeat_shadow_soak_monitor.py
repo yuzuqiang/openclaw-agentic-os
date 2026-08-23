@@ -2244,6 +2244,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "authority": "file_artifacts",
                     "db_authority_enabled": False,
                     "authority_input_digest": digest,
+                    "monitor_run_id": config["run_id"],
                     "file_authority_view_recreated": True,
                     "shadow_database_removed": True,
                     "recoverable_local_backup_created": True,
@@ -2255,6 +2256,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "parity": {"status": "pass", "percent": 100, "mismatch_count": 0},
                 },
             )
+            monitor._write_rollback_receipt_authentication(config)
             (self.root / "state/agentic-os").mkdir(parents=True, exist_ok=True)
             (self.root / "state/agentic-os/control.db").write_bytes(b"recreated")
             monitor._atomic_write_json(

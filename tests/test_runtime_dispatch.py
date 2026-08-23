@@ -723,7 +723,43 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ("acquired",),
             )
 
-    def test_spawn_metadata_mismatch_releases_only_owned_lease(self) -> None:
+    def test_ambiguous_acquire_candidate_identity_is_persisted_for_review(self) -> None:
+        candidate = observation(
+            lease_metadata(self.request, "lease-collision"),
+            external_id="lease-collision",
+        )
+        adapter = TransportFailingAdapter(
+            {
+                "allow_lease_acquire": AdapterAmbiguousOutcomeError(
+                    "duplicate allowLease acquire returned cached lease identity",
+                    candidate_observation=candidate,
+                )
+            }
+        )
+        with self.assertRaisesRegex(RuntimeDispatchError, "allow lease transport outcome unknown"):
+            dispatch_with_metadata(self.database, adapter, self.request)
+        with self._connect() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,external_id FROM external_rpc_intents "
+                    "WHERE rpc_kind='allow_lease_acquire'"
+                ).fetchone(),
+                ("unknown", "lease-collision"),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state,reconciliation_status FROM leases "
+                    "WHERE client_lease_id='client-lease'"
+                ).fetchone(),
+                (
+                    "acquire_pending",
+                    "ambiguous allow lease candidate preserved for human "
+                    "reconciliation: duplicate allowLease acquire returned cached "
+                    "lease identity",
+                ),
+            )
+
+    def test_spawn_metadata_mismatch_preserves_owned_lease_for_review(self) -> None:
         wrong = dict(spawn_metadata(self.request))
         wrong["task_digest"] = "other-task"
         adapter = ScriptedAdapter(
@@ -738,41 +774,34 @@ class RuntimeDispatchTests(unittest.TestCase):
         )
         with self.assertRaises(RuntimeDispatchError):
             dispatch_with_metadata(self.database, adapter, self.request)
-        self.assertEqual(Counter(adapter.calls)["allow_lease_release"], 1)
-        self.assertEqual(
-            [params for call, params in adapter.params if call == "allow_lease_release"],
-            [release_metadata(self.request, "lease-gateway")],
-        )
+        self.assertEqual(Counter(adapter.calls)["allow_lease_release"], 0)
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
-                    "SELECT state,release_idempotency_key FROM leases "
+                    "SELECT state,release_idempotency_key,reconciliation_status FROM leases "
                     "WHERE client_lease_id='client-lease'"
                 ).fetchone(),
-                ("released", "release-idem"),
+                ("acquired", "release-idem", "not_needed"),
             )
             self.assertEqual(
                 connection.execute(
-                    "SELECT state FROM external_rpc_intents "
+                    "SELECT state,external_id FROM external_rpc_intents "
                     "WHERE rpc_kind='sessions_spawn'"
-                ).fetchone()[0],
-                "human_review_required",
+                ).fetchone(),
+                ("human_review_required", "session-key"),
             )
 
     def test_release_contract_error_after_spawn_failure_keeps_human_review_state(
         self,
     ) -> None:
-        wrong = dict(spawn_metadata(self.request))
-        wrong["task_digest"] = "other-task"
         adapter = ContractFailingAdapter(
-            {"allow_lease_release"},
+            {"sessions_spawn", "allow_lease_release"},
             acquire=[
                 observation(
                     lease_metadata(self.request, "lease-gateway"),
                     external_id="lease-gateway",
                 )
             ],
-            spawn=[observation(wrong, external_id="session-key")],
         )
         with self.assertRaisesRegex(RuntimeDispatchError, "release requires human review"):
             dispatch_with_metadata(self.database, adapter, self.request)
@@ -810,19 +839,17 @@ class RuntimeDispatchTests(unittest.TestCase):
     def test_release_raw_metadata_conflicting_idempotency_alias_requires_review(
         self,
     ) -> None:
-        wrong = dict(spawn_metadata(self.request))
-        wrong["task_digest"] = "other-task"
         release_metadata_payload = release_metadata(self.request, "lease-gateway")
         raw_release_metadata = dict(release_metadata_payload)
         raw_release_metadata["idempotency_key"] = "other-release-idem"
-        adapter = ScriptedAdapter(
+        adapter = ContractFailingAdapter(
+            {"sessions_spawn"},
             acquire=[
                 observation(
                     lease_metadata(self.request, "lease-gateway"),
                     external_id="lease-gateway",
                 )
             ],
-            spawn=[observation(wrong, external_id="session-key")],
             release=[
                 MetadataObservation(
                     metadata_contract_version="v1",
@@ -857,17 +884,17 @@ class RuntimeDispatchTests(unittest.TestCase):
             )
 
     def test_release_transport_failure_keeps_pending_release_intent_unknown(self) -> None:
-        wrong = dict(spawn_metadata(self.request))
-        wrong["task_digest"] = "other-task"
         adapter = TransportFailingAdapter(
-            {"allow_lease_release": TimeoutError("release timed out")},
+            {
+                "sessions_spawn": AdapterContractError("pre-call spawn metadata invalid"),
+                "allow_lease_release": TimeoutError("release timed out"),
+            },
             acquire=[
                 observation(
                     lease_metadata(self.request, "lease-gateway"),
                     external_id="lease-gateway",
                 )
             ],
-            spawn=[observation(wrong, external_id="session-key")],
         )
         with self.assertRaisesRegex(RuntimeDispatchError, "release outcome unknown"):
             dispatch_with_metadata(self.database, adapter, self.request)
@@ -1565,39 +1592,39 @@ class RuntimeDispatchTests(unittest.TestCase):
                 ("human_review_required", None),
             )
 
-    def test_reconcile_release_pending_from_release_metadata(self) -> None:
-        wrong = dict(spawn_metadata(self.request))
-        wrong["task_digest"] = "other-task"
+    def test_reconcile_release_pending_rejects_live_status_as_release_proof(self) -> None:
         adapter = TransportFailingAdapter(
-            {"allow_lease_release": TimeoutError("release timed out")},
+            {
+                "sessions_spawn": AdapterContractError("pre-call spawn metadata invalid"),
+                "allow_lease_release": TimeoutError("release timed out"),
+            },
             acquire=[
                 observation(
                     lease_metadata(self.request, "lease-gateway"),
                     external_id="lease-gateway",
                 )
             ],
-            spawn=[observation(wrong, external_id="session-key")],
         )
         with self.assertRaisesRegex(RuntimeDispatchError, "release outcome unknown"):
             dispatch_with_metadata(self.database, adapter, self.request)
 
         reconcile_adapter = ScriptedAdapter(leases=[self._release_observation()])
         summary = reconcile_unknown_metadata(self.database, reconcile_adapter)
-        self.assertEqual(summary.reconciled, 1)
+        self.assertEqual(summary.human_review_required, 1)
         with self._connect() as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT state,external_id FROM external_rpc_intents "
                     "WHERE rpc_kind='allow_lease_release'"
                 ).fetchone(),
-                ("reconciled", "lease-gateway"),
+                ("human_review_required", None),
             )
             self.assertEqual(
                 connection.execute(
                     "SELECT state,reconciliation_status FROM leases "
                     "WHERE client_lease_id='client-lease'"
                 ).fetchone(),
-                ("released", "not_needed"),
+                ("release_pending", "release-still-visible-in-live-lease-status"),
             )
 
     def test_reconcile_acquire_only_lease_releases_after_blocked_spawn(self) -> None:

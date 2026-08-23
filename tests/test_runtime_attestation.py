@@ -368,6 +368,11 @@ def release_params(**overrides: object) -> dict[str, object]:
 
 
 class RuntimeAttestationTests(unittest.TestCase):
+    def _approved_identity(self, transport: FakeAttestedTransport) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(transport.runtime_identity_snapshot())
+        ).hexdigest()
+
     def _adapter(self, transport: FakeAttestedTransport) -> OpenClawAdapter:
         from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
 
@@ -377,6 +382,7 @@ class RuntimeAttestationTests(unittest.TestCase):
                 DigestVerifier(),
                 clock_ms=lambda: NOW_MS,
                 nonce_factory=lambda: "challenge-1",
+                approved_runtime_identity_sha256=self._approved_identity(transport),
             ),
         )
 
@@ -539,6 +545,7 @@ class RuntimeAttestationTests(unittest.TestCase):
                 DigestVerifier(),
                 clock_ms=lambda: clock["now"],
                 nonce_factory=lambda: "challenge-1",
+                approved_runtime_identity_sha256=self._approved_identity(transport),
             ),
         )
 
@@ -559,6 +566,7 @@ class RuntimeAttestationTests(unittest.TestCase):
                 clock_ms=lambda: NOW_MS,
                 monotonic_ms=lambda: monotonic["now"],
                 nonce_factory=lambda: "challenge-1",
+                approved_runtime_identity_sha256=self._approved_identity(transport),
             ),
         )
 
@@ -577,6 +585,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             clock_ms=lambda: NOW_MS,
             monotonic_ms=lambda: monotonic["now"],
             nonce_factory=lambda: "challenge-1",
+            approved_runtime_identity_sha256=self._approved_identity(transport),
         )
         adapter = OpenClawAdapter.from_attested_transport(transport, attestor)
         adapter.allow_lease_acquire(lease_params())
@@ -603,6 +612,7 @@ class RuntimeAttestationTests(unittest.TestCase):
             clock_ms=lambda: NOW_MS,
             monotonic_ms=lambda: 10_000,
             nonce_factory=lambda: "challenge-1",
+            approved_runtime_identity_sha256=self._approved_identity(transport),
         )
         adapter = OpenClawAdapter.from_attested_transport(transport, attestor)
         adapter.allow_lease_acquire(lease_params())
@@ -674,6 +684,21 @@ class RuntimeAttestationTests(unittest.TestCase):
         with self.assertRaisesRegex(AdapterContractError, "aggregate digest"):
             self._adapter(transport)
 
+    def test_unapproved_signed_runtime_identity_cannot_mint_adapter_authority(self) -> None:
+        transport = FakeAttestedTransport()
+        from agentic_os.runtime_attestation import TransportBoundRuntimeAttestor
+
+        with self.assertRaisesRegex(AdapterContractError, "approved runtime identity"):
+            OpenClawAdapter.from_attested_transport(
+                transport,
+                TransportBoundRuntimeAttestor(
+                    DigestVerifier(),
+                    clock_ms=lambda: NOW_MS,
+                    nonce_factory=lambda: "challenge-1",
+                    approved_runtime_identity_sha256="9" * 64,
+                ),
+            )
+
     def test_identity_drift_after_application_rpc_rejects_response(self) -> None:
         class PostCallDriftTransport(FakeAttestedTransport):
             def call(self, method, params):
@@ -712,7 +737,9 @@ class RuntimeAttestationTests(unittest.TestCase):
                 transport.spawn_raw_override = raw
                 adapter = self._adapter(transport)
                 adapter.allow_lease_acquire(lease_params())
-                with self.assertRaisesRegex(AdapterContractError, message):
+                with self.assertRaisesRegex(
+                    AdapterAmbiguousOutcomeError, "unverifiable"
+                ):
                     adapter.sessions_spawn(spawn_params(metadata))
 
     def test_conflicting_spawn_metadata_aliases_fail_closed(self) -> None:
@@ -762,7 +789,9 @@ class RuntimeAttestationTests(unittest.TestCase):
                 transport = ConflictingAliasTransport(conflict=conflict)
                 adapter = self._adapter(transport)
                 adapter.allow_lease_acquire(lease_params())
-                with self.assertRaisesRegex(AdapterContractError, message):
+                with self.assertRaisesRegex(
+                    AdapterAmbiguousOutcomeError, "unverifiable"
+                ):
                     adapter.sessions_spawn(spawn_params())
 
     def test_unknown_spawn_outcome_is_never_retried(self) -> None:

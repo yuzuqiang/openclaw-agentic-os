@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -187,6 +188,36 @@ class HeartbeatShadowTests(unittest.TestCase):
             )
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM sessions").fetchone(), (0,)
+            )
+
+    def test_file_authority_cycle_rejects_hard_linked_control_database(self) -> None:
+        self._file_shadow_cycle()
+        outside = self.root / "outside-control.db"
+        os.link(self.database, outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+
+        with self.assertRaisesRegex(HeartbeatShadowError, "hard-linked"):
+            self._file_shadow_cycle(run_id="hard-linked-control")
+
+    def test_rollback_rejects_hard_linked_sqlite_sidecar(self) -> None:
+        receipt = self._file_shadow_cycle()
+        sidecar = self.database.with_name(f"{self.database.name}-wal")
+        sidecar.write_bytes(b"")
+        outside = self.root / "outside-control.db-wal"
+        os.link(sidecar, outside)
+        self.addCleanup(outside.unlink, missing_ok=True)
+        self.addCleanup(sidecar.unlink, missing_ok=True)
+
+        with self.assertRaisesRegex(HeartbeatShadowError, "hard-linked"):
+            force_heartbeat_file_authority_rollback(
+                baseline_path=self.baseline_path,
+                heartbeat_file=self.heartbeat_file,
+                live_config_path=self.live_config_path,
+                database=self.database,
+                authority_input_digest=receipt["authority_input_digest"],
+                rollback_id="hard-linked-sidecar",
+                receipt_path=self.root / "artifacts/hard-linked-sidecar.json",
+                repo_root_path=self.root,
             )
 
     def test_manifest_rejects_authority_drift_privacy_weakening_and_db_authority(self) -> None:
