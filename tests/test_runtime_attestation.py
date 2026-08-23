@@ -436,17 +436,19 @@ class RuntimeAttestationTests(unittest.TestCase):
             "run_id": "other-run",
         }
         with self.assertRaisesRegex(
-            AdapterContractError,
-            "ownership conflicts with cached adapter ownership",
-        ):
+            AdapterAmbiguousOutcomeError,
+            "gateway lease identity is quarantined",
+        ) as raised:
             adapter.allow_lease_acquire(changed)
+        self.assertEqual(raised.exception.candidate_observation.external_id, "lease-1")
 
-        release = adapter.allow_lease_release(release_params())
-        self.assertEqual(release.external_id, "lease-1")
-        self.assertEqual(
-            transport.calls[-1],
-            ("subagents.allowLease.release", release_params()),
-        )
+        call_count = len(transport.calls)
+        with self.assertRaisesRegex(
+            AdapterAmbiguousOutcomeError,
+            "quarantined ambiguous adapter lease ownership",
+        ):
+            adapter.allow_lease_release(release_params())
+        self.assertEqual(len(transport.calls), call_count)
 
     def test_release_owner_metadata_must_match_cached_acquire_before_transport(
         self,

@@ -4132,6 +4132,31 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("status runtime_attestation receipt", payload["error"])
 
+    def test_persistent_attested_preflight_requires_status_leases_array(self) -> None:
+        module = load_preflight_module()
+        for label, transform in {
+            "missing": lambda status: status.pop("leases"),
+            "object": lambda status: status.__setitem__("leases", {}),
+        }.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as install_root:
+                fixture = write_persistent_runtime_fixture(install_root)
+                key_path, key = write_attestation_key()
+                evidence = build_persistent_evidence(
+                    module,
+                    install_root,
+                    fixture,
+                    key,
+                    status_response_transform=transform,
+                )
+
+                result = run_persistent_preflight(evidence, install_root, key_path)
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["runtime_ready"])
+            self.assertIn("status RPC leases must be an array", payload["error"])
+
     def test_persistent_attested_preflight_rejects_non_empty_status_params(self) -> None:
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:

@@ -988,6 +988,7 @@ class OpenClawAdapter:
         adapter._lease_acquire_request_by_request_identity: dict[
             tuple[str, str], dict[str, Any]
         ] = {}
+        adapter._quarantined_lease_ids: set[str] = set()
         adapter._session_metadata_by_key: dict[str, dict[str, str]] = {}
         adapter._session_identity_by_request: dict[tuple[str, str], str] = {}
         adapter._session_spawn_request_by_request_identity: dict[
@@ -999,6 +1000,18 @@ class OpenClawAdapter:
             monotonic_ms=attestor.monotonic_ms,
         )
         return adapter
+
+    def _quarantine_lease_identity(self, gateway_lease_id: str) -> None:
+        self._quarantined_lease_ids.add(gateway_lease_id)
+        self._lease_metadata_by_external_id.pop(gateway_lease_id, None)
+
+    def _reject_quarantined_lease_identity(
+        self, gateway_lease_id: str, context: str
+    ) -> None:
+        if gateway_lease_id in self._quarantined_lease_ids:
+            raise AdapterAmbiguousOutcomeError(
+                f"{context} references quarantined ambiguous adapter lease ownership"
+            )
 
     def _require_verified_runtime_authority(self) -> _AdapterAuthorityState:
         state = _ADAPTER_AUTHORITIES.get(self)
@@ -1165,9 +1178,13 @@ class OpenClawAdapter:
             )
         expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
         if expected is not None and expected != local:
-            raise AdapterContractError(
-                "allowLease acquire ownership conflicts with cached adapter ownership"
+            self._quarantine_lease_identity(gateway_lease_id)
+            raise AdapterAmbiguousOutcomeError(
+                "allowLease acquire ownership conflicts with cached adapter ownership; "
+                "gateway lease identity is quarantined for human reconciliation",
+                candidate_observation=observation,
             )
+        self._reject_quarantined_lease_identity(gateway_lease_id, "allowLease acquire")
         self._lease_identity_by_request[request_identity] = gateway_lease_id
         self._lease_acquire_request_by_request_identity[request_identity] = local_request
         self._lease_metadata_by_external_id[gateway_lease_id] = local
@@ -1192,16 +1209,24 @@ class OpenClawAdapter:
             raise self._metadata_error(exc) from exc
         expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
         if expected is not None and expected != local:
-            raise AdapterContractError(
-                "adopted allowLease ownership conflicts with cached adapter ownership"
+            self._quarantine_lease_identity(gateway_lease_id)
+            raise AdapterAmbiguousOutcomeError(
+                "adopted allowLease ownership conflicts with cached adapter ownership; "
+                "gateway lease identity is quarantined for human reconciliation",
+                candidate_observation=observation,
             )
+        self._reject_quarantined_lease_identity(
+            gateway_lease_id, "adopted allowLease ownership"
+        )
         self._lease_metadata_by_external_id[gateway_lease_id] = local
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
         method, response = self._call("allow_lease_status", {})
         observations = _observations_from_items(response.get("leases"), "lease")
         for observation in observations:
-            expected = self._lease_metadata_by_external_id.get(observation.external_id or "")
+            external_id = observation.external_id or ""
+            self._reject_quarantined_lease_identity(external_id, "allowLease status")
+            expected = self._lease_metadata_by_external_id.get(external_id)
             if expected is None:
                 continue
             try:
@@ -1232,6 +1257,7 @@ class OpenClawAdapter:
             )
         except MetadataContractError as exc:
             raise self._metadata_error(exc) from exc
+        self._reject_quarantined_lease_identity(gateway_lease_id, "allowLease release")
         expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
         if expected is None:
             raise AdapterContractError(
@@ -1369,6 +1395,7 @@ class OpenClawAdapter:
             )
         except MetadataContractError as exc:
             raise self._metadata_error(exc) from exc
+        self._reject_quarantined_lease_identity(gateway_lease_id, "sessions_spawn")
         expected_lease = self._lease_metadata_by_external_id.get(gateway_lease_id)
         if expected_lease is None:
             raise AdapterContractError(

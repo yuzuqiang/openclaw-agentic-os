@@ -556,45 +556,115 @@ def _load_sample_authentication_entries(
     return entries
 
 
-def _validate_sample_authentication_entries(
-    config: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
-) -> list[Mapping[str, Any]]:
-    entries = _load_sample_authentication_entries(config)
-    if len(entries) != len(samples):
-        raise MonitorError("sample authentication journal does not cover core samples")
-    previous_signature: str | None = None
-    for index, (entry, sample) in enumerate(zip(entries, samples), start=1):
-        if not isinstance(entry, Mapping):
-            raise MonitorError("sample authentication journal entry is invalid")
+def _write_sample_authentication_entries(
+    config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]
+) -> str:
+    return _atomic_write_json(
+        _sample_authentication_path(config),
+        {
+            "schema_version": SCHEMA_SAMPLE_AUTHENTICATION,
+            "run_id": config["run_id"],
+            "authority_input_digest": config["authority_input_digest"],
+            "entries": [dict(entry) for entry in entries],
+        },
+    )
+
+
+def _validate_sample_authentication_entry(
+    config: Mapping[str, Any],
+    entry: Mapping[str, Any],
+    *,
+    sample_index: int,
+    sample: Mapping[str, Any] | None,
+    previous_signature: str | None,
+) -> str:
+    if sample is None:
+        payload_keys = set(
+            _sample_authentication_payload(
+                config,
+                sample_index=sample_index,
+                sample={},
+                previous_signature=previous_signature,
+            )
+        )
+        payload = {key: entry.get(key) for key in payload_keys}
+        if payload.get("sample_index") != sample_index:
+            raise MonitorError("sample authentication journal payload mismatch")
+        if payload.get("previous_signature") != previous_signature:
+            raise MonitorError("sample authentication journal payload mismatch")
+    else:
         payload = _sample_authentication_payload(
             config,
-            sample_index=index,
+            sample_index=sample_index,
             sample=sample,
             previous_signature=previous_signature,
         )
         observed_payload = {key: entry.get(key) for key in payload}
         if observed_payload != payload:
             raise MonitorError("sample authentication journal payload mismatch")
-        authentication = entry.get("authentication")
-        if not isinstance(authentication, Mapping):
-            raise MonitorError("sample authentication journal signature is missing")
-        if set(authentication) != {"scheme", "key_env", "signature"}:
-            raise MonitorError("sample authentication journal signature shape is invalid")
-        if authentication.get("scheme") != "hmac-sha256-env":
-            raise MonitorError("sample authentication journal signature scheme is invalid")
-        if authentication.get("key_env") != MONITOR_HMAC_ENV:
-            raise MonitorError("sample authentication journal key authority is invalid")
-        signature = authentication.get("signature")
-        if (
-            not isinstance(signature, str)
-            or len(signature) != 64
-            or any(character not in "0123456789abcdef" for character in signature)
-        ):
-            raise MonitorError("sample authentication journal signature is invalid")
-        expected = _sample_authentication_signature(payload)
-        if not hmac.compare_digest(signature, expected):
-            raise MonitorError("sample authentication journal signature mismatch")
-        previous_signature = signature
+    authentication = entry.get("authentication")
+    if not isinstance(authentication, Mapping):
+        raise MonitorError("sample authentication journal signature is missing")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise MonitorError("sample authentication journal signature shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise MonitorError("sample authentication journal signature scheme is invalid")
+    if authentication.get("key_env") != MONITOR_HMAC_ENV:
+        raise MonitorError("sample authentication journal key authority is invalid")
+    signature = authentication.get("signature")
+    if (
+        not isinstance(signature, str)
+        or len(signature) != 64
+        or any(character not in "0123456789abcdef" for character in signature)
+    ):
+        raise MonitorError("sample authentication journal signature is invalid")
+    expected = _sample_authentication_signature(payload)
+    if not hmac.compare_digest(signature, expected):
+        raise MonitorError("sample authentication journal signature mismatch")
+    return signature
+
+
+def _validate_sample_authentication_entries(
+    config: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
+    entries = _load_sample_authentication_entries(config)
+    if len(entries) == len(samples) + 1:
+        previous_signature: str | None = None
+        for index, (entry, sample) in enumerate(zip(entries, samples), start=1):
+            if not isinstance(entry, Mapping):
+                raise MonitorError("sample authentication journal entry is invalid")
+            previous_signature = _validate_sample_authentication_entry(
+                config,
+                entry,
+                sample_index=index,
+                sample=sample,
+                previous_signature=previous_signature,
+            )
+        trailing = entries[-1]
+        if not isinstance(trailing, Mapping):
+            raise MonitorError("sample authentication journal entry is invalid")
+        _validate_sample_authentication_entry(
+            config,
+            trailing,
+            sample_index=len(samples) + 1,
+            sample=None,
+            previous_signature=previous_signature,
+        )
+        entries = entries[: len(samples)]
+        _write_sample_authentication_entries(config, entries)
+    if len(entries) != len(samples):
+        raise MonitorError("sample authentication journal does not cover core samples")
+    previous_signature: str | None = None
+    for index, (entry, sample) in enumerate(zip(entries, samples), start=1):
+        if not isinstance(entry, Mapping):
+            raise MonitorError("sample authentication journal entry is invalid")
+        previous_signature = _validate_sample_authentication_entry(
+            config,
+            entry,
+            sample_index=index,
+            sample=sample,
+            previous_signature=previous_signature,
+        )
     return entries
 
 
@@ -628,15 +698,7 @@ def _append_sample_authentication(
             },
         }
     )
-    _atomic_write_json(
-        _sample_authentication_path(config),
-        {
-            "schema_version": SCHEMA_SAMPLE_AUTHENTICATION,
-            "run_id": config["run_id"],
-            "authority_input_digest": config["authority_input_digest"],
-            "entries": entries,
-        },
-    )
+    _write_sample_authentication_entries(config, entries)
 
 
 def _validate_core_sample_authentication(
@@ -2077,9 +2139,9 @@ def run(args: argparse.Namespace) -> int:
                 note=str(exc),
             )
             return 2
-        persist_heartbeat_soak_receipt(receipt_path, updated, repo_root_path=REPO_ROOT)
         _persist_sample(config, len(updated["samples"]), sample)
         _append_sample_authentication(config, len(updated["samples"]), sample)
+        persist_heartbeat_soak_receipt(receipt_path, updated, repo_root_path=REPO_ROOT)
         if updated["status"] == "failed":
             _persist_envelope(config, status="failed_closed", violation="sample_failed", sample=sample)
             return 2
@@ -2188,6 +2250,15 @@ def rollback(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     config = _load_validated_resume_config(state_dir)
     pid = _load_pid(_path_from_config(config, "pidfile_path"))
+    if pid is None and not args.allow_running:
+        try:
+            envelope = _read_json(_path_from_config(config, "monitor_envelope_path"))
+        except MonitorError:
+            envelope = {}
+        if envelope.get("status") == "running":
+            raise MonitorError(
+                "refusing rollback while running monitor process identity is unavailable"
+            )
     if pid and _pid_alive(pid) and not args.allow_running:
         raise MonitorError("refusing rollback while monitor process is active")
     receipt = _read_json(_path_from_config(config, "core_soak_receipt_path"))

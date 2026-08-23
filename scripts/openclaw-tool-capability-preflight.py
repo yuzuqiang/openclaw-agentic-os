@@ -2240,6 +2240,8 @@ def _persistent_gateway_status_from_evidence(
     )
     _validate_status_attestation_receipt(receipt, signed_payload)
     leases = status_payload.get("leases")
+    if not isinstance(leases, list):
+        raise AdapterContractError("persistent status RPC leases must be an array")
     corroboration: dict[str, Any] = {
         "method": "subagents.allowLease.status",
         "request_semantics": "read_only_request",
@@ -2250,9 +2252,8 @@ def _persistent_gateway_status_from_evidence(
         "raw_response_sha256": record.get("raw_response_sha256"),
         "ok": True,
         "runtime_attestation": dict(receipt),
+        "leases_count": len(leases),
     }
-    if isinstance(leases, list):
-        corroboration["leases_count"] = len(leases)
     return corroboration
 
 

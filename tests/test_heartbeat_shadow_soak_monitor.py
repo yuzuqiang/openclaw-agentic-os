@@ -1470,6 +1470,39 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
         self.assertIn("sample authentication journal", envelope["note"])
 
+    def test_sample_authentication_trailing_crash_entry_is_reconciled(self) -> None:
+        digest = "a" * 64
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=1_700_000_000_000,
+                started_at_monotonic_ms=1_700_000_000_000,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            first = _pass_sample(1_700_000_000_000, digest)
+            second = _pass_sample(1_700_000_300_000, digest)
+            receipt = monitor.append_heartbeat_soak_sample(receipt, first)
+            monitor.persist_heartbeat_soak_receipt(
+                self.state_dir / "core-soak-receipt.json",
+                receipt,
+                repo_root_path=self.root,
+            )
+            monitor._append_sample_authentication(config, 1, first)
+            monitor._append_sample_authentication(config, 2, second)
+
+            monitor._validate_core_sample_authentication(config, receipt)
+
+        journal = json.loads(
+            (self.state_dir / "sample-authentication.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(journal["entries"]), 1)
+        self.assertEqual(journal["entries"][0]["sample_index"], 1)
+
     def test_status_refresh_preserves_failed_closed_audit_fields(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
@@ -2382,6 +2415,38 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                                 allow_running=False,
                             )
                         )
+
+        rollback.assert_not_called()
+
+    def test_rollback_refuses_running_envelope_with_unavailable_monitor_identity(
+        self,
+    ) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {
+                    "status": "running",
+                    "monitor": {"pidfile": str(self.state_dir / "monitor.pid")},
+                },
+            )
+            (self.state_dir / "monitor.pid").write_text("", encoding="utf-8")
+            with mock.patch.object(
+                monitor, "force_heartbeat_file_authority_rollback"
+            ) as rollback:
+                with self.assertRaisesRegex(
+                    monitor.MonitorError,
+                    "process identity is unavailable",
+                ):
+                    monitor.rollback(
+                        Namespace(
+                            state_dir=self.state_dir,
+                            rollback_id="missing-pid",
+                            allow_running=False,
+                        )
+                    )
 
         rollback.assert_not_called()
 
