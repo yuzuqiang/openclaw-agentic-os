@@ -1002,16 +1002,23 @@ class OpenClawAdapter:
         return adapter
 
     def _quarantine_lease_identity(self, gateway_lease_id: str) -> None:
-        self._quarantined_lease_ids.add(gateway_lease_id)
+        self._quarantined_lease_identity_set().add(gateway_lease_id)
         self._lease_metadata_by_external_id.pop(gateway_lease_id, None)
 
     def _reject_quarantined_lease_identity(
         self, gateway_lease_id: str, context: str
     ) -> None:
-        if gateway_lease_id in self._quarantined_lease_ids:
+        if gateway_lease_id in self._quarantined_lease_identity_set():
             raise AdapterAmbiguousOutcomeError(
                 f"{context} references quarantined ambiguous adapter lease ownership"
             )
+
+    def _quarantined_lease_identity_set(self) -> set[str]:
+        quarantined = getattr(self, "_quarantined_lease_ids", None)
+        if quarantined is None:
+            quarantined = set()
+            self._quarantined_lease_ids = quarantined
+        return quarantined
 
     def _require_verified_runtime_authority(self) -> _AdapterAuthorityState:
         state = _ADAPTER_AUTHORITIES.get(self)

@@ -59,7 +59,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "ab2396f23b68f1b46d6ed2ea57bd6f8cb9dbd01fdf085ae03aa8d3b0cdc26eb1"
+    "3e31329a78eab1b0a216a0fef2fe37ed0db611179bfdab8d9df2b241e261393d"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -1036,7 +1036,7 @@ def _validate_independent_validation_provenance(
     if verifier.get("identity") == "lifecycle_producer":
         raise MonitorError("independent validation must not be self-produced")
     implementation_head = validation.get("implementation_head")
-    if implementation_head != config["exact_heads"]["implementation_base"]:
+    if implementation_head != _independent_validation_implementation_head(config):
         raise MonitorError("independent validation implementation head mismatch")
     invocation = validation.get("invocation")
     if not isinstance(invocation, Mapping):
@@ -1055,6 +1055,16 @@ def _verifier_session_key_sha256(verifier: Mapping[str, Any], label: str) -> str
     if "session_key" in verifier:
         raise MonitorError(f"{label} must redact session_key to session_key_sha256")
     raise MonitorError(f"{label} session_key_sha256 is missing")
+
+
+def _independent_validation_implementation_head(config: Mapping[str, Any]) -> str:
+    exact_heads = config.get("exact_heads")
+    if not isinstance(exact_heads, Mapping):
+        raise MonitorError("independent validation exact head contract is missing")
+    head = exact_heads.get("monitor_implementation_head")
+    if not _is_git_sha(head):
+        raise MonitorError("independent validation target implementation head is missing")
+    return str(head)
 
 
 def _validate_independent_validation_anchor(
@@ -1095,7 +1105,9 @@ def _validate_independent_validation_anchor(
         raise MonitorError("independent validation authenticated record is not PASS")
     if record.get("receipt_sha256") != validation.get("receipt_sha256"):
         raise MonitorError("independent validation authenticated record receipt mismatch")
-    if record.get("implementation_head") != config["exact_heads"]["implementation_base"]:
+    if record.get("implementation_head") != _independent_validation_implementation_head(
+        config
+    ):
         raise MonitorError(
             "independent validation authenticated record implementation mismatch"
         )

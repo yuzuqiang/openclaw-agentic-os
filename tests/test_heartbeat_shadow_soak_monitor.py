@@ -171,7 +171,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "record_authority": "phase_c_terminal_checkpoint",
                 "validation_verdict": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -186,7 +186,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {
                 "status": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -505,7 +505,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {
                 "status": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -533,7 +533,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {
                 "status": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -563,7 +563,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "record_authority": "phase_c_terminal_checkpoint",
                 "validation_verdict": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -576,7 +576,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {
                 "status": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -609,7 +609,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     "record_authority": "phase_c_terminal_checkpoint",
                     "validation_verdict": "pass",
                     "receipt_sha256": lifecycle_sha,
-                    "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                    "implementation_head": "b" * 40,
                     "verifier": {
                         "identity": "security-engineer-phase-c",
                         "role": "independent_verifier",
@@ -624,7 +624,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             {
                 "status": "pass",
                 "receipt_sha256": lifecycle_sha,
-                "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "implementation_head": "b" * 40,
                 "verifier": {
                     "identity": "security-engineer-phase-c",
                     "role": "independent_verifier",
@@ -687,6 +687,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertGreaterEqual(completed_at, implementation_committed_at)
         for head_key in ("reviewed_head", "review_merge_head"):
             self.assertEqual(
+                validation["implementation_head"],
+                validation["invocation"][head_key],
+            )
+            self.assertEqual(
                 subprocess.run(
                     [
                         "git",
@@ -718,7 +722,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 monitor._validate_independent_validation_anchor(
                     {
                         "exact_heads": {
-                            "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE
+                            "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                            "monitor_implementation_head": validation[
+                                "implementation_head"
+                            ],
                         }
                     },
                     validation,
@@ -730,7 +737,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 monitor._validate_independent_validation_anchor(
                     {
                         "exact_heads": {
-                            "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE
+                            "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                            "monitor_implementation_head": validation[
+                                "implementation_head"
+                            ],
                         }
                     },
                     validation,
@@ -751,7 +761,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 runtime_head=monitor.EXPECTED_RUNTIME_HEAD,
                 agentic_os_evidence_head=monitor.EXPECTED_AGENTIC_OS_EVIDENCE_HEAD,
                 implementation_base=monitor.EXPECTED_IMPLEMENTATION_BASE,
-                monitor_implementation_head="b" * 40,
+                monitor_implementation_head=validation["implementation_head"],
                 expected_lifecycle_sha256=monitor.EXPECTED_LIFECYCLE_SHA256,
                 expected_independent_validation_sha256=(
                     monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256
@@ -763,6 +773,34 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with mock.patch.object(monitor, "REPO_ROOT", repo_root):
                 with self.assertRaisesRegex(monitor.MonitorError, "signature mismatch"):
                     monitor._build_config(args)
+
+    def test_independent_validation_rejects_base_only_implementation_head(self) -> None:
+        validation = {
+            "status": "pass",
+            "receipt_sha256": "a" * 64,
+            "implementation_head": monitor.EXPECTED_IMPLEMENTATION_BASE,
+            "verifier": {
+                "identity": "security-engineer-phase-c",
+                "role": "independent_verifier",
+                "session_key_sha256": "b" * 64,
+            },
+            "invocation": {
+                "command": "python -m unittest",
+                "completed_at": "2026-08-23T03:57:59Z",
+            },
+        }
+        config = {
+            "exact_heads": {
+                "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                "monitor_implementation_head": "c" * 40,
+            }
+        }
+
+        with self.assertRaisesRegex(
+            monitor.MonitorError,
+            "independent validation implementation head mismatch",
+        ):
+            monitor._validate_independent_validation_provenance(config, validation)
 
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
         digest = "a" * 64
