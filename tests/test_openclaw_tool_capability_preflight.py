@@ -1014,6 +1014,93 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("model-callable tools.catalog is unavailable", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
 
+    def test_live_status_requires_lease_array_before_runtime_ready(self) -> None:
+        malformed_status_payloads = [
+            (
+                {"ok": True, "writeMode": "memory", "allowAgents": ["main"]},
+                "missing_leases",
+            ),
+            (
+                {
+                    "ok": True,
+                    "writeMode": "memory",
+                    "allowAgents": ["main"],
+                    "leases": {"leaseId": "lease-1"},
+                },
+                "dict",
+            ),
+        ]
+        for status_payload, expected_error in malformed_status_payloads:
+            with self.subTest(expected_error=expected_error):
+                with tempfile.TemporaryDirectory() as install_root:
+                    write_contract_candidate_dist(install_root)
+                    bin_dir = os.path.join(install_root, "bin")
+                    os.makedirs(bin_dir, exist_ok=True)
+                    executable = os.path.join(bin_dir, "openclaw")
+                    catalog = {
+                        "groups": [
+                            {
+                                "id": "unit",
+                                "tools": [
+                                    active_tool_entry(
+                                        tool_id,
+                                        include_schema=True,
+                                    )
+                                    for tool_id in ACTIVE_TOOL_IDS
+                                ],
+                            }
+                        ]
+                    }
+                    with open(executable, "w", encoding="utf-8") as handle:
+                        handle.write(
+                            "#!/usr/bin/env python3\n"
+                            "import json\n"
+                            "import sys\n"
+                            "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                            f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+                            "    raise SystemExit(0)\n"
+                            "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                            f"    print(json.dumps({status_payload!r}, sort_keys=True))\n"
+                            "    raise SystemExit(0)\n"
+                            "raise SystemExit(2)\n"
+                        )
+                    os.chmod(executable, 0o755)
+                    env = dict(os.environ)
+                    env["OPENCLAW_INSTALL_ROOT"] = install_root
+                    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SCRIPT),
+                            "--live-installed-openclaw",
+                            "--json",
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                    )
+
+                self.assertEqual(result.returncode, 1, result.stderr)
+                payload = json.loads(result.stdout)
+                gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+                self.assertEqual(
+                    gateway_catalog["status"],
+                    "status_corroboration_failed",
+                )
+                self.assertEqual(
+                    gateway_catalog["status_corroboration"]["status"],
+                    "status_rpc_leases_shape_invalid",
+                )
+                self.assertEqual(
+                    gateway_catalog["status_corroboration"]["error"],
+                    expected_error,
+                )
+                self.assertIn(
+                    "active OpenClaw Gateway status RPC leases must be an array",
+                    payload["error"],
+                )
+
     def test_catalog_failure_does_not_promote_model_declarations_to_gateway_source(
         self,
     ) -> None:

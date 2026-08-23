@@ -1213,8 +1213,20 @@ def _run_gateway_allow_lease_status(
     if isinstance(allow_agents, list):
         corroboration["allowAgents_count"] = len(allow_agents)
     leases = status_payload.get("leases")
-    if isinstance(leases, list):
-        corroboration["leases_count"] = len(leases)
+    if not isinstance(leases, list):
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_leases_shape_invalid",
+            error=type(leases).__name__ if leases is not None else "missing_leases",
+            response_sha256=response_sha256,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC leases must be an array",
+            catalog=catalog,
+        )
+    corroboration["leases_count"] = len(leases)
     return corroboration
 
 
