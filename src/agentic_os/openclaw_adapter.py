@@ -1184,8 +1184,11 @@ class OpenClawAdapter:
             raise self._metadata_error(exc) from exc
         prior_identity = self._lease_identity_by_request.get(request_identity)
         if prior_identity is not None and prior_identity != gateway_lease_id:
-            raise AdapterContractError(
-                "duplicate allowLease acquire returned a different lease identity"
+            self._quarantine_lease_identity(gateway_lease_id)
+            raise AdapterAmbiguousOutcomeError(
+                "duplicate allowLease acquire returned a different lease identity; "
+                "gateway lease identity is quarantined for human reconciliation",
+                candidate_observation=observation,
             )
         expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
         if expected is not None and expected != local:

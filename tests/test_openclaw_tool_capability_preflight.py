@@ -1101,6 +1101,70 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     payload["error"],
                 )
 
+    def test_live_status_validates_each_returned_lease_item(self) -> None:
+        status_payload = {
+            "ok": True,
+            "writeMode": "memory",
+            "allowAgents": ["main"],
+            "leases": [{"gateway_lease_id": "lease-1"}],
+        }
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            executable = os.path.join(bin_dir, "openclaw")
+            catalog = {
+                "groups": [
+                    {
+                        "id": "unit",
+                        "tools": [
+                            active_tool_entry(tool_id, include_schema=True)
+                            for tool_id in ACTIVE_TOOL_IDS
+                        ],
+                    }
+                ]
+            }
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    "import sys\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                    f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+                    "    raise SystemExit(0)\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    f"    print(json.dumps({status_payload!r}, sort_keys=True))\n"
+                    "    raise SystemExit(0)\n"
+                    "raise SystemExit(2)\n"
+                )
+            os.chmod(executable, 0o755)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(gateway_catalog["status"], "status_corroboration_failed")
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "status_rpc_lease_items_invalid",
+        )
+        self.assertIn("lease item 0", gateway_catalog["status_corroboration"]["error"])
+        self.assertIn("leases contain invalid metadata", payload["error"])
+
     def test_catalog_failure_does_not_promote_model_declarations_to_gateway_source(
         self,
     ) -> None:
@@ -4268,6 +4332,29 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             self.assertEqual(payload["status"], "fail")
             self.assertFalse(payload["runtime_ready"])
             self.assertIn("status RPC leases must be an array", payload["error"])
+
+    def test_persistent_attested_preflight_validates_status_lease_items(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                status_response_transform=lambda status: status.__setitem__(
+                    "leases", [{"gateway_lease_id": "lease-1"}]
+                ),
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertFalse(payload["runtime_ready"])
+        self.assertIn("persistent status RPC lease item 0", payload["error"])
 
     def test_persistent_attested_preflight_rejects_non_empty_status_params(self) -> None:
         module = load_preflight_module()

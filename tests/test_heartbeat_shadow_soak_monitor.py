@@ -1634,12 +1634,13 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         self.assertEqual(envelope["violations"], ["core_receipt_invalid"])
         self.assertIn("sample authentication journal", envelope["note"])
 
-    def test_sample_authentication_trailing_crash_entry_is_reconciled(self) -> None:
+    def test_sample_authentication_trailing_authenticated_sample_fails_closed(self) -> None:
         digest = "a" * 64
         with mock.patch.object(monitor, "REPO_ROOT", self.root):
             config = monitor._build_config(self.args)
             config["authority_input_digest"] = digest
             self.state_dir.mkdir(parents=True, exist_ok=True)
+            (self.state_dir / "samples").mkdir(parents=True, exist_ok=True)
             receipt = monitor.new_heartbeat_soak_receipt(
                 run_id=config["run_id"],
                 authority_input_digest=digest,
@@ -1659,15 +1660,20 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             monitor._bind_soak_timing_config(config, receipt)
             monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
             monitor._append_sample_authentication(config, 1, first)
+            monitor._persist_sample(config, 2, second)
             monitor._append_sample_authentication(config, 2, second)
 
-            monitor._validate_core_sample_authentication(config, receipt)
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "authenticated sample missing from core receipt",
+            ):
+                monitor._validate_core_sample_authentication(config, receipt)
 
         journal = json.loads(
             (self.state_dir / "sample-authentication.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(len(journal["entries"]), 1)
-        self.assertEqual(journal["entries"][0]["sample_index"], 1)
+        self.assertEqual(len(journal["entries"]), 2)
+        self.assertEqual(journal["entries"][1]["sample_index"], 2)
 
     def test_status_refresh_preserves_failed_closed_audit_fields(self) -> None:
         digest = "a" * 64

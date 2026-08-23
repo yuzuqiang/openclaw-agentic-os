@@ -62,7 +62,7 @@ EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
 )
 EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "29f8be87091a945f53a667afcc481989a1e5b057c043a24bace1d08cd9bef39d"
+    "48b2d1c7b5b42fb391addf15c7941f61a3fa1209da755ecc827179368b1b4e3f"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -881,11 +881,16 @@ def _validate_sample_authentication_entries(
             config,
             trailing,
             sample_index=len(samples) + 1,
-            sample=None,
+            sample=_read_json(
+                _path_from_config(config, "sample_dir")
+                / f"sample-{len(samples) + 1:04d}.json"
+            ),
             previous_signature=previous_signature,
         )
-        entries = entries[: len(samples)]
-        _write_sample_authentication_entries(config, entries)
+        raise MonitorError(
+            "sample authentication journal contains authenticated sample missing "
+            "from core receipt"
+        )
     if len(entries) != len(samples):
         raise MonitorError("sample authentication journal does not cover core samples")
     previous_signature: str | None = None

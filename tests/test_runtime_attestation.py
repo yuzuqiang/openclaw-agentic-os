@@ -891,6 +891,38 @@ class RuntimeAttestationTests(unittest.TestCase):
             "session-2",
         )
 
+    def test_duplicate_acquire_changed_identity_preserves_candidate(self) -> None:
+        class ChangedDuplicateAcquireTransport(FakeAttestedTransport):
+            def __init__(self) -> None:
+                super().__init__()
+                self.acquire_count = 0
+
+            def call(self, method, params):
+                if method != "subagents.allowLease.acquire":
+                    return super().call(method, params)
+                self.calls.append((method, dict(params)))
+                self.acquire_count += 1
+                gateway_lease_id = "lease-1" if self.acquire_count == 1 else "lease-2"
+                metadata = {**dict(params), "gateway_lease_id": gateway_lease_id}
+                return {
+                    "gateway_lease_id": gateway_lease_id,
+                    "metadata": self._metadata(metadata),
+                }
+
+        transport = ChangedDuplicateAcquireTransport()
+        adapter = self._adapter(transport)
+        adapter.allow_lease_acquire(lease_params())
+        with self.assertRaisesRegex(
+            AdapterAmbiguousOutcomeError,
+            "different lease identity",
+        ) as context:
+            adapter.allow_lease_acquire(lease_params())
+        self.assertIsNotNone(context.exception.candidate_observation)
+        self.assertEqual(
+            context.exception.candidate_observation.external_id,
+            "lease-2",
+        )
+
     def test_cli_transport_binds_signed_payload_to_local_executable_and_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "openclaw"

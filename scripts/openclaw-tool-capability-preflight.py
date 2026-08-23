@@ -21,10 +21,16 @@ from typing import Any, Iterable, Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import agentic_os
+from agentic_os.metadata import (
+    MetadataContractError,
+    validate_accepted_lease_identity,
+    validate_allow_lease_observation,
+)
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
     assert_preflighted_runtime_authority,
     assert_installed_runtime_tools,
+    observation_from_openclaw_response,
 )
 
 
@@ -1226,8 +1232,47 @@ def _run_gateway_allow_lease_status(
             "active OpenClaw Gateway status RPC leases must be an array",
             catalog=catalog,
         )
+    try:
+        _validate_status_lease_items(leases, label="status RPC")
+    except AdapterContractError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_lease_items_invalid",
+            error=str(exc),
+            response_sha256=response_sha256,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC leases contain invalid metadata",
+            catalog=catalog,
+        ) from exc
     corroboration["leases_count"] = len(leases)
     return corroboration
+
+
+def _validate_status_lease_items(leases: Iterable[Any], *, label: str) -> None:
+    for index, lease in enumerate(leases):
+        if not isinstance(lease, Mapping):
+            raise AdapterContractError(f"{label} lease item {index} must be an object")
+        try:
+            observation = observation_from_openclaw_response(lease)
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=observation.external_id
+            )
+            if not isinstance(observation.normalized, Mapping):
+                raise MetadataContractError("normalized lease metadata is required")
+            local = {**dict(observation.normalized), "gateway_lease_id": gateway_lease_id}
+            validate_allow_lease_observation(
+                local=local,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except (AdapterContractError, MetadataContractError) as exc:
+            raise AdapterContractError(
+                f"{label} lease item {index} failed metadata contract: {exc}"
+            ) from exc
 
 
 def _runtime_identity_catalog(
@@ -2267,6 +2312,7 @@ def _persistent_gateway_status_from_evidence(
     leases = status_payload.get("leases")
     if not isinstance(leases, list):
         raise AdapterContractError("persistent status RPC leases must be an array")
+    _validate_status_lease_items(leases, label="persistent status RPC")
     corroboration: dict[str, Any] = {
         "method": "subagents.allowLease.status",
         "request_semantics": "read_only_request",
