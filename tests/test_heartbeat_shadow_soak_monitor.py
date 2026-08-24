@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import importlib.util
@@ -758,7 +759,33 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertEqual(
             subject["reviewed_synthetic_commit"],
-            "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+            validation["invocation"]["reviewed_synthetic_commit"],
+        )
+        self.assertTrue(monitor._is_git_sha(subject["reviewed_synthetic_commit"]))
+        subprocess.run(
+            [
+                "git",
+                "cat-file",
+                "-e",
+                f"{subject['reviewed_synthetic_commit']}^{{commit}}",
+            ],
+            cwd=repo_root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                subject["reviewed_head"],
+                subject["reviewed_synthetic_commit"],
+            ],
+            cwd=repo_root,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         self.assertEqual(
             subject["tree_sha256"],
@@ -861,7 +888,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         ):
             monitor._validate_independent_validation_provenance(config, validation)
 
-    def test_independent_validation_accepts_signed_ancestor_implementation_head(
+    def test_independent_validation_rejects_signed_ancestor_implementation_head(
         self,
     ) -> None:
         config = {
@@ -873,26 +900,33 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         }
 
         with mock.patch.object(monitor, "_git_check", return_value=True) as git_check:
-            self.assertEqual(
-                monitor._validate_independent_validation_implementation_head(
-                    config, "b" * 40
-                ),
-                "b" * 40,
-            )
-
-        git_check.assert_called_with(
-            self.root,
-            ["merge-base", "--is-ancestor", "b" * 40, "c" * 40],
-        )
-
-        with mock.patch.object(monitor, "_git_check", return_value=True):
             with self.assertRaisesRegex(
                 monitor.MonitorError,
                 "independent validation implementation head mismatch",
             ):
                 monitor._validate_independent_validation_implementation_head(
-                    config, "a" * 40
+                    config, "b" * 40
                 )
+
+        git_check.assert_not_called()
+
+    def test_independent_validation_accepts_exact_legacy_implementation_head(
+        self,
+    ) -> None:
+        config = {
+            "repo_root": str(self.root),
+            "exact_heads": {
+                "implementation_base": "a" * 40,
+                "monitor_implementation_head": "c" * 40,
+            },
+        }
+
+        self.assertEqual(
+            monitor._validate_independent_validation_implementation_head(
+                config, "c" * 40
+            ),
+            "c" * 40,
+        )
 
     def test_independent_validation_subject_survives_clean_successor_checkout(
         self,
@@ -1013,6 +1047,39 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
             monitor._assert_start_git_contract(config)
             monitor._validate_independent_validation_provenance(config, validation)
+
+            missing_anchor_exclusion = copy.deepcopy(validation)
+            missing_anchor_exclusion["implementation_subject"] = {
+                **subject,
+                "excluded_paths": [validation_path.relative_to(repo_root).as_posix()],
+            }
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "implementation subject exclusions mismatch",
+            ):
+                monitor._validate_independent_validation_provenance(
+                    config,
+                    missing_anchor_exclusion,
+                )
+
+            extra_lifecycle_exclusion = copy.deepcopy(validation)
+            extra_lifecycle_exclusion["implementation_subject"] = {
+                **subject,
+                "excluded_paths": sorted(
+                    [
+                        *subject_exclusions,
+                        lifecycle_path.relative_to(repo_root).as_posix(),
+                    ]
+                ),
+            }
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "implementation subject exclusions mismatch",
+            ):
+                monitor._validate_independent_validation_provenance(
+                    config,
+                    extra_lifecycle_exclusion,
+                )
 
             (repo_root / "scripts/heartbeat-shadow-soak-monitor.py").write_text(
                 "changed monitor content\n",

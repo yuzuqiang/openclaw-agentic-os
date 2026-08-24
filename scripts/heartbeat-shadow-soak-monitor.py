@@ -1473,16 +1473,6 @@ def _validate_independent_validation_implementation_head(
     target = _independent_validation_implementation_head(config)
     if implementation == target:
         return implementation
-    exact_heads = config.get("exact_heads")
-    base = exact_heads.get("implementation_base") if isinstance(exact_heads, Mapping) else None
-    if implementation == base:
-        raise MonitorError("independent validation implementation head mismatch")
-    repo_root = _repo_root_from_config(config)
-    if _git_check(
-        repo_root,
-        ["merge-base", "--is-ancestor", implementation, target],
-    ):
-        return implementation
     raise MonitorError("independent validation implementation head mismatch")
 
 
