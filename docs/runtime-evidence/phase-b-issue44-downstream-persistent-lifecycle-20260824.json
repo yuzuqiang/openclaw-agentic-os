@@ -1,0 +1,109 @@
+{
+  "agentic_os_head_sha": "afc5c267c3090b817b658d409558fb8d5f6cb662",
+  "agentic_sources": [
+    {
+      "path": "scripts/openclaw-real-gateway-contract-probe.py",
+      "sha256": "4c123662d9a1290e55b348be58c17f20a32b4c98f1aca727ccaa1e039ca5245f"
+    },
+    {
+      "path": "scripts/openclaw-live-accepted-session-probe.py",
+      "sha256": "f3ce272790217e37c4651ebe11a6f78171bcb0be1ef2b7ed9f216a8503a3d430"
+    },
+    {
+      "path": "src/agentic_os/openclaw_adapter.py",
+      "sha256": "b08a8910f3e891d74b8cf9315d0a6d6c803dd935a62038ff92e737ebeb3a2389"
+    },
+    {
+      "path": "src/agentic_os/runtime_attestation.py",
+      "sha256": "e3c30d6054efe3698eddaab48bc64f9ad6b09216f0d5f7bd744ae13645b6ab46"
+    },
+    {
+      "path": "src/agentic_os/metadata.py",
+      "sha256": "8c429842eb17fafd0db30276b012103859167c7d231c99b8c41399bf553689c2"
+    }
+  ],
+  "classification": "persistent_lifecycle_runner_failed",
+  "fail_closed_matrix": [
+    {
+      "check": "candidate_exact_clean_head",
+      "evidence": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
+      "status": "pass"
+    },
+    {
+      "check": "persistent_runner_present",
+      "evidence_sha256": "76960dda19e6ee0b59ed0357575a0a1e5101b3b1c59a07171e27d875aa70aedf",
+      "status": "pass"
+    },
+    {
+      "check": "runner_exit_code",
+      "exit_code": 1,
+      "status": "fail"
+    },
+    {
+      "check": "runner_classification",
+      "classification": "port_state_timeout",
+      "error_code": "port_state_timeout",
+      "error_message_sha256": "d4c527a4a19ec67c2116568cc14d65666fd9699b6f1eaf87d4b1e329c5072639",
+      "status": "fail"
+    },
+    {
+      "check": "failure_cleanup",
+      "error_code": "port_state_timeout",
+      "error_message_sha256": "d4c527a4a19ec67c2116568cc14d65666fd9699b6f1eaf87d4b1e329c5072639",
+      "status": "pass"
+    }
+  ],
+  "isolated_non_production_gateway": {
+    "candidate_port_closed": true,
+    "db_authority_enabled": false,
+    "loopback": true,
+    "port": 20189,
+    "production_config_hash_unchanged": true,
+    "status": "fail_closed",
+    "token_authenticated": true
+  },
+  "openclaw_head_sha": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
+  "probe": "agentic-os-persistent-lifecycle-runner",
+  "production_authority_enabled": false,
+  "production_behavior_proven": false,
+  "runner": {
+    "command_sha256": "6adf101add0137f65d9f7b972855d489b55da980ab75ef444b592b2c2bd052df",
+    "run_root_sha256": "ad6fb2a2f8fdc28017974aacb4ab14ad83ac998b9403949936b383411b8cddd5",
+    "script": "scripts/agentic-os-persistent-lifecycle-runner.mts",
+    "stderr_sha256": "765d79d29cbc0b3c9b4bf83a97b82004e920e3ed26726393662b70d1fac25ffb",
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "runtime_ready": false,
+  "runtime_ready_candidate_evidence": false,
+  "runtime_sources": [
+    {
+      "path": "package.json",
+      "sha256": "51c0a69bea92e8bf3f8db58b503e26343116b078f4821b2ebdfb83a70a51021c"
+    },
+    {
+      "path": "openclaw.mjs",
+      "sha256": "0f6f5f70cfcfae01bda117d02139ed9159219659076d8d2eb0d005b266ffde7d"
+    },
+    {
+      "path": "scripts/agentic-os-persistent-lifecycle-runner.mts",
+      "sha256": "76960dda19e6ee0b59ed0357575a0a1e5101b3b1c59a07171e27d875aa70aedf"
+    },
+    {
+      "path": "src/gateway/agentic-os-runtime-attestation.ts",
+      "sha256": "6d6966e34c74ab9fec9c4dc11e9fe1b4d01fdbc02fbd9f3f37285cb220c5359a"
+    },
+    {
+      "path": "src/gateway/agentic-os-runtime-contract-descriptors.ts",
+      "sha256": "83d8a73ff50894ed7254b79816d150800715ad1140c1900cdee8407517b7db50"
+    },
+    {
+      "path": "src/gateway/client.ts",
+      "sha256": "7190487964e41237e059b96cf786783589e804b9c8dee3755e8de5af7245d978"
+    },
+    {
+      "path": "src/utils/message-channel.ts",
+      "sha256": "41fbf00d6e70c154b1e14ee442d383333f8bc4ffa357efc5415d4758fff7ffd1"
+    }
+  ],
+  "status": "fail_closed"
+}
