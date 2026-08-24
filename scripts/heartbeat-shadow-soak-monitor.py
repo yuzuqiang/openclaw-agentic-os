@@ -55,14 +55,14 @@ SCHEMA_SAMPLE_AUTHENTICATION = (
 SCHEMA_ROLLBACK_AUTHENTICATION_INTENT = (
     "p03-heartbeat-shadow-rollback-authentication-intent.v2"
 )
+INDEPENDENT_VALIDATION_SUBJECT_SCHEME = (
+    "git-tree-with-excluded-validation-evidence-sha256.v1"
+)
 DEFAULT_DURATION_HOURS = 24
 DEFAULT_INTERVAL_SECONDS = 300
 DAEMON_READY_TIMEOUT_SECONDS = 2.0
 EXPECTED_LIFECYCLE_SHA256 = (
     "60245f0148a5dc5d7c55cbd42de17eb343d9a2544863d56b7b4c3ffac40276a8"
-)
-EXPECTED_INDEPENDENT_VALIDATION_SHA256 = (
-    "48b2d1c7b5b42fb391addf15c7941f61a3fa1209da755ecc827179368b1b4e3f"
 )
 EXPECTED_RUNTIME_HEAD = "ff180d08bde60ff42bd39147f339d3a590639778"
 EXPECTED_AGENTIC_OS_EVIDENCE_HEAD = "21f0bde95beeedabd22f870d14eaa6fe98dbcf74"
@@ -273,6 +273,78 @@ def _git_check(repo_root: Path, args: list[str]) -> bool:
         stderr=subprocess.DEVNULL,
     )
     return result.returncode == 0
+
+
+def _repo_relative_path(repo_root: Path, path: Path, label: str) -> str:
+    try:
+        return path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError as exc:
+        raise MonitorError(f"{label} must be repo-bound") from exc
+
+
+def _validation_subject_excluded_paths(
+    config: Mapping[str, Any], validation: Mapping[str, Any]
+) -> list[str]:
+    repo_root = _repo_root_from_config(config)
+    validation_path = _path_from_config(config, "independent_validation_path")
+    anchor = validation.get("authenticated_record")
+    if not isinstance(anchor, Mapping):
+        raise MonitorError("independent validation authenticated record is missing")
+    raw_anchor_path = anchor.get("path")
+    if not isinstance(raw_anchor_path, str) or not raw_anchor_path:
+        raise MonitorError("independent validation authenticated record path is missing")
+    anchor_path = Path(raw_anchor_path)
+    if not anchor_path.is_absolute():
+        anchor_path = repo_root / anchor_path
+    return sorted(
+        {
+            _repo_relative_path(
+                repo_root,
+                validation_path,
+                "independent validation receipt path",
+            ),
+            _repo_relative_path(
+                repo_root,
+                anchor_path,
+                "independent validation authenticated record path",
+            ),
+        }
+    )
+
+
+def _git_tracked_tree_subject_sha256(
+    repo_root: Path, excluded_paths: Sequence[str]
+) -> str:
+    excluded = set(excluded_paths)
+    result = subprocess.run(
+        ["git", "ls-tree", "-rz", "HEAD"],
+        cwd=repo_root,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise MonitorError(
+            f"git validation subject tree failed: {result.stderr.decode('utf-8', 'replace').strip()}"
+        )
+    digest = hashlib.sha256()
+    observed_exclusions: set[str] = set()
+    for raw_entry in result.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        try:
+            _metadata, raw_path = raw_entry.split(b"\t", 1)
+        except ValueError as exc:
+            raise MonitorError("git validation subject tree entry is malformed") from exc
+        path = raw_path.decode("utf-8", "surrogateescape")
+        if path in excluded:
+            observed_exclusions.add(path)
+            continue
+        digest.update(raw_entry)
+        digest.update(b"\0")
+    if observed_exclusions != excluded:
+        raise MonitorError("independent validation subject exclusion is not tracked")
+    return digest.hexdigest()
 
 
 def _assert_start_git_contract(config: Mapping[str, Any]) -> None:
@@ -1248,6 +1320,35 @@ def _load_pid(pidfile: Path) -> int | None:
         return None
 
 
+def _assert_rollback_monitor_inactive(
+    config: Mapping[str, Any], pid: int | None, allow_running: bool
+) -> None:
+    if allow_running:
+        return
+    if pid is not None and _pid_alive(pid):
+        raise MonitorError("refusing rollback while monitor process is active")
+    try:
+        envelope = _read_json(_path_from_config(config, "monitor_envelope_path"))
+    except MonitorError:
+        envelope = {}
+    if envelope.get("status") != "running":
+        return
+    if pid is None:
+        raise MonitorError(
+            "refusing rollback while running monitor process identity is unavailable"
+        )
+    monitor_doc = envelope.get("monitor")
+    envelope_pid = monitor_doc.get("pid") if isinstance(monitor_doc, Mapping) else None
+    if not isinstance(envelope_pid, int) or envelope_pid <= 0:
+        raise MonitorError(
+            "refusing rollback while running monitor process identity is unavailable"
+        )
+    if envelope_pid != pid or not _pid_alive(pid):
+        raise MonitorError(
+            "refusing rollback while running monitor process identity is ambiguous"
+        )
+
+
 def _verified_predecessor_summary(config: Mapping[str, Any]) -> dict[str, Any]:
     lifecycle_path = _path_from_config(config, "lifecycle_receipt_path")
     validation_path = _path_from_config(config, "independent_validation_path")
@@ -1296,7 +1397,8 @@ def _verified_predecessor_summary(config: Mapping[str, Any]) -> dict[str, Any]:
             "sha256": validation_sha,
             "status": validation.get("status"),
             "verifier_identity": validation["verifier"]["identity"],
-            "implementation_head": validation["implementation_head"],
+            "implementation_head": validation.get("implementation_head"),
+            "implementation_subject": validation.get("implementation_subject"),
         },
     }
 
@@ -1323,9 +1425,11 @@ def _validate_independent_validation_provenance(
     _verifier_session_key_sha256(verifier, "independent validation verifier")
     if verifier.get("identity") == "lifecycle_producer":
         raise MonitorError("independent validation must not be self-produced")
-    implementation_head = validation.get("implementation_head")
-    if implementation_head != _independent_validation_implementation_head(config):
-        raise MonitorError("independent validation implementation head mismatch")
+    if isinstance(validation.get("implementation_subject"), Mapping):
+        _validate_independent_validation_implementation_subject(config, validation)
+    else:
+        implementation_head = validation.get("implementation_head")
+        _validate_independent_validation_implementation_head(config, implementation_head)
     invocation = validation.get("invocation")
     if not isinstance(invocation, Mapping):
         raise MonitorError("independent validation invocation provenance is missing")
@@ -1355,14 +1459,73 @@ def _independent_validation_implementation_head(config: Mapping[str, Any]) -> st
     return str(head)
 
 
+def _repo_root_from_config(config: Mapping[str, Any]) -> Path:
+    raw = config.get("repo_root")
+    return Path(str(raw)).resolve() if isinstance(raw, str) and raw else REPO_ROOT.resolve()
+
+
+def _validate_independent_validation_implementation_head(
+    config: Mapping[str, Any], implementation_head: Any
+) -> str:
+    if not _is_git_sha(implementation_head):
+        raise MonitorError("independent validation implementation head mismatch")
+    implementation = str(implementation_head)
+    target = _independent_validation_implementation_head(config)
+    if implementation == target:
+        return implementation
+    exact_heads = config.get("exact_heads")
+    base = exact_heads.get("implementation_base") if isinstance(exact_heads, Mapping) else None
+    if implementation == base:
+        raise MonitorError("independent validation implementation head mismatch")
+    repo_root = _repo_root_from_config(config)
+    if _git_check(
+        repo_root,
+        ["merge-base", "--is-ancestor", implementation, target],
+    ):
+        return implementation
+    raise MonitorError("independent validation implementation head mismatch")
+
+
+def _validate_independent_validation_implementation_subject(
+    config: Mapping[str, Any], validation: Mapping[str, Any]
+) -> str:
+    subject = validation.get("implementation_subject")
+    if not isinstance(subject, Mapping):
+        raise MonitorError("independent validation implementation subject is missing")
+    if subject.get("scheme") != INDEPENDENT_VALIDATION_SUBJECT_SCHEME:
+        raise MonitorError("independent validation implementation subject scheme mismatch")
+    tree_sha = subject.get("tree_sha256")
+    if not _is_sha256(tree_sha):
+        raise MonitorError("independent validation implementation subject hash mismatch")
+    excluded_paths = subject.get("excluded_paths")
+    if (
+        not isinstance(excluded_paths, list)
+        or not excluded_paths
+        or any(not isinstance(path, str) or not path for path in excluded_paths)
+    ):
+        raise MonitorError("independent validation implementation subject exclusions mismatch")
+    expected_exclusions = _validation_subject_excluded_paths(config, validation)
+    if sorted(excluded_paths) != expected_exclusions:
+        raise MonitorError("independent validation implementation subject exclusions mismatch")
+    synthetic_commit = subject.get("reviewed_synthetic_commit")
+    if synthetic_commit is not None and not _is_git_sha(synthetic_commit):
+        raise MonitorError("independent validation reviewed synthetic commit is invalid")
+    reviewed_head = subject.get("reviewed_head")
+    if reviewed_head is not None and not _is_git_sha(reviewed_head):
+        raise MonitorError("independent validation reviewed head is invalid")
+    current = _git_tracked_tree_subject_sha256(
+        _repo_root_from_config(config),
+        expected_exclusions,
+    )
+    if not hmac.compare_digest(str(tree_sha), current):
+        raise MonitorError("independent validation implementation subject mismatch")
+    return str(tree_sha)
+
+
 def _validate_independent_validation_anchor(
     config: Mapping[str, Any], validation: Mapping[str, Any]
 ) -> None:
-    repo_root = (
-        _path_from_config(config, "repo_root")
-        if isinstance(config.get("repo_root"), str)
-        else REPO_ROOT.resolve()
-    )
+    repo_root = _repo_root_from_config(config)
     anchor = validation.get("authenticated_record")
     if not isinstance(anchor, Mapping):
         raise MonitorError("independent validation authenticated record is missing")
@@ -1393,9 +1556,12 @@ def _validate_independent_validation_anchor(
         raise MonitorError("independent validation authenticated record is not PASS")
     if record.get("receipt_sha256") != validation.get("receipt_sha256"):
         raise MonitorError("independent validation authenticated record receipt mismatch")
-    if record.get("implementation_head") != _independent_validation_implementation_head(
-        config
-    ):
+    if isinstance(validation.get("implementation_subject"), Mapping):
+        if record.get("implementation_subject") != validation.get("implementation_subject"):
+            raise MonitorError(
+                "independent validation authenticated record implementation mismatch"
+            )
+    elif record.get("implementation_head") != validation.get("implementation_head"):
         raise MonitorError(
             "independent validation authenticated record implementation mismatch"
         )
@@ -2559,17 +2725,7 @@ def rollback(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     config = _load_validated_resume_config(state_dir)
     pid = _load_pid(_path_from_config(config, "pidfile_path"))
-    if pid is None and not args.allow_running:
-        try:
-            envelope = _read_json(_path_from_config(config, "monitor_envelope_path"))
-        except MonitorError:
-            envelope = {}
-        if envelope.get("status") == "running":
-            raise MonitorError(
-                "refusing rollback while running monitor process identity is unavailable"
-            )
-    if pid and _pid_alive(pid) and not args.allow_running:
-        raise MonitorError("refusing rollback while monitor process is active")
+    _assert_rollback_monitor_inactive(config, pid, args.allow_running)
     receipt = _read_json(_path_from_config(config, "core_soak_receipt_path"))
     validate_heartbeat_soak_receipt(receipt)
     rollback_receipt_path = _path_from_config(config, "rollback_receipt_path")

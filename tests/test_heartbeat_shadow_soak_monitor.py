@@ -734,35 +734,42 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         completed_at = datetime.fromisoformat(
             validation["validated_at_utc"].replace("Z", "+00:00")
         )
-        implementation_committed_at = datetime.fromisoformat(
-            validation["invocation"]["implementation_commit_committed_at"]
+        invocation_completed_at = datetime.fromisoformat(
+            validation["invocation"]["completed_at"].replace("Z", "+00:00")
         )
+        current_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            text=True,
+        ).strip()
 
-        self.assertGreaterEqual(completed_at, implementation_committed_at)
-        for head_key in ("reviewed_head", "review_merge_head"):
-            self.assertEqual(
-                validation["implementation_head"],
-                validation["invocation"][head_key],
-            )
-            self.assertEqual(
-                subprocess.run(
-                    [
-                        "git",
-                        "merge-base",
-                        "--is-ancestor",
-                        monitor.EXPECTED_IMPLEMENTATION_BASE,
-                        validation["invocation"][head_key],
-                    ],
-                    cwd=repo_root,
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                ).returncode,
-                0,
-            )
+        self.assertGreaterEqual(completed_at, invocation_completed_at)
+        self.assertNotIn("implementation_head", validation)
+        subject = validation["implementation_subject"]
+        self.assertEqual(subject["scheme"], monitor.INDEPENDENT_VALIDATION_SUBJECT_SCHEME)
         self.assertEqual(
-            monitor._sha256_file(validation_path),
-            monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256,
+            subject["excluded_paths"],
+            sorted(
+                [
+                    validation_path.relative_to(repo_root).as_posix(),
+                    anchor_path.relative_to(repo_root).as_posix(),
+                ]
+            ),
+        )
+        self.assertEqual(
+            subject["reviewed_synthetic_commit"],
+            "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+        )
+        self.assertEqual(
+            subject["tree_sha256"],
+            monitor._git_tracked_tree_subject_sha256(
+                repo_root,
+                subject["excluded_paths"],
+            ),
+        )
+        self.assertEqual(
+            len(monitor._sha256_file(validation_path)),
+            64,
         )
         self.assertEqual(
             validation["authenticated_record"]["sha256"],
@@ -775,11 +782,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "signature mismatch"):
                 monitor._validate_independent_validation_anchor(
                     {
+                        "independent_validation_path": str(validation_path),
                         "exact_heads": {
                             "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
-                            "monitor_implementation_head": validation[
-                                "implementation_head"
-                            ],
+                            "monitor_implementation_head": current_head,
                         }
                     },
                     validation,
@@ -790,11 +796,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             ):
                 monitor._validate_independent_validation_anchor(
                     {
+                        "independent_validation_path": str(validation_path),
                         "exact_heads": {
                             "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
-                            "monitor_implementation_head": validation[
-                                "implementation_head"
-                            ],
+                            "monitor_implementation_head": current_head,
                         }
                     },
                     validation,
@@ -815,10 +820,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 runtime_head=monitor.EXPECTED_RUNTIME_HEAD,
                 agentic_os_evidence_head=monitor.EXPECTED_AGENTIC_OS_EVIDENCE_HEAD,
                 implementation_base=monitor.EXPECTED_IMPLEMENTATION_BASE,
-                monitor_implementation_head=validation["implementation_head"],
+                monitor_implementation_head=current_head,
                 expected_lifecycle_sha256=monitor.EXPECTED_LIFECYCLE_SHA256,
                 expected_independent_validation_sha256=(
-                    monitor.EXPECTED_INDEPENDENT_VALIDATION_SHA256
+                    monitor._sha256_file(validation_path)
                 ),
                 duration_hours=24,
                 interval_seconds=300,
@@ -855,6 +860,182 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             "independent validation implementation head mismatch",
         ):
             monitor._validate_independent_validation_provenance(config, validation)
+
+    def test_independent_validation_accepts_signed_ancestor_implementation_head(
+        self,
+    ) -> None:
+        config = {
+            "repo_root": str(self.root),
+            "exact_heads": {
+                "implementation_base": "a" * 40,
+                "monitor_implementation_head": "c" * 40,
+            },
+        }
+
+        with mock.patch.object(monitor, "_git_check", return_value=True) as git_check:
+            self.assertEqual(
+                monitor._validate_independent_validation_implementation_head(
+                    config, "b" * 40
+                ),
+                "b" * 40,
+            )
+
+        git_check.assert_called_with(
+            self.root,
+            ["merge-base", "--is-ancestor", "b" * 40, "c" * 40],
+        )
+
+        with mock.patch.object(monitor, "_git_check", return_value=True):
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "independent validation implementation head mismatch",
+            ):
+                monitor._validate_independent_validation_implementation_head(
+                    config, "a" * 40
+                )
+
+    def test_independent_validation_subject_survives_clean_successor_checkout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo_root = Path(temp)
+            subprocess.run(["git", "init"], cwd=repo_root, check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=repo_root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test User"],
+                cwd=repo_root,
+                check=True,
+            )
+            validation_path = (
+                repo_root
+                / "docs/runtime-evidence/phase-b-p03-independent-validation-20260821T065433Z.json"
+            )
+            anchor_path = (
+                repo_root
+                / "docs/runtime-evidence/phase-b-p03-independent-validation-anchor-20260821T065433Z.json"
+            )
+            lifecycle_path = repo_root / "docs/runtime-evidence/lifecycle.json"
+            (repo_root / "scripts").mkdir()
+            (repo_root / "scripts/heartbeat-shadow-soak-monitor.py").write_text(
+                "reviewed monitor content\n",
+                encoding="utf-8",
+            )
+            lifecycle_sha = _write_json(lifecycle_path, {"status": "pass"})
+            _write_json(validation_path, {"placeholder": True})
+            _write_json(anchor_path, {"placeholder": True})
+            subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "base"],
+                cwd=repo_root,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            base_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                text=True,
+            ).strip()
+            subject_exclusions = sorted(
+                [
+                    validation_path.relative_to(repo_root).as_posix(),
+                    anchor_path.relative_to(repo_root).as_posix(),
+                ]
+            )
+            subject = {
+                "scheme": monitor.INDEPENDENT_VALIDATION_SUBJECT_SCHEME,
+                "tree_sha256": monitor._git_tracked_tree_subject_sha256(
+                    repo_root,
+                    subject_exclusions,
+                ),
+                "excluded_paths": subject_exclusions,
+                "reviewed_synthetic_commit": "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+            }
+            anchor = _signed_anchor(
+                {
+                    "schema_version": "agentic-os.independent-validation-anchor.v1",
+                    "record_authority": "phase_c_terminal_checkpoint",
+                    "validation_verdict": "pass",
+                    "receipt_sha256": lifecycle_sha,
+                    "implementation_subject": subject,
+                    "verifier": {
+                        "identity": "security-engineer-phase-c",
+                        "role": "independent_verifier",
+                        "session_key_sha256": self.verifier_session_key_sha256,
+                    },
+                },
+                self.anchor_key,
+            )
+            anchor_sha = _write_json(anchor_path, anchor)
+            validation = {
+                "status": "pass",
+                "receipt_sha256": lifecycle_sha,
+                "implementation_subject": subject,
+                "verifier": {
+                    "identity": "security-engineer-phase-c",
+                    "role": "independent_verifier",
+                    "session_key_sha256": self.verifier_session_key_sha256,
+                },
+                "invocation": {
+                    "command": "Phase C synthetic squash validation",
+                    "completed_at": "2026-08-23T19:22:37Z",
+                    "reviewed_synthetic_commit": "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+                },
+                "authenticated_record": {
+                    "path": anchor_path.relative_to(repo_root).as_posix(),
+                    "sha256": anchor_sha,
+                },
+            }
+            _write_json(validation_path, validation)
+            subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "successor evidence"],
+                cwd=repo_root,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            successor_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                text=True,
+            ).strip()
+            config = {
+                "repo_root": str(repo_root),
+                "independent_validation_path": str(validation_path),
+                "exact_heads": {
+                    "implementation_base": base_head,
+                    "monitor_implementation_head": successor_head,
+                },
+            }
+
+            monitor._assert_start_git_contract(config)
+            monitor._validate_independent_validation_provenance(config, validation)
+
+            (repo_root / "scripts/heartbeat-shadow-soak-monitor.py").write_text(
+                "changed monitor content\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "changed reviewed tree"],
+                cwd=repo_root,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            changed_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                text=True,
+            ).strip()
+            config["exact_heads"]["monitor_implementation_head"] = changed_head
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "implementation subject mismatch",
+            ):
+                monitor._validate_independent_validation_provenance(config, validation)
 
     def test_coverage_gap_uses_failed_closed_monitor_envelope(self) -> None:
         digest = "a" * 64
@@ -2625,6 +2806,47 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                             allow_running=False,
                         )
                     )
+
+        rollback.assert_not_called()
+
+    def test_rollback_refuses_dead_pidfile_when_running_envelope_has_different_pid(
+        self,
+    ) -> None:
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._atomic_write_json(
+                self.state_dir / "monitor-envelope.json",
+                {
+                    "status": "running",
+                    "monitor": {
+                        "pid": 12345,
+                        "pidfile": str(self.state_dir / "monitor.pid"),
+                        "process_alive": True,
+                    },
+                },
+            )
+            (self.state_dir / "monitor.pid").write_text("54321\n", encoding="utf-8")
+
+            def fake_pid_alive(pid: int) -> bool:
+                return pid == 12345
+
+            with mock.patch.object(monitor, "_pid_alive", side_effect=fake_pid_alive):
+                with mock.patch.object(
+                    monitor, "force_heartbeat_file_authority_rollback"
+                ) as rollback:
+                    with self.assertRaisesRegex(
+                        monitor.MonitorError,
+                        "process identity is ambiguous",
+                    ):
+                        monitor.rollback(
+                            Namespace(
+                                state_dir=self.state_dir,
+                                rollback_id="forged-dead-pid",
+                                allow_running=False,
+                            )
+                        )
 
         rollback.assert_not_called()
 
