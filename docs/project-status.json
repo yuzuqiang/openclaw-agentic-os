@@ -48,7 +48,7 @@
     },
     "issue44_live_installed_preflight": {
       "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
-      "sha256": "b93d48a102e444228bf6001fc6941083c586fd08c9ca72e49c9fd8bac2423987",
+      "sha256": "5288657875ac2a92c9ca8dd6b4dbe4a7b6fffd90baf1ac87afefc251fdc59a01",
       "status": "fail_closed_future_contract",
       "runtime_ready": false,
       "openclaw_version": "2026.7.1",

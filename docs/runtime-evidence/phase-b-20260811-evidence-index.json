@@ -20,16 +20,16 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "b4d1d358382bd03e38829473ba77586033a69a53",
+      "head_sha": "754cdf022fcee10d0d3440d7250da0f05195187b",
       "script_sha256": "709ccdd93b9ae34909acb85521f0a64c357291db35d4ef69660eb93f5995ece9",
-      "tree_sha": "52071254ef3b3fb2c44e96a9b3975cf7037b27f0"
+      "tree_sha": "2fd21066aed5840db161e0928185ac06f2de03fd"
     },
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
     "raw_status": "fail",
     "reviewed_head_sha": null,
     "runtime_ready": false,
-    "sha256": "b93d48a102e444228bf6001fc6941083c586fd08c9ca72e49c9fd8bac2423987",
+    "sha256": "5288657875ac2a92c9ca8dd6b4dbe4a7b6fffd90baf1ac87afefc251fdc59a01",
     "status": "captured_from_clean_generator_revision",
     "status_reason": "Issue #44 recaptured installed OpenClaw 2026.7.1 from a clean generator head while skipping live allowLease.status to preserve the no-production-lease-mutation boundary. It remains fail-closed because model-callable catalog availability, connected build identity, live allowLease reachability, and agenticOs.runtime.attest readiness are unproven."
   },

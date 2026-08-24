@@ -479,7 +479,7 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`b4d1d358382bd03e38829473ba77586033a69a53` in
+`754cdf022fcee10d0d3440d7250da0f05195187b` in
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
