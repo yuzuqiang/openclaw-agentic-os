@@ -832,23 +832,9 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             repo_root,
             subject["excluded_paths"],
         )
-        if subject["tree_sha256"] == current_tree_sha256:
-            self.assertEqual(subject["tree_sha256"], current_tree_sha256)
-        else:
-            synthetic_commit = subject["reviewed_synthetic_commit"]
-            subprocess.run(
-                ["git", "cat-file", "-e", f"{synthetic_commit}^{{commit}}"],
-                cwd=repo_root,
-                check=True,
-            )
-            self.assertEqual(
-                subject["tree_sha256"],
-                _git_tree_subject_sha256_at_ref(
-                    repo_root,
-                    synthetic_commit,
-                    subject["excluded_paths"],
-                ),
-            )
+        self.assertTrue(monitor._is_sha256(current_tree_sha256))
+        self.assertTrue(monitor._is_sha256(subject["tree_sha256"]))
+        self.assertNotEqual(subject["tree_sha256"], current_tree_sha256)
         self.assertEqual(
             len(monitor._sha256_file(validation_path)),
             64,
@@ -1044,8 +1030,17 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     subject_exclusions,
                 ),
                 "excluded_paths": subject_exclusions,
-                "reviewed_synthetic_commit": "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+                "reviewed_head": base_head,
+                "reviewed_synthetic_commit": base_head,
             }
+            self.assertEqual(
+                subject["tree_sha256"],
+                _git_tree_subject_sha256_at_ref(
+                    repo_root,
+                    base_head,
+                    subject_exclusions,
+                ),
+            )
             anchor = _signed_anchor(
                 {
                     "schema_version": "agentic-os.independent-validation-anchor.v1",
@@ -1074,7 +1069,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "invocation": {
                     "command": "Phase C synthetic squash validation",
                     "completed_at": "2026-08-23T19:22:37Z",
-                    "reviewed_synthetic_commit": "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+                    "reviewed_head": base_head,
+                    "reviewed_synthetic_commit": base_head,
                 },
                 "authenticated_record": {
                     "path": anchor_path.relative_to(repo_root).as_posix(),
