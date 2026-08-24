@@ -739,6 +739,23 @@ def _run_persistent_lifecycle_probe(
 ) -> dict[str, Any]:
     run_root = run_root.resolve()
     evidence_dir = run_root / "evidence"
+    runner_home = run_root / "runner-home"
+    runner_state = run_root / "runner-state"
+    runner_tmp = run_root / "runner-tmp"
+    for directory in (runner_home, runner_state, runner_tmp):
+        directory.mkdir(parents=True, exist_ok=True)
+    runner_env = dict(os.environ)
+    runner_env.update(
+        {
+            "HOME": str(runner_home),
+            "TMPDIR": str(runner_tmp),
+            "OPENCLAW_HOME": str(runner_home),
+            "OPENCLAW_STATE_DIR": str(runner_state),
+            "OPENCLAW_SKIP_CHANNELS": "1",
+            "OPENCLAW_NO_AUTO_UPDATE": "1",
+            "OPENCLAW_DISABLE_AUTO_UPDATE": "1",
+        }
+    )
     command = [
         "node",
         "--import",
@@ -764,7 +781,7 @@ def _run_persistent_lifecycle_probe(
         "--evidence-dir",
         str(evidence_dir),
     ]
-    proc = _run(command, cwd=openclaw_root, timeout=timeout)
+    proc = _run(command, cwd=openclaw_root, env=runner_env, timeout=timeout)
     if validate_candidate_root(openclaw_root) != head:
         raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
     if proc.returncode != 0:

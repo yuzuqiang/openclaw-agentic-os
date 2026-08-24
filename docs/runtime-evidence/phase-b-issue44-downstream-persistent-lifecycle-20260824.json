@@ -1,5 +1,5 @@
 {
-  "agentic_os_head_sha": "afc5c267c3090b817b658d409558fb8d5f6cb662",
+  "agentic_os_head_sha": "21d37d2bb01da8474d62bdd36234a65d88a2a86f",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
@@ -41,15 +41,15 @@
     },
     {
       "check": "runner_classification",
-      "classification": "port_state_timeout",
-      "error_code": "port_state_timeout",
-      "error_message_sha256": "d4c527a4a19ec67c2116568cc14d65666fd9699b6f1eaf87d4b1e329c5072639",
+      "classification": "unexpected_error",
+      "error_code": "unknown",
+      "error_message_sha256": "b0d7d95f0f3a85b19442dc934a948b349da22ad72290d1e200575766f87b963d",
       "status": "fail"
     },
     {
       "check": "failure_cleanup",
-      "error_code": "port_state_timeout",
-      "error_message_sha256": "d4c527a4a19ec67c2116568cc14d65666fd9699b6f1eaf87d4b1e329c5072639",
+      "error_code": "unknown",
+      "error_message_sha256": "b0d7d95f0f3a85b19442dc934a948b349da22ad72290d1e200575766f87b963d",
       "status": "pass"
     }
   ],
@@ -67,11 +67,11 @@
   "production_authority_enabled": false,
   "production_behavior_proven": false,
   "runner": {
-    "command_sha256": "6adf101add0137f65d9f7b972855d489b55da980ab75ef444b592b2c2bd052df",
-    "run_root_sha256": "ad6fb2a2f8fdc28017974aacb4ab14ad83ac998b9403949936b383411b8cddd5",
+    "command_sha256": "dd2915e7b352c8d537ec74bde4ea7a8ff78f767928379263f150aa164a44dc51",
+    "run_root_sha256": "9c440e26cd6c9d9104e268194c9c041266e5f8ed8748818a20d1394a4af6903d",
     "script": "scripts/agentic-os-persistent-lifecycle-runner.mts",
-    "stderr_sha256": "765d79d29cbc0b3c9b4bf83a97b82004e920e3ed26726393662b70d1fac25ffb",
-    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    "stderr_sha256": "0e247fd7c535da65dec466b88d8babd65780067e29faaf9e6a10613c067aaf02",
+    "stdout_sha256": "3e525cd46447a0995d1ba0ab61087ecdeaca9566d43b3a51d577d21a17befe86"
   },
   "runtime_ready": false,
   "runtime_ready_candidate_evidence": false,

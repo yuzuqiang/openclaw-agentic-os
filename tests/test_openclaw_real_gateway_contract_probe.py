@@ -439,6 +439,67 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn("/private", json.dumps(payload, sort_keys=True))
         self.assertNotIn("runner stdout", json.dumps(payload, sort_keys=True))
 
+    def test_persistent_runner_invocation_uses_isolated_runner_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            output = root / "evidence.json"
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            captured_env = {}
+
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(command, *, cwd, env=None, timeout=240):
+                self.assertIsNotNone(env)
+                captured_env.update(env)
+                return Proc()
+
+            try:
+                MODULE._run = fake_run
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._persistent_lifecycle_summary = lambda **kwargs: {
+                    "status": "pass",
+                    "openclaw_head_sha": "openclaw-head",
+                    "agentic_os_head_sha": "agentic-head",
+                    "runtime_ready": False,
+                    "runtime_ready_candidate_evidence": True,
+                }
+                payload = MODULE._run_persistent_lifecycle_probe(
+                    root,
+                    output,
+                    timeout=1,
+                    head="openclaw-head",
+                    agentic_sources=[],
+                    runtime_sources=[],
+                    run_root=run_root,
+                    port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                    run_id="run-id",
+                    transition_id="transition-id",
+                )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+
+        self.assertEqual(payload["status"], "pass")
+        self.assertEqual(captured_env["OPENCLAW_HOME"], str((run_root / "runner-home").resolve()))
+        self.assertEqual(
+            captured_env["OPENCLAW_STATE_DIR"],
+            str((run_root / "runner-state").resolve()),
+        )
+        self.assertNotEqual(
+            captured_env["OPENCLAW_STATE_DIR"],
+            "/Users/zuqiangyu/.openclaw/state",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
