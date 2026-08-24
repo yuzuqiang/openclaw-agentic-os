@@ -55,6 +55,9 @@ RUNTIME_AUTHORITY_COUNT_KEYS = (
     "duplicate_spawn_identity_groups",
 )
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+ROLLBACK_SOURCE_GUARD_RECOVERY_INTENT_SCHEMA = (
+    "p03-heartbeat-rollback-source-guard-recovery-intent.v1"
+)
 SAFE_SCHEDULER_FIELDS = {
     "every": str,
     "target": str,
@@ -906,6 +909,79 @@ def _restore_database_from_local_backup(source: Path, backup: Path) -> None:
         _fsync_directory(source.parent)
 
 
+def _rollback_source_guard_recovery_intent_path(backup: Path) -> Path:
+    return backup.with_name("source-guard-recovery-intent.json")
+
+
+def _write_rollback_source_guard_recovery_intent(
+    *,
+    root: Path,
+    target: Path,
+    backup: Path,
+    target_receipt: Path,
+    rollback_id: str,
+    authority_input_digest: str,
+    source_sha256: str,
+) -> Path:
+    intent_path = _rollback_source_guard_recovery_intent_path(backup)
+    _atomic_write_json(
+        intent_path,
+        {
+            "schema_version": ROLLBACK_SOURCE_GUARD_RECOVERY_INTENT_SCHEMA,
+            "rollback_id": rollback_id,
+            "authority_input_digest": authority_input_digest,
+            "source_database": target.relative_to(root).as_posix(),
+            "recoverable_local_backup_path": backup.relative_to(root).as_posix(),
+            "rollback_receipt_path": target_receipt.relative_to(root).as_posix(),
+            "source_database_sha256_before_rollback": source_sha256,
+        },
+    )
+    return intent_path
+
+
+def _recover_abandoned_rollback_source_guard(
+    *,
+    root: Path,
+    target: Path,
+    backup: Path,
+    target_receipt: Path,
+    rollback_id: str,
+    authority_input_digest: str,
+) -> bool:
+    intent_path = _rollback_source_guard_recovery_intent_path(backup)
+    if not intent_path.exists():
+        return False
+    if target_receipt.exists():
+        return False
+    if not target.is_dir():
+        return False
+    if not backup.is_file():
+        return False
+    intent = _json_file(intent_path, "Heartbeat rollback source guard recovery intent")
+    expected = {
+        "schema_version": ROLLBACK_SOURCE_GUARD_RECOVERY_INTENT_SCHEMA,
+        "rollback_id": rollback_id,
+        "authority_input_digest": authority_input_digest,
+        "source_database": target.relative_to(root).as_posix(),
+        "recoverable_local_backup_path": backup.relative_to(root).as_posix(),
+        "rollback_receipt_path": target_receipt.relative_to(root).as_posix(),
+    }
+    if {key: intent.get(key) for key in expected} != expected:
+        raise HeartbeatShadowError(
+            "Heartbeat rollback source guard recovery intent mismatch"
+        )
+    source_sha256 = intent.get("source_database_sha256_before_rollback")
+    if not _is_sha256(source_sha256) or _sha256_file(backup) != source_sha256:
+        raise HeartbeatShadowError(
+            "Heartbeat rollback source guard recovery backup hash mismatch"
+        )
+    _remove_recreated_rollback_source_path(target)
+    _restore_database_from_local_backup(target, backup)
+    intent_path.unlink()
+    _fsync_directory(intent_path.parent)
+    return True
+
+
 def run_heartbeat_file_shadow_cycle(
     *,
     baseline_path: Path,
@@ -1687,17 +1763,26 @@ def force_heartbeat_file_authority_rollback(
     expected = heartbeat_control_database(root)
     if target != expected:
         raise HeartbeatShadowError("Heartbeat rollback target is not the ignored control DB")
+    audit_snapshot = _rollback_recovery_database(root, rollback_id, "audit-snapshot.db")
+    backup = _rollback_recovery_database(root, rollback_id, target.name)
+    _recover_abandoned_rollback_source_guard(
+        root=root,
+        target=target,
+        backup=backup,
+        target_receipt=target_receipt,
+        rollback_id=rollback_id,
+        authority_input_digest=authority_input_digest,
+    )
     if not target.is_file():
         raise HeartbeatShadowError("Heartbeat shadow DB is missing")
     if target_receipt.exists():
         raise HeartbeatShadowError("Heartbeat rollback receipt already exists")
-    audit_snapshot = _rollback_recovery_database(root, rollback_id, "audit-snapshot.db")
-    backup = _rollback_recovery_database(root, rollback_id, target.name)
     if backup.exists() or any(Path(f"{backup}{suffix}").exists() for suffix in SQLITE_SIDECAR_SUFFIXES):
         raise HeartbeatShadowError("Heartbeat rollback backup already exists")
     assert_privacy_preflight(root, database_paths=(target, audit_snapshot, backup))
     lock_connection, source_idle = _lock_rollback_source_idle(target)
     source_path_guard: int | None = None
+    source_path_guard_intent: Path | None = None
     backup_created = False
     rollback_receipt_persisted = False
     receipt: dict[str, Any] | None = None
@@ -1720,6 +1805,15 @@ def force_heartbeat_file_authority_rollback(
             authority_input_digest=authority_input_digest,
         )
         source_sha256 = _sha256_file(target)
+        source_path_guard_intent = _write_rollback_source_guard_recovery_intent(
+            root=root,
+            target=target,
+            backup=backup,
+            target_receipt=target_receipt,
+            rollback_id=rollback_id,
+            authority_input_digest=authority_input_digest,
+            source_sha256=source_sha256,
+        )
         moved_sidecars = _move_database_to_local_backup(target, backup)
         backup_created = True
         source_path_guard = _create_rollback_source_path_guard(target)
@@ -1773,6 +1867,10 @@ def force_heartbeat_file_authority_rollback(
         }
         _atomic_write_json(target_receipt, receipt)
         rollback_receipt_persisted = True
+        if source_path_guard_intent is not None:
+            source_path_guard_intent.unlink(missing_ok=True)
+            _fsync_directory(source_path_guard_intent.parent)
+            source_path_guard_intent = None
         if rollback_receipt_persisted_callback is not None:
             rollback_receipt_persisted_callback(receipt)
     finally:
@@ -1810,6 +1908,21 @@ def force_heartbeat_file_authority_rollback(
                     _remove_recreated_rollback_source_path(target)
                 try:
                     _restore_database_from_local_backup(target, backup)
+                except BaseException as exc:
+                    restore_error = exc
+                else:
+                    if source_path_guard_intent is not None:
+                        try:
+                            source_path_guard_intent.unlink(missing_ok=True)
+                            _fsync_directory(source_path_guard_intent.parent)
+                            source_path_guard_intent = None
+                        except BaseException as exc:
+                            restore_error = exc
+            elif source_path_guard_intent is not None and target.exists():
+                try:
+                    source_path_guard_intent.unlink(missing_ok=True)
+                    _fsync_directory(source_path_guard_intent.parent)
+                    source_path_guard_intent = None
                 except BaseException as exc:
                     restore_error = exc
         deferred_error: BaseException | None = None

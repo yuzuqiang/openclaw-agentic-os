@@ -1171,6 +1171,49 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertFalse(self.database.exists())
         self.assertTrue(receipt_path.exists())
 
+    def test_forced_rollback_recovers_abandoned_source_guard_on_retry(
+        self,
+    ) -> None:
+        prior = self._file_shadow_cycle()
+        rollback_id = "abandoned-source-guard"
+        receipt_path = self.root / "artifacts/abandoned-source-guard-rollback.json"
+        backup = (
+            self.root
+            / f"state/agentic-os/backups/heartbeat-shadow-rollback/{rollback_id}/control.db"
+        )
+        source_sha256 = heartbeat_shadow_module._sha256_file(self.database)
+        intent_path = heartbeat_shadow_module._write_rollback_source_guard_recovery_intent(
+            root=self.root,
+            target=self.database,
+            backup=backup,
+            target_receipt=receipt_path.resolve(),
+            rollback_id=rollback_id,
+            authority_input_digest=str(prior["authority_input_digest"]),
+            source_sha256=source_sha256,
+        )
+        heartbeat_shadow_module._move_database_to_local_backup(self.database, backup)
+        descriptor = heartbeat_shadow_module._create_rollback_source_path_guard(
+            self.database
+        )
+        os.close(descriptor)
+
+        receipt = force_heartbeat_file_authority_rollback(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            database=self.database,
+            authority_input_digest=str(prior["authority_input_digest"]),
+            rollback_id=rollback_id,
+            receipt_path=receipt_path,
+            repo_root_path=self.root,
+        )
+
+        self.assertEqual(receipt["status"], "pass")
+        self.assertFalse(self.database.exists())
+        self.assertTrue(backup.is_file())
+        self.assertFalse(intent_path.exists())
+        self.assertTrue(receipt_path.exists())
+
     def test_forced_rollback_checkpoints_committed_wal_under_final_lock(self) -> None:
         prior = self._file_shadow_cycle()
         receipt_path = self.root / "artifacts/committed-wal-rollback.json"
