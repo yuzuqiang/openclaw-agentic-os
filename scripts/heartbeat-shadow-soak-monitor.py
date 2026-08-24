@@ -27,6 +27,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from agentic_os.heartbeat_shadow import (  # noqa: E402
     HeartbeatShadowError,
+    RUNTIME_AUTHORITY_COUNT_KEYS,
     append_heartbeat_soak_sample,
     force_heartbeat_file_authority_rollback,
     heartbeat_parity_sample,
@@ -35,6 +36,7 @@ from agentic_os.heartbeat_shadow import (  # noqa: E402
     run_heartbeat_file_shadow_cycle,
     snapshot_heartbeat_runtime_authority_database,
     validate_heartbeat_soak_receipt,
+    _runtime_authority_counts,
 )
 
 
@@ -812,6 +814,7 @@ def _sample_authentication_payload(
     sample_index: int,
     sample: Mapping[str, Any],
     previous_signature: str | None,
+    runtime_snapshot: object,
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_SAMPLE_AUTHENTICATION,
@@ -831,6 +834,7 @@ def _sample_authentication_payload(
                 allow_nan=False,
             )
         ),
+        "runtime_snapshot": runtime_snapshot,
         "previous_signature": previous_signature,
     }
 
@@ -891,6 +895,7 @@ def _validate_sample_authentication_entry(
                 sample_index=sample_index,
                 sample={},
                 previous_signature=previous_signature,
+                runtime_snapshot=entry.get("runtime_snapshot"),
             )
         )
         payload = {key: entry.get(key) for key in payload_keys}
@@ -904,6 +909,7 @@ def _validate_sample_authentication_entry(
             sample_index=sample_index,
             sample=sample,
             previous_signature=previous_signature,
+            runtime_snapshot=_sample_runtime_snapshot_binding(config, sample),
         )
         observed_payload = {key: entry.get(key) for key in payload}
         if observed_payload != payload:
@@ -998,6 +1004,7 @@ def _append_sample_authentication(
         sample_index=sample_index,
         sample=sample,
         previous_signature=previous_signature,
+        runtime_snapshot=_sample_runtime_snapshot_binding(config, sample),
     )
     entries.append(
         {
@@ -2102,7 +2109,63 @@ def _validate_runtime_snapshot_entry(
         raise MonitorError("runtime snapshot file is missing or unsafe")
     if entry.get("snapshot_sha256") != _sha256_file(observed_path):
         raise MonitorError("runtime snapshot file hash mismatch")
+    try:
+        observed_counts = _runtime_authority_counts(observed_path)
+    except HeartbeatShadowError as exc:
+        raise MonitorError("runtime snapshot authority counts are invalid") from exc
+    if entry.get("runtime_authority_counts") != observed_counts:
+        raise MonitorError("runtime snapshot authority counts mismatch")
+    if (
+        sample is not None
+        and sample.get("runtime_authority_counts_observed") is True
+        and sample.get("runtime_authority_counts") != observed_counts
+    ):
+        raise MonitorError("runtime snapshot counts do not match its sample")
     return dict(entry)
+
+
+def _sample_runtime_snapshot_binding(
+    config: Mapping[str, Any], sample: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    if sample.get("runtime_authority_counts_observed") is not True:
+        return None
+    sampled_at = sample.get("sampled_at_epoch_ms")
+    if type(sampled_at) is not int or sampled_at <= 0:
+        raise MonitorError("runtime snapshot sample epoch is invalid")
+    path = _path_from_config(config, "runtime_snapshot_receipts_path")
+    if not path.exists():
+        raise MonitorError("runtime snapshot receipt is missing for authenticated sample")
+    document = _read_json(path)
+    if document.get("schema_version") != SCHEMA_SNAPSHOTS:
+        raise MonitorError("unsupported runtime snapshot receipt schema")
+    if document.get("run_id") != config.get("run_id"):
+        raise MonitorError("runtime snapshot receipts run_id mismatch")
+    raw_snapshots = document.get("snapshots")
+    if not isinstance(raw_snapshots, list):
+        raise MonitorError("runtime snapshot receipts must be a list")
+    matches: list[dict[str, Any]] = []
+    for raw_entry in raw_snapshots:
+        if not isinstance(raw_entry, Mapping):
+            raise MonitorError("runtime snapshot entry must be an object")
+        try:
+            if _snapshot_epoch(raw_entry.get("snapshot_database")) == sampled_at:
+                matches.append(
+                    _validate_runtime_snapshot_entry(config, raw_entry, sample=sample)
+                )
+        except MonitorError:
+            raise
+    if len(matches) != 1:
+        raise MonitorError("runtime snapshot receipt does not match authenticated sample")
+    entry = matches[0]
+    counts = entry.get("runtime_authority_counts")
+    if not isinstance(counts, Mapping) or set(counts) != set(RUNTIME_AUTHORITY_COUNT_KEYS):
+        raise MonitorError("runtime snapshot authority counts are invalid")
+    return {
+        "schema_version": "p03-heartbeat-runtime-snapshot-sample-binding.v1",
+        "snapshot_database": entry["snapshot_database"],
+        "snapshot_sha256": entry["snapshot_sha256"],
+        "runtime_authority_counts": dict(counts),
+    }
 
 
 def _validate_runtime_snapshot_receipts(

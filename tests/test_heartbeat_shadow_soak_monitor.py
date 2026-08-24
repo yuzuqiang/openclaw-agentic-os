@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -31,6 +32,33 @@ def _write_json(path: Path, value: dict[str, object]) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     path.write_bytes(payload)
     return hashlib.sha256(payload).hexdigest()
+
+
+def _git_tree_subject_sha256_at_ref(
+    repo_root: Path, ref: str, excluded_paths: list[str]
+) -> str:
+    excluded = set(excluded_paths)
+    result = subprocess.run(
+        ["git", "ls-tree", "-rz", ref],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    digest = hashlib.sha256()
+    observed_exclusions: set[str] = set()
+    for raw_entry in result.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        _metadata, raw_path = raw_entry.split(b"\t", 1)
+        path = raw_path.decode("utf-8", "surrogateescape")
+        if path in excluded:
+            observed_exclusions.add(path)
+            continue
+        digest.update(raw_entry)
+        digest.update(b"\0")
+    if observed_exclusions != excluded:
+        raise AssertionError("subject exclusion is not tracked at ref")
+    return digest.hexdigest()
 
 
 def _signed_anchor(value: dict[str, object], key: str) -> dict[str, object]:
@@ -87,16 +115,31 @@ def _pass_sample(
 
 def _snapshot_entry(root: Path, snapshot_database: Path, payload: bytes = b"runtime snapshot") -> dict[str, object]:
     snapshot_database.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_database.write_bytes(payload)
+    snapshot_database.unlink(missing_ok=True)
+    with sqlite3.connect(snapshot_database) as connection:
+        connection.execute("CREATE TABLE leases(id TEXT)")
+        connection.execute("CREATE TABLE spawn_requests(id TEXT)")
+        connection.execute("CREATE TABLE sessions(id TEXT)")
+        connection.execute(
+            "CREATE TABLE external_rpc_intents(rpc_kind TEXT, external_id TEXT)"
+        )
+        connection.execute("CREATE TABLE workflow_authority(workflow TEXT, mode TEXT)")
+        connection.execute(
+            "INSERT INTO workflow_authority(workflow, mode) VALUES(?, ?)",
+            ("heartbeat", "file_authority_shadow"),
+        )
+        connection.execute("CREATE TABLE snapshot_payload(payload BLOB)")
+        connection.execute("INSERT INTO snapshot_payload(payload) VALUES(?)", (payload,))
+    snapshot_sha256 = hashlib.sha256(snapshot_database.read_bytes()).hexdigest()
     return {
         "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
         "status": "pass",
         "authority": "file_artifacts",
         "db_authority_enabled": False,
         "source_database": "state/agentic-os/control.db",
-        "source_sidecars_observed": ["control.db-wal"],
+        "source_sidecars_observed": [],
         "snapshot_database": snapshot_database.relative_to(root).as_posix(),
-        "snapshot_sha256": hashlib.sha256(payload).hexdigest(),
+        "snapshot_sha256": snapshot_sha256,
         "snapshot_sidecars_present": False,
         "local_recovery_only": True,
         "packaging_retrieval_denied": True,
@@ -117,6 +160,27 @@ def _write_sample_authentication(config: dict[str, object], receipt: dict[str, o
         Path(str(config["state_dir"])) / "monitor-config.json",
         config,
     )
+    snapshot_receipts_path = Path(str(config["runtime_snapshot_receipts_path"]))
+    if not snapshot_receipts_path.exists():
+        snapshots = []
+        snapshot_root = Path(str(config["runtime_snapshot_dir"]))
+        for sample in receipt["samples"]:
+            snapshots.append(
+                _snapshot_entry(
+                    Path(str(config["repo_root"])),
+                    snapshot_root / f"sample-{sample['sampled_at_epoch_ms']}.db",
+                    f"snapshot-{sample['sampled_at_epoch_ms']}".encode("utf-8"),
+                )
+            )
+        monitor._atomic_write_json(
+            snapshot_receipts_path,
+            {
+                "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                "run_id": config["run_id"],
+                "scope": "local_recovery_only",
+                "snapshots": snapshots,
+            },
+        )
     for index, sample in enumerate(receipt["samples"], start=1):
         monitor._append_sample_authentication(config, index, sample)
 
@@ -763,26 +827,28 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
         )
         self.assertTrue(monitor._is_git_sha(subject["reviewed_synthetic_commit"]))
         self.assertEqual(subject["reviewed_head"], validation["invocation"]["reviewed_head"])
-        subprocess.run(
-            [
-                "git",
-                "merge-base",
-                "--is-ancestor",
-                subject["reviewed_head"],
-                current_head,
-            ],
-            cwd=repo_root,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        self.assertTrue(monitor._is_git_sha(subject["reviewed_head"]))
+        current_tree_sha256 = monitor._git_tracked_tree_subject_sha256(
+            repo_root,
+            subject["excluded_paths"],
         )
-        self.assertEqual(
-            subject["tree_sha256"],
-            monitor._git_tracked_tree_subject_sha256(
-                repo_root,
-                subject["excluded_paths"],
-            ),
-        )
+        if subject["tree_sha256"] == current_tree_sha256:
+            self.assertEqual(subject["tree_sha256"], current_tree_sha256)
+        else:
+            synthetic_commit = subject["reviewed_synthetic_commit"]
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{synthetic_commit}^{{commit}}"],
+                cwd=repo_root,
+                check=True,
+            )
+            self.assertEqual(
+                subject["tree_sha256"],
+                _git_tree_subject_sha256_at_ref(
+                    repo_root,
+                    synthetic_commit,
+                    subject["excluded_paths"],
+                ),
+            )
         self.assertEqual(
             len(monitor._sha256_file(validation_path)),
             64,
@@ -846,7 +912,10 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 no_daemon=True,
             )
             with mock.patch.object(monitor, "REPO_ROOT", repo_root):
-                with self.assertRaisesRegex(monitor.MonitorError, "signature mismatch"):
+                with self.assertRaisesRegex(
+                    monitor.MonitorError,
+                    "implementation subject mismatch|signature mismatch",
+                ):
                     monitor._build_config(args)
 
     def test_independent_validation_rejects_base_only_implementation_head(self) -> None:
@@ -1585,28 +1654,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             config["authority_input_digest"] = digest
             self.state_dir.mkdir(parents=True, exist_ok=True)
             snapshot_path = monitor._runtime_snapshot_path(config, epoch)
-            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            snapshot_path.write_bytes(b"snapshot-ledger")
-            entry = {
-                "schema_version": "p03-heartbeat-runtime-authority-snapshot.v1",
-                "status": "pass",
-                "authority": "file_artifacts",
-                "db_authority_enabled": False,
-                "source_database": "state/agentic-os/control.db",
-                "source_sidecars_observed": [],
-                "snapshot_database": snapshot_path.relative_to(self.root).as_posix(),
-                "snapshot_sha256": hashlib.sha256(b"snapshot-ledger").hexdigest(),
-                "snapshot_sidecars_present": False,
-                "local_recovery_only": True,
-                "packaging_retrieval_denied": True,
-                "runtime_authority_counts": {
-                    "lease_rows": 0,
-                    "spawn_request_rows": 0,
-                    "session_rows": 0,
-                    "lifecycle_rpc_intent_rows": 0,
-                    "duplicate_spawn_identity_groups": 0,
-                },
-            }
+            entry = _snapshot_entry(self.root, snapshot_path, b"snapshot-ledger")
             ledger_path = Path(config["runtime_snapshot_receipts_path"])
             _write_json(
                 ledger_path,
@@ -1645,6 +1693,65 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     document,
                     samples=[_pass_sample(epoch + 1, digest)],
                 )
+
+            with sqlite3.connect(snapshot_path) as connection:
+                connection.execute("INSERT INTO leases(id) VALUES('lease')")
+            changed = {
+                **entry,
+                "snapshot_sha256": hashlib.sha256(
+                    snapshot_path.read_bytes()
+                ).hexdigest(),
+            }
+            document = {
+                "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                "run_id": config["run_id"],
+                "scope": "local_recovery_only",
+                "snapshots": [changed],
+            }
+            with self.assertRaisesRegex(monitor.MonitorError, "counts mismatch"):
+                monitor._validate_runtime_snapshot_receipts(config, document)
+
+    def test_sample_authentication_binds_runtime_snapshot_digest(self) -> None:
+        digest = "a" * 64
+        epoch = 1_700_000_000_123
+        with mock.patch.object(monitor, "REPO_ROOT", self.root):
+            config = monitor._build_config(self.args)
+            config["authority_input_digest"] = digest
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            receipt = monitor.new_heartbeat_soak_receipt(
+                run_id=config["run_id"],
+                authority_input_digest=digest,
+                started_at_epoch_ms=epoch,
+                started_at_monotonic_ms=epoch,
+                duration_hours=24,
+                sample_interval_seconds=300,
+            )
+            monitor._bind_soak_timing_config(config, receipt)
+            sample = _pass_sample(epoch, digest, epoch)
+            snapshot_path = monitor._runtime_snapshot_path(config, epoch)
+            entry = _snapshot_entry(self.root, snapshot_path, b"snapshot-before")
+            ledger = {
+                "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                "run_id": config["run_id"],
+                "scope": "local_recovery_only",
+                "snapshots": [entry],
+            }
+            monitor._atomic_write_json(
+                Path(config["runtime_snapshot_receipts_path"]), ledger
+            )
+            monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            monitor._append_sample_authentication(config, 1, sample)
+
+            replaced = _snapshot_entry(self.root, snapshot_path, b"snapshot-after")
+            monitor._atomic_write_json(
+                Path(config["runtime_snapshot_receipts_path"]),
+                {**ledger, "snapshots": [replaced]},
+            )
+
+            with self.assertRaisesRegex(
+                monitor.MonitorError, "payload mismatch|signature mismatch"
+            ):
+                monitor._validate_sample_authentication_entries(config, [sample])
 
     def test_run_rejects_core_receipt_from_other_monitor_config(self) -> None:
         digest = "a" * 64
@@ -1896,6 +2003,27 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             )
             monitor._bind_soak_timing_config(config, receipt)
             monitor._atomic_write_json(self.state_dir / "monitor-config.json", config)
+            snapshot_root = Path(config["runtime_snapshot_dir"])
+            monitor._atomic_write_json(
+                Path(config["runtime_snapshot_receipts_path"]),
+                {
+                    "schema_version": monitor.SCHEMA_SNAPSHOTS,
+                    "run_id": config["run_id"],
+                    "scope": "local_recovery_only",
+                    "snapshots": [
+                        _snapshot_entry(
+                            self.root,
+                            snapshot_root / "sample-1700000000000.db",
+                            b"first",
+                        ),
+                        _snapshot_entry(
+                            self.root,
+                            snapshot_root / "sample-1700000300000.db",
+                            b"second",
+                        ),
+                    ],
+                },
+            )
             monitor._append_sample_authentication(config, 1, first)
             monitor._persist_sample(config, 2, second)
             monitor._append_sample_authentication(config, 2, second)

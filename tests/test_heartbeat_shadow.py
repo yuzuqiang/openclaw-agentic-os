@@ -575,6 +575,42 @@ class HeartbeatShadowTests(unittest.TestCase):
         self.assertEqual(sample["status"], "pass")
         self.assertIs(sample["runtime_authority_counts_observed"], True)
 
+    def test_parity_sample_requires_projection_authority_digest_binding(self) -> None:
+        prior = self._file_shadow_cycle()
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest.pop("authority_input_digest"), prior["authority_input_digest"]
+        )
+        self.manifest_path.write_bytes(_canonical_json(manifest))
+        self.database.unlink()
+        heartbeat_shadow_module.backfill_file_authority_shadow(
+            self.database,
+            (self.manifest_path,),
+            workflow="heartbeat",
+            run_id="missing-binding-run",
+            repo_root_path=self.root,
+        )
+
+        sample = heartbeat_parity_sample(
+            baseline_path=self.baseline_path,
+            heartbeat_file=self.heartbeat_file,
+            live_config_path=self.live_config_path,
+            projected_artifact=self.manifest_path,
+            run_id="missing-binding-run",
+            authority_input_digest=prior["authority_input_digest"],
+            authority_mode="file_authority_shadow",
+            database=self.database,
+            sampled_at_epoch_ms=1_700_000_060_000,
+            sampled_at_monotonic_ms=1_700_000_060_000,
+            repo_root_path=self.root,
+        )
+
+        self.assertEqual(sample["status"], "fail")
+        self.assertEqual(
+            sample["observation_error"], "projection_authority_digest_mismatch"
+        )
+        self.assertEqual(sample["counters"]["projection_drift"], 1)
+
     def test_parity_sample_records_file_drift_as_failed_sample(self) -> None:
         prior = self._file_shadow_cycle()
         self.heartbeat_file.write_text("# changed authority\n", encoding="utf-8")

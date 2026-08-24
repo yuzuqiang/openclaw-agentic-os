@@ -441,6 +441,7 @@ def heartbeat_authority_manifest(
 def _manifest_authority_digest(manifest: Mapping[str, Any]) -> str:
     authority_view = dict(manifest)
     authority_view.pop("observed_at_epoch_ms", None)
+    authority_view.pop("authority_input_digest", None)
     return _sha256_bytes(_canonical_json(authority_view).encode("utf-8"))
 
 
@@ -699,13 +700,7 @@ def _artifact_projection_set_binds_authority_digest(
             return False
         if not isinstance(document, Mapping):
             return False
-        try:
-            projection_digest = document.get("authority_input_digest")
-            if projection_digest is None:
-                projection_digest = _manifest_authority_digest(document)
-        except HeartbeatShadowError:
-            return False
-        if projection_digest != authority_input_digest:
+        if document.get("authority_input_digest") != authority_input_digest:
             return False
     return True
 
@@ -945,6 +940,8 @@ def run_heartbeat_file_shadow_cycle(
         live_config_path,
         observed_at_epoch_ms=observed_at_epoch_ms,
     )
+    authority_digest = _manifest_authority_digest(manifest)
+    manifest = {**manifest, "authority_input_digest": authority_digest}
     manifest_sha256 = _atomic_write_json(target_manifest, manifest)
     try:
         backfill = backfill_file_authority_shadow(
@@ -969,7 +966,6 @@ def run_heartbeat_file_shadow_cycle(
         live_config_path,
         observed_at_epoch_ms=observed_at_epoch_ms,
     )
-    authority_digest = _manifest_authority_digest(manifest)
     if _manifest_authority_digest(live_manifest) != authority_digest:
         raise HeartbeatShadowError("Heartbeat authority changed during shadow projection")
     counts = _runtime_authority_counts(target_database)
@@ -1261,6 +1257,11 @@ def heartbeat_parity_sample(
     except (ShadowBackfillError, sqlite3.Error):
         audit_status = "fail"
         observation_error = observation_error or "projection_audit_error"
+    if not _artifact_projection_set_binds_authority_digest(
+        [target_projection], authority_input_digest
+    ):
+        audit_status = "fail"
+        observation_error = observation_error or "projection_authority_digest_mismatch"
     counts_observed = True
     try:
         counts = _runtime_authority_counts(audit_database)
@@ -1380,6 +1381,7 @@ def _validate_heartbeat_soak_sample(
             "authority_manifest_invalid",
             "authority_manifest_privacy_violation",
             "projection_audit_error",
+            "projection_authority_digest_mismatch",
             "runtime_authority_audit_error",
         }
         or type(sample.get("runtime_authority_counts_observed")) is not bool
