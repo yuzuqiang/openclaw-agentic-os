@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import contextlib
+import hmac
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agentic_os.migrations import repository_root
@@ -67,16 +71,25 @@ VALID_CATALOG = {
             "name": "sessions_spawn",
             "inputSchema": {
                 "properties": {
+                    "task": {"type": "string"},
+                    "taskName": {"type": "string"},
+                    "runtime": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "agentId": {"type": "string"},
+                    "cleanup": {"type": "string"},
+                    "context": {"type": "string"},
+                    "lightContext": {"type": "boolean"},
                     "client_request_id": {"type": "string"},
                     "idempotency_key": {"type": "string"},
+                    "gateway_lease_id": {"type": "string"},
                     "metadata": {"type": "object"},
                 }
             },
         },
         {"name": "sessions_list", "inputSchema": {"properties": {}}},
         {
-            "name": "sessions_status",
-            "inputSchema": {"properties": {"session_key": {"type": "string"}}},
+            "name": "session_status",
+            "inputSchema": {"properties": {"sessionKey": {"type": "string"}}},
         },
         {
             "name": "sessions_history",
@@ -99,8 +112,23 @@ ACTIVE_TOOL_IDS = [
     "sessions_spawn",
     "sessions_list",
     "sessions_history",
-    "sessions_status",
+    "session_status",
 ]
+
+SPAWN_SCHEMA_FIELDS = {
+    "task": {"type": "string"},
+    "taskName": {"type": "string"},
+    "runtime": {"type": "string"},
+    "mode": {"type": "string"},
+    "agentId": {"type": "string"},
+    "cleanup": {"type": "string"},
+    "context": {"type": "string"},
+    "lightContext": {"type": "boolean"},
+    "client_request_id": {"type": "string"},
+    "idempotency_key": {"type": "string"},
+    "gateway_lease_id": {"type": "string"},
+    "metadata": {"type": "object"},
+}
 
 
 def active_tool_entry(tool_id, *, include_schema=False):
@@ -118,12 +146,12 @@ def write_contract_candidate_dist(install_root):
         json.dump({"name": "openclaw", "version": "2026.candidate"}, handle)
     with open(os.path.join(dist, "openclaw-tools-candidate.js"), "w", encoding="utf-8") as handle:
         handle.write(
-            "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+            "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
             "function createSessionsListToolSchema(){return Type.Object({});}\n"
             "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-            "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+            "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
             'name: "sessions_spawn", name: "sessions_list", '
-            'name: "sessions_history", name: "sessions_status"'
+            'name: "sessions_history", name: "session_status"'
         )
     with open(os.path.join(dist, "server-methods-candidate.js"), "w", encoding="utf-8") as handle:
         handle.write(
@@ -136,6 +164,318 @@ def write_contract_candidate_dist(install_root):
             "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
             "params?.phase; params?.transition_id; params?.agent_id; "
             "params?.requester_agent_id; params?.gateway_lease_id },"
+        )
+    with open(
+        os.path.join(dist, "agentic-os-runtime-attestation-candidate.js"),
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        handle.write(
+            'const REQUEST_FIELDS = ["challenge", "client_process_id", '
+            '"expected_executable_sha256", "expected_catalog_sha256"];'
+        )
+
+
+def canonical_json_bytes(value):
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def canonical_sha256(value):
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def file_sha256(path):
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def path_sha256(path):
+    return hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()
+
+
+def git_head(path):
+    return subprocess.check_output(
+        ["git", "-C", path, "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+
+
+def init_git_repo(path):
+    subprocess.run(["git", "-C", path, "init"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", path, "config", "user.email", "tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", path, "config", "user.name", "Tests"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", path, "add", "."], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-C", path, "commit", "-m", "fixture"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def write_attestation_key():
+    key_path = os.path.join(tempfile.mkdtemp(prefix="attestation-key-"), "attestation.key")
+    key = bytes(range(32))
+    with open(key_path, "wb") as handle:
+        handle.write(key)
+    os.chmod(key_path, 0o600)
+    return key_path, key
+
+
+def write_persistent_runtime_fixture(root):
+    write_contract_candidate_dist(root)
+    scripts_dir = os.path.join(root, "scripts")
+    bin_dir = os.path.join(root, "bin")
+    os.makedirs(scripts_dir, exist_ok=True)
+    os.makedirs(bin_dir, exist_ok=True)
+    runner = os.path.join(scripts_dir, "agentic-os-persistent-lifecycle-runner.mts")
+    with open(runner, "w", encoding="utf-8") as handle:
+        handle.write("export const runner = true;\n")
+    launcher = os.path.join(root, "openclaw.mjs")
+    with open(launcher, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env node\nconsole.log('fixture launcher');\n")
+    os.chmod(launcher, 0o755)
+    executable = os.path.join(bin_dir, "openclaw")
+    with open(executable, "w", encoding="utf-8") as handle:
+        handle.write("#!/usr/bin/env sh\nexit 97\n")
+    os.chmod(executable, 0o755)
+    init_git_repo(root)
+    return {
+        "runner": runner,
+        "launcher": launcher,
+        "executable": executable,
+    }
+
+
+def persistent_status_receipt(signed_payload):
+    binding = signed_payload["binding"]
+    return {
+        "schema_version": signed_payload["schema_version"],
+        "runtime_identity_token_sha256": signed_payload[
+            "runtime_identity_token_sha256"
+        ],
+        "owner_scope_id": signed_payload["owner_scope_id"],
+        "client_process_id": signed_payload["client_process_id"],
+        "expires_at_epoch_ms": signed_payload["expires_at_epoch_ms"],
+        "executable_content_sha256": binding["executable"]["content_sha256"],
+        "catalog_sha256": binding["catalog"]["sha256"],
+        "contract_vector_sha256": binding["catalog"]["contract_vector_sha256"],
+        "sources_sha256": binding["sources_sha256"],
+        "endpoint": binding["gateway"]["endpoint"],
+        "build_id": binding["gateway"]["build_id"],
+        "process_identity": binding["gateway"]["process_identity"],
+        "transport_kind": binding["transport"]["kind"],
+        "transport_identity": binding["transport"]["identity"],
+    }
+
+
+def persistent_rpc_transcript_sha256(module, rpc_evidence):
+    records = []
+    for key, method in (
+        ("tools_catalog", "tools.catalog"),
+        ("allow_lease_status", "subagents.allowLease.status"),
+    ):
+        record = rpc_evidence[key]
+        records.append(
+            {
+                "key": key,
+                "method": method,
+                "request_params": dict(record["request_params"]),
+                "raw_response_sha256": record["raw_response_sha256"],
+            }
+        )
+    return module._canonical_json_sha256(
+        {
+            "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+            "records": records,
+        }
+    )
+
+
+def build_persistent_evidence(
+    module,
+    root,
+    fixture,
+    key,
+    *,
+    issued_at_epoch_ms=None,
+    expires_at_epoch_ms=None,
+    binding_transform=None,
+    status_response_transform=None,
+):
+    now_ms = int(time.time() * 1000)
+    issued_at_epoch_ms = issued_at_epoch_ms if issued_at_epoch_ms is not None else now_ms
+    expires_at_epoch_ms = (
+        expires_at_epoch_ms
+        if expires_at_epoch_ms is not None
+        else issued_at_epoch_ms + 60_000
+    )
+    method_bindings = module._expected_method_bindings_payload()
+    runtime_methods = module._expected_runtime_methods_catalog()
+    package_path = os.path.join(root, "package.json")
+    launcher_sha = file_sha256(fixture["launcher"])
+    sources = [
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(module._runtime_source_digest_snapshot(Path(root)).items())
+    ]
+    signed_payload = {
+        "schema_version": "agentic-os.openclaw-attestation.v1",
+        "online": True,
+        "challenge": "challenge-1",
+        "nonce": "challenge-1",
+        "issued_at_epoch_ms": issued_at_epoch_ms,
+        "expires_at_epoch_ms": expires_at_epoch_ms,
+        "client_process_id": "p03-persistent-runner:test",
+        "runtime_identity_token_sha256": hashlib.sha256(b"token").hexdigest(),
+        "owner_scope_id": hashlib.sha256(b"owner").hexdigest(),
+        "binding": {
+            "executable": {
+                "path_sha256": path_sha256(fixture["launcher"]),
+                "content_sha256": launcher_sha,
+            },
+            "install": {
+                "root_sha256": path_sha256(root),
+                "package_json_sha256": file_sha256(package_path),
+                "package_name": "openclaw",
+                "version": "2026.candidate",
+            },
+            "sources": sources,
+            "sources_sha256": canonical_sha256(sources),
+            "catalog": {
+                "authority": "tools.catalog.runtimeMethods",
+                "sha256": canonical_sha256(runtime_methods),
+                "contract_vector_sha256": module._expected_contract_vector_sha256(),
+            },
+            "gateway": {
+                "endpoint": "ws://127.0.0.1:20189",
+                "version": "2026.candidate",
+                "build_id": "fixture-build",
+                "process_identity": "fixture-process",
+            },
+            "transport": {
+                "kind": "gateway-websocket",
+                "identity": "fixture-transport",
+            },
+        },
+        "method_bindings": method_bindings,
+    }
+    if binding_transform is not None:
+        binding_transform(signed_payload["binding"])
+    tools_catalog = {
+        "groups": [
+            {
+                "id": "unit",
+                "tools": [
+                    active_tool_entry(tool_id, include_schema=True)
+                    for tool_id in ACTIVE_TOOL_IDS
+                ],
+            }
+        ]
+    }
+    status_response = {
+        "status": "ok",
+        "leases": [],
+        "runtime_attestation": persistent_status_receipt(signed_payload),
+    }
+    if status_response_transform is not None:
+        status_response_transform(status_response)
+    rpc_evidence = {
+        "tools_catalog": {
+            "method": "tools.catalog",
+            "request_params": {},
+            "response": tools_catalog,
+            "raw_response_sha256": canonical_sha256(tools_catalog),
+        },
+        "allow_lease_status": {
+            "method": "subagents.allowLease.status",
+            "request_params": {},
+            "response": status_response,
+            "raw_response_sha256": canonical_sha256(status_response),
+        },
+    }
+    signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
+        module, rpc_evidence
+    )
+    attestation_response = {
+        "signature_algorithm": "hmac-sha256",
+        "signature": hmac.new(
+            key, canonical_json_bytes(signed_payload), hashlib.sha256
+        ).hexdigest(),
+        "signed_payload": signed_payload,
+    }
+    evidence = {
+        "schema_version": module.PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION,
+        "captured_at_epoch_ms": now_ms,
+        "expected_runtime_head": git_head(root),
+        "expected_agentic_os_head": git_head(repository_root()),
+        "runtime": {
+            "worktree": root,
+            "staged_root": root,
+            "executable_sha256": launcher_sha,
+            "package_json_sha256": file_sha256(package_path),
+            "dist_entry_sha256": None,
+            "expected_catalog_sha256": canonical_sha256(runtime_methods),
+        },
+        "agentic_os": {"worktree": str(repository_root())},
+        "runner": {
+            "script_path": fixture["runner"],
+            "script_sha256": file_sha256(fixture["runner"]),
+        },
+        "gateway": {"endpoint": "ws://127.0.0.1:20189", "port": 20189},
+        "attestation": {
+            "method": "agenticOs.runtime.attest",
+            "request_params": {
+                "challenge": "challenge-1",
+                "client_process_id": "p03-persistent-runner:test",
+                "expected_executable_sha256": launcher_sha,
+                "expected_catalog_sha256": canonical_sha256(runtime_methods),
+            },
+            "response": attestation_response,
+            "response_sha256": canonical_sha256(attestation_response),
+            "runtime_identity_token_sha256": signed_payload[
+                "runtime_identity_token_sha256"
+            ],
+        },
+        "rpc_evidence": rpc_evidence,
+    }
+    return evidence
+
+
+def run_persistent_preflight(evidence, root, key_path, write_evidence_path=None):
+    with tempfile.TemporaryDirectory(prefix="persistent-evidence-") as evidence_dir:
+        evidence_path = os.path.join(evidence_dir, "persistent-evidence.json")
+        with open(evidence_path, "w", encoding="utf-8") as handle:
+            json.dump(evidence, handle, sort_keys=True)
+        env = os.environ.copy()
+        env["OPENCLAW_INSTALL_ROOT"] = root
+        env["OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE"] = key_path
+        env["PATH"] = os.path.join(root, "bin") + os.pathsep + env.get("PATH", "")
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "--persistent-attested-preflight-json-file",
+            evidence_path,
+            "--json",
+        ]
+        if write_evidence_path is not None:
+            command.extend(["--write-evidence", write_evidence_path])
+        return subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
         )
 
 
@@ -183,7 +523,7 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
     baseline_entries = [
         active_tool_entry(tool_id)
         for tool_id in ACTIVE_TOOL_IDS
-        if tool_id != "sessions_status"
+        if tool_id != "session_status"
     ]
     candidate_entries = [active_tool_entry(tool_id) for tool_id in ACTIVE_TOOL_IDS]
     with open(executable, "w", encoding="utf-8") as handle:
@@ -361,7 +701,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("client_lease_id", payload["error"])
         self.assertIn("idempotency_key", payload["error"])
         self.assertIn("release_idempotency_key", payload["error"])
-        self.assertIn("sessions_status", payload["error"])
+        self.assertNotIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertIn("metadata", payload["error"])
 
     def test_live_installed_openclaw_catalog_is_sanitized_and_fail_closed(self) -> None:
@@ -497,12 +837,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("connected Gateway build identity is not proven", payload["error"])
         self.assertEqual(
             catalog["model_tool_catalog"]["required_tool_names"],
-            [
-                "sessions_history",
-                "sessions_list",
-                "sessions_spawn",
-                "sessions_status",
-            ],
+            ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
         )
         self.assertNotIn(
             "subagents.allowLease.acquire",
@@ -519,6 +854,27 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(
             catalog["gateway_rpc_catalog"]["status_corroboration"]["status"],
             "ok",
+        )
+        self.assertEqual(
+            catalog["attestation_rpc_catalog"],
+            {
+                "authority": "installed_runtime_sources",
+                "catalog_kind": "source_bound_runtime_attestation_rpc",
+                "expected_parameters": [
+                    "challenge",
+                    "client_process_id",
+                    "expected_executable_sha256",
+                    "expected_catalog_sha256",
+                ],
+                "method": "agenticOs.runtime.attest",
+                "parameters": [
+                    "challenge",
+                    "client_process_id",
+                    "expected_catalog_sha256",
+                    "expected_executable_sha256",
+                ],
+                "status": "source_bound_exact",
+            },
         )
         self.assertEqual(
             catalog["gateway_rpc_catalog"]["status_corroboration"][
@@ -652,11 +1008,162 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertFalse(catalog["future_db_authority_contract"]["db_authority_enabled"])
         self.assertEqual(
-            catalog["status_alias_requirement"]["future_canonical_status_method_status"],
+            catalog["status_alias_requirement"]["canonical_status_method_status"],
             "unproven_model_catalog_unavailable",
         )
         self.assertIn("model-callable tools.catalog is unavailable", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
+
+    def test_live_status_requires_lease_array_before_runtime_ready(self) -> None:
+        malformed_status_payloads = [
+            (
+                {"ok": True, "writeMode": "memory", "allowAgents": ["main"]},
+                "missing_leases",
+            ),
+            (
+                {
+                    "ok": True,
+                    "writeMode": "memory",
+                    "allowAgents": ["main"],
+                    "leases": {"leaseId": "lease-1"},
+                },
+                "dict",
+            ),
+        ]
+        for status_payload, expected_error in malformed_status_payloads:
+            with self.subTest(expected_error=expected_error):
+                with tempfile.TemporaryDirectory() as install_root:
+                    write_contract_candidate_dist(install_root)
+                    bin_dir = os.path.join(install_root, "bin")
+                    os.makedirs(bin_dir, exist_ok=True)
+                    executable = os.path.join(bin_dir, "openclaw")
+                    catalog = {
+                        "groups": [
+                            {
+                                "id": "unit",
+                                "tools": [
+                                    active_tool_entry(
+                                        tool_id,
+                                        include_schema=True,
+                                    )
+                                    for tool_id in ACTIVE_TOOL_IDS
+                                ],
+                            }
+                        ]
+                    }
+                    with open(executable, "w", encoding="utf-8") as handle:
+                        handle.write(
+                            "#!/usr/bin/env python3\n"
+                            "import json\n"
+                            "import sys\n"
+                            "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                            f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+                            "    raise SystemExit(0)\n"
+                            "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                            f"    print(json.dumps({status_payload!r}, sort_keys=True))\n"
+                            "    raise SystemExit(0)\n"
+                            "raise SystemExit(2)\n"
+                        )
+                    os.chmod(executable, 0o755)
+                    env = dict(os.environ)
+                    env["OPENCLAW_INSTALL_ROOT"] = install_root
+                    env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SCRIPT),
+                            "--live-installed-openclaw",
+                            "--json",
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                    )
+
+                self.assertEqual(result.returncode, 1, result.stderr)
+                payload = json.loads(result.stdout)
+                gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+                self.assertEqual(
+                    gateway_catalog["status"],
+                    "status_corroboration_failed",
+                )
+                self.assertEqual(
+                    gateway_catalog["status_corroboration"]["status"],
+                    "status_rpc_leases_shape_invalid",
+                )
+                self.assertEqual(
+                    gateway_catalog["status_corroboration"]["error"],
+                    expected_error,
+                )
+                self.assertIn(
+                    "active OpenClaw Gateway status RPC leases must be an array",
+                    payload["error"],
+                )
+
+    def test_live_status_validates_each_returned_lease_item(self) -> None:
+        status_payload = {
+            "ok": True,
+            "writeMode": "memory",
+            "allowAgents": ["main"],
+            "leases": [{"gateway_lease_id": "lease-1"}],
+        }
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            executable = os.path.join(bin_dir, "openclaw")
+            catalog = {
+                "groups": [
+                    {
+                        "id": "unit",
+                        "tools": [
+                            active_tool_entry(tool_id, include_schema=True)
+                            for tool_id in ACTIVE_TOOL_IDS
+                        ],
+                    }
+                ]
+            }
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    "import sys\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                    f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+                    "    raise SystemExit(0)\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    f"    print(json.dumps({status_payload!r}, sort_keys=True))\n"
+                    "    raise SystemExit(0)\n"
+                    "raise SystemExit(2)\n"
+                )
+            os.chmod(executable, 0o755)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(gateway_catalog["status"], "status_corroboration_failed")
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "status_rpc_lease_items_invalid",
+        )
+        self.assertIn("lease item 0", gateway_catalog["status_corroboration"]["error"])
+        self.assertIn("leases contain invalid metadata", payload["error"])
 
     def test_catalog_failure_does_not_promote_model_declarations_to_gateway_source(
         self,
@@ -671,10 +1178,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     'name: "subagents.allowLease.status", '
                     'name: "subagents.allowLease.acquire", '
                     'name: "subagents.allowLease.release", '
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                 )
             with open(os.path.join(dist, "core-descriptors-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -750,12 +1257,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["catalog"]["runtime_target"], "isolated_candidate")
         self.assertEqual(
             payload["catalog"]["required_canonical_session_status_method"],
-            "sessions_status",
+            "session_status",
         )
         status_tool = next(
-            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_status"
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "session_status"
         )
-        self.assertEqual(status_tool["parameters"], ["session_key"])
+        self.assertEqual(status_tool["parameters"], ["sessionKey"])
 
     def test_isolated_candidate_openclaw_requires_explicit_install_root(self) -> None:
         env = dict(os.environ)
@@ -851,9 +1358,24 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         for path in isolated_files:
             with self.subTest(path=path.name):
                 payload = json.loads(path.read_text(encoding="utf-8"))
+                if "lifecycle" in path.name:
+                    self.assertEqual(payload.get("status"), "pass")
+                    self.assertIsInstance(payload.get("staging"), dict)
+                    self.assertIsInstance(payload.get("preflight"), dict)
+                    continue
                 catalog = payload.get("catalog")
                 if catalog is None:
                     catalog = payload.get("preflight", {}).get("catalog")
+                if catalog is None and payload.get("classification") == "preflight_failed_fail_closed":
+                    self.assertEqual(payload.get("candidate", {}).get("port"), 20189)
+                    self.assertFalse(
+                        payload.get("lifecycle", {}).get("mutating_lifecycle_attempted")
+                    )
+                    self.assertIn(
+                        "subagents.allowLease.status",
+                        payload.get("preflight", {}).get("required_source_bound_rpc_names", []),
+                    )
+                    continue
                 self.assertIsInstance(catalog, dict)
                 self.assertEqual(catalog.get("runtime_target"), "isolated_candidate")
                 if payload.get("status") == "pass":
@@ -875,6 +1397,21 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     )
                     self.assertGreater(history.get("history_items_identity_checked", 0), 0)
 
+    def test_committed_lifecycle_receipts_do_not_expose_plaintext_gateway_tokens(
+        self,
+    ) -> None:
+        evidence_dir = repository_root() / "docs" / "runtime-evidence"
+        lifecycle_files = sorted(evidence_dir.glob("*lifecycle*.json"))
+        self.assertTrue(lifecycle_files)
+        for path in lifecycle_files:
+            with self.subTest(path=path.name):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                staging = payload.get("staging", {})
+                self.assertNotIn("token", staging)
+                if "token_redacted" in staging:
+                    self.assertIs(staging["token_redacted"], True)
+                    self.assertRegex(staging.get("token_sha256", ""), r"^[0-9a-f]{64}$")
+
     def test_installed_openclaw_negative_baseline_fails_for_2026_7_1(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package_root = os.path.join(directory, "openclaw")
@@ -884,7 +1421,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.7.1"}, handle)
             with open(os.path.join(dist, "openclaw-tools-baseline.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", name: "sessions_history"'
@@ -907,7 +1444,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 env,
                 package_root,
                 active_tool_ids=[
-                    tool_id for tool_id in ACTIVE_TOOL_IDS if tool_id != "sessions_status"
+                    tool_id for tool_id in ACTIVE_TOOL_IDS if tool_id != "session_status"
                 ],
             )
             result = subprocess.run(
@@ -931,7 +1468,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "installed_openclaw_negative_baseline",
         )
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
-        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
@@ -973,7 +1510,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             payload["catalog"]["runtime_target"],
             "installed_openclaw_negative_baseline",
         )
-        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertNotIn("runtime tool catalog is missing subagents.allowLease", payload["error"])
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["status"],
@@ -2227,7 +2764,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             "tools": [
                 {
                     "name": "sessions_spawn",
-                    "id": "sessions_status",
+                    "id": "session_status",
                     "inputSchema": {
                         "properties": {
                             "client_request_id": {"type": "string"},
@@ -2488,12 +3025,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2541,13 +3078,97 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("sessions_spawn", payload["error"])
-        self.assertIn("metadata", payload["error"])
+        self.assertIn("required parameter schema is unproven", payload["error"])
         spawn_tool = next(
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
         )
         self.assertNotIn("metadata", spawn_tool["parameters"])
+        self.assertEqual(
+            spawn_tool["parameter_evidence"]["status"],
+            "catalog_schema_disagrees_with_installed_source",
+        )
         self.assertNotIn(
             "metadata", spawn_tool["parameter_evidence"]["catalog_parameters"]
+        )
+        self.assertIn(
+            "metadata", spawn_tool["parameter_evidence"]["source_parameters"]
+        )
+
+    def test_live_catalog_rejects_active_schema_extra_parameter(self) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            dist = os.path.join(install_root, "dist")
+            os.makedirs(dist)
+            with open(os.path.join(install_root, "package.json"), "w", encoding="utf-8") as handle:
+                json.dump({"name": "openclaw", "version": "2026.test"}, handle)
+            with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsListToolSchema(){return Type.Object({});}\n"
+                    "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_list", '
+                    'name: "sessions_history", name: "session_status"'
+                )
+            with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    '"subagents.allowLease.status": ({ params }) => {},'
+                    '"subagents.allowLease.acquire": ({ params }) => { '
+                    "params?.client_lease_id; params?.idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.ttl_ms },"
+                    '"subagents.allowLease.release": ({ params }) => { '
+                    "params?.client_lease_id; params?.release_idempotency_key; params?.run_id; "
+                    "params?.phase; params?.transition_id; params?.agent_id; "
+                    "params?.requester_agent_id; params?.gateway_lease_id },"
+                )
+            active_spawn = active_tool_entry("sessions_spawn", include_schema=True)
+            active_spawn["inputSchema"]["properties"]["unexpected"] = {"type": "string"}
+
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            add_fake_openclaw_to_env(
+                env,
+                install_root,
+                active_tool_entries=[
+                    active_spawn,
+                    *[
+                        active_tool_entry(tool_id)
+                        for tool_id in ACTIVE_TOOL_IDS
+                        if tool_id != "sessions_spawn"
+                    ],
+                ],
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("sessions_spawn", payload["error"])
+        self.assertIn("required parameter schema is unproven", payload["error"])
+        spawn_tool = next(
+            tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_spawn"
+        )
+        self.assertIn("unexpected", spawn_tool["parameters"])
+        self.assertEqual(
+            spawn_tool["parameter_evidence"]["status"],
+            "catalog_schema_disagrees_with_installed_source",
+        )
+        self.assertIn(
+            "unexpected", spawn_tool["parameter_evidence"]["catalog_parameters"]
+        )
+        self.assertNotIn(
+            "unexpected", spawn_tool["parameter_evidence"]["source_parameters"]
         )
 
     def test_live_installed_openclaw_requires_matching_active_executable_root(self) -> None:
@@ -2573,12 +3194,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2635,12 +3256,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({\"client_request_id\": Type.String(), \"idempotency_key\": Type.String(), \"metadata\": Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({\"task\": Type.String(), \"taskName\": Type.String(), \"runtime\": Type.String(), \"mode\": Type.String(), \"agentId\": Type.String(), \"cleanup\": Type.String(), \"context\": Type.String(), \"lightContext\": Type.Boolean(), \"client_request_id\": Type.String(), \"idempotency_key\": Type.String(), \"metadata\": Type.Object({}), \"gateway_lease_id\": Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({\"sessionKey\": Type.String(), \"limit\": Type.Number(), \"includeTools\": Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({\"session_key\": Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({\"sessionKey\": Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2678,7 +3299,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         )
         self.assertEqual(
             spawn_tool["parameters"],
-            ["client_request_id", "idempotency_key", "metadata"],
+            sorted(SPAWN_SCHEMA_FIELDS),
         )
         self.assertIn("live reachability is unproven", payload["error"])
 
@@ -2703,9 +3324,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2762,9 +3383,9 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "openclaw-tools-stale.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2819,14 +3440,14 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "// function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
-                    "const stale = `function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}`;\n"
+                    "// function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
+                    "const stale = `function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}`;\n"
                     "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String()});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2874,11 +3495,11 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
-                    'name: "sessions_list", name: "sessions_history", name: "sessions_status"'
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
+                    'name: "sessions_list", name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2925,12 +3546,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -2983,12 +3604,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-current.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3045,12 +3666,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsListToolSchema(){return Type.Object({});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     'name: "sessions_spawn", name: "sessions_list", '
-                    'name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3103,12 +3724,12 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
                     "// name: \"sessions_list\"\n"
                     "const stale = 'name: \"sessions_list\"';\n"
-                    'name: "sessions_spawn", name: "sessions_history", name: "sessions_status"'
+                    'name: "sessions_spawn", name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "server-methods-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
@@ -3167,10 +3788,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                 json.dump({"name": "openclaw", "version": "2026.test"}, handle)
             with open(os.path.join(dist, "openclaw-tools-test.js"), "w", encoding="utf-8") as handle:
                 handle.write(
-                    "function createSessionsSpawnToolSchema(){return Type.Object({client_request_id: Type.String(), idempotency_key: Type.String(), metadata: Type.Object({})});}\n"
+                    "function createSessionsSpawnToolSchema(){return Type.Object({task: Type.String(), taskName: Type.String(), runtime: Type.String(), mode: Type.String(), agentId: Type.String(), cleanup: Type.String(), context: Type.String(), lightContext: Type.Boolean(), client_request_id: Type.String(), idempotency_key: Type.String(), gateway_lease_id: Type.String(), metadata: Type.Object({})});}\n"
                     "function createSessionsHistoryToolSchema(){return Type.Object({sessionKey: Type.String(), limit: Type.Number(), includeTools: Type.Boolean()});}\n"
-                    "function createSessionsStatusToolSchema(){return Type.Object({session_key: Type.String()});}\n"
-                    'name: "sessions_spawn", name: "sessions_history", name: "sessions_status"'
+                    "function createSessionStatusToolSchema(){return Type.Object({sessionKey: Type.String()});}\n"
+                    'name: "sessions_spawn", name: "sessions_history", name: "session_status"'
                 )
             with open(os.path.join(dist, "core-descriptors-test.js"), "w", encoding="utf-8") as handle:
                 handle.write('name: "sessions_list"')
@@ -3213,6 +3834,544 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             tool for tool in payload["catalog"]["tools"] if tool["name"] == "sessions_list"
         )
         self.assertEqual(sessions_list["parameters"], [])
+
+    def test_persistent_attested_preflight_accepts_same_connection_evidence(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "pass")
+        catalog = payload["catalog"]
+        self.assertEqual(catalog["connected_gateway_build_identity"], "proven")
+        rpc_evidence = {
+            item["name"]: item
+            for item in catalog["gateway_rpc_catalog"]["rpc_evidence"]
+        }
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.acquire"]["live_reachability"],
+            "signed_method_binding",
+        )
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.status"]["live_reachability"],
+            "reachable",
+        )
+
+    def test_persistent_attested_preflight_rejects_dirty_agentic_os_worktree(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        dirty_path = repository_root() / ".persistent-preflight-dirty-agentic-os-test"
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            try:
+                dirty_path.write_text("dirty\n", encoding="utf-8")
+                result = run_persistent_preflight(evidence, install_root, key_path)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    dirty_path.unlink()
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertFalse(payload["runtime_ready"])
+        self.assertIn(
+            "persistent preflight Agentic OS worktree must be clean",
+            payload["error"],
+        )
+
+    def test_persistent_attested_preflight_missing_key_file_writes_fail_closed_evidence(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            _key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence_path = os.path.join(install_root, "fail-evidence.json")
+
+            result = run_persistent_preflight(
+                evidence,
+                install_root,
+                os.path.join(install_root, "missing-attestation.key"),
+                write_evidence_path=evidence_path,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["runtime_ready"])
+            self.assertIn("attestation key file is unreadable", payload["error"])
+            with open(evidence_path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), payload)
+
+    def test_persistent_attested_preflight_unreadable_key_file_writes_fail_closed_evidence(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            _key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            key_directory = os.path.join(install_root, "attestation-key-dir")
+            os.mkdir(key_directory, 0o600)
+            evidence_path = os.path.join(install_root, "fail-evidence.json")
+
+            result = run_persistent_preflight(
+                evidence,
+                install_root,
+                key_directory,
+                write_evidence_path=evidence_path,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["runtime_ready"])
+            self.assertIn("attestation key file must be a regular file", payload["error"])
+            with open(evidence_path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), payload)
+
+    def test_persistent_attested_preflight_key_file_rejects_symlink(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target.key"
+            target.write_bytes(b"a" * 32)
+            target.chmod(0o600)
+            link = Path(directory) / "attestation.key"
+            link.symlink_to(target)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(link)},
+            ):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file is unreadable",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_rejects_wrong_mode(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o644)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file must be mode 0600",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_rejects_hardlink(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            linked_key_path = Path(directory) / "linked-attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            os.link(key_path, linked_key_path)
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file must have exactly one link",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_rejects_wrong_owner(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            descriptor = mock.Mock(
+                st_mode=stat.S_IFREG | 0o600,
+                st_uid=os.getuid() + 1,
+                st_nlink=1,
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ), mock.patch.object(module.os, "fstat", return_value=descriptor):
+                with self.assertRaisesRegex(
+                    module.AdapterContractError,
+                    "attestation key file must be owned by the current user",
+                ):
+                    module._read_attestation_key_from_env()
+
+    def test_persistent_attested_preflight_key_file_uses_single_descriptor(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "attestation.key"
+            key_path.write_bytes(b"a" * 32)
+            key_path.chmod(0o600)
+            original_open = module.os.open
+            observed: dict[str, int] = {}
+
+            def checked_open(path, flags, mode=0o777, *, dir_fd=None):
+                fd = original_open(path, flags, mode, dir_fd=dir_fd)
+                observed["fd"] = fd
+                os.replace(key_path, key_path.with_name("rotated.key"))
+                key_path.write_bytes(b"b" * 32)
+                key_path.chmod(0o600)
+                return fd
+
+            with mock.patch.dict(
+                os.environ,
+                {"OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE": str(key_path)},
+            ), mock.patch.object(module.os, "open", side_effect=checked_open):
+                key = module._read_attestation_key_from_env()
+
+        self.assertIn("fd", observed)
+        self.assertEqual(key, b"a" * 32)
+
+    def test_persistent_attested_preflight_rejects_forged_hmac_despite_status_pass(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["status"] = "pass"
+            evidence["attestation"]["response"]["signature"] = "0" * 64
+            evidence["attestation"]["response_sha256"] = canonical_sha256(
+                evidence["attestation"]["response"]
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("HMAC mismatch", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_stale_attestation(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                issued_at_epoch_ms=int(time.time() * 1000) - 60_000,
+                expires_at_epoch_ms=int(time.time() * 1000) - 1,
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("stale or expired", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_future_dated_attestation(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            issued = (
+                int(time.time() * 1000)
+                + module.PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS
+                + 60_000
+            )
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                issued_at_epoch_ms=issued,
+                expires_at_epoch_ms=issued + 60_000,
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("issue time is in the future", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_future_dated_capture(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["captured_at_epoch_ms"] = (
+                int(time.time() * 1000)
+                + module.PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS
+                + 60_000
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("captured_at is in the future", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_dirty_runtime_worktree(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            Path(install_root, "untracked-runtime-drift.txt").write_text(
+                "drift\n", encoding="utf-8"
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("runtime worktree must be clean", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_runner_digest_not_at_head(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            Path(fixture["runner"]).write_text(
+                "#!/usr/bin/env python3\nraise SystemExit(0)\n# local drift\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    install_root,
+                    "update-index",
+                    "--assume-unchanged",
+                    "scripts/agentic-os-persistent-lifecycle-runner.mts",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            forged_digest = file_sha256(fixture["runner"])
+            evidence["runner"]["script_sha256"] = forged_digest
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("committed blob", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_install_root_drift_from_reviewed_worktree(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as reviewed_root, tempfile.TemporaryDirectory() as active_root:
+            reviewed_fixture = write_persistent_runtime_fixture(reviewed_root)
+            write_persistent_runtime_fixture(active_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(
+                module, reviewed_root, reviewed_fixture, key
+            )
+
+            result = run_persistent_preflight(evidence, active_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("install root must match reviewed runtime worktree", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_unsigned_rpc_transcript_drift(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["rpc_evidence"]["tools_catalog"]["response"]["groups"].append(
+                {"id": "forged", "tools": []}
+            )
+            evidence["rpc_evidence"]["tools_catalog"]["raw_response_sha256"] = canonical_sha256(
+                evidence["rpc_evidence"]["tools_catalog"]["response"]
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("RPC transcript", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_signed_source_set_mismatch(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+
+            def drop_last_source(binding):
+                binding["sources"] = binding["sources"][:-1]
+                binding["sources_sha256"] = canonical_sha256(binding["sources"])
+
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                binding_transform=drop_last_source,
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("signed runtime sources do not match active source snapshot", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_executable_path_digest_mismatch(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+
+            def drift_executable_path(binding):
+                binding["executable"]["path_sha256"] = "9" * 64
+
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                binding_transform=drift_executable_path,
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("executable path digest", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_status_receipt_mismatch(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+
+            def drift_status_receipt(status):
+                status["runtime_attestation"]["endpoint"] = "ws://127.0.0.1:29999"
+
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                status_response_transform=drift_status_receipt,
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("status runtime_attestation receipt", payload["error"])
+
+    def test_persistent_attested_preflight_requires_status_leases_array(self) -> None:
+        module = load_preflight_module()
+        for label, transform in {
+            "missing": lambda status: status.pop("leases"),
+            "object": lambda status: status.__setitem__("leases", {}),
+        }.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as install_root:
+                fixture = write_persistent_runtime_fixture(install_root)
+                key_path, key = write_attestation_key()
+                evidence = build_persistent_evidence(
+                    module,
+                    install_root,
+                    fixture,
+                    key,
+                    status_response_transform=transform,
+                )
+
+                result = run_persistent_preflight(evidence, install_root, key_path)
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertFalse(payload["runtime_ready"])
+            self.assertIn("status RPC leases must be an array", payload["error"])
+
+    def test_persistent_attested_preflight_validates_status_lease_items(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(
+                module,
+                install_root,
+                fixture,
+                key,
+                status_response_transform=lambda status: status.__setitem__(
+                    "leases", [{"gateway_lease_id": "lease-1"}]
+                ),
+            )
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertFalse(payload["runtime_ready"])
+        self.assertIn("persistent status RPC lease item 0", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_non_empty_status_params(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["rpc_evidence"]["allow_lease_status"]["request_params"] = {
+                "requesterAgentId": "main"
+            }
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("request params must be empty", payload["error"])
 
 
 if __name__ == "__main__":

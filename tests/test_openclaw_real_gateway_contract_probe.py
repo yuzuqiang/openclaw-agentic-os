@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import get_type_hints
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "openclaw-real-gateway-contract-probe.py"
@@ -16,6 +17,12 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RealGatewayProbeTests(unittest.TestCase):
+    def test_runtime_annotations_resolve(self) -> None:
+        self.assertEqual(
+            get_type_hints(MODULE._validate_sha256_field)["payload"],
+            MODULE.Mapping[str, MODULE.Any],
+        )
+
     def test_requires_running_and_completed_lifecycle_proofs(self) -> None:
         self.assertIn("lifecycle_running_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
         self.assertIn("lifecycle_completed_observed", MODULE.REQUIRED_RUNTIME_PROOFS)
@@ -32,6 +39,7 @@ class RealGatewayProbeTests(unittest.TestCase):
 
     def test_binds_current_gateway_and_adapter_sources_without_disabled_probe(self) -> None:
         self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
+        self.assertIn("src/agentic_os/runtime_attestation.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertFalse(hasattr(MODULE, "ADAPTER_PROBE"))
 

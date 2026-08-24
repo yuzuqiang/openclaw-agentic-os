@@ -6,22 +6,31 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import agentic_os
+from agentic_os.metadata import (
+    MetadataContractError,
+    validate_accepted_lease_identity,
+    validate_allow_lease_observation,
+)
 from agentic_os.openclaw_adapter import (
     AdapterContractError,
     assert_preflighted_runtime_authority,
     assert_installed_runtime_tools,
+    observation_from_openclaw_response,
 )
 
 
@@ -40,29 +49,101 @@ GATEWAY_RPC_METHOD_NAMES = (
     "subagents.allowLease.status",
     "subagents.allowLease.release",
 )
+ATTESTATION_RPC_METHOD_NAME = "agenticOs.runtime.attest"
+ATTESTATION_REQUEST_PARAMETERS = (
+    "challenge",
+    "client_process_id",
+    "expected_executable_sha256",
+    "expected_catalog_sha256",
+)
 MODEL_CALLABLE_TOOL_NAMES = (
     "sessions_spawn",
     "sessions_list",
     "sessions_history",
     "session_status",
-    "sessions_status",
 )
 LIVE_TOOL_NAMES = (
     *GATEWAY_RPC_METHOD_NAMES,
     *MODEL_CALLABLE_TOOL_NAMES,
 )
+PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION = (
+    "agentic-os.persistent-attested-preflight-evidence.v1"
+)
+PERSISTENT_PREFLIGHT_MIN_TTL_MS = 20_000
+PERSISTENT_PREFLIGHT_MAX_ATTESTATION_LIFETIME_MS = 300_000
+PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS = 30_000
+PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    "allow_lease_acquire": (
+        "subagents.allowLease.acquire",
+        (
+            "client_lease_id",
+            "idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "ttl_ms",
+        ),
+    ),
+    "allow_lease_status": ("subagents.allowLease.status", ()),
+    "allow_lease_release": (
+        "subagents.allowLease.release",
+        (
+            "client_lease_id",
+            "release_idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "gateway_lease_id",
+        ),
+    ),
+    "sessions_spawn": (
+        "sessions_spawn",
+        (
+            "task",
+            "taskName",
+            "runtime",
+            "mode",
+            "agentId",
+            "cleanup",
+            "context",
+            "lightContext",
+            "client_request_id",
+            "idempotency_key",
+            "gateway_lease_id",
+            "metadata",
+        ),
+    ),
+    "sessions_list": ("sessions_list", ()),
+    "session_status": ("session_status", ("sessionKey",)),
+    "sessions_history": (
+        "sessions_history",
+        ("sessionKey", "limit", "includeTools"),
+    ),
+}
 
 MODEL_TOOL_SCHEMA_MARKERS = {
     "sessions_spawn": "function createSessionsSpawnToolSchema",
     "sessions_list": "function createSessionsListToolSchema",
     "sessions_history": "function createSessionsHistoryToolSchema",
     "session_status": "function createSessionStatusToolSchema",
-    "sessions_status": "function createSessionsStatusToolSchema",
 }
 RUNTIME_SOURCE_PATTERNS = (
     "openclaw-tools-*.js",
     "core-descriptors-*.js",
     "server-methods-*.js",
+    "agentic-os-runtime-contract-descriptors-*.js",
+    "agentic-os-runtime-attestation-*.js",
+)
+RUNTIME_SOURCE_FILES = (
+    "src/gateway/agentic-os-runtime-contract-descriptors.ts",
+    "src/gateway/agentic-os-runtime-attestation.ts",
+    "src/gateway/agentic-os-runtime-contract.ts",
+    "src/gateway/methods/core-descriptors.ts",
+    "src/agents/tools/sessions-spawn-tool.ts",
 )
 FUTURE_DB_AUTHORITY_CONTRACT = {
     "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
@@ -87,16 +168,25 @@ FUTURE_DB_AUTHORITY_CONTRACT = {
         "run_id",
         "transition_id",
     ],
-    "sessions_spawn_required_metadata": [
+    "sessions_spawn_required_parameters": [
+        "task",
+        "taskName",
+        "runtime",
+        "mode",
+        "agentId",
+        "cleanup",
+        "context",
+        "lightContext",
         "client_request_id",
         "idempotency_key",
+        "gateway_lease_id",
         "metadata",
     ],
     "accepted_session_identity_requirement": (
         "future_db_authority_requires_duplicate_spawn_to_return_the_same_non_empty_"
         "accepted_session_identity"
     ),
-    "future_canonical_status_method": "sessions_status",
+    "canonical_status_method": "session_status",
 }
 STATUS_RPC_INCIDENTAL_MUTATIONS = (
     "expired_lease_cleanup",
@@ -104,7 +194,12 @@ STATUS_RPC_INCIDENTAL_MUTATIONS = (
 )
 EVIDENCE_CAPABILITY_SOURCE_PATHS = (
     "scripts/openclaw-tool-capability-preflight.py",
+    "scripts/openclaw-live-accepted-session-probe.py",
+    "scripts/openclaw-real-gateway-contract-probe.py",
     "src/agentic_os/openclaw_adapter.py",
+    "src/agentic_os/runtime_attestation.py",
+    "src/agentic_os/metadata.py",
+    "src/agentic_os/heartbeat_shadow.py",
     "src/agentic_os/__init__.py",
 )
 
@@ -217,6 +312,57 @@ def _json_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise AdapterContractError("persistent preflight evidence is not canonical JSON") from exc
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _require_record(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise AdapterContractError(f"{label} must be an object")
+    return value
+
+
+def _require_exact_keys(value: Mapping[str, Any], keys: Iterable[str], label: str) -> None:
+    expected = set(keys)
+    observed = set(value)
+    if observed != expected:
+        raise AdapterContractError(
+            f"{label} keys must be exactly {sorted(expected)}, found {sorted(observed)}"
+        )
+
+
+def _require_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise AdapterContractError(f"{label} must be a non-empty string")
+    return value
+
+
+def _require_int(value: Any, label: str) -> int:
+    if type(value) is not int:
+        raise AdapterContractError(f"{label} must be an integer")
+    return value
+
+
+def _require_sha256(value: Any, label: str) -> str:
+    text = _require_string(value, label)
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise AdapterContractError(f"{label} must be a lowercase SHA-256")
+    return text
+
+
 def _relative_source_path(root: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
@@ -238,13 +384,43 @@ def _runtime_source_digest_snapshot(root: Path) -> dict[str, str]:
     for pattern in RUNTIME_SOURCE_PATTERNS:
         for path in sorted((root / "dist").glob(pattern)):
             snapshot[_relative_source_path(root, path)] = _file_digest(path)
+    for relative in RUNTIME_SOURCE_FILES:
+        path = root / relative
+        if path.exists():
+            snapshot[_relative_source_path(root, path)] = _file_digest(path)
     return snapshot
+
+
+def _source_records_from_snapshot(snapshot: Mapping[str, str]) -> list[dict[str, str]]:
+    return [
+        {"path": path, "sha256": digest}
+        for path, digest in sorted(snapshot.items())
+    ]
 
 
 def _read_dist_files(root: Path, pattern: str) -> list[tuple[Path, str]]:
     return [
         (path, path.read_text(encoding="utf-8", errors="ignore"))
         for path in sorted((root / "dist").glob(pattern))
+    ]
+
+
+def _read_runtime_files(
+    root: Path,
+    *,
+    dist_pattern: str | None = None,
+    source_files: Iterable[str] = (),
+) -> list[tuple[Path, str]]:
+    files: list[Path] = []
+    if dist_pattern is not None:
+        files.extend(sorted((root / "dist").glob(dist_pattern)))
+    for relative in source_files:
+        path = root / relative
+        if path.exists():
+            files.append(path)
+    return [
+        (path, path.read_text(encoding="utf-8", errors="ignore"))
+        for path in files
     ]
 
 
@@ -628,6 +804,99 @@ def _extract_model_tool_schemas(root: Path) -> tuple[dict[str, set[str]], list[P
     return discovered, sources
 
 
+def _extract_js_string_array_items(text: str) -> list[str]:
+    items: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] in {"'", '"', "`"}:
+            parsed = _parse_js_string_literal(text, index)
+            if parsed is None:
+                index += 1
+                continue
+            value, index = parsed
+            items.append(value)
+            continue
+        index += 1
+    return items
+
+
+def _extract_runtime_method_params(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
+    candidates: dict[str, list[tuple[Path, set[str]]]] = {}
+    source_candidates: dict[str, list[tuple[Path, set[str]]]] = {}
+    files = _read_runtime_files(
+        root,
+        dist_pattern="agentic-os-runtime-contract-descriptors-*.js",
+        source_files=("src/gateway/agentic-os-runtime-contract-descriptors.ts",),
+    )
+    for path, text in files:
+        for match in re.finditer(
+            r"\bname\s*:\s*[\"']([A-Za-z][A-Za-z0-9_.-]*)[\"']",
+            text,
+        ):
+            name = match.group(1)
+            if name not in LIVE_TOOL_NAMES:
+                continue
+            parameters_key = text.find("parameters", match.end())
+            if parameters_key < 0:
+                continue
+            next_name = text.find("name", match.end())
+            if next_name > 0 and next_name < parameters_key:
+                continue
+            bracket = text.find("[", parameters_key)
+            if bracket < 0:
+                continue
+            array_text = _balanced_slice(text, bracket, "[", "]")
+            if array_text is None:
+                continue
+            target = (
+                source_candidates
+                if _relative_source_path(root, path).startswith("src/")
+                else candidates
+            )
+            target.setdefault(name, []).append((path, set(_extract_js_string_array_items(array_text))))
+    preferred = source_candidates if source_candidates else candidates
+    discovered: dict[str, set[str]] = {}
+    sources: list[Path] = []
+    for name, items in preferred.items():
+        if len(items) == 1:
+            path, names = items[0]
+            discovered[name] = set(names)
+            sources.append(path)
+        else:
+            sources.extend(path for path, _ in items)
+    return discovered, sources
+
+
+def _extract_attestation_request_params(root: Path) -> tuple[set[str], list[Path]]:
+    files = _read_runtime_files(
+        root,
+        dist_pattern="agentic-os-runtime-attestation-*.js",
+        source_files=("src/gateway/agentic-os-runtime-attestation.ts",),
+    )
+    source_items: list[tuple[Path, set[str]]] = []
+    dist_items: list[tuple[Path, set[str]]] = []
+    for path, text in files:
+        marker = text.find("REQUEST_FIELDS")
+        if marker < 0:
+            continue
+        bracket = text.find("[", marker)
+        if bracket < 0:
+            continue
+        array_text = _balanced_slice(text, bracket, "[", "]")
+        if array_text is None:
+            continue
+        item = (path, set(_extract_js_string_array_items(array_text)))
+        if _relative_source_path(root, path).startswith("src/"):
+            source_items.append(item)
+        else:
+            dist_items.append(item)
+    items = source_items or dist_items
+    if len(items) != 1:
+        return set(), [path for path, _ in items]
+    path, params = items[0]
+    return set(params), [path]
+
+
 def _extract_gateway_method_params(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
     methods: dict[str, set[str]] = {}
     sources: list[Path] = []
@@ -818,7 +1087,7 @@ def _gateway_rpc_validation_failure_catalog(
         catalog["model_tool_catalog"]["raw_response_sha256"] = active_catalog_sha256
     catalog["gateway_rpc_catalog"] = {
         "catalog_kind": "source_bound_gateway_rpc_catalog",
-        "authority": "installed_runtime_dist_sources",
+        "authority": "installed_runtime_sources",
         "source_bound_rpc_names": sorted(source_bound_rpc_names),
         "status": "status_corroboration_failed",
         "status_corroboration": status_corroboration,
@@ -950,9 +1219,60 @@ def _run_gateway_allow_lease_status(
     if isinstance(allow_agents, list):
         corroboration["allowAgents_count"] = len(allow_agents)
     leases = status_payload.get("leases")
-    if isinstance(leases, list):
-        corroboration["leases_count"] = len(leases)
+    if not isinstance(leases, list):
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_leases_shape_invalid",
+            error=type(leases).__name__ if leases is not None else "missing_leases",
+            response_sha256=response_sha256,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC leases must be an array",
+            catalog=catalog,
+        )
+    try:
+        _validate_status_lease_items(leases, label="status RPC")
+    except AdapterContractError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_lease_items_invalid",
+            error=str(exc),
+            response_sha256=response_sha256,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status RPC leases contain invalid metadata",
+            catalog=catalog,
+        ) from exc
+    corroboration["leases_count"] = len(leases)
     return corroboration
+
+
+def _validate_status_lease_items(leases: Iterable[Any], *, label: str) -> None:
+    for index, lease in enumerate(leases):
+        if not isinstance(lease, Mapping):
+            raise AdapterContractError(f"{label} lease item {index} must be an object")
+        try:
+            observation = observation_from_openclaw_response(lease)
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=observation.external_id
+            )
+            if not isinstance(observation.normalized, Mapping):
+                raise MetadataContractError("normalized lease metadata is required")
+            local = {**dict(observation.normalized), "gateway_lease_id": gateway_lease_id}
+            validate_allow_lease_observation(
+                local=local,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except (AdapterContractError, MetadataContractError) as exc:
+            raise AdapterContractError(
+                f"{label} lease item {index} failed metadata contract: {exc}"
+            ) from exc
 
 
 def _runtime_identity_catalog(
@@ -1037,8 +1357,10 @@ def _runtime_identity_snapshot(
         include_env_override=include_env_override,
         require_env_override=require_env_override,
     )
-    executable = _resolve_openclaw_executable()
-    _require_executable_matches_install_root(root, executable)
+    cli_executable = _resolve_openclaw_executable()
+    _require_executable_matches_install_root(root, cli_executable)
+    launcher = root / "openclaw.mjs"
+    executable = launcher.resolve() if launcher.is_file() else cli_executable
     package_path = root / "package.json"
     try:
         package_raw = package_path.read_bytes()
@@ -1204,7 +1526,7 @@ def _active_catalog_validation_failure_catalog(
     catalog = dict(runtime_identity_catalog)
     catalog.update(
         {
-            "required_canonical_session_status_method": "sessions_status",
+            "required_canonical_session_status_method": "session_status",
             "active_catalog": {
                 "method": "tools.catalog",
                 "status": "contract_validation_failed",
@@ -1360,11 +1682,15 @@ def _scan_runtime_source_contract(
     set[str],
     list[Path],
     set[str],
+    set[str],
+    list[Path],
 ]:
     try:
         model_tool_params, model_tool_sources = _extract_model_tool_schemas(root)
         gateway_params, gateway_sources = _extract_gateway_method_params(root)
         declared_names, declaration_sources, gateway_declared_names = _declared_core_names(root)
+        runtime_method_params, runtime_method_sources = _extract_runtime_method_params(root)
+        attestation_params, attestation_sources = _extract_attestation_request_params(root)
     except OSError as exc:
         catalog = _runtime_source_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1376,6 +1702,14 @@ def _scan_runtime_source_contract(
             "active OpenClaw runtime sources could not be scanned after catalog capture",
             catalog=catalog,
         ) from exc
+    for name, params in runtime_method_params.items():
+        declared_names.add(name)
+        if name in GATEWAY_RPC_METHOD_NAMES:
+            gateway_params[name] = set(params)
+            gateway_declared_names.add(name)
+        if name in MODEL_CALLABLE_TOOL_NAMES:
+            model_tool_params[name] = set(params)
+    declaration_sources.extend(runtime_method_sources)
     return (
         model_tool_params,
         model_tool_sources,
@@ -1384,6 +1718,8 @@ def _scan_runtime_source_contract(
         declared_names,
         declaration_sources,
         gateway_declared_names,
+        attestation_params,
+        attestation_sources,
     )
 
 
@@ -1486,6 +1822,561 @@ def _gateway_tools_from_sources(
     return tools
 
 
+def _attestation_rpc_catalog(attestation_params: set[str]) -> dict[str, Any]:
+    expected = set(ATTESTATION_REQUEST_PARAMETERS)
+    observed = set(attestation_params)
+    return {
+        "catalog_kind": "source_bound_runtime_attestation_rpc",
+        "authority": "installed_runtime_sources",
+        "method": ATTESTATION_RPC_METHOD_NAME,
+        "parameters": sorted(observed),
+        "expected_parameters": list(ATTESTATION_REQUEST_PARAMETERS),
+        "status": "source_bound_exact" if observed == expected else "source_bound_mismatch",
+    }
+
+
+def _expected_method_bindings_payload() -> dict[str, dict[str, Any]]:
+    return {
+        logical_name: {
+            "method": method,
+            "parameter_names": list(parameters),
+        }
+        for logical_name, (method, parameters) in PERSISTENT_METHOD_BINDINGS.items()
+    }
+
+
+def _expected_runtime_methods_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": method,
+            "parameters": list(parameters),
+        }
+        for method, parameters in PERSISTENT_METHOD_BINDINGS.values()
+    ]
+
+
+def _expected_contract_vector_sha256() -> str:
+    return _canonical_json_sha256(
+        {
+            "schema_version": "agentic-os.runtime-contract-vector.v1",
+            "runtime_methods": _expected_runtime_methods_catalog(),
+            "method_bindings": _expected_method_bindings_payload(),
+        }
+    )
+
+
+def _expected_runtime_catalog_sha256() -> str:
+    return _canonical_json_sha256(_expected_runtime_methods_catalog())
+
+
+def _read_attestation_key_from_env() -> bytes:
+    key_path = os.environ.get("OPENCLAW_AGENTIC_OS_ATTESTATION_KEY_FILE", "").strip()
+    if not key_path:
+        raise AdapterContractError("persistent preflight requires attestation key file")
+    path = Path(key_path).expanduser()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise AdapterContractError(
+            "persistent preflight attestation key file is unreadable"
+        ) from exc
+    try:
+        try:
+            descriptor = os.fstat(fd)
+        except OSError as exc:
+            raise AdapterContractError(
+                "persistent preflight attestation key file is unreadable"
+            ) from exc
+        if not stat.S_ISREG(descriptor.st_mode):
+            raise AdapterContractError(
+                "persistent preflight attestation key file must be a regular file"
+            )
+        if descriptor.st_uid != os.getuid():
+            raise AdapterContractError(
+                "persistent preflight attestation key file must be owned by the current user"
+            )
+        if descriptor.st_nlink != 1:
+            raise AdapterContractError(
+                "persistent preflight attestation key file must have exactly one link"
+            )
+        mode = descriptor.st_mode & 0o777
+        if mode != 0o600:
+            raise AdapterContractError(
+                "persistent preflight attestation key file must be mode 0600"
+            )
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                fd = -1
+                key = handle.read()
+        except OSError as exc:
+            raise AdapterContractError(
+                "persistent preflight attestation key file is unreadable"
+            ) from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(key) != 32:
+        raise AdapterContractError("persistent preflight attestation key must be 32 bytes")
+    return key
+
+
+def _validate_runtime_and_agentic_heads(evidence: Mapping[str, Any]) -> tuple[Path, Path]:
+    runtime = _require_record(evidence.get("runtime"), "persistent evidence runtime")
+    agentic_os_record = _require_record(
+        evidence.get("agentic_os"), "persistent evidence agentic_os"
+    )
+    runtime_worktree = Path(
+        _require_string(runtime.get("worktree"), "persistent runtime worktree")
+    ).resolve()
+    agentic_os_worktree = Path(
+        _require_string(agentic_os_record.get("worktree"), "persistent Agentic OS worktree")
+    ).resolve()
+    expected_runtime_head = _require_string(
+        evidence.get("expected_runtime_head"), "persistent expected runtime head"
+    ).lower()
+    expected_agentic_head = _require_string(
+        evidence.get("expected_agentic_os_head"), "persistent expected Agentic OS head"
+    ).lower()
+    if _require_valid_git_revision(runtime_worktree, "HEAD") != expected_runtime_head:
+        raise AdapterContractError("persistent preflight runtime head mismatch")
+    _require_clean_persistent_runtime_worktree(runtime_worktree)
+    script_root = Path(__file__).resolve().parents[1]
+    if agentic_os_worktree != script_root:
+        raise AdapterContractError("persistent preflight Agentic OS worktree mismatch")
+    if _require_valid_git_revision(script_root, "HEAD") != expected_agentic_head:
+        raise AdapterContractError("persistent preflight Agentic OS head mismatch")
+    _require_clean_persistent_agentic_os_worktree(script_root)
+    return runtime_worktree, agentic_os_worktree
+
+
+def _require_clean_persistent_runtime_worktree(runtime_worktree: Path) -> None:
+    status = _git_status_porcelain(runtime_worktree)
+    if status is None:
+        raise AdapterContractError("persistent preflight runtime worktree status unavailable")
+    if status.strip():
+        raise AdapterContractError("persistent preflight runtime worktree must be clean")
+
+
+def _require_clean_persistent_agentic_os_worktree(agentic_os_worktree: Path) -> None:
+    status = _git_status_porcelain(agentic_os_worktree)
+    if status is None:
+        raise AdapterContractError(
+            "persistent preflight Agentic OS worktree status unavailable"
+        )
+    if status.strip():
+        raise AdapterContractError(
+            "persistent preflight Agentic OS worktree must be clean"
+        )
+
+
+def _git_committed_blob_digest(root: Path, path: Path, revision: str = "HEAD") -> str:
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+        proc = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-p", f"{revision}:{relative}"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        raise AdapterContractError("persistent runner script committed blob is unavailable") from exc
+    return hashlib.sha256(proc.stdout).hexdigest()
+
+
+def _validate_runner_script_binding(evidence: Mapping[str, Any], runtime_worktree: Path) -> None:
+    runner = _require_record(evidence.get("runner"), "persistent runner")
+    script_path = Path(
+        _require_string(runner.get("script_path"), "persistent runner script path")
+    ).resolve()
+    try:
+        script_path.relative_to(runtime_worktree)
+    except ValueError as exc:
+        raise AdapterContractError("persistent runner script is outside runtime worktree") from exc
+    observed = _file_digest(script_path)
+    expected = _require_sha256(runner.get("script_sha256"), "persistent runner script digest")
+    if observed != expected:
+        raise AdapterContractError("persistent runner script digest mismatch")
+    committed = _git_committed_blob_digest(runtime_worktree, script_path)
+    if committed != expected:
+        raise AdapterContractError("persistent runner script digest does not match committed blob")
+
+
+def _require_active_install_root_matches_runtime_worktree(
+    root: Path, runtime_worktree: Path
+) -> None:
+    if root.resolve() != runtime_worktree.resolve():
+        raise RuntimeEvidenceError(
+            "persistent active install root must match reviewed runtime worktree"
+        )
+
+
+def _require_persistent_rpc_record(
+    evidence: Mapping[str, Any], key: str, method: str
+) -> Mapping[str, Any]:
+    rpc_evidence = _require_record(
+        evidence.get("rpc_evidence"), "persistent rpc_evidence"
+    )
+    record = _require_record(rpc_evidence.get(key), f"persistent rpc_evidence.{key}")
+    _require_exact_keys(
+        record,
+        ("method", "request_params", "response", "raw_response_sha256"),
+        f"persistent rpc_evidence.{key}",
+    )
+    if record.get("method") != method:
+        raise AdapterContractError(f"persistent RPC evidence method mismatch for {method}")
+    request_params = _require_record(
+        record.get("request_params"), f"persistent {method} request_params"
+    )
+    if dict(request_params) != {}:
+        raise AdapterContractError(f"persistent {method} request params must be empty")
+    response = _require_record(record.get("response"), f"persistent {method} response")
+    digest = _canonical_json_sha256(response)
+    if record.get("raw_response_sha256") != digest:
+        raise AdapterContractError(f"persistent {method} raw response digest mismatch")
+    return record
+
+
+def _persistent_rpc_transcript_sha256(evidence: Mapping[str, Any]) -> str:
+    records = []
+    for key, method in (
+        ("tools_catalog", "tools.catalog"),
+        ("allow_lease_status", "subagents.allowLease.status"),
+    ):
+        record = _require_persistent_rpc_record(evidence, key, method)
+        records.append(
+            {
+                "key": key,
+                "method": method,
+                "request_params": dict(
+                    _require_record(
+                        record.get("request_params"),
+                        f"persistent {method} request_params",
+                    )
+                ),
+                "raw_response_sha256": record.get("raw_response_sha256"),
+            }
+        )
+    return _canonical_json_sha256(
+        {
+            "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+            "records": records,
+        }
+    )
+
+
+def _validate_status_attestation_receipt(
+    receipt: Mapping[str, Any],
+    signed_payload: Mapping[str, Any],
+) -> None:
+    binding = _require_record(signed_payload.get("binding"), "signed runtime binding")
+    executable = _require_record(binding.get("executable"), "signed executable binding")
+    catalog = _require_record(binding.get("catalog"), "signed catalog binding")
+    gateway = _require_record(binding.get("gateway"), "signed gateway binding")
+    transport = _require_record(binding.get("transport"), "signed transport binding")
+    expected = {
+        "schema_version": signed_payload.get("schema_version"),
+        "runtime_identity_token_sha256": signed_payload.get(
+            "runtime_identity_token_sha256"
+        ),
+        "owner_scope_id": signed_payload.get("owner_scope_id"),
+        "client_process_id": signed_payload.get("client_process_id"),
+        "expires_at_epoch_ms": signed_payload.get("expires_at_epoch_ms"),
+        "executable_content_sha256": executable.get("content_sha256"),
+        "catalog_sha256": catalog.get("sha256"),
+        "contract_vector_sha256": catalog.get("contract_vector_sha256"),
+        "sources_sha256": binding.get("sources_sha256"),
+        "endpoint": gateway.get("endpoint"),
+        "build_id": gateway.get("build_id"),
+        "process_identity": gateway.get("process_identity"),
+        "transport_kind": transport.get("kind"),
+        "transport_identity": transport.get("identity"),
+    }
+    _require_exact_keys(receipt, expected.keys(), "status runtime_attestation")
+    if dict(receipt) != expected:
+        raise AdapterContractError("status runtime_attestation receipt is not signed-payload bound")
+
+
+def _validate_persistent_attestation(
+    evidence: Mapping[str, Any],
+    *,
+    runtime_identity_catalog: Mapping[str, Any],
+    source_digest_snapshot: Mapping[str, str],
+) -> Mapping[str, Any]:
+    attestation = _require_record(evidence.get("attestation"), "persistent attestation")
+    _require_exact_keys(
+        attestation,
+        (
+            "method",
+            "request_params",
+            "response",
+            "response_sha256",
+            "runtime_identity_token_sha256",
+        ),
+        "persistent attestation",
+    )
+    if attestation.get("method") != ATTESTATION_RPC_METHOD_NAME:
+        raise AdapterContractError("persistent attestation method mismatch")
+    request_params = _require_record(
+        attestation.get("request_params"), "persistent attestation request_params"
+    )
+    _require_exact_keys(
+        request_params,
+        ATTESTATION_REQUEST_PARAMETERS,
+        "persistent attestation request_params",
+    )
+    response = _require_record(attestation.get("response"), "persistent attestation response")
+    _require_exact_keys(
+        response,
+        ("signature_algorithm", "signature", "signed_payload"),
+        "persistent attestation response",
+    )
+    if attestation.get("response_sha256") != _canonical_json_sha256(response):
+        raise AdapterContractError("persistent attestation response digest mismatch")
+    if response.get("signature_algorithm") != "hmac-sha256":
+        raise AdapterContractError("persistent attestation signature algorithm mismatch")
+    signature = _require_sha256(response.get("signature"), "persistent attestation signature")
+    signed_payload = _require_record(
+        response.get("signed_payload"), "persistent signed attestation payload"
+    )
+    expected_signature = hmac.new(
+        _read_attestation_key_from_env(),
+        _canonical_json_bytes(signed_payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise AdapterContractError("persistent attestation HMAC mismatch")
+    _require_exact_keys(
+        signed_payload,
+        (
+            "schema_version",
+            "online",
+            "challenge",
+            "nonce",
+            "issued_at_epoch_ms",
+            "expires_at_epoch_ms",
+            "client_process_id",
+            "runtime_identity_token_sha256",
+            "owner_scope_id",
+            "binding",
+            "method_bindings",
+            "rpc_transcript_sha256",
+        ),
+        "persistent signed attestation payload",
+    )
+    if signed_payload.get("schema_version") != "agentic-os.openclaw-attestation.v1":
+        raise AdapterContractError("persistent attestation schema mismatch")
+    if signed_payload.get("online") is not True:
+        raise AdapterContractError("persistent attestation must be online")
+    if signed_payload.get("challenge") != request_params.get("challenge"):
+        raise AdapterContractError("persistent attestation challenge mismatch")
+    if signed_payload.get("nonce") != request_params.get("challenge"):
+        raise AdapterContractError("persistent attestation nonce mismatch")
+    if signed_payload.get("client_process_id") != request_params.get("client_process_id"):
+        raise AdapterContractError("persistent attestation client process mismatch")
+    if signed_payload.get("rpc_transcript_sha256") != _persistent_rpc_transcript_sha256(
+        evidence
+    ):
+        raise AdapterContractError("persistent RPC transcript is not signed-channel bound")
+    if (
+        attestation.get("runtime_identity_token_sha256")
+        != signed_payload.get("runtime_identity_token_sha256")
+    ):
+        raise AdapterContractError("persistent runtime identity token digest mismatch")
+    _require_sha256(
+        signed_payload.get("runtime_identity_token_sha256"),
+        "persistent runtime identity token digest",
+    )
+    _require_sha256(signed_payload.get("owner_scope_id"), "persistent owner scope")
+    issued = _require_int(
+        signed_payload.get("issued_at_epoch_ms"), "persistent attestation issued_at"
+    )
+    expires = _require_int(
+        signed_payload.get("expires_at_epoch_ms"), "persistent attestation expires_at"
+    )
+    now_ms = time.time_ns() // 1_000_000
+    if issued > now_ms + PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS:
+        raise AdapterContractError("persistent attestation issue time is in the future")
+    if expires <= issued or expires - issued > PERSISTENT_PREFLIGHT_MAX_ATTESTATION_LIFETIME_MS:
+        raise AdapterContractError("persistent attestation lifetime invalid")
+    if expires - now_ms < PERSISTENT_PREFLIGHT_MIN_TTL_MS:
+        raise AdapterContractError("persistent attestation is stale or expired")
+
+    method_bindings = _require_record(
+        signed_payload.get("method_bindings"), "persistent method_bindings"
+    )
+    expected_bindings = _expected_method_bindings_payload()
+    if dict(method_bindings) != expected_bindings:
+        raise AdapterContractError("persistent signed method bindings mismatch")
+    contract_vector_sha256 = _expected_contract_vector_sha256()
+    expected_catalog_sha256 = _expected_runtime_catalog_sha256()
+    if request_params.get("expected_catalog_sha256") != expected_catalog_sha256:
+        raise AdapterContractError("persistent expected runtime catalog digest mismatch")
+
+    binding = _require_record(signed_payload.get("binding"), "persistent runtime binding")
+    _require_exact_keys(
+        binding,
+        ("executable", "install", "sources", "sources_sha256", "catalog", "gateway", "transport"),
+        "persistent runtime binding",
+    )
+    executable = _require_record(binding.get("executable"), "persistent executable binding")
+    _require_exact_keys(
+        executable,
+        ("path_sha256", "content_sha256"),
+        "persistent executable binding",
+    )
+    install = _require_record(binding.get("install"), "persistent install binding")
+    catalog = _require_record(binding.get("catalog"), "persistent catalog binding")
+    gateway = _require_record(binding.get("gateway"), "persistent gateway binding")
+    transport = _require_record(binding.get("transport"), "persistent transport binding")
+    executable_path_digest = _require_sha256(
+        executable.get("path_sha256"), "persistent executable path digest"
+    )
+    if executable_path_digest != runtime_identity_catalog.get("active_executable_path_sha256"):
+        raise AdapterContractError("persistent executable path digest does not match active runtime")
+    executable_digest = _require_sha256(
+        executable.get("content_sha256"), "persistent executable digest"
+    )
+    if executable_digest != runtime_identity_catalog.get("active_executable_sha256"):
+        raise AdapterContractError("persistent executable digest does not match active runtime")
+    if request_params.get("expected_executable_sha256") != executable_digest:
+        raise AdapterContractError("persistent expected executable digest mismatch")
+    if install.get("root_sha256") != runtime_identity_catalog.get("install_root_path_sha256"):
+        raise AdapterContractError("persistent install root digest mismatch")
+    if install.get("package_json_sha256") != runtime_identity_catalog.get("package_json_sha256"):
+        raise AdapterContractError("persistent package digest mismatch")
+    if install.get("package_name") != runtime_identity_catalog.get("openclaw_package_name"):
+        raise AdapterContractError("persistent package name mismatch")
+    if install.get("version") != runtime_identity_catalog.get("openclaw_version"):
+        raise AdapterContractError("persistent package version mismatch")
+    sources = binding.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise AdapterContractError("persistent runtime sources must be a non-empty list")
+    signed_source_snapshot: dict[str, str] = {}
+    for source in sources:
+        source_record = _require_record(source, "persistent runtime source")
+        _require_exact_keys(source_record, ("path", "sha256"), "persistent runtime source")
+        source_path = _require_string(source_record.get("path"), "persistent runtime source path")
+        if source_path.startswith("/") or ".." in Path(source_path).parts:
+            raise AdapterContractError("persistent runtime source path is invalid")
+        if source_path in signed_source_snapshot:
+            raise AdapterContractError("persistent runtime source paths must be unique")
+        signed_source_snapshot[source_path] = _require_sha256(
+            source_record.get("sha256"), "persistent runtime source digest"
+        )
+    if binding.get("sources_sha256") != _canonical_json_sha256(sources):
+        raise AdapterContractError("persistent runtime sources digest mismatch")
+    if dict(sorted(signed_source_snapshot.items())) != dict(sorted(source_digest_snapshot.items())):
+        raise AdapterContractError(
+            "persistent signed runtime sources do not match active source snapshot"
+        )
+    if sources != _source_records_from_snapshot(source_digest_snapshot):
+        raise AdapterContractError(
+            "persistent signed runtime sources must use canonical source snapshot order"
+        )
+    if catalog.get("authority") != "tools.catalog.runtimeMethods":
+        raise AdapterContractError("persistent catalog authority mismatch")
+    if catalog.get("sha256") != expected_catalog_sha256:
+        raise AdapterContractError("persistent signed catalog digest mismatch")
+    if catalog.get("contract_vector_sha256") != contract_vector_sha256:
+        raise AdapterContractError("persistent contract vector digest mismatch")
+    gateway_record = _require_record(evidence.get("gateway"), "persistent gateway")
+    if gateway.get("endpoint") != gateway_record.get("endpoint"):
+        raise AdapterContractError("persistent gateway endpoint mismatch")
+    if transport.get("kind") != "gateway-websocket":
+        raise AdapterContractError("persistent transport kind mismatch")
+    _require_string(gateway.get("build_id"), "persistent gateway build id")
+    _require_string(gateway.get("process_identity"), "persistent gateway process identity")
+    _require_string(transport.get("identity"), "persistent transport identity")
+    return signed_payload
+
+
+def _persistent_gateway_status_from_evidence(
+    evidence: Mapping[str, Any],
+    signed_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    record = _require_persistent_rpc_record(
+        evidence, "allow_lease_status", "subagents.allowLease.status"
+    )
+    response = _require_record(record.get("response"), "persistent status response")
+    status_payload = response.get("result") if isinstance(response.get("result"), Mapping) else response
+    status_payload = _require_record(status_payload, "persistent status payload")
+    if status_payload.get("status") != "ok":
+        raise AdapterContractError("persistent status RPC did not return status=ok")
+    receipt = _require_record(
+        status_payload.get("runtime_attestation"), "persistent status runtime_attestation"
+    )
+    _validate_status_attestation_receipt(receipt, signed_payload)
+    leases = status_payload.get("leases")
+    if not isinstance(leases, list):
+        raise AdapterContractError("persistent status RPC leases must be an array")
+    _validate_status_lease_items(leases, label="persistent status RPC")
+    corroboration: dict[str, Any] = {
+        "method": "subagents.allowLease.status",
+        "request_semantics": "read_only_request",
+        "requested_mutation": False,
+        "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+        "live_reachability": "reachable",
+        "status": "ok",
+        "raw_response_sha256": record.get("raw_response_sha256"),
+        "ok": True,
+        "runtime_attestation": dict(receipt),
+        "leases_count": len(leases),
+    }
+    return corroboration
+
+
+def _persistent_gateway_rpc_evidence(
+    *,
+    source_bound_rpc_names: set[str],
+    gateway_status: Mapping[str, Any],
+    signed_payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    method_bindings = _require_record(
+        signed_payload.get("method_bindings"), "persistent signed method bindings"
+    )
+    logical_by_method = {
+        method: logical_name
+        for logical_name, (method, _parameters) in PERSISTENT_METHOD_BINDINGS.items()
+    }
+    evidence: list[dict[str, Any]] = []
+    for name in GATEWAY_RPC_METHOD_NAMES:
+        if name == "subagents.allowLease.status":
+            evidence.append(
+                {
+                    "name": name,
+                    "disk_source_declaration": (
+                        "observed" if name in source_bound_rpc_names else "not_observed"
+                    ),
+                    "live_reachability": "reachable",
+                    "live_probe": dict(gateway_status),
+                }
+            )
+            continue
+        logical_name = logical_by_method[name]
+        binding = _require_record(
+            method_bindings.get(logical_name),
+            f"persistent method binding {logical_name}",
+        )
+        evidence.append(
+            {
+                "name": name,
+                "disk_source_declaration": (
+                    "observed" if name in source_bound_rpc_names else "not_observed"
+                ),
+                "live_reachability": "signed_method_binding",
+                "method_binding": {
+                    "status": "signed_exact",
+                    "method": binding.get("method"),
+                    "parameter_names": list(binding.get("parameter_names", [])),
+                },
+            }
+        )
+    return evidence
+
+
 def _status_alias_requirement(
     *,
     active_names: set[str],
@@ -1494,24 +2385,24 @@ def _status_alias_requirement(
     model_catalog_available: bool,
 ) -> dict[str, Any]:
     return {
-        "future_canonical_status_method": "sessions_status",
-        "future_canonical_status_method_status": (
+        "canonical_status_method": "session_status",
+        "canonical_status_method_status": (
             "available"
-            if "sessions_status" in active_names
+            if "session_status" in active_names
             else (
                 "unproven_model_catalog_unavailable"
                 if not model_catalog_available
                 else "missing_from_model_callable_tools_catalog"
             )
         ),
-        "legacy_status_alias": "session_status",
-        "observed_model_status_aliases": sorted(
+        "unsupported_plural_status_alias": "sessions_status",
+        "observed_model_status_names": sorted(
             name
             for name in ("session_status", "sessions_status")
             if name in active_names or name in model_tool_params or name in declared_names
         ),
-        "future_canonical_status_alias_available": "sessions_status" in active_names,
-        "db_authority_requirement": "future_db_authority_requires_canonical_sessions_status",
+        "canonical_status_method_available": "session_status" in active_names,
+        "db_authority_requirement": "db_authority_requires_singular_session_status",
     }
 
 
@@ -1531,6 +2422,7 @@ def _model_catalog_unavailable_catalog(
     declared_names: set[str],
     source_bound_rpc_names: set[str],
     gateway_status: Mapping[str, Any],
+    attestation_params: set[str],
     source_paths: Iterable[Path],
     source_digest_snapshot: Mapping[str, str],
     root: Path,
@@ -1555,10 +2447,10 @@ def _model_catalog_unavailable_catalog(
         model_tool_catalog["failure_payload_sha256"] = failure_sha
     return {
         **runtime_identity_catalog,
-        "required_canonical_session_status_method": "sessions_status",
+        "required_canonical_session_status_method": "session_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
         "runtime_process_binding_limit": (
-            "installed dist source identity does not prove the connected Gateway "
+            "installed runtime source identity does not prove the connected Gateway "
             "process is executing that exact bundle"
         ),
         "connected_gateway_build_identity": "unproven",
@@ -1577,7 +2469,7 @@ def _model_catalog_unavailable_catalog(
         "model_tool_catalog": model_tool_catalog,
         "gateway_rpc_catalog": {
             "catalog_kind": "source_bound_gateway_rpc_catalog",
-            "authority": "installed_runtime_dist_sources",
+            "authority": "installed_runtime_sources",
             "status": _gateway_catalog_status(source_bound_rpc_names),
             "source_bound_rpc_names": sorted(source_bound_rpc_names),
             "rpc_evidence": _gateway_rpc_evidence(
@@ -1587,6 +2479,7 @@ def _model_catalog_unavailable_catalog(
             "status_corroboration": gateway_status,
             "tools": gateway_tools,
         },
+        "attestation_rpc_catalog": _attestation_rpc_catalog(attestation_params),
         "sources": [
             _source_record_from_snapshot(root, path, source_digest_snapshot)
             for path in sorted(source_paths)
@@ -1636,6 +2529,8 @@ def live_installed_openclaw_catalog(
             declared_names,
             declaration_sources,
             gateway_declared_names,
+            attestation_params,
+            attestation_sources,
         ) = _scan_runtime_source_contract(
             root=root,
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1697,6 +2592,7 @@ def live_installed_openclaw_catalog(
             *model_tool_sources,
             *gateway_sources,
             *declaration_sources,
+            *attestation_sources,
         }
         split_catalog = _model_catalog_unavailable_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1706,6 +2602,7 @@ def live_installed_openclaw_catalog(
             declared_names=declared_names,
             source_bound_rpc_names=source_bound_rpc_names,
             gateway_status=gateway_status,
+            attestation_params=attestation_params,
             source_paths=source_paths,
             source_digest_snapshot=source_digest_snapshot,
             root=root,
@@ -1761,13 +2658,15 @@ def live_installed_openclaw_catalog(
         model_tool_sources,
         gateway_params,
         gateway_sources,
-        declared_names,
-        declaration_sources,
-        gateway_declared_names,
-    ) = _scan_runtime_source_contract(
-        root=root,
-        runtime_identity_catalog=runtime_identity_catalog,
-        active_catalog_sha256=active_catalog_sha256,
+            declared_names,
+            declaration_sources,
+            gateway_declared_names,
+            attestation_params,
+            attestation_sources,
+        ) = _scan_runtime_source_contract(
+            root=root,
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
     )
     _require_runtime_sources_unchanged_after_scan(
         runtime_identity_catalog=runtime_identity_catalog,
@@ -1832,14 +2731,20 @@ def live_installed_openclaw_catalog(
                 active_parameter_evidence[name]["schema_available"]
             )
             if catalog_schema_available:
-                params = sorted(catalog_params & source_params)
+                params = sorted(catalog_params)
+                status = (
+                    "catalog_schema_matches_installed_source"
+                    if catalog_params == source_params
+                    else "catalog_schema_disagrees_with_installed_source"
+                )
                 parameter_evidence = {
-                    "status": "catalog_schema_intersected_with_installed_source",
+                    "status": status,
                     "catalog_schema_available": True,
                     "catalog_parameters": sorted(catalog_params),
+                    "source_parameters": sorted(source_params),
                     "parameter_authority": [
                         "tools.catalog",
-                        "installed_runtime_dist_sources",
+                        "installed_runtime_sources",
                     ],
                 }
             elif name in model_tool_params:
@@ -1847,7 +2752,7 @@ def live_installed_openclaw_catalog(
                 parameter_evidence = {
                     "status": "installed_source_bound_catalog_schema_unavailable",
                     "catalog_schema_available": False,
-                    "parameter_authority": "installed_runtime_dist_sources",
+                    "parameter_authority": "installed_runtime_sources",
                 }
             else:
                 params = []
@@ -1865,7 +2770,12 @@ def live_installed_openclaw_catalog(
             }
             model_tools.append(tool)
             tools.append(tool)
-    source_paths = sorted({*model_tool_sources, *gateway_sources, *declaration_sources})
+    source_paths = sorted({
+        *model_tool_sources,
+        *gateway_sources,
+        *declaration_sources,
+        *attestation_sources,
+    })
     model_tool_names = sorted(active_names & set(MODEL_CALLABLE_TOOL_NAMES))
     model_tools_with_catalog_schema = sorted(
         name
@@ -1877,10 +2787,10 @@ def live_installed_openclaw_catalog(
     )
     return {
         **runtime_identity_catalog,
-        "required_canonical_session_status_method": "sessions_status",
+        "required_canonical_session_status_method": "session_status",
         "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
         "runtime_process_binding_limit": (
-            "installed dist source identity does not prove the connected Gateway "
+            "installed runtime source identity does not prove the connected Gateway "
             "process is executing that exact bundle"
         ),
         "connected_gateway_build_identity": "unproven",
@@ -1913,7 +2823,7 @@ def live_installed_openclaw_catalog(
         },
         "gateway_rpc_catalog": {
             "catalog_kind": "source_bound_gateway_rpc_catalog",
-            "authority": "installed_runtime_dist_sources",
+            "authority": "installed_runtime_sources",
             "status": _gateway_catalog_status(source_bound_rpc_names),
             "source_bound_rpc_names": sorted(source_bound_rpc_names),
             "rpc_evidence": _gateway_rpc_evidence(
@@ -1923,6 +2833,7 @@ def live_installed_openclaw_catalog(
             "status_corroboration": gateway_status,
             "tools": gateway_tools,
         },
+        "attestation_rpc_catalog": _attestation_rpc_catalog(attestation_params),
         "sources": [
             _source_record_from_snapshot(root, path, source_digest_snapshot)
             for path in source_paths
@@ -1966,10 +2877,12 @@ def _runtime_failure_catalog(
         catalog["openclaw_version"] = package.get("version")
         catalog["openclaw_package_name"] = package.get("name")
     try:
-        executable = _resolve_openclaw_executable()
+        cli_executable = _resolve_openclaw_executable()
+        _require_executable_matches_install_root(root, cli_executable)
+        launcher = root / "openclaw.mjs"
+        executable = launcher.resolve() if launcher.is_file() else cli_executable
         catalog["active_executable_path_sha256"] = _path_digest(executable)
         _record_file_digest(catalog, "active_executable_sha256", executable)
-        _require_executable_matches_install_root(root, executable)
     except AdapterContractError as exc:
         catalog["executable_resolution_error"] = str(exc)
     return catalog
@@ -1991,8 +2904,270 @@ def installed_negative_baseline_catalog() -> dict[str, Any]:
     )
 
 
+def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
+    evidence_path = Path(evidence_file).resolve()
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeEvidenceError(
+            f"persistent attested preflight evidence could not be read: {type(exc).__name__}"
+        ) from exc
+    evidence = dict(_require_record(evidence, "persistent attested preflight evidence"))
+    if evidence.get("schema_version") != PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION:
+        raise RuntimeEvidenceError("persistent attested preflight evidence schema mismatch")
+    captured_at = _require_int(
+        evidence.get("captured_at_epoch_ms"), "persistent evidence captured_at"
+    )
+    now_ms = time.time_ns() // 1_000_000
+    if captured_at > now_ms + PERSISTENT_PREFLIGHT_MAX_FUTURE_SKEW_MS:
+        raise RuntimeEvidenceError("persistent evidence captured_at is in the future")
+    runtime_worktree, _agentic_os_worktree = _validate_runtime_and_agentic_heads(evidence)
+    _validate_runner_script_binding(evidence, runtime_worktree)
+    if bool(agentic_os.DB_AUTHORITY_ENABLED) is not False:
+        raise RuntimeEvidenceError("DB_AUTHORITY_ENABLED must remain false for preflight")
+
+    root, executable, package, runtime_identity_catalog, _failure_catalog = _runtime_identity_snapshot(
+        runtime_target="isolated_candidate",
+        include_env_override=True,
+        require_env_override=True,
+    )
+    _require_active_install_root_matches_runtime_worktree(root, runtime_worktree)
+    runtime_record = _require_record(evidence.get("runtime"), "persistent runtime")
+    for key, label in (
+        ("executable_sha256", "active_executable_sha256"),
+        ("package_json_sha256", "package_json_sha256"),
+    ):
+        if runtime_record.get(key) != runtime_identity_catalog.get(label):
+            raise RuntimeEvidenceError(f"persistent runtime {key} mismatch")
+    if runtime_record.get("expected_catalog_sha256") != _expected_runtime_catalog_sha256():
+        raise RuntimeEvidenceError("persistent runtime expected catalog digest mismatch")
+
+    try:
+        source_digest_snapshot = _runtime_source_digest_snapshot(root)
+    except OSError as exc:
+        raise RuntimeEvidenceError(
+            "persistent runtime sources could not be snapshotted"
+        ) from exc
+    signed_payload = _validate_persistent_attestation(
+        evidence,
+        runtime_identity_catalog=runtime_identity_catalog,
+        source_digest_snapshot=source_digest_snapshot,
+    )
+    catalog_record = _require_persistent_rpc_record(evidence, "tools_catalog", "tools.catalog")
+    active_catalog = _require_record(catalog_record.get("response"), "persistent tools.catalog")
+    active_catalog_sha256 = _canonical_json_sha256(active_catalog)
+    if catalog_record.get("raw_response_sha256") != active_catalog_sha256:
+        raise RuntimeEvidenceError("persistent tools.catalog digest mismatch")
+    _require_runtime_identity_unchanged_after_catalog(
+        runtime_identity_catalog=runtime_identity_catalog,
+        runtime_target="isolated_candidate",
+        include_env_override=True,
+        require_env_override=True,
+        active_catalog_sha256=active_catalog_sha256,
+    )
+    try:
+        active_parameter_evidence = _active_tool_parameter_evidence(active_catalog)
+    except AdapterContractError as exc:
+        validation_catalog = _active_catalog_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+        )
+        raise RuntimeEvidenceError(str(exc), catalog=validation_catalog) from exc
+    active_names = set(active_parameter_evidence)
+    if not active_parameter_evidence:
+        validation_catalog = _active_catalog_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            required_tool_names=[],
+        )
+        raise RuntimeEvidenceError(
+            "persistent tools.catalog did not expose required tools",
+            catalog=validation_catalog,
+        )
+    (
+        model_tool_params,
+        model_tool_sources,
+        gateway_params,
+        gateway_sources,
+        declared_names,
+        declaration_sources,
+        gateway_declared_names,
+        attestation_params,
+        attestation_sources,
+    ) = _scan_runtime_source_contract(
+        root=root,
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+    )
+    _require_runtime_sources_unchanged_after_scan(
+        runtime_identity_catalog=runtime_identity_catalog,
+        active_catalog_sha256=active_catalog_sha256,
+        source_digest_snapshot=source_digest_snapshot,
+        root=root,
+    )
+    source_bound_rpc_names = _source_bound_gateway_rpc_names(
+        gateway_params=gateway_params,
+        gateway_declared_names=gateway_declared_names,
+    )
+    gateway_status = _persistent_gateway_status_from_evidence(evidence, signed_payload)
+    tools: list[dict[str, Any]] = []
+    gateway_tools = _gateway_tools_from_sources(
+        gateway_params=gateway_params,
+        source_bound_rpc_names=source_bound_rpc_names,
+    )
+    model_tools: list[dict[str, Any]] = []
+    tools.extend(gateway_tools)
+    for name in MODEL_CALLABLE_TOOL_NAMES:
+        declared = name in declared_names
+        active = name in active_names
+        source_params = set(model_tool_params.get(name, set()))
+        source_kind = "model_tool_schema" if declared and name in model_tool_params else "absent"
+        if declared and active and source_kind == "absent":
+            source_kind = "declared_tool_name"
+        if active and declared:
+            catalog_params = set(active_parameter_evidence[name]["parameters"])
+            catalog_schema_available = bool(
+                active_parameter_evidence[name]["schema_available"]
+            )
+            if catalog_schema_available:
+                params = sorted(catalog_params)
+                status = (
+                    "catalog_schema_matches_installed_source"
+                    if catalog_params == source_params
+                    else "catalog_schema_disagrees_with_installed_source"
+                )
+                parameter_evidence = {
+                    "status": status,
+                    "catalog_schema_available": True,
+                    "catalog_parameters": sorted(catalog_params),
+                    "source_parameters": sorted(source_params),
+                    "parameter_authority": [
+                        "tools.catalog",
+                        "installed_runtime_sources",
+                    ],
+                }
+            elif name in model_tool_params:
+                params = sorted(source_params)
+                parameter_evidence = {
+                    "status": "installed_source_bound_catalog_schema_unavailable",
+                    "catalog_schema_available": False,
+                    "parameter_authority": "installed_runtime_sources",
+                }
+            else:
+                params = []
+                parameter_evidence = {
+                    "status": "unproven_from_catalog_and_installed_sources",
+                    "catalog_schema_available": False,
+                    "parameter_authority": "unproven",
+                }
+            tool = {
+                "name": name,
+                "parameters": params,
+                "catalog_surface": "model_tool",
+                "schema_source": source_kind,
+                "parameter_evidence": parameter_evidence,
+            }
+            model_tools.append(tool)
+            tools.append(tool)
+    source_paths = sorted(
+        {
+            *model_tool_sources,
+            *gateway_sources,
+            *declaration_sources,
+            *attestation_sources,
+        }
+    )
+    model_tool_names = sorted(active_names & set(MODEL_CALLABLE_TOOL_NAMES))
+    model_tools_with_catalog_schema = sorted(
+        name
+        for name in model_tool_names
+        if active_parameter_evidence[name]["schema_available"]
+    )
+    model_tools_without_catalog_schema = sorted(
+        set(model_tool_names) - set(model_tools_with_catalog_schema)
+    )
+    binding = _require_record(signed_payload.get("binding"), "persistent binding")
+    executable_binding = _require_record(binding.get("executable"), "persistent executable")
+    gateway_binding = _require_record(binding.get("gateway"), "persistent gateway binding")
+    return {
+        **runtime_identity_catalog,
+        "required_canonical_session_status_method": "session_status",
+        "future_db_authority_contract": dict(FUTURE_DB_AUTHORITY_CONTRACT),
+        "runtime_process_binding_limit": (
+            "persistent same-connection attestation binds this preflight to the "
+            "connected Gateway process"
+        ),
+        "connected_gateway_build_identity": "proven",
+        "connected_gateway_build_evidence": {
+            "status": "proven",
+            "verification_method": "gateway_reported_executable_sha256",
+            "connected_executable_sha256": executable_binding.get("content_sha256"),
+            "gateway_endpoint": gateway_binding.get("endpoint"),
+            "gateway_build_id": gateway_binding.get("build_id"),
+            "gateway_process_identity": gateway_binding.get("process_identity"),
+            "attestation_payload_sha256": _canonical_json_sha256(signed_payload),
+        },
+        "status_alias_requirement": _status_alias_requirement(
+            active_names=active_names,
+            model_tool_params=model_tool_params,
+            declared_names=declared_names,
+            model_catalog_available=True,
+        ),
+        "active_catalog": {
+            "method": "tools.catalog",
+            "raw_response_sha256": active_catalog_sha256,
+            "required_tool_names": sorted(active_names),
+            "parameter_schema_tool_names": model_tools_with_catalog_schema,
+            "parameter_schema_unavailable_tool_names": model_tools_without_catalog_schema,
+        },
+        "model_tool_catalog": {
+            "catalog_kind": "model_callable_tools_catalog",
+            "authority": "tools.catalog",
+            "method": "tools.catalog",
+            "raw_response_sha256": active_catalog_sha256,
+            "required_tool_names": model_tool_names,
+            "parameter_schema_tool_names": model_tools_with_catalog_schema,
+            "parameter_schema_unavailable_tool_names": model_tools_without_catalog_schema,
+            "tools": model_tools,
+        },
+        "gateway_rpc_catalog": {
+            "catalog_kind": "source_bound_gateway_rpc_catalog",
+            "authority": "installed_runtime_sources",
+            "status": _gateway_catalog_status(source_bound_rpc_names),
+            "source_bound_rpc_names": sorted(source_bound_rpc_names),
+            "rpc_evidence": _persistent_gateway_rpc_evidence(
+                source_bound_rpc_names=source_bound_rpc_names,
+                gateway_status=gateway_status,
+                signed_payload=signed_payload,
+            ),
+            "status_corroboration": gateway_status,
+            "tools": gateway_tools,
+            "signed_method_bindings_sha256": _canonical_json_sha256(
+                signed_payload.get("method_bindings")
+            ),
+        },
+        "attestation_rpc_catalog": _attestation_rpc_catalog(attestation_params),
+        "persistent_attested_preflight": {
+            "schema_version": PERSISTENT_ATTESTED_PREFLIGHT_SCHEMA_VERSION,
+            "evidence_file_sha256": _file_digest(evidence_path),
+            "attestation_response_sha256": _canonical_json_sha256(
+                _require_record(evidence.get("attestation"), "persistent attestation").get(
+                    "response"
+                )
+            ),
+            "status_response_sha256": gateway_status["raw_response_sha256"],
+            "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
+        },
+        "sources": [
+            _source_record_from_snapshot(root, path, source_digest_snapshot)
+            for path in source_paths
+        ],
+        "tools": tools,
+    }
+
+
 def _runtime_failure_catalog_for_args(args: argparse.Namespace) -> dict[str, Any] | None:
-    if args.isolated_candidate_openclaw:
+    if args.isolated_candidate_openclaw or args.persistent_attested_preflight_json_file:
         return _runtime_failure_catalog(
             runtime_target="isolated_candidate",
             include_env_override=True,
@@ -2039,6 +3214,7 @@ def _runtime_target_requested(args: argparse.Namespace) -> bool:
         args.live_installed_openclaw
         or args.isolated_candidate_openclaw
         or args.installed_openclaw_negative_baseline
+        or args.persistent_attested_preflight_json_file
     )
 
 
@@ -2233,6 +3409,9 @@ def _capture_evidence_binding(args: argparse.Namespace, argv: list[str]) -> dict
         {
             "--catalog-json-file": args.catalog_json_file,
             "--write-evidence": args.write_evidence,
+            "--persistent-attested-preflight-json-file": (
+                args.persistent_attested_preflight_json_file
+            ),
         },
         {"--catalog-json"},
     )
@@ -2331,6 +3510,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--persistent-attested-preflight-json-file",
+        help=(
+            "Validate raw tools.catalog/status/attestation evidence captured over one "
+            "persistent attested GatewayClient connection. This mode does not open a "
+            "Gateway connection."
+        ),
+    )
+    parser.add_argument(
         "--write-evidence",
         help="Write the preflight result and sanitized catalog evidence to this JSON file.",
     )
@@ -2351,17 +3538,27 @@ def main(argv: list[str] | None = None) -> int:
             args.live_installed_openclaw,
             args.isolated_candidate_openclaw,
             args.installed_openclaw_negative_baseline,
+            args.persistent_attested_preflight_json_file is not None,
         )
         if flag
     ]
     if len(live_targets) > 1:
         raise SystemExit("provide only one OpenClaw runtime target flag")
 
-    if args.live_installed_openclaw or args.isolated_candidate_openclaw or args.installed_openclaw_negative_baseline:
+    if (
+        args.live_installed_openclaw
+        or args.isolated_candidate_openclaw
+        or args.installed_openclaw_negative_baseline
+        or args.persistent_attested_preflight_json_file is not None
+    ):
         if args.catalog_json is not None or args.catalog_json_file is not None:
             raise SystemExit("OpenClaw runtime target flags cannot be combined with catalog input")
         try:
-            if args.isolated_candidate_openclaw:
+            if args.persistent_attested_preflight_json_file is not None:
+                catalog = persistent_attested_openclaw_catalog(
+                    args.persistent_attested_preflight_json_file
+                )
+            elif args.isolated_candidate_openclaw:
                 catalog = isolated_candidate_openclaw_catalog()
             elif args.installed_openclaw_negative_baseline:
                 catalog = installed_negative_baseline_catalog()

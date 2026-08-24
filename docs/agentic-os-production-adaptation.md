@@ -23,6 +23,8 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-08-13: Added the local-only P0.3 runtime-attestation and Heartbeat shadow batch:
+  - Corrections: `agentic_os.runtime_attestation` defines a transport/object/process/expiry-bound attestor contract and rejects offline, unsigned, stale, drifted, cross-process, or wrong-digest signed attestations; `OpenClawAdapter` remains inert unless created through that fresh attestation and rejects missing or extra application RPC parameters before transport. The TypeScript runtime's `agenticOs.runtime.attest` response is the candidate provider surface and now includes `runtime_identity_token`, `runtime_identity_token_sha256`, `owner_scope_id`, and `catalog.contract_vector_sha256`; Python validates the token digest and contract vector digest over escaped canonical JSON. There is no `agenticOs.runtime.identity` RPC and Python no longer depends on one. Per-call CLI subprocess transport remains future-only and non-authoritative unless a persistent attested connection or follow-up token authorization is implemented, so no current live Gateway runtime identity proof is claimed. `agentic_os.runtime_dispatch` now persists ambiguous `sessions_spawn` transport outcomes as `human_review_required` with no automatic retry while retaining the owned lease for review. `agentic_os.heartbeat_shadow` adds a Heartbeat-only file-authority shadow/parity/forced-rollback/bounded-soak mechanism over ignored local `state/agentic-os/control.db`; no production authority, Gateway config, Cron, service, session, or lease state is changed, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-12: Recorded the PR #39 post-merge repository/design acceptance boundary:
   - Corrections: `docs/project-status.json` separates repository artifact acceptance from live runtime evidence and production authority. Repository acceptance is bound to PR #39, exact accepted head `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, accepted/merge tree `609ea2995b6d1113b1952a34f26bbc35f82e1592`, exact-head Phase C PASS, the clean Codex review comment, merge commit `b48a7cba8c6671b5dd33a369fb4f59f57d159739`, and the accepted-head design artifact digest. The current corrected design artifact digest is recorded separately and is not reused as PR #39 acceptance proof. Live runtime evidence remains `pending_non_authoritative` through `docs/runtime-evidence/phase-b-20260811-evidence-index.json`, production authority remains disabled, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-11: Corrected the installed-runtime preflight evidence model after Phase A found a combined-catalog false negative:
@@ -233,11 +235,11 @@ External runtime metadata contract is a P0 prerequisite:
 
 - `subagents.allowLease.acquire` must accept `client_lease_id`, `idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `ttl_ms`.
 - Duplicate allowLease acquire with the same idempotency key must return the same live lease identity and must not create another lease.
-- `subagents.allowLease.status` must expose all caller metadata for every live lease.
+- `subagents.allowLease.status` takes no parameters, rejects non-empty parameter objects, and must expose all visible live leases in the provider response.
 - `subagents.allowLease.release` must be idempotent on `release_idempotency_key` and must refuse to release a lease whose owner metadata does not match the caller, except through explicit human review.
 - Release observations must echo `client_lease_id`, `release_idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`, `requester_agent_id`, and `gateway_lease_id`; `run_id` plus `transition_id` alone is not owner proof.
 - A local lease row cannot move to `released` or `release_pending` without a non-empty release idempotency key and release request evidence; `release_not_required` is valid only when no external Gateway lease identity exists.
-- `sessions_spawn` or its tool-layer wrapper must accept `client_request_id`, `idempotency_key`, and `metadata={run_id, phase, agent_id, transition_id, task_digest}`.
+- The Agentic OS `sessions_spawn` runtime contract must accept exactly these top-level parameters: `task`, `taskName`, `runtime`, `mode`, `agentId`, `cleanup`, `context`, `lightContext`, `client_request_id`, `idempotency_key`, `gateway_lease_id`, and `metadata`.
 - Session list/status/history-backed result APIs must expose that metadata and the accepted session identity. A non-null `metadata_contract_version` is only a version label; it is never proof by itself.
 - Runtime tool catalog preflight must fail closed unless allowLease
   acquire/status/release are present and `subagents.allowLease.acquire`
@@ -246,9 +248,10 @@ External runtime metadata contract is a P0 prerequisite:
   `subagents.allowLease.release` declares `client_lease_id`,
   `release_idempotency_key`, `run_id`, `phase`, `transition_id`, `agent_id`,
   `requester_agent_id`, and `gateway_lease_id`, and
-  `sessions_spawn` declares `client_request_id`, `idempotency_key`, and
-  `metadata`; a spawn surface that cannot carry caller metadata is not valid
-  runtime evidence for reconciliation.
+  `sessions_spawn` declares exactly `client_request_id`, `idempotency_key`,
+  `gateway_lease_id`, and `metadata`; a spawn surface that cannot carry caller
+  metadata and the Gateway-owned lease identity is not valid runtime evidence
+  for reconciliation.
 - For `sessions_spawn`, SQLite authority is normalized and raw evidence must agree with it: `external_rpc_intents.spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest` must match one concrete `spawn_requests` row through foreign keys. Whenever a `sessions_spawn` row carries `external_metadata_json`, DDL requires `json_valid(...)` and requires `json_extract(...,'$.run_id')`, `$.transition_id`, `$.client_request_id`, `$.idempotency_key`, `$.phase`, `$.agent_id`, and `$.task_digest` to match both the normalized observed fields and the local intent fields exactly. Accepted/reconciled rows additionally require a non-empty accepted external session identity in `external_id`. Pre-RPC `pending` rows may exist without external JSON because the external call has not returned; the blocking SLO rejects pending/unknown/accepted/reconciled rows from auto-repair or gate trust unless the raw JSON, normalized observed fields, and local intent fields are an exact triple match.
 - Accepted session identity has one source of truth tuple: `external_rpc_intents.external_id`, `spawn_requests.session_key`, and `sessions.session_key` must be non-empty and equal for accepted/reconciled or accepted/completed spawn state. The `sessions` row must bind to the same `spawn_requests` row by `spawn_request_id`, `run_id`, `transition_id`, `client_request_id`, `spawn_idempotency_key`, `phase`, `agent_id`, and `task_digest`; a session may not point at a real `spawn_request_id` while carrying another run, phase, agent, client, idempotency, or task identity. Accepted/reconciled replay must re-read this local tuple and fail closed if the local spawn/session proof is missing or mismatched.
 - Post-dispatch budget events must additionally bind to the selected `run_budgets` provider/model/endpoint/capability/cost row and to strict `requested_at_epoch_ms < accepted_at_epoch_ms < budget_events.created_at_epoch_ms` ordering.
@@ -4202,7 +4205,7 @@ Spawn:
 2. Transaction A commits before the external boundary. External runtime execution is not transactional with SQLite; the only durable ordering proof is the committed reserve row plus committed intent row before the call.
 3. External boundary calls metadata-capable `sessions_spawn`.
 4. Transaction B records accepted session and transition to `dispatched` only when the accepted runtime session identity is non-empty and consistent across `external_rpc_intents.external_id`, `spawn_requests.session_key`, and one exact `sessions` row bound to the full spawn tuple.
-5. Unknown result becomes `spawn_unknown`. The adapter must not retry spawn automatically. Reconciliation may bind only when the external session exposes exact normalized metadata matching `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest`, and the raw `external_metadata_json` paths for those seven fields match the same normalized/local values.
+5. Ambiguous `sessions_spawn` transport outcomes become `human_review_required`; the adapter must not retry spawn automatically. Legacy or crash-left `spawn_unknown` rows may be reconciled only by the scanner when the external session exposes exact normalized metadata matching `run_id`, `transition_id`, `client_request_id`, `idempotency_key`, `phase`, `agent_id`, and `task_digest`, and the raw `external_metadata_json` paths for those seven fields match the same normalized/local values.
 6. Missing `spawn_request_id`, orphan or mismatched spawn request binding, missing accepted session identity, missing exact sessions row, sessions same-row identity mismatch, missing reserve pointer, malformed epoch authority, reserve from the wrong run/transition/provider/model/endpoint/capability/cost row, equal-millisecond ambiguity, reserve created after the intent, NULL/free-form-only/version-only external metadata, invalid external metadata JSON, raw-JSON/normalized/local metadata mismatch, or mismatched external metadata becomes `human_review_required` with no automatic retry or bind.
 
 First-output handshake:
@@ -4625,8 +4628,8 @@ P0.0 - privacy and external contract preflight:
   are not current authoritative proof requirements; they remain disabled
   future-contract checks until a verified in-process adapter handoff can run
   without minting authority from an unsigned catalog. DB authority still fails closed on
-  future metadata/idempotency/full-owner fields, missing `sessions_spawn`
-  metadata, and the future canonical `sessions_status` alias. Before any real
+  future metadata/idempotency/full-owner fields and missing `sessions_spawn`
+  metadata. The canonical status surface is singular `session_status(sessionKey)`. Before any real
   RPC is relied on, the exact tool/RPC surface must be proven with
   `scripts/openclaw-tool-capability-preflight.py`.
   Run it against the installed runtime with
@@ -4679,8 +4682,8 @@ P1.1 - metadata-based dispatch and reconciliation:
   pending-intent dispatcher, and fail-closed reconciliation probes exist.
 - Not production-proven: live allowLease/session metadata conformance; dispatch
   workflows must remain fail-closed until exact capability preflight proves the
-  future metadata/idempotency/full-owner fields, accepted-session identity, and
-  future canonical `sessions_status` alias.
+  future metadata/idempotency/full-owner fields and accepted-session identity;
+  singular `session_status(sessionKey)` is the canonical status surface.
 - Remaining: production reconciliation scanner rollout after live metadata
   fixtures pass.
 

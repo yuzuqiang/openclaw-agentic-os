@@ -10,14 +10,16 @@ import os
 import subprocess
 import sys
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
+    "scripts/openclaw-live-accepted-session-probe.py",
     "src/agentic_os/openclaw_adapter.py",
+    "src/agentic_os/runtime_attestation.py",
     "src/agentic_os/metadata.py",
 )
 FORBIDDEN_EVIDENCE_KEYS = {

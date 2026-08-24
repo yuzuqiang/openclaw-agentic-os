@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
+import subprocess
 import time
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from agentic_os.metadata import (
 )
 from agentic_os.migrations import MigrationError, repository_root, verify_database_connection
 from agentic_os.openclaw_adapter import (
+    AdapterAmbiguousOutcomeError,
     AdapterContractError,
     MetadataCapableOpenClawAdapter,
     MetadataObservation,
@@ -39,7 +42,12 @@ METADATA_RUNTIME_ERRORS = (
     sqlite3.Error,
 )
 
-AMBIGUOUS_TRANSPORT_ERRORS = (TimeoutError, OSError)
+AMBIGUOUS_TRANSPORT_ERRORS = (
+    AdapterAmbiguousOutcomeError,
+    TimeoutError,
+    OSError,
+    subprocess.TimeoutExpired,
+)
 RELEASE_FAILURE_ERRORS = METADATA_RUNTIME_ERRORS + AMBIGUOUS_TRANSPORT_ERRORS
 
 
@@ -59,6 +67,13 @@ class DispatchRequest:
     ttl_ms: int
     spawn_client_request_id: str
     spawn_idempotency_key: str
+    spawn_task: str | None = None
+    spawn_task_name: str | None = None
+    spawn_runtime: str = "subagent"
+    spawn_mode: str = "run"
+    spawn_cleanup: str = "keep"
+    spawn_context: str = "isolated"
+    spawn_light_context: bool = False
     lease_id: str | None = None
 
 
@@ -199,18 +214,119 @@ def spawn_metadata(request: DispatchRequest) -> dict[str, str]:
     }
 
 
+def spawn_descriptor_metadata(request: DispatchRequest) -> dict[str, object]:
+    validate_transient_spawn_descriptor(request)
+    return {
+        **spawn_metadata(request),
+        "taskName": request.spawn_task_name,
+        "runtime": request.spawn_runtime,
+        "mode": request.spawn_mode,
+        "cleanup": request.spawn_cleanup,
+        "context": request.spawn_context,
+        "lightContext": request.spawn_light_context,
+    }
+
+
+def _required_spawn_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeDispatchError(
+            f"sessions_spawn transient {label} must be a non-empty string"
+        )
+    return value
+
+
+def validate_transient_spawn_descriptor(request: DispatchRequest) -> None:
+    task = _required_spawn_string(request.spawn_task, "task")
+    _required_spawn_string(request.spawn_task_name, "taskName")
+    if hashlib.sha256(task.encode("utf-8")).hexdigest() != request.task_digest:
+        raise RuntimeDispatchError(
+            "sessions_spawn transient task must match persisted task_digest"
+        )
+    if request.spawn_runtime != "subagent":
+        raise RuntimeDispatchError('sessions_spawn transient runtime must be "subagent"')
+    if request.spawn_mode != "run":
+        raise RuntimeDispatchError('sessions_spawn transient mode must be "run"')
+    if request.spawn_cleanup not in {"delete", "keep"}:
+        raise RuntimeDispatchError("sessions_spawn transient cleanup is invalid")
+    if request.spawn_context not in {"fork", "isolated"}:
+        raise RuntimeDispatchError("sessions_spawn transient context is invalid")
+    if type(request.spawn_light_context) is not bool:
+        raise RuntimeDispatchError(
+            "sessions_spawn transient lightContext must be a boolean"
+        )
+
+
+def _replay_transient_descriptor_supplied(request: DispatchRequest) -> bool:
+    return (
+        request.spawn_task is not None
+        or request.spawn_task_name is not None
+        or request.spawn_runtime != "subagent"
+        or request.spawn_mode != "run"
+        or request.spawn_cleanup != "keep"
+        or request.spawn_context != "isolated"
+        or type(request.spawn_light_context) is not bool
+        or request.spawn_light_context is not False
+    )
+
+
+def _stored_spawn_descriptor_requires_transient_descriptor(metadata_json: str | None) -> bool:
+    if metadata_json is None:
+        return False
+    try:
+        metadata = json.loads(metadata_json)
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(metadata, dict):
+        return True
+    descriptor_keys = {
+        "taskName",
+        "runtime",
+        "mode",
+        "cleanup",
+        "context",
+        "lightContext",
+    }
+    return any(key in metadata for key in descriptor_keys)
+
+
+def spawn_rpc_params(
+    request: DispatchRequest, gateway_lease_id: str
+) -> dict[str, Any]:
+    validate_transient_spawn_descriptor(request)
+    return {
+        "task": request.spawn_task,
+        "taskName": request.spawn_task_name,
+        "runtime": request.spawn_runtime,
+        "mode": request.spawn_mode,
+        "agentId": request.agent_id,
+        "cleanup": request.spawn_cleanup,
+        "context": request.spawn_context,
+        "lightContext": request.spawn_light_context,
+        "client_request_id": request.spawn_client_request_id,
+        "idempotency_key": request.spawn_idempotency_key,
+        "gateway_lease_id": gateway_lease_id,
+        "metadata": spawn_metadata(request),
+    }
+
+
 def _existing_spawn_replay_result(
     connection: sqlite3.Connection, request: DispatchRequest
 ) -> DispatchResult | None:
     row = connection.execute(
         "SELECT run_id,transition_id,spawn_request_id,reserve_budget_event_id,"
-        "client_request_id,phase,agent_id,task_digest,state,external_id "
+        "client_request_id,phase,agent_id,task_digest,metadata_json,state,external_id "
         "FROM external_rpc_intents "
         "WHERE rpc_kind='sessions_spawn' AND idempotency_key=?",
         (request.spawn_idempotency_key,),
     ).fetchone()
     if row is None:
         return None
+    descriptor_json = row[8]
+    descriptor_required = _stored_spawn_descriptor_requires_transient_descriptor(
+        descriptor_json
+    )
+    if _replay_transient_descriptor_supplied(request) or descriptor_required:
+        validate_transient_spawn_descriptor(request)
     expected = (
         request.run_id,
         request.transition_id,
@@ -223,8 +339,13 @@ def _existing_spawn_replay_result(
     )
     if row[:8] != expected:
         raise RuntimeDispatchError("conflicting reuse of sessions_spawn idempotency key")
-    state = row[8]
-    external_id = row[9]
+    if _replay_transient_descriptor_supplied(request) or descriptor_required:
+        if descriptor_json != stable_json(spawn_descriptor_metadata(request)):
+            raise RuntimeDispatchError(
+                "conflicting reuse of sessions_spawn execution descriptor"
+            )
+    state = row[9]
+    external_id = row[10]
     if state in ("accepted", "reconciled"):
         binding = connection.execute(
             "SELECT spawn_request_id,lease_id,run_id,transition_id,phase,agent_id,"
@@ -651,7 +772,7 @@ def insert_pending_dispatch(connection: sqlite3.Connection, request: DispatchReq
             request.phase,
             request.agent_id,
             request.task_digest,
-            stable_json(spawn_metadata(request)),
+            stable_json(spawn_descriptor_metadata(request)),
             "pending",
             spawn_requested_at,
             spawn_requested_at_ms,
@@ -774,6 +895,98 @@ def persist_acquired_lease(
         raise RuntimeDispatchError("allow_lease_acquire lease update did not match exactly one row")
 
 
+def persist_unknown_acquired_lease_candidate(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    observation: MetadataObservation,
+    gateway_lease_id: str,
+    *,
+    reason: str,
+) -> None:
+    now, now_ms = now_utc()
+    observed = validate_allow_lease_observation(
+        local=lease_metadata(request, gateway_lease_id),
+        normalized=observation.normalized,
+        raw_json=observation.raw_json,
+        metadata_contract_version=observation.metadata_contract_version,
+    )
+    connection.execute(
+        "UPDATE external_rpc_intents SET state='unknown',resolved_at=?,"
+        "resolved_at_epoch_ms=?,metadata_contract_version=?,external_metadata_json=?,"
+        "external_run_id=?,external_transition_id=?,external_client_request_id=?,"
+        "external_idempotency_key=?,external_phase=?,external_agent_id=?,"
+        "external_requester_agent_id=?,external_ttl_ms=?,external_id=? "
+        "WHERE rpc_kind='allow_lease_acquire' AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled','human_review_required','failed')",
+        (
+            now,
+            now_ms,
+            observation.metadata_contract_version,
+            observation.raw_json,
+            observed["run_id"],
+            observed["transition_id"],
+            observed["client_lease_id"],
+            observed["idempotency_key"],
+            observed["phase"],
+            observed["agent_id"],
+            observed["requester_agent_id"],
+            observed["ttl_ms"],
+            gateway_lease_id,
+            request.acquire_idempotency_key,
+        ),
+    )
+    connection.execute(
+        "UPDATE leases SET reconciliation_status=? "
+        "WHERE client_lease_id=? AND gateway_lease_id IS NULL "
+        "AND state='acquire_pending'",
+        (reason, request.client_lease_id),
+    )
+
+
+def expire_locally_expired_lease_before_spawn(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    gateway_lease_id: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT expires_at_epoch_ms FROM leases WHERE client_lease_id=? "
+        "AND run_id=? AND transition_id=? AND gateway_lease_id=? "
+        "AND state='acquired'",
+        (
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    ).fetchone()
+    if row is None or type(row[0]) is not int:
+        raise RuntimeDispatchError("missing acquired lease expiry before sessions_spawn")
+    _, now_ms = now_utc()
+    if row[0] > now_ms:
+        return False
+    lease_cursor = connection.execute(
+        "UPDATE leases SET state='expired',reconciliation_status=? "
+        "WHERE client_lease_id=? AND run_id=? AND transition_id=? "
+        "AND gateway_lease_id=? AND state='acquired'",
+        (
+            "lease expired before sessions_spawn",
+            request.client_lease_id,
+            request.run_id,
+            request.transition_id,
+            gateway_lease_id,
+        ),
+    )
+    if lease_cursor.rowcount != 1:
+        raise RuntimeDispatchError("expired lease update did not match exactly one row")
+    mark_human_review(
+        connection,
+        request,
+        rpc_kind="sessions_spawn",
+        reason="spawn blocked by locally expired allow lease",
+    )
+    return True
+
+
 def persist_spawn_acceptance(
     connection: sqlite3.Connection,
     request: DispatchRequest,
@@ -889,21 +1102,70 @@ def mark_human_review(
     )
     connection.execute(
         "UPDATE external_rpc_intents SET state='human_review_required',resolved_at=?,"
-        "resolved_at_epoch_ms=? WHERE rpc_kind=? AND idempotency_key=?",
+        "resolved_at_epoch_ms=? WHERE rpc_kind=? AND idempotency_key=? "
+        "AND state NOT IN ('accepted','reconciled','human_review_required','failed')",
         (now, now_ms, rpc_kind, key),
     )
     if rpc_kind == "sessions_spawn":
         connection.execute(
             "UPDATE spawn_requests SET state='human_review_required',ambiguity_reason=?,"
-            "updated_at=? WHERE spawn_request_id=?",
+            "updated_at=? WHERE spawn_request_id=? "
+            "AND state NOT IN ('accepted','completed','reconciled','human_review_required','failed')",
             (reason, now, request.spawn_request_id),
         )
     else:
         connection.execute(
             "UPDATE leases SET state='human_review_required',reconciliation_status=? "
-            "WHERE client_lease_id=? AND gateway_lease_id IS NULL",
+            "WHERE client_lease_id=? AND gateway_lease_id IS NULL "
+            "AND state NOT IN ('accepted','acquired','released','human_review_required','failed')",
             (reason, request.client_lease_id),
         )
+
+
+def persist_ambiguous_spawn_candidate(
+    connection: sqlite3.Connection,
+    request: DispatchRequest,
+    observation: MetadataObservation,
+) -> None:
+    if not observation.external_id:
+        return
+    try:
+        observed = validate_session_observation(
+            local=spawn_metadata(request),
+            normalized=observation.normalized,
+            raw_json=observation.raw_json,
+            metadata_contract_version=observation.metadata_contract_version,
+        )
+    except MetadataContractError:
+        observed = {}
+    external_metadata_json = observation.raw_json if observed else None
+    connection.execute(
+        "UPDATE external_rpc_intents SET metadata_contract_version=COALESCE(?,metadata_contract_version),"
+        "external_metadata_json=COALESCE(?,external_metadata_json),"
+        "external_run_id=COALESCE(?,external_run_id),"
+        "external_transition_id=COALESCE(?,external_transition_id),"
+        "external_client_request_id=COALESCE(?,external_client_request_id),"
+        "external_idempotency_key=COALESCE(?,external_idempotency_key),"
+        "external_phase=COALESCE(?,external_phase),"
+        "external_agent_id=COALESCE(?,external_agent_id),"
+        "external_task_digest=COALESCE(?,external_task_digest),"
+        "external_id=COALESCE(?,external_id) "
+        "WHERE rpc_kind='sessions_spawn' AND idempotency_key=? "
+        "AND state='human_review_required'",
+        (
+            observation.metadata_contract_version,
+            external_metadata_json,
+            observed.get("run_id"),
+            observed.get("transition_id"),
+            observed.get("client_request_id"),
+            observed.get("idempotency_key"),
+            observed.get("phase"),
+            observed.get("agent_id"),
+            observed.get("task_digest"),
+            observation.external_id,
+            request.spawn_idempotency_key,
+        ),
+    )
 
 
 def mark_unknown(
@@ -1144,8 +1406,11 @@ def dispatch_with_metadata(
             existing = _existing_spawn_replay_result(connection, request)
             if existing is not None:
                 return existing
+            validate_transient_spawn_descriptor(request)
             insert_pending_dispatch(connection, request)
 
+        acquire_observation: MetadataObservation | None = None
+        gateway_lease_id: str | None = None
         try:
             acquire_observation = adapter.allow_lease_acquire(
                 {
@@ -1168,12 +1433,36 @@ def dispatch_with_metadata(
                 )
         except AMBIGUOUS_TRANSPORT_ERRORS as exc:
             with immediate_transaction(connection):
-                mark_unknown(
-                    connection,
-                    request,
-                    rpc_kind="allow_lease_acquire",
-                    reason=str(exc),
-                )
+                candidate = getattr(exc, "candidate_observation", None)
+                if isinstance(candidate, MetadataObservation):
+                    try:
+                        candidate_lease_id = validate_accepted_lease_identity(
+                            gateway_lease_id=candidate.external_id
+                        )
+                        persist_unknown_acquired_lease_candidate(
+                            connection,
+                            request,
+                            candidate,
+                            candidate_lease_id,
+                            reason=(
+                                "ambiguous allow lease candidate preserved for "
+                                f"human reconciliation: {exc}"
+                            ),
+                        )
+                    except MetadataContractError:
+                        mark_unknown(
+                            connection,
+                            request,
+                            rpc_kind="allow_lease_acquire",
+                            reason=str(exc),
+                        )
+                else:
+                    mark_unknown(
+                        connection,
+                        request,
+                        rpc_kind="allow_lease_acquire",
+                        reason=str(exc),
+                    )
                 mark_human_review(
                     connection,
                     request,
@@ -1183,12 +1472,32 @@ def dispatch_with_metadata(
             raise RuntimeDispatchError("allow lease transport outcome unknown") from exc
         except METADATA_RUNTIME_ERRORS as exc:
             with immediate_transaction(connection):
-                mark_human_review(
-                    connection,
-                    request,
-                    rpc_kind="allow_lease_acquire",
-                    reason=str(exc),
-                )
+                if acquire_observation is not None and gateway_lease_id is not None:
+                    try:
+                        persist_unknown_acquired_lease_candidate(
+                            connection,
+                            request,
+                            acquire_observation,
+                            gateway_lease_id,
+                            reason=(
+                                "validated allow lease candidate after local persistence failure: "
+                                f"{exc}"
+                            ),
+                        )
+                    except MetadataContractError:
+                        mark_human_review(
+                            connection,
+                            request,
+                            rpc_kind="allow_lease_acquire",
+                            reason=str(exc),
+                        )
+                else:
+                    mark_human_review(
+                        connection,
+                        request,
+                        rpc_kind="allow_lease_acquire",
+                        reason=str(exc),
+                    )
                 mark_human_review(
                     connection,
                     request,
@@ -1197,33 +1506,46 @@ def dispatch_with_metadata(
                 )
             raise RuntimeDispatchError("allow lease metadata validation failed") from exc
 
+        with immediate_transaction(connection):
+            lease_expired = expire_locally_expired_lease_before_spawn(
+                connection, request, gateway_lease_id
+            )
+        if lease_expired:
+            raise RuntimeDispatchError("allow lease expired before sessions_spawn")
+
         try:
-            session_metadata = spawn_metadata(request)
             spawn_observation = adapter.sessions_spawn(
-                {
-                    "metadata": session_metadata,
-                    "gateway_lease_id": gateway_lease_id,
-                    "client_request_id": request.spawn_client_request_id,
-                    "idempotency_key": request.spawn_idempotency_key,
-                }
+                spawn_rpc_params(request, gateway_lease_id)
             )
-            session_key = validate_accepted_session_identity(
-                external_id=spawn_observation.external_id,
-                spawn_request_session_key=spawn_observation.spawn_request_session_key,
-                session_key=spawn_observation.session_key,
-            )
-            with immediate_transaction(connection):
-                persist_spawn_acceptance(connection, request, spawn_observation, session_key)
+            try:
+                session_key = validate_accepted_session_identity(
+                    external_id=spawn_observation.external_id,
+                    spawn_request_session_key=spawn_observation.spawn_request_session_key,
+                    session_key=spawn_observation.session_key,
+                )
+                with immediate_transaction(connection):
+                    persist_spawn_acceptance(
+                        connection, request, spawn_observation, session_key
+                    )
+            except MetadataContractError as exc:
+                raise AdapterAmbiguousOutcomeError(
+                    "sessions_spawn returned unverifiable metadata after the "
+                    "application RPC; observed candidate requires human reconciliation",
+                    candidate_observation=spawn_observation,
+                ) from exc
         except AMBIGUOUS_TRANSPORT_ERRORS as exc:
             with immediate_transaction(connection):
-                mark_unknown(
+                mark_human_review(
                     connection,
                     request,
                     rpc_kind="sessions_spawn",
                     reason=str(exc),
                 )
+                candidate = getattr(exc, "candidate_observation", None)
+                if isinstance(candidate, MetadataObservation):
+                    persist_ambiguous_spawn_candidate(connection, request, candidate)
             raise RuntimeDispatchError(
-                "sessions_spawn transport outcome unknown; reconciliation required"
+                "sessions_spawn transport outcome unknown; human review required"
             ) from exc
         except (AdapterContractError, MetadataContractError) as exc:
             with immediate_transaction(connection):

@@ -187,6 +187,45 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(live["status"], "pending_non_authoritative")
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
+        local_p03 = live["local_p03_runtime_heartbeat_shadow"]
+        self.assertEqual(local_p03["status"], "local_only_non_authoritative")
+        self.assertEqual(
+            local_p03["ambiguous_sessions_spawn"],
+            "human_review_required_no_retry",
+        )
+        self.assertEqual(
+            local_p03["agentic_os_runtime_attest_rpc"],
+            "candidate_source_bound_unproven_live_gateway",
+        )
+        self.assertEqual(
+            local_p03["agentic_os_runtime_identity_rpc"],
+            "not_required_nonexistent_removed_current_enforcement_is_connection_bound_attestation",
+        )
+        self.assertEqual(
+            local_p03["signed_json_contract"],
+            "canonical_json_utf8_escaped_cross_language_validated",
+        )
+        self.assertFalse(local_p03["live_gateway_session_or_lease_mutation"])
+        self.assertFalse(local_p03["production_authority_enabled"])
+        source_bound = live["local_p03_source_bound_candidate_preflight"]
+        source_bound_path = root / source_bound["path"]
+        self.assertEqual(
+            source_bound["sha256"],
+            hashlib.sha256(source_bound_path.read_bytes()).hexdigest(),
+        )
+        source_bound_payload = json.loads(source_bound_path.read_text(encoding="utf-8"))
+        self.assertEqual(source_bound_payload["status"], "fail")
+        self.assertFalse(source_bound_payload["runtime_ready"])
+        self.assertEqual(
+            source_bound_payload["catalog"]["attestation_rpc_catalog"]["status"],
+            "source_bound_exact",
+        )
+        spawn_tool = next(
+            tool
+            for tool in source_bound_payload["catalog"]["model_tool_catalog"]["tools"]
+            if tool["name"] == "sessions_spawn"
+        )
+        self.assertEqual(len(spawn_tool["parameters"]), 12)
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
@@ -519,18 +558,18 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["catalog"]["status_alias_requirement"][
-                "future_canonical_status_method"
+                "canonical_status_method"
             ],
-            "sessions_status",
+            "session_status",
         )
         self.assertFalse(
             payload["catalog"]["status_alias_requirement"][
-                "future_canonical_status_alias_available"
+                "canonical_status_method_available"
             ]
         )
         self.assertEqual(
             payload["catalog"]["status_alias_requirement"][
-                "future_canonical_status_method_status"
+                "canonical_status_method_status"
             ],
             "missing_from_model_callable_tools_catalog",
         )
@@ -541,7 +580,7 @@ class CurrentStatusTests(unittest.TestCase):
             "accepted_session_identity_requirement",
             payload["catalog"]["future_db_authority_contract"],
         )
-        self.assertIn("runtime tool catalog is missing sessions_status", payload["error"])
+        self.assertNotIn("runtime tool catalog is missing session_status", payload["error"])
         self.assertIn("live reachability is unproven", payload["error"])
         self.assertNotIn("sessions_history is missing parameters", payload["error"])
         self.assertNotIn(

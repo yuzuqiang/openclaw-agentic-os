@@ -581,7 +581,7 @@ class MigrationTests(unittest.TestCase):
             "self_bootstrap_empty",
         )
 
-        self.assertEqual(apply_migrations(self.database), (13, 14, 15))
+        self.assertEqual(apply_migrations(self.database), (13, 14, 15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -617,7 +617,7 @@ class MigrationTests(unittest.TestCase):
                 requested_at_epoch_ms=2,
             )
 
-        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14, 15))
+        self.assertEqual(apply_migrations(self.database), (10, 11, 12, 13, 14, 15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -986,7 +986,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
         )
         retained_projection_id = _shadow_projection_id(
             "run-a", "reports/summary.json", "a" * 64
@@ -1086,7 +1086,7 @@ class MigrationTests(unittest.TestCase):
 
         self.assertEqual(
             apply_migrations(self.database),
-            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
         )
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
@@ -1111,6 +1111,7 @@ class MigrationTests(unittest.TestCase):
                     (13, current_hash),
                     (14, current_hash),
                     (15, current_hash),
+                    (16, current_hash),
                 ],
             )
 
@@ -1176,7 +1177,7 @@ class MigrationTests(unittest.TestCase):
                 (14, v14_hash),
             )
 
-        self.assertEqual(apply_migrations(self.database), (15,))
+        self.assertEqual(apply_migrations(self.database), (15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -1184,7 +1185,7 @@ class MigrationTests(unittest.TestCase):
                     "WHERE query_name=? ORDER BY schema_version",
                     (query_name,),
                 ).fetchall()[-2:],
-                [(14, v14_hash), (15, current_hash)],
+                [(15, current_hash), (16, current_hash)],
             )
 
     def test_strict_prior_reserve_migration_aborts_on_active_trust(self) -> None:
@@ -1589,6 +1590,7 @@ class MigrationTests(unittest.TestCase):
                 "trust_promotion_binding",
                 "db_authority_canary_binding",
                 "strict_prior_reserve_slo_identity",
+                "expired_lease_spawn_guard",
             ],
         )
         for migration in migrations:
@@ -1613,7 +1615,7 @@ class MigrationTests(unittest.TestCase):
         before_mtime = verify_target.stat().st_mtime_ns
         self.assertEqual(
             verify_database(verify_target),
-            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+            (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
         )
         self.assertEqual(hashlib.sha256(verify_target.read_bytes()).hexdigest(), before)
         self.assertEqual(verify_target.stat().st_mtime_ns, before_mtime)
@@ -2252,7 +2254,7 @@ class MigrationTests(unittest.TestCase):
                     ),
                 )
 
-        self.assertEqual(apply_migrations(self.database), (14, 15))
+        self.assertEqual(apply_migrations(self.database), (14, 15, 16))
         with sqlite3.connect(self.database) as connection:
             self.assertEqual(
                 connection.execute(
@@ -2944,6 +2946,28 @@ class MigrationTests(unittest.TestCase):
                 + ")",
                 released_without_proof,
             )
+        expired_without_proof = (
+            "expired-no-proof", "run", "phase", "transition", "agent", "requester",
+            "expired", "gateway-expired-no-proof", "client-expired-no-proof",
+            "idem-expired-no-proof", 60000, "v1", "now",
+            json.dumps(
+                {
+                    **metadata,
+                    "client_lease_id": "client-expired-no-proof",
+                    "idempotency_key": "idem-expired-no-proof",
+                    "gateway_lease_id": "gateway-expired-no-proof",
+                }
+            ),
+            "client-expired-no-proof", "idem-expired-no-proof", "run", "phase",
+            "transition", "agent", "requester", 60000, "past", 1,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "release intent proof"):
+            connection.execute(
+                f"INSERT INTO leases({acquire_fields}) VALUES("
+                + ",".join("?" for _ in expired_without_proof)
+                + ")",
+                expired_without_proof,
+            )
         released_fields = (
             f"{acquire_fields},release_idempotency_key,release_requested_at,released_at"
         )
@@ -3148,10 +3172,74 @@ class MigrationTests(unittest.TestCase):
                 "UPDATE leases SET state='release_not_required', gateway_lease_id=NULL "
                 "WHERE lease_id='acquired-live'"
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "expiry is immutable"):
+            connection.execute(
+                "UPDATE leases SET expires_at_epoch_ms=1 WHERE lease_id='acquired-live'"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "expiry is immutable"):
+            connection.execute(
+                "UPDATE leases SET expires_at='past', expires_at_epoch_ms=1 "
+                "WHERE lease_id='acquired-live'"
+            )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
             connection.execute(
                 "UPDATE leases SET state='expired' WHERE lease_id='acquired-live'"
             )
+        acquire_expired_metadata = json.dumps(
+            {
+                "client_lease_id": "client-expired",
+                "idempotency_key": "idem-expired",
+                "run_id": "run",
+                "phase": "phase",
+                "transition_id": "transition",
+                "agent_id": "agent",
+                "requester_agent_id": "requester",
+                "ttl_ms": 60000,
+                "gateway_lease_id": "gateway-expired",
+            }
+        )
+        connection.execute(
+            "INSERT INTO external_rpc_intents(intent_id,run_id,transition_id,rpc_kind,"
+            "phase,agent_id,requester_agent_id,ttl_ms,client_request_id,idempotency_key,"
+            "metadata_contract_version,metadata_json,external_metadata_json,"
+            "external_run_id,external_phase,external_transition_id,external_agent_id,"
+            "external_requester_agent_id,external_ttl_ms,external_client_request_id,"
+            "external_idempotency_key,state,"
+            "external_id,requested_at,requested_at_epoch_ms) VALUES('acquire-expired','run',"
+            "'transition','allow_lease_acquire','phase','agent','requester',60000,"
+            "'client-expired','idem-expired','v1','{}',?,'run','phase','transition','agent',"
+            "'requester',60000,"
+            "'client-expired','idem-expired','accepted','gateway-expired','now',1000)",
+            (acquire_expired_metadata,),
+        )
+        acquired_expired = (
+            "acquired-expired", "run", "phase", "transition", "agent", "requester",
+            "acquired", "gateway-expired", "client-expired", "idem-expired", 60000,
+            "v1", "now", acquire_expired_metadata, "client-expired", "idem-expired",
+            "run", "phase", "transition", "agent", "requester", 60000, "past", 1,
+        )
+        connection.execute(
+            f"INSERT INTO leases({acquire_fields}) VALUES("
+            + ",".join("?" for _ in acquired_expired)
+            + ")",
+            acquired_expired,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
+            connection.execute(
+                "UPDATE leases SET state='expired', ttl_ms=1, "
+                "metadata_contract_version=NULL, external_metadata_json=NULL "
+                "WHERE lease_id='acquired-expired'"
+            )
+        connection.execute(
+            "UPDATE leases SET state='expired' WHERE lease_id='acquired-expired'"
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT state,ttl_ms,metadata_contract_version,external_metadata_json "
+                "FROM leases WHERE lease_id='acquired-expired'"
+            ).fetchone(),
+            ("expired", 60000, "v1", acquire_expired_metadata),
+        )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "leaving live state"):
             connection.execute(
                 "UPDATE leases SET state='human_review_required', gateway_lease_id=NULL "
@@ -7641,12 +7729,13 @@ class MigrationTests(unittest.TestCase):
         self.addCleanup(connection.close)
         connection.execute("PRAGMA foreign_keys=ON")
         contract = SLO_QUERY_CONTRACTS[0]
+        future_version = max(migration.version for migration in load_migrations()) + 1
         migration_sha = "9" * 64
         query_hash = "9" * 64
         connection.execute(
             "INSERT INTO schema_migrations(version,name,sha256,applied_at) "
-            "VALUES(16,'future_contract',?,'now')",
-            (migration_sha,),
+            "VALUES(?,'future_contract',?,'now')",
+            (future_version, migration_sha),
         )
         connection.execute(
             "INSERT INTO slo_queries(query_name,schema_version,migration_sha256,"
@@ -7654,7 +7743,7 @@ class MigrationTests(unittest.TestCase):
             "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 contract.query_name,
-                16,
+                future_version,
                 migration_sha,
                 query_hash,
                 "SELECT 1;",
@@ -7668,7 +7757,7 @@ class MigrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM slo_queries WHERE query_name=?",
                 (contract.query_name,),
             ).fetchone(),
-            (16,),
+            (future_version,),
         )
 
     def test_slo_registry_delete_is_refused(self) -> None:
@@ -7880,6 +7969,7 @@ class MigrationTests(unittest.TestCase):
                 (13, "trust_promotion_binding"),
                 (14, "db_authority_canary_binding"),
                 (15, "strict_prior_reserve_slo_identity"),
+                (16, "expired_lease_spawn_guard"),
             ],
         )
 

@@ -2,14 +2,45 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
+from agentic_os.metadata import (
+    MetadataContractError,
+    validate_accepted_lease_identity,
+    validate_accepted_session_identity,
+    validate_allow_lease_observation,
+    validate_allow_lease_release_observation,
+    validate_session_observation,
+)
+from agentic_os.runtime_attestation import (
+    AttestableOpenClawTransport,
+    RuntimeAttestationError,
+    TransportBoundRuntimeAttestor,
+    VerifiedRuntimeAttestation,
+    assert_attestation_current,
+)
+
 
 class AdapterContractError(ValueError):
     """An OpenClaw response did not expose the required metadata contract."""
+
+
+class AdapterAmbiguousOutcomeError(AdapterContractError):
+    """An application RPC may have succeeded but can no longer be verified."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        candidate_observation: MetadataObservation | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.candidate_observation = candidate_observation
 
 
 @dataclass(frozen=True)
@@ -34,6 +65,11 @@ class MetadataCapableOpenClawAdapter(Protocol):
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
         ...
 
+    def adopt_verified_lease_ownership(
+        self, params: Mapping[str, Any], observation: MetadataObservation
+    ) -> None:
+        ...
+
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
         ...
 
@@ -46,16 +82,38 @@ class MetadataCapableOpenClawAdapter(Protocol):
     def session_result(self, session_key: str) -> MetadataObservation:
         ...
 
+    def refresh_runtime_attestation(
+        self, attestor: TransportBoundRuntimeAttestor
+    ) -> None:
+        ...
+
 
 class OpenClawTransport(Protocol):
     def call(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         ...
 
 
+SESSIONS_SPAWN_PUBLIC_RPC_PARAMS = frozenset(
+    (
+        "task",
+        "taskName",
+        "runtime",
+        "mode",
+        "agentId",
+        "cleanup",
+        "context",
+        "lightContext",
+        "client_request_id",
+        "idempotency_key",
+        "gateway_lease_id",
+        "metadata",
+    )
+)
+
 _REQUIRED_SESSION_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
-    "sessions_spawn": frozenset(("client_request_id", "idempotency_key", "metadata")),
+    "sessions_spawn": SESSIONS_SPAWN_PUBLIC_RPC_PARAMS,
     "sessions_list": frozenset(),
-    "sessions_status": frozenset(("session_key",)),
+    "session_status": frozenset(("sessionKey",)),
     "sessions_history": frozenset(("sessionKey", "limit", "includeTools")),
 }
 
@@ -86,6 +144,27 @@ _REQUIRED_ALLOW_LEASE_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
         )
     ),
 }
+
+_ALLOW_LEASE_OWNER_METADATA_PARAMS = frozenset(
+    (
+        "client_lease_id",
+        "run_id",
+        "phase",
+        "transition_id",
+        "agent_id",
+        "requester_agent_id",
+        "gateway_lease_id",
+    )
+)
+
+_SPAWN_LEASE_OWNER_METADATA_PARAMS = frozenset(
+    (
+        "run_id",
+        "phase",
+        "transition_id",
+        "agent_id",
+    )
+)
 
 _REQUIRED_RUNTIME_TOOL_PARAMS: Mapping[str, frozenset[str]] = {
     **_REQUIRED_ALLOW_LEASE_TOOL_PARAMS,
@@ -191,7 +270,10 @@ def _split_evidence_authority_errors(
                 and required_tools[name]
                 and isinstance(parameter_evidence, Mapping)
                 and parameter_evidence.get("status")
-                == "unproven_from_catalog_and_installed_sources"
+                in {
+                    "unproven_from_catalog_and_installed_sources",
+                    "catalog_schema_disagrees_with_installed_source",
+                }
             ):
                 unproven_parameter_methods.add(name)
 
@@ -225,6 +307,10 @@ def _split_evidence_authority_errors(
                     f"runtime Gateway RPC {method} is missing authority-aware live "
                     "reachability evidence"
                 )
+            elif method != "subagents.allowLease.status" and _signed_method_binding_evidence_valid(
+                evidence, method
+            ):
+                continue
             elif evidence.get("live_reachability") != "reachable":
                 errors.append(
                     f"runtime Gateway RPC {method} live reachability is unproven; "
@@ -253,6 +339,26 @@ def _is_sha256(value: Any) -> bool:
         isinstance(value, str)
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _signed_method_binding_evidence_valid(
+    evidence: Mapping[str, Any], method: str
+) -> bool:
+    binding = evidence.get("method_binding")
+    if not isinstance(binding, Mapping):
+        return False
+    parameter_names = binding.get("parameter_names")
+    if not isinstance(parameter_names, Sequence) or isinstance(
+        parameter_names, (str, bytes, bytearray)
+    ):
+        return False
+    return (
+        evidence.get("live_reachability") == "signed_method_binding"
+        and binding.get("status") == "signed_exact"
+        and binding.get("method") == method
+        and frozenset(str(name) for name in parameter_names)
+        == _REQUIRED_ALLOW_LEASE_TOOL_PARAMS[method]
     )
 
 
@@ -310,7 +416,7 @@ def assert_preflighted_runtime_authority(payload: Mapping[str, Any]) -> None:
     else:
         if gateway_catalog.get("catalog_kind") != "source_bound_gateway_rpc_catalog":
             errors.append("runtime Gateway RPC catalog kind is invalid")
-        if gateway_catalog.get("authority") != "installed_runtime_dist_sources":
+        if gateway_catalog.get("authority") != "installed_runtime_sources":
             errors.append(
                 "runtime Gateway RPC catalog authority must be installed runtime sources"
             )
@@ -431,10 +537,16 @@ def _assert_installed_tools(
             )
             continue
         missing_params = sorted(required_params - entries[method])
+        extra_params = sorted(entries[method] - required_params)
         if missing_params:
             missing = ", ".join(missing_params)
             errors.append(
                 f"runtime tool catalog {method} is missing parameters: {missing}"
+            )
+        if extra_params:
+            extra = ", ".join(extra_params)
+            errors.append(
+                f"runtime tool catalog {method} has unexpected parameters: {extra}"
             )
     if errors:
         raise AdapterContractError("; ".join(errors))
@@ -470,7 +582,11 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
     if not isinstance(items, Sequence) or isinstance(items, (str, bytes, bytearray)):
         raise AdapterContractError(f"{label} response must include {label}")
     observations: list[MetadataObservation] = []
-    for item in items:
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise AdapterContractError(
+                f"{label} response contains malformed {label} item at index {index}"
+            )
         try:
             mapped = _mapping(item, label)
         except AdapterContractError:
@@ -479,10 +595,14 @@ def _observations_from_items(items: Any, label: str) -> tuple[MetadataObservatio
             observations.append(observation_from_openclaw_response(mapped))
         except AdapterContractError:
             partial = partial_observation_from_openclaw_response(mapped)
-            if partial is not None:
-                observations.append(
-                    replace(partial, metadata_contract_version=None, raw_json=None)
+            if partial is None:
+                raise AdapterContractError(
+                    f"{label} response contains identity-less malformed "
+                    f"{label} item at index {index}"
                 )
+            observations.append(
+                replace(partial, metadata_contract_version=None, raw_json=None)
+            )
     return tuple(observations)
 
 
@@ -510,6 +630,7 @@ def _history_item_session_keys(
                 (
                     (f"{label}.session_key", item.get("session_key")),
                     (f"{label}.sessionKey", item.get("sessionKey")),
+                    (f"{label}.key", item.get("key")),
                     (f"{label}.session.session_key", session.get("session_key")),
                     (f"{label}.session.sessionKey", session.get("sessionKey")),
                     (f"{label}.session.key", session.get("key")),
@@ -559,19 +680,67 @@ def _history_item_session_keys(
                     ),
                 ),
             )
-            if (
-                session_key is not None
-                or spawn_request_session_key is not None
-                or external_id is not None
-            ):
-                identities.append(
-                    (label, session_key, spawn_request_session_key, external_id)
-                )
+            identities.append(
+                (label, session_key, spawn_request_session_key, external_id)
+            )
     return tuple(identities)
 
 
 def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _consistent_metadata_mapping_alias(
+    label: str,
+    aliases: Iterable[tuple[str, Any]],
+) -> Mapping[str, Any]:
+    present: list[tuple[str, Mapping[str, Any]]] = []
+    for name, value in aliases:
+        if value is None:
+            continue
+        present.append((name, _mapping(value, name)))
+    if not present:
+        raise AdapterContractError(f"{label} is required")
+    canonical = json.dumps(
+        dict(present[0][1]),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    for name, value in present[1:]:
+        candidate = json.dumps(
+            dict(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        if candidate != canonical:
+            raise AdapterContractError(
+                f"conflicting {label} aliases: {present[0][0]} != {name}"
+            )
+    return present[0][1]
+
+
+def _consistent_string_alias(
+    label: str,
+    aliases: Iterable[tuple[str, Any]],
+) -> str:
+    present: list[tuple[str, str]] = []
+    for name, value in aliases:
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value:
+            raise AdapterContractError(f"{name} must be a non-empty string")
+        present.append((name, value))
+    if not present:
+        raise AdapterContractError(f"{label} is required")
+    first_name, first_value = present[0]
+    for name, value in present[1:]:
+        if value != first_value:
+            raise AdapterContractError(
+                f"conflicting {label} aliases: {first_name} != {name}"
+            )
+    return first_value
 
 
 def partial_observation_from_openclaw_response(
@@ -642,26 +811,35 @@ def partial_observation_from_openclaw_response(
 def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataObservation:
     """Extract normalized/raw metadata from OpenClaw-shaped raw responses."""
 
-    container: Mapping[str, Any] = response
+    containers: list[tuple[str, Mapping[str, Any]]] = [("response", response)]
     if isinstance(response.get("metadata"), Mapping):
-        container = _mapping(response["metadata"], "metadata")
+        containers.append(("metadata", _mapping(response["metadata"], "metadata")))
 
-    normalized = (
-        container.get("normalized")
-        or container.get("normalized_metadata")
-        or container.get("external_metadata")
+    normalized = _consistent_metadata_mapping_alias(
+        "normalized metadata",
+        tuple(
+            (f"{container_name}.{alias}", container.get(alias))
+            for container_name, container in containers
+            for alias in ("normalized", "normalized_metadata", "external_metadata")
+        ),
     )
-    normalized = _mapping(normalized, "normalized metadata")
 
-    raw_json = container.get("raw_json") or container.get("raw_metadata_json")
-    if not isinstance(raw_json, str) or not raw_json:
-        raise AdapterContractError("raw metadata JSON is required")
-
-    version = container.get("metadata_contract_version") or container.get(
-        "contract_version"
+    raw_json = _consistent_string_alias(
+        "raw metadata JSON",
+        tuple(
+            (f"{container_name}.{alias}", container.get(alias))
+            for container_name, container in containers
+            for alias in ("raw_json", "raw_metadata_json")
+        ),
     )
-    if not isinstance(version, str) or not version:
-        raise AdapterContractError("metadata contract version is required")
+    version = _consistent_string_alias(
+        "metadata contract version",
+        tuple(
+            (f"{container_name}.{alias}", container.get(alias))
+            for container_name, container in containers
+            for alias in ("metadata_contract_version", "contract_version")
+        ),
+    )
 
     lease: Mapping[str, Any] | None = None
     if isinstance(response.get("lease"), Mapping):
@@ -714,6 +892,15 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
             "session external identity",
             (
                 ("external_id", response.get("external_id")),
+                ("externalId", response.get("externalId")),
+                (
+                    "session.external_id",
+                    session.get("external_id") if session is not None else None,
+                ),
+                (
+                    "session.externalId",
+                    session.get("externalId") if session is not None else None,
+                ),
                 ("session_key", session_key),
             ),
         )
@@ -747,133 +934,666 @@ def observation_from_openclaw_response(response: Mapping[str, Any]) -> MetadataO
     )
 
 
+@dataclass(frozen=True)
+class _AdapterAuthorityState:
+    attestation: VerifiedRuntimeAttestation
+    clock_ms: Any
+    monotonic_ms: Any
+
+
+_ADAPTER_AUTHORITIES: "weakref.WeakKeyDictionary[OpenClawAdapter, _AdapterAuthorityState]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _attestation_identity_continuity_error(
+    previous: VerifiedRuntimeAttestation, current: VerifiedRuntimeAttestation
+) -> str | None:
+    comparisons = (
+        ("runtime identity", previous.identity_sha256, current.identity_sha256),
+        ("owner scope", previous.owner_scope_id, current.owner_scope_id),
+        ("transport identity", previous.transport_identity, current.transport_identity),
+        ("Gateway endpoint", previous.gateway_endpoint, current.gateway_endpoint),
+        ("Gateway build", previous.gateway_build_id, current.gateway_build_id),
+    )
+    for label, old_value, new_value in comparisons:
+        if old_value != new_value:
+            return f"{label} changed across runtime attestation refresh"
+    return None
+
+
 class OpenClawAdapter:
-    """Fail-closed RPC adapter pending a transport-bound runtime attestor."""
+    """RPC adapter available only for one freshly attested transport target."""
 
     def __init__(self, transport: OpenClawTransport) -> None:
         del transport
         raise AdapterContractError(
-            "OpenClawAdapter construction is disabled until a transport-bound "
-            "runtime attestor is implemented"
+            "OpenClawAdapter construction requires a transport-bound runtime attestor"
         )
 
-    def _require_verified_runtime_authority(self) -> None:
-        """Reject until a real attestor can bind authority to this exact instance."""
-
-        raise AdapterContractError(
-            "OpenClawAdapter has no verified transport-bound runtime authority"
+    @classmethod
+    def from_attested_transport(
+        cls,
+        transport: AttestableOpenClawTransport,
+        attestor: TransportBoundRuntimeAttestor,
+    ) -> "OpenClawAdapter":
+        if getattr(transport, "supports_persistent_adapter_authority", False) is not True:
+            raise AdapterContractError(
+                "transport cannot mint persistent adapter authority without a bound application channel"
+            )
+        try:
+            attestation = attestor.attest(transport)
+        except RuntimeAttestationError as exc:
+            raise AdapterContractError(str(exc)) from exc
+        adapter = object.__new__(cls)
+        adapter._transport = transport
+        adapter._lease_metadata_by_external_id: dict[str, dict[str, Any]] = {}
+        adapter._lease_identity_by_request: dict[tuple[str, str], str] = {}
+        adapter._lease_acquire_request_by_request_identity: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
+        adapter._quarantined_lease_ids: set[str] = set()
+        adapter._session_metadata_by_key: dict[str, dict[str, str]] = {}
+        adapter._session_identity_by_request: dict[tuple[str, str], str] = {}
+        adapter._session_spawn_request_by_request_identity: dict[
+            tuple[str, str], str
+        ] = {}
+        _ADAPTER_AUTHORITIES[adapter] = _AdapterAuthorityState(
+            attestation=attestation,
+            clock_ms=attestor.clock_ms,
+            monotonic_ms=attestor.monotonic_ms,
         )
+        return adapter
+
+    def _quarantine_lease_identity(self, gateway_lease_id: str) -> None:
+        self._quarantined_lease_identity_set().add(gateway_lease_id)
+        self._lease_metadata_by_external_id.pop(gateway_lease_id, None)
+
+    def _reject_quarantined_lease_identity(
+        self, gateway_lease_id: str, context: str
+    ) -> None:
+        if gateway_lease_id in self._quarantined_lease_identity_set():
+            raise AdapterAmbiguousOutcomeError(
+                f"{context} references quarantined ambiguous adapter lease ownership"
+            )
+
+    def _quarantined_lease_identity_set(self) -> set[str]:
+        quarantined = getattr(self, "_quarantined_lease_ids", None)
+        if quarantined is None:
+            quarantined = set()
+            self._quarantined_lease_ids = quarantined
+        return quarantined
+
+    def _require_verified_runtime_authority(self) -> _AdapterAuthorityState:
+        state = _ADAPTER_AUTHORITIES.get(self)
+        if state is None:
+            raise AdapterContractError(
+                "OpenClawAdapter has no verified transport-bound runtime authority"
+            )
+        try:
+            assert_attestation_current(
+                self._transport,
+                state.attestation,
+                clock_ms=state.clock_ms,
+                monotonic_ms=state.monotonic_ms,
+            )
+        except (AttributeError, RuntimeAttestationError) as exc:
+            raise AdapterContractError(str(exc)) from exc
+        return state
 
     @property
     def runtime_authority_verified(self) -> bool:
-        return False
+        try:
+            self._require_verified_runtime_authority()
+        except AdapterContractError:
+            return False
+        return True
+
+    @property
+    def runtime_attestation_digest(self) -> str:
+        state = self._require_verified_runtime_authority()
+        return state.attestation.payload_sha256
+
+    def refresh_runtime_attestation(
+        self, attestor: TransportBoundRuntimeAttestor
+    ) -> None:
+        if getattr(self._transport, "supports_persistent_adapter_authority", False) is not True:
+            raise AdapterContractError(
+                "transport cannot refresh persistent adapter authority without a bound application channel"
+            )
+        previous_state = _ADAPTER_AUTHORITIES.get(self)
+        if previous_state is None:
+            raise AdapterContractError(
+                "OpenClawAdapter has no verified transport-bound runtime authority"
+            )
+        try:
+            attestation = attestor.attest(self._transport)
+        except RuntimeAttestationError as exc:
+            raise AdapterContractError(str(exc)) from exc
+        continuity_error = _attestation_identity_continuity_error(
+            previous_state.attestation, attestation
+        )
+        if continuity_error is not None:
+            self._lease_metadata_by_external_id.clear()
+            self._lease_identity_by_request.clear()
+            self._lease_acquire_request_by_request_identity.clear()
+            self._session_metadata_by_key.clear()
+            self._session_identity_by_request.clear()
+            self._session_spawn_request_by_request_identity.clear()
+            _ADAPTER_AUTHORITIES.pop(self, None)
+            raise AdapterContractError(
+                f"{continuity_error}; cached runtime lease/session ownership was cleared"
+            )
+        _ADAPTER_AUTHORITIES[self] = _AdapterAuthorityState(
+            attestation=attestation,
+            clock_ms=attestor.clock_ms,
+            monotonic_ms=attestor.monotonic_ms,
+        )
 
     @classmethod
     def from_preflighted_catalog(
         cls, transport: OpenClawTransport, payload: Mapping[str, Any]
     ) -> "OpenClawAdapter":
+        del cls, transport
         assert_preflighted_runtime_authority(payload)
         raise AdapterContractError(
             "unsigned preflight mapping cannot mint verified runtime authority"
         )
 
-    def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        return observation_from_openclaw_response(
-            _transport_response(
-                self._transport.call("subagents.allowLease.acquire", params),
-                "subagents.allowLease.acquire",
+    def _call(
+        self, logical_name: str, params: Mapping[str, Any]
+    ) -> tuple[str, Mapping[str, Any]]:
+        state = self._require_verified_runtime_authority()
+        binding = state.attestation.method_bindings[logical_name]
+        expected_parameters = set(binding.parameter_names)
+        actual_parameters = set(params)
+        missing = sorted(expected_parameters - actual_parameters)
+        extra = sorted(actual_parameters - expected_parameters)
+        if missing or extra:
+            details = []
+            if missing:
+                details.append(f"missing: {', '.join(missing)}")
+            if extra:
+                details.append(f"extra: {', '.join(extra)}")
+            raise AdapterContractError(
+                f"{binding.method} request must contain the exact attested parameter set "
+                f"({'; '.join(details)})"
             )
+        response = self._transport.call(binding.method, params)
+        try:
+            assert_attestation_current(
+                self._transport,
+                state.attestation,
+                clock_ms=state.clock_ms,
+                monotonic_ms=state.monotonic_ms,
+            )
+        except (AttributeError, RuntimeAttestationError) as exc:
+            raise AdapterAmbiguousOutcomeError(
+                "runtime attestation expired or drifted after application RPC; "
+                "outcome requires human review"
+            ) from exc
+        return binding.method, _transport_response(response, binding.method)
+
+    @staticmethod
+    def _metadata_error(exc: MetadataContractError) -> AdapterContractError:
+        return AdapterContractError(str(exc))
+
+    def allow_lease_acquire(self, params: Mapping[str, Any]) -> MetadataObservation:
+        authority = self._require_verified_runtime_authority()
+        request_identity = self._request_identity(
+            params, "client_lease_id", "idempotency_key", "allowLease acquire"
         )
+        local_request = dict(params)
+        if set(local_request) != set(
+            authority.attestation.method_bindings[
+                "allow_lease_acquire"
+            ].parameter_names
+        ):
+            raise AdapterContractError(
+                "allowLease acquire request must contain the exact attested parameter set"
+            )
+        ttl_ms = local_request.get("ttl_ms")
+        if type(ttl_ms) is not int or not 1 <= ttl_ms <= 31_536_000_000:
+            raise AdapterContractError("allowLease acquire ttl_ms is invalid")
+        self._require_nonempty_strings(
+            local_request,
+            set(local_request) - {"ttl_ms"},
+            "allowLease acquire",
+        )
+        prior_request = self._lease_acquire_request_by_request_identity.get(
+            request_identity
+        )
+        if prior_request is not None and prior_request != local_request:
+            raise AdapterContractError(
+                "duplicate allowLease acquire request changed owner metadata"
+            )
+        method, response = self._call("allow_lease_acquire", params)
+        observation = observation_from_openclaw_response(response)
+        try:
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=observation.external_id
+            )
+            local = {**dict(params), "gateway_lease_id": gateway_lease_id}
+            validate_allow_lease_observation(
+                local=local,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        prior_identity = self._lease_identity_by_request.get(request_identity)
+        if prior_identity is not None and prior_identity != gateway_lease_id:
+            self._quarantine_lease_identity(gateway_lease_id)
+            raise AdapterAmbiguousOutcomeError(
+                "duplicate allowLease acquire returned a different lease identity; "
+                "gateway lease identity is quarantined for human reconciliation",
+                candidate_observation=observation,
+            )
+        expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected is not None and expected != local:
+            self._quarantine_lease_identity(gateway_lease_id)
+            raise AdapterAmbiguousOutcomeError(
+                "allowLease acquire ownership conflicts with cached adapter ownership; "
+                "gateway lease identity is quarantined for human reconciliation",
+                candidate_observation=observation,
+            )
+        self._reject_quarantined_lease_identity(gateway_lease_id, "allowLease acquire")
+        self._lease_identity_by_request[request_identity] = gateway_lease_id
+        self._lease_acquire_request_by_request_identity[request_identity] = local_request
+        self._lease_metadata_by_external_id[gateway_lease_id] = local
+        return observation
+
+    def adopt_verified_lease_ownership(
+        self, params: Mapping[str, Any], observation: MetadataObservation
+    ) -> None:
+        self._require_verified_runtime_authority()
+        try:
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=observation.external_id
+            )
+            local = {**dict(params), "gateway_lease_id": gateway_lease_id}
+            validate_allow_lease_observation(
+                local=local,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected is not None and expected != local:
+            self._quarantine_lease_identity(gateway_lease_id)
+            raise AdapterAmbiguousOutcomeError(
+                "adopted allowLease ownership conflicts with cached adapter ownership; "
+                "gateway lease identity is quarantined for human reconciliation",
+                candidate_observation=observation,
+            )
+        self._reject_quarantined_lease_identity(
+            gateway_lease_id, "adopted allowLease ownership"
+        )
+        self._lease_metadata_by_external_id[gateway_lease_id] = local
 
     def allow_lease_list(self) -> Sequence[MetadataObservation]:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        response = _transport_response(
-            self._transport.call("subagents.allowLease.status", {}),
-            "subagents.allowLease.status",
-        )
-        return _observations_from_items(response.get("leases"), "lease")
+        method, response = self._call("allow_lease_status", {})
+        observations = _observations_from_items(response.get("leases"), "lease")
+        for observation in observations:
+            external_id = observation.external_id or ""
+            self._reject_quarantined_lease_identity(external_id, "allowLease status")
+            expected = self._lease_metadata_by_external_id.get(external_id)
+            if expected is None:
+                continue
+            try:
+                validate_allow_lease_observation(
+                    local=expected,
+                    normalized=observation.normalized,
+                    raw_json=observation.raw_json,
+                    metadata_contract_version=observation.metadata_contract_version,
+                )
+            except MetadataContractError as exc:
+                raise self._metadata_error(exc) from exc
+        del method
+        return observations
 
     def allow_lease_release(self, params: Mapping[str, Any]) -> MetadataObservation:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        return observation_from_openclaw_response(
-            _transport_response(
-                self._transport.call("subagents.allowLease.release", params),
-                "subagents.allowLease.release",
+        self._require_verified_runtime_authority()
+        try:
+            validate_allow_lease_release_observation(
+                local=params,
+                normalized=params,
+                raw_json=json.dumps(
+                    dict(params), sort_keys=True, separators=(",", ":")
+                ),
+                metadata_contract_version="v1",
             )
-        )
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=str(params.get("gateway_lease_id") or "")
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        self._reject_quarantined_lease_identity(gateway_lease_id, "allowLease release")
+        expected = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected is None:
+            raise AdapterContractError(
+                "allowLease release requires cached adapter lease ownership"
+            )
+        mismatched_owner_fields = [
+            key
+            for key in sorted(_ALLOW_LEASE_OWNER_METADATA_PARAMS)
+            if expected.get(key) != params.get(key)
+        ]
+        if mismatched_owner_fields:
+            raise AdapterContractError(
+                "allowLease release owner metadata does not match cached adapter "
+                f"lease ownership: {', '.join(mismatched_owner_fields)}"
+            )
+        method, response = self._call("allow_lease_release", params)
+        observation = observation_from_openclaw_response(response)
+        try:
+            validate_accepted_lease_identity(
+                gateway_lease_id=observation.external_id,
+                duplicate_acquire_lease_id=str(params.get("gateway_lease_id") or ""),
+            )
+            validate_allow_lease_release_observation(
+                local=params,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        self._lease_metadata_by_external_id.pop(gateway_lease_id, None)
+        del method
+        return observation
 
     def sessions_spawn(self, params: Mapping[str, Any]) -> MetadataObservation:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        return observation_from_openclaw_response(
-            _transport_response(
-                self._transport.call("sessions_spawn", params), "sessions_spawn"
-            )
+        authority = self._require_verified_runtime_authority()
+        local_request = dict(params)
+        expected_parameters = set(
+            authority.attestation.method_bindings["sessions_spawn"].parameter_names
         )
+        actual_parameters = set(params)
+        if actual_parameters != expected_parameters:
+            missing = sorted(expected_parameters - actual_parameters)
+            extra = sorted(actual_parameters - expected_parameters)
+            details = []
+            if missing:
+                details.append(f"missing: {', '.join(missing)}")
+            if extra:
+                details.append(f"extra: {', '.join(extra)}")
+            raise AdapterContractError(
+                "sessions_spawn request must contain the exact attested parameter set "
+                f"({'; '.join(details)})"
+            )
+        metadata = params.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise AdapterContractError("sessions_spawn metadata must be an object")
+        if (
+            metadata.get("client_request_id") != params.get("client_request_id")
+            or metadata.get("idempotency_key") != params.get("idempotency_key")
+        ):
+            raise AdapterContractError(
+                "sessions_spawn top-level request identity must match metadata"
+            )
+        task = params.get("task")
+        if not isinstance(task, str) or not task:
+            raise AdapterContractError("sessions_spawn task must be a non-empty string")
+        if hashlib.sha256(task.encode("utf-8")).hexdigest() != metadata.get(
+            "task_digest"
+        ):
+            raise AdapterContractError(
+                "sessions_spawn metadata task_digest must match task"
+            )
+        for field in (
+            "taskName",
+            "runtime",
+            "mode",
+            "agentId",
+            "cleanup",
+            "context",
+            "gateway_lease_id",
+        ):
+            if not isinstance(params.get(field), str) or not params.get(field):
+                raise AdapterContractError(
+                    f"sessions_spawn {field} must be a non-empty string"
+                )
+        if params.get("runtime") != "subagent":
+            raise AdapterContractError('sessions_spawn runtime must be "subagent"')
+        if params.get("mode") != "run":
+            raise AdapterContractError('sessions_spawn mode must be "run"')
+        if params.get("cleanup") not in {"delete", "keep"}:
+            raise AdapterContractError("sessions_spawn cleanup is invalid")
+        if params.get("context") not in {"fork", "isolated"}:
+            raise AdapterContractError("sessions_spawn context is invalid")
+        if type(params.get("lightContext")) is not bool:
+            raise AdapterContractError("sessions_spawn lightContext must be a boolean")
+        if metadata.get("agent_id") != params.get("agentId"):
+            raise AdapterContractError(
+                "sessions_spawn agentId must match metadata agent_id"
+            )
+        request_identity = self._request_identity(
+            params, "client_request_id", "idempotency_key", "sessions_spawn"
+        )
+        try:
+            request_fingerprint = json.dumps(
+                local_request,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise AdapterContractError(
+                "sessions_spawn request must be JSON serializable"
+            ) from exc
+        prior_request = self._session_spawn_request_by_request_identity.get(
+            request_identity
+        )
+        if prior_request is not None and prior_request != request_fingerprint:
+            raise AdapterContractError(
+                "duplicate sessions_spawn request changed execution descriptor"
+            )
+        try:
+            validate_session_observation(
+                local=metadata,
+                normalized=metadata,
+                raw_json=json.dumps(
+                    dict(metadata), sort_keys=True, separators=(",", ":")
+                ),
+                metadata_contract_version="v1",
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        try:
+            gateway_lease_id = validate_accepted_lease_identity(
+                gateway_lease_id=str(params.get("gateway_lease_id") or "")
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
+        self._reject_quarantined_lease_identity(gateway_lease_id, "sessions_spawn")
+        expected_lease = self._lease_metadata_by_external_id.get(gateway_lease_id)
+        if expected_lease is None:
+            raise AdapterContractError(
+                "sessions_spawn requires cached live adapter lease ownership"
+            )
+        mismatched_lease_fields = [
+            key
+            for key in sorted(_SPAWN_LEASE_OWNER_METADATA_PARAMS)
+            if expected_lease.get(key) != metadata.get(key)
+        ]
+        if mismatched_lease_fields:
+            raise AdapterContractError(
+                "sessions_spawn lease owner metadata does not match cached adapter "
+                f"lease ownership: {', '.join(mismatched_lease_fields)}"
+            )
+        self._session_spawn_request_by_request_identity.setdefault(
+            request_identity, request_fingerprint
+        )
+        method, response = self._call("sessions_spawn", params)
+        try:
+            observation = observation_from_openclaw_response(response)
+        except AdapterContractError as exc:
+            raise AdapterAmbiguousOutcomeError(
+                "sessions_spawn returned an unverifiable response after the "
+                "application RPC; raw candidate requires human reconciliation",
+                candidate_observation=MetadataObservation(
+                    metadata_contract_version=None,
+                    normalized=None,
+                    raw_json=None,
+                    raw_response_json=_json_object(response),
+                ),
+            ) from exc
+        try:
+            validate_session_observation(
+                local=metadata,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+            session_key = validate_accepted_session_identity(
+                external_id=observation.external_id,
+                spawn_request_session_key=observation.spawn_request_session_key,
+                session_key=observation.session_key,
+            )
+        except MetadataContractError as exc:
+            raise AdapterAmbiguousOutcomeError(
+                "sessions_spawn returned unverifiable metadata after the application "
+                "RPC; observed candidate requires human reconciliation",
+                candidate_observation=observation,
+            ) from exc
+        prior_identity = self._session_identity_by_request.get(request_identity)
+        if prior_identity is not None and prior_identity != session_key:
+            raise AdapterAmbiguousOutcomeError(
+                "duplicate sessions_spawn returned a different session identity; "
+                "observed candidate identity requires human reconciliation",
+                candidate_observation=observation,
+            )
+        prior_session_metadata = self._session_metadata_by_key.get(session_key)
+        if (
+            prior_session_metadata is not None
+            and prior_session_metadata != dict(metadata)
+        ):
+            raise AdapterAmbiguousOutcomeError(
+                "sessions_spawn session identity is already cached for different "
+                "request metadata; observed candidate identity requires human "
+                "reconciliation",
+                candidate_observation=observation,
+            )
+        self._session_identity_by_request[request_identity] = session_key
+        self._session_metadata_by_key[session_key] = dict(metadata)
+        del method
+        return observation
 
     def sessions_list(self) -> Sequence[MetadataObservation]:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        response = _transport_response(
-            self._transport.call("sessions_list", {}), "sessions_list"
+        method, response = self._call("sessions_list", {})
+        observations = _observations_from_items(response.get("sessions"), "session")
+        for observation in observations:
+            expected = self._session_metadata_by_key.get(observation.external_id or "")
+            if expected is None:
+                continue
+            self._validate_session_echo(expected, observation, observation.external_id)
+        del method
+        return observations
+
+    @staticmethod
+    def _request_identity(
+        params: Mapping[str, Any], first: str, second: str, label: str
+    ) -> tuple[str, str]:
+        values = (params.get(first), params.get(second))
+        if any(not isinstance(value, str) or not value for value in values):
+            raise AdapterContractError(
+                f"{label} {first} and {second} must be non-empty strings"
+            )
+        return values[0], values[1]
+
+    @staticmethod
+    def _require_nonempty_strings(
+        params: Mapping[str, Any], fields: set[str], label: str
+    ) -> None:
+        invalid = sorted(
+            field
+            for field in fields
+            if not isinstance(params.get(field), str) or not params.get(field)
         )
-        return _observations_from_items(response.get("sessions"), "session")
+        if invalid:
+            raise AdapterContractError(
+                f"{label} fields must be non-empty strings: {', '.join(invalid)}"
+            )
+
+    def _validate_session_echo(
+        self,
+        expected_metadata: Mapping[str, Any],
+        observation: MetadataObservation,
+        expected_session_key: str | None,
+    ) -> str:
+        try:
+            validate_session_observation(
+                local=expected_metadata,
+                normalized=observation.normalized,
+                raw_json=observation.raw_json,
+                metadata_contract_version=observation.metadata_contract_version,
+            )
+            return validate_accepted_session_identity(
+                external_id=observation.external_id,
+                spawn_request_session_key=observation.spawn_request_session_key,
+                session_key=observation.session_key,
+                duplicate_spawn_session_key=expected_session_key,
+            )
+        except MetadataContractError as exc:
+            raise self._metadata_error(exc) from exc
 
     def session_status(self, session_key: str) -> MetadataObservation:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        return observation_from_openclaw_response(
-            _transport_response(
-                self._transport.call("sessions_status", {"session_key": session_key}),
-                "sessions_status",
+        self._require_verified_runtime_authority()
+        expected = self._session_metadata_by_key.get(session_key)
+        if expected is None:
+            raise AdapterContractError(
+                "session_status requires an accepted session identity from this adapter"
             )
-        )
+        method, response = self._call("session_status", {"sessionKey": session_key})
+        observation = observation_from_openclaw_response(response)
+        self._validate_session_echo(expected, observation, session_key)
+        del method
+        return observation
 
     def session_result(self, session_key: str) -> MetadataObservation:
-        OpenClawAdapter._require_verified_runtime_authority(self)
-        response = _transport_response(
-            self._transport.call(
-                "sessions_history",
-                {"sessionKey": session_key, "limit": 1, "includeTools": True},
-            ),
+        self._require_verified_runtime_authority()
+        expected = self._session_metadata_by_key.get(session_key)
+        if expected is None:
+            raise AdapterContractError(
+                "sessions_history requires an accepted session identity from this adapter"
+            )
+        method, response = self._call(
             "sessions_history",
+            {"sessionKey": session_key, "limit": 1, "includeTools": True},
         )
         observation = observation_from_openclaw_response(response)
-        if (
-            not observation.external_id
-            or not observation.session_key
-            or not observation.spawn_request_session_key
-        ):
-            raise AdapterContractError(
-                "sessions_history response must include accepted session identity"
-            )
-        if (
-            observation.external_id != session_key
-            or observation.session_key != session_key
-            or observation.spawn_request_session_key != session_key
-        ):
-            raise AdapterContractError(
-                "sessions_history response identity must match requested session"
-            )
+        self._validate_session_echo(expected, observation, session_key)
         for (
             label,
             item_session_key,
             item_spawn_request_session_key,
             item_external_id,
-        ) in (
-            _history_item_session_keys(response)
-        ):
+        ) in _history_item_session_keys(response):
+            if (
+                item_session_key is None
+                and item_spawn_request_session_key is None
+                and item_external_id is None
+            ):
+                raise AdapterContractError(
+                    f"{method} {label} must include requested session identity"
+                )
             if item_session_key is not None and item_session_key != session_key:
                 raise AdapterContractError(
-                    f"sessions_history {label} identity must match requested session"
+                    f"{method} {label} identity must match requested session"
                 )
             if (
                 item_spawn_request_session_key is not None
                 and item_spawn_request_session_key != session_key
             ):
                 raise AdapterContractError(
-                    f"sessions_history {label} identity must match requested session"
+                    f"{method} {label} identity must match requested session"
                 )
             if item_external_id is not None and item_external_id != session_key:
                 raise AdapterContractError(
-                    f"sessions_history {label} identity must match requested session"
+                    f"{method} {label} identity must match requested session"
                 )
         return observation

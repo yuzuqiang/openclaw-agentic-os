@@ -37,6 +37,20 @@ from agentic_os.metadata import (  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT = ROOT / "scripts" / "openclaw-tool-capability-preflight.py"
+ATTESTED_SESSIONS_SPAWN_PARAMETERS = (
+    "task",
+    "taskName",
+    "runtime",
+    "mode",
+    "agentId",
+    "cleanup",
+    "context",
+    "lightContext",
+    "client_request_id",
+    "idempotency_key",
+    "gateway_lease_id",
+    "metadata",
+)
 
 
 class LiveRpcError(RuntimeError):
@@ -449,6 +463,71 @@ def _lease_ids_from_response(response: Mapping[str, Any]) -> list[str]:
     )
 
 
+def _candidate_lease_ids_for_cleanup(response: Mapping[str, Any]) -> list[str]:
+    """Collect lease identity candidates before metadata validation."""
+    payload_map = dict(response)
+    candidates: list[Mapping[str, Any]] = [payload_map]
+    for path in (
+        ("lease",),
+        ("result",),
+        ("result", "lease"),
+        ("output",),
+        ("output", "lease"),
+    ):
+        nested = _mapping_path(payload_map, path)
+        if nested is not None:
+            candidates.append(nested)
+
+    lease_ids: list[str] = []
+    for candidate in candidates:
+        candidate_map = dict(candidate)
+        for value in _lease_ids_from_response(candidate_map):
+            _append_unique(lease_ids, value)
+        for container_name in ("metadata", "metadata_echo"):
+            metadata_container = _mapping_path(candidate_map, (container_name,))
+            if metadata_container is None:
+                continue
+            for alias in ("normalized", "normalized_metadata", "external_metadata"):
+                value = metadata_container.get(alias)
+                if not isinstance(value, Mapping):
+                    continue
+                gateway_lease_id = value.get("gateway_lease_id")
+                if isinstance(gateway_lease_id, str) and gateway_lease_id:
+                    _append_unique(lease_ids, gateway_lease_id)
+            for alias in ("raw_json", "raw_metadata_json"):
+                raw_json = metadata_container.get(alias)
+                if not isinstance(raw_json, str):
+                    continue
+                try:
+                    raw = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(raw, Mapping):
+                    continue
+                gateway_lease_id = raw.get("gateway_lease_id")
+                if isinstance(gateway_lease_id, str) and gateway_lease_id:
+                    _append_unique(lease_ids, gateway_lease_id)
+    return lease_ids
+
+
+def _record_unresolved_lease_candidates(
+    evidence: dict[str, Any],
+    response: Mapping[str, Any],
+    *,
+    trusted_lease_ids: Sequence[str] = (),
+) -> None:
+    trusted = set(trusted_lease_ids)
+    candidates = [
+        _identity_proof(candidate)
+        for candidate in _candidate_lease_ids_for_cleanup(response)
+        if candidate not in trusted
+    ]
+    if not candidates:
+        return
+    evidence.setdefault("unresolved_allow_lease_candidates", []).extend(candidates)
+    evidence["allow_lease_acquire_outcome_unknown"] = True
+
+
 def _mapping_path(payload: dict[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
     value = _path_value(payload, path)
     return value if isinstance(value, Mapping) else None
@@ -536,6 +615,71 @@ def _validate_allow_lease_raw_metadata(
         "normalized_metadata": _redact_live_identity_fields(observed),
         "raw_metadata_json_sha256": hashlib.sha256(raw_json.encode("utf-8")).hexdigest(),
     }
+
+
+def _validated_allow_lease_acquire_identity(
+    payload: Mapping[str, Any],
+    *,
+    expected_owner_metadata: Mapping[str, Any],
+    label: str,
+) -> tuple[str, dict[str, Any]]:
+    payload_map = dict(payload)
+    candidates: list[Mapping[str, Any]] = [payload_map]
+    for path in (("lease",), ("result",), ("result", "lease"), ("output",), ("output", "lease")):
+        nested = _mapping_path(payload_map, path)
+        if nested is not None:
+            candidates.append(nested)
+    metadata_container = None
+    for candidate in candidates:
+        candidate_map = dict(candidate)
+        metadata_container = _mapping_path(candidate_map, ("metadata",)) or _mapping_path(
+            candidate_map, ("metadata_echo",)
+        )
+        if metadata_container is not None:
+            break
+    if metadata_container is None:
+        raise MetadataContractError(f"{label} did not expose raw allowLease metadata")
+    normalized = _metadata_alias(
+        metadata_container,
+        ("normalized", "normalized_metadata", "external_metadata"),
+        label=f"{label} normalized metadata",
+        expected_type=Mapping,
+    )
+    if not isinstance(normalized, Mapping):
+        raise MetadataContractError(f"{label} normalized metadata is required")
+    gateway_lease_id = normalized.get("gateway_lease_id")
+    if not isinstance(gateway_lease_id, str) or not gateway_lease_id:
+        raise MetadataContractError(
+            f"{label} normalized metadata is missing gateway_lease_id"
+        )
+    raw_metadata = _validate_allow_lease_raw_metadata(
+        payload,
+        expected_metadata={**expected_owner_metadata, "gateway_lease_id": gateway_lease_id},
+        release=False,
+        label=label,
+    )
+    return gateway_lease_id, raw_metadata
+
+
+def _reject_unvalidated_allow_lease_identity_aliases(
+    payload: Mapping[str, Any],
+    *,
+    trusted_lease_id: str,
+    evidence: dict[str, Any],
+    message: str,
+) -> None:
+    untrusted_candidates = [
+        candidate
+        for candidate in _candidate_lease_ids_for_cleanup(payload)
+        if candidate != trusted_lease_id
+    ]
+    if untrusted_candidates:
+        _record_unresolved_lease_candidates(
+            evidence,
+            payload,
+            trusted_lease_ids=(trusted_lease_id,),
+        )
+        raise MetadataContractError(message)
 
 
 def _allow_lease_owner_metadata_matches(
@@ -1073,11 +1217,9 @@ def _session_status_method(preflight_payload: dict[str, Any]) -> str:
                 name = item.get("name")
                 if isinstance(name, str):
                     names.add(name)
-    if "sessions_status" in names:
-        return "sessions_status"
-    if not names:
-        return "sessions_status"
-    raise RuntimeError("isolated candidate catalog did not prove sessions_status")
+    if "session_status" in names:
+        return "session_status"
+    raise RuntimeError("isolated candidate catalog did not prove session_status")
 
 
 def _release_lease(
@@ -1130,7 +1272,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     evidence: dict[str, Any] = {
         "probe": "openclaw-live-accepted-session-identity",
         "preflight_runtime_target": "isolated_candidate",
-        "required_canonical_session_status_method": "sessions_status",
+        "required_canonical_session_status_method": "session_status",
         "started_epoch_ms": started,
         "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         "rpc_attempted": [],
@@ -1202,6 +1344,19 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         )
         return evidence
 
+    if not args.execute_lifecycle:
+        evidence.update(
+            {
+                "status": "fail_closed",
+                "mode": "preflight_only",
+                "reason": "lifecycle_not_authorized",
+                "spawn_attempted": False,
+                "lease_acquired": False,
+                "released": "not_required",
+            }
+        )
+        return evidence
+
     lease_id: str | None = None
     gateway_lease_id: str | None = None
     lease_ids_to_release: list[str] = []
@@ -1222,16 +1377,20 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        for observed_lease_id in _lease_ids_from_response(first):
-            _append_unique(lease_ids_to_release, observed_lease_id)
-        gateway_lease_id = _lease_id_from_response(first)
+        gateway_lease_id, acquire_metadata = _validated_allow_lease_acquire_identity(
+            first,
+            expected_owner_metadata=acquire_params,
+            label="allowLease acquire proof",
+        )
         lease_id = validate_accepted_lease_identity(gateway_lease_id=gateway_lease_id)
         _append_unique(lease_ids_to_release, lease_id)
-        acquire_metadata = _validate_allow_lease_raw_metadata(
+        _reject_unvalidated_allow_lease_identity_aliases(
             first,
-            expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
-            release=False,
-            label="allowLease acquire proof",
+            trusted_lease_id=gateway_lease_id,
+            evidence=evidence,
+            message=(
+                "allowLease acquire response exposed unvalidated lease identity aliases"
+            ),
         )
         evidence["allow_lease"] = {
             "gateway_lease_id_sha256": _identity_sha256(gateway_lease_id),
@@ -1246,23 +1405,27 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             openclaw_executable,
             "subagents.allowLease.acquire", acquire_params, timeout_ms=args.gateway_timeout_ms
         )
-        for observed_lease_id in _lease_ids_from_response(second):
-            _append_unique(lease_ids_to_release, observed_lease_id)
-        duplicate_gateway_lease_id = _lease_id_from_response(second)
-        if duplicate_gateway_lease_id is None:
-            raise MetadataContractError(
-                "duplicate allowLease acquire did not report lease identity"
+        try:
+            duplicate_gateway_lease_id, duplicate_metadata = _validated_allow_lease_acquire_identity(
+                second,
+                expected_owner_metadata=acquire_params,
+                label="duplicate allowLease acquire proof",
             )
+        except MetadataContractError:
+            _record_unresolved_lease_candidates(evidence, second)
+            raise
         _append_unique(lease_ids_to_release, duplicate_gateway_lease_id)
+        _reject_unvalidated_allow_lease_identity_aliases(
+            second,
+            trusted_lease_id=duplicate_gateway_lease_id,
+            evidence=evidence,
+            message=(
+                "duplicate allowLease acquire response exposed unvalidated lease identity aliases"
+            ),
+        )
         validate_accepted_lease_identity(
             gateway_lease_id=gateway_lease_id,
             duplicate_acquire_lease_id=duplicate_gateway_lease_id,
-        )
-        duplicate_metadata = _validate_allow_lease_raw_metadata(
-            second,
-            expected_metadata={**acquire_params, "gateway_lease_id": duplicate_gateway_lease_id},
-            release=False,
-            label="duplicate allowLease acquire proof",
         )
         evidence["allow_lease"]["duplicate_gateway_lease_id_sha256"] = _identity_sha256(
             duplicate_gateway_lease_id
@@ -1287,26 +1450,19 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             expected_metadata={**acquire_params, "gateway_lease_id": gateway_lease_id},
             lease_ids_to_release=lease_ids_to_release,
         )
-        if not args.execute_session_spawn:
-            evidence.update(
-                {
-                    "status": "fail_closed",
-                    "reason": "session_spawn_execution_disabled",
-                    "spawn_attempted": False,
-                    "lease_acquired": True,
-                }
-            )
-            return evidence
-
+        probe_task = "Return exactly: issue35 identity probe complete"
         spawn_args = {
-            "task": "Return exactly: issue35 identity probe complete",
+            "task": probe_task,
             "taskName": f"issue35probe{args.probe_id.replace('-', '')[:24]}",
             "runtime": "subagent",
             "mode": "run",
             "agentId": args.agent_id,
-            "gateway_lease_id": gateway_lease_id,
+            "cleanup": "keep",
+            "context": "isolated",
+            "lightContext": False,
             "client_request_id": f"issue35-client-{args.probe_id}",
             "idempotency_key": f"issue35-spawn-{args.probe_id}",
+            "gateway_lease_id": gateway_lease_id,
             "metadata": {
                 "run_id": f"issue35-run-{args.probe_id}",
                 "transition_id": f"issue35-transition-{args.probe_id}",
@@ -1314,9 +1470,13 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "idempotency_key": f"issue35-spawn-{args.probe_id}",
                 "phase": "B",
                 "agent_id": args.agent_id,
-                "task_digest": f"issue35-task-{args.probe_id}",
+                "task_digest": hashlib.sha256(probe_task.encode("utf-8")).hexdigest(),
             },
         }
+        if tuple(spawn_args) != ATTESTED_SESSIONS_SPAWN_PARAMETERS:
+            raise MetadataContractError(
+                "sessions_spawn probe args do not match attested parameter vector"
+            )
         evidence["rpc_attempted"].append("sessions_spawn")
         accepted_one = _session_spawn_once(
             openclaw_executable,
@@ -1359,7 +1519,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         session_status = _gateway_call(
             openclaw_executable,
             status_method,
-            {"session_key": session_identity},
+            {"sessionKey": session_identity},
             timeout_ms=args.gateway_timeout_ms,
         )
         session_read_evidence[status_method] = _validate_session_api_observes_session(
@@ -1490,9 +1650,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Upper bound for each direct structured sessions_spawn RPC.",
     )
     parser.add_argument(
-        "--execute-session-spawn",
+        "--execute-lifecycle",
         action="store_true",
-        help="Actually spawn duplicate accepted-session probes after exact preflight and allowLease proof pass.",
+        help="Authorize the full mutating acquire/duplicate/spawn/duplicate/read/release lifecycle.",
     )
     parser.add_argument("--evidence-file", help="Path for sanitized JSON evidence.")
     args = parser.parse_args(argv)
