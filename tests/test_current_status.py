@@ -184,7 +184,7 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(live["status"], "pending_non_authoritative")
+        self.assertEqual(live["status"], "phase_b_candidate_snapshot_pending_phase_c")
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
         local_p03 = live["local_p03_runtime_heartbeat_shadow"]
@@ -229,16 +229,57 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(index["status"], "pending_current_evidence")
+        self.assertEqual(index["status"], "phase_b_candidate_snapshot_pending_phase_c")
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
             index["current_evidence"]["status"],
         )
         self.assertEqual(
             index["current_evidence"]["status"],
-            "pending_clean_generator_revision_capture",
+            "captured_from_clean_generator_revision",
         )
-        self.assertFalse((root / index["current_evidence"]["path"]).exists())
+        current_evidence_path = root / index["current_evidence"]["path"]
+        self.assertTrue(current_evidence_path.exists())
+        self.assertEqual(
+            index["current_evidence"]["sha256"],
+            hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
+        )
+
+        issue44_installed = live["issue44_live_installed_preflight"]
+        issue44_installed_path = root / issue44_installed["path"]
+        self.assertEqual(
+            issue44_installed["sha256"],
+            hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
+        )
+        issue44_installed_payload = json.loads(
+            issue44_installed_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(issue44_installed_payload["status"], "fail")
+        self.assertFalse(issue44_installed_payload["runtime_ready"])
+        self.assertEqual(
+            issue44_installed_payload["catalog"]["gateway_rpc_catalog"][
+                "status_corroboration"
+            ]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+
+        issue44_candidate = live["issue44_downstream_persistent_lifecycle_probe"]
+        issue44_candidate_path = root / issue44_candidate["path"]
+        self.assertEqual(
+            issue44_candidate["sha256"],
+            hashlib.sha256(issue44_candidate_path.read_bytes()).hexdigest(),
+        )
+        issue44_candidate_payload = json.loads(
+            issue44_candidate_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(issue44_candidate_payload["status"], "pass")
+        self.assertFalse(issue44_candidate_payload["runtime_ready"])
+        self.assertTrue(issue44_candidate_payload["runtime_ready_candidate_evidence"])
+        self.assertTrue(issue44_candidate_payload["phase_c_exact_head_required_before_review"])
+        self.assertEqual(
+            issue44_candidate_payload["openclaw_head_sha"],
+            issue44_candidate["openclaw_head_sha"],
+        )
 
         authority = status["production_authority"]
         self.assertEqual(authority["status"], "disabled")
@@ -449,7 +490,7 @@ class CurrentStatusTests(unittest.TestCase):
             self.assertFalse(evidence_path.exists())
             return
         self.assertEqual(current["status"], "captured_from_clean_generator_revision")
-        self.assertEqual(index["status"], "current_evidence_captured")
+        self.assertEqual(index["status"], "phase_b_candidate_snapshot_pending_phase_c")
         self.assertEqual(
             current["sha256"], hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         )
@@ -458,6 +499,16 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(payload["classification"], "fail_closed_future_contract")
         self.assertFalse(payload["runtime_ready"])
         self.assertEqual(payload["catalog"]["runtime_target"], "live_installed_openclaw")
+        self.assertTrue(current["no_production_lease_mutation"])
+        candidate = index["downstream_candidate_evidence"]
+        candidate_path = root / candidate["path"]
+        self.assertEqual(
+            candidate["sha256"], hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        )
+        candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+        self.assertEqual(candidate_payload["status"], "pass")
+        self.assertFalse(candidate_payload["runtime_ready"])
+        self.assertTrue(candidate_payload["runtime_ready_candidate_evidence"])
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
         self.assertEqual(
@@ -466,25 +517,15 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["catalog"]["model_tool_catalog"]["required_tool_names"],
+            [],
+        )
+        self.assertEqual(
+            payload["catalog"]["model_tool_catalog"]["source_declared_tool_names"],
             ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
         )
         self.assertEqual(
-            payload["catalog"]["model_tool_catalog"][
-                "parameter_schema_unavailable_tool_names"
-            ],
-            ["session_status", "sessions_history", "sessions_list", "sessions_spawn"],
-        )
-        model_tools = {
-            item["name"]: item
-            for item in payload["catalog"]["model_tool_catalog"]["tools"]
-        }
-        self.assertEqual(
-            model_tools["sessions_spawn"]["parameter_evidence"]["status"],
-            "installed_source_bound_catalog_schema_unavailable",
-        )
-        self.assertEqual(
-            model_tools["sessions_history"]["parameter_evidence"]["status"],
-            "unproven_from_catalog_and_installed_sources",
+            payload["catalog"]["model_tool_catalog"]["status"],
+            "catalog_unavailable_before_contract_validation",
         )
         self.assertEqual(
             payload["catalog"]["gateway_rpc_catalog"]["source_bound_rpc_names"],
@@ -504,13 +545,15 @@ class CurrentStatusTests(unittest.TestCase):
         }
         self.assertEqual(
             rpc_evidence["subagents.allowLease.status"]["live_reachability"],
-            "reachable",
+            "skipped_no_production_lease_mutation",
         )
-        status_probe = rpc_evidence["subagents.allowLease.status"]["live_probe"]
+        status_probe = payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"]
         self.assertEqual(status_probe["method"], "subagents.allowLease.status")
-        self.assertEqual(status_probe["status"], "ok")
-        self.assertEqual(status_probe["live_reachability"], "reachable")
-        self.assertRegex(status_probe["raw_response_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(status_probe["status"], "skipped_no_production_lease_mutation")
+        self.assertEqual(
+            status_probe["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
         self.assertEqual(status_probe["request_semantics"], "read_only_request")
         self.assertFalse(status_probe["requested_mutation"])
         self.assertGreaterEqual(len(status_probe["incidental_mutations_possible"]), 2)
@@ -554,7 +597,7 @@ class CurrentStatusTests(unittest.TestCase):
             payload["catalog"]["gateway_rpc_catalog"]["status_corroboration"][
                 "status"
             ],
-            "ok",
+            "skipped_no_production_lease_mutation",
         )
         self.assertEqual(
             payload["catalog"]["status_alias_requirement"][
@@ -571,7 +614,7 @@ class CurrentStatusTests(unittest.TestCase):
             payload["catalog"]["status_alias_requirement"][
                 "canonical_status_method_status"
             ],
-            "missing_from_model_callable_tools_catalog",
+            "unproven_model_catalog_unavailable",
         )
         self.assertFalse(
             payload["catalog"]["future_db_authority_contract"]["db_authority_enabled"]
@@ -581,7 +624,7 @@ class CurrentStatusTests(unittest.TestCase):
             payload["catalog"]["future_db_authority_contract"],
         )
         self.assertNotIn("runtime tool catalog is missing session_status", payload["error"])
-        self.assertIn("live reachability is unproven", payload["error"])
+        self.assertIn("model-callable tools.catalog is unavailable", payload["error"])
         self.assertNotIn("sessions_history is missing parameters", payload["error"])
         self.assertNotIn(
             "runtime authority envelope must declare runtime_ready=true",
@@ -600,14 +643,9 @@ class CurrentStatusTests(unittest.TestCase):
         )
         bound_head = binding["agentic_os_head_sha"]
         self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
-        self.assertRegex(current["reviewed_head_sha"], r"^[0-9a-f]{40}$")
-        reviewed_head = current["reviewed_head_sha"]
+        self.assertIsNone(current["reviewed_head_sha"])
         subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, reviewed_head],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", reviewed_head, "HEAD"],
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
             check=True,
         )
         bound_tree = subprocess.run(

@@ -17,7 +17,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "e18c39e3805c1c27abef8e76567b1ea9236b7ce32333e561f8b03d9deaeeec19",
+      "sha256": "57ed45c818d0b60e6a53c7410fb75fe8bf3de68fa63edfa831546a8968fc70ef",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merged_at": "2026-08-12T10:59:18Z",
@@ -42,9 +42,36 @@
   },
   "live_runtime_evidence": {
     "evidence_index": {
-      "current_evidence_status": "pending_clean_generator_revision_capture",
+      "current_evidence_status": "captured_from_clean_generator_revision",
       "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
-      "status": "pending_current_evidence"
+      "status": "phase_b_candidate_snapshot_pending_phase_c"
+    },
+    "issue44_live_installed_preflight": {
+      "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
+      "sha256": "b93d48a102e444228bf6001fc6941083c586fd08c9ca72e49c9fd8bac2423987",
+      "status": "fail_closed_future_contract",
+      "runtime_ready": false,
+      "openclaw_version": "2026.7.1",
+      "no_production_lease_mutation": true,
+      "status_rpc_live_reachability": "skipped_no_production_lease_mutation",
+      "production_authority_enabled": false
+    },
+    "issue44_downstream_persistent_lifecycle_probe": {
+      "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
+      "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
+      "status": "pass",
+      "runtime_ready": false,
+      "runtime_ready_candidate_evidence": true,
+      "runtime_ready_blocked_until_phase_c": true,
+      "openclaw_head_sha": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
+      "agentic_os_head_sha": "377ea08fb2cc240342d4a019444d3374b6e55a0f",
+      "isolated_non_production_gateway": true,
+      "token_authenticated": true,
+      "production_config_hash_unchanged": true,
+      "candidate_port_closed": true,
+      "db_authority_enabled": false,
+      "phase_c_exact_head_required_before_review": true,
+      "production_authority_enabled": false
     },
     "local_openclaw_dependency_evidence": {
       "path": "docs/runtime-evidence/phase-b-20260813-local-openclaw-tsgo-evidence-reuse.json",
@@ -75,7 +102,7 @@
     },
     "production_behavior_proven": false,
     "runtime_ready": false,
-    "status": "pending_non_authoritative"
+    "status": "phase_b_candidate_snapshot_pending_phase_c"
   },
   "production_authority": {
     "db_authority_enabled": false,

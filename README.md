@@ -18,11 +18,11 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `e18c39e3805c1c27abef8e76567b1ea9236b7ce32333e561f8b03d9deaeeec19`
+- Current corrected design artifact SHA-256: `57ed45c818d0b60e6a53c7410fb75fe8bf3de68fa63edfa831546a8968fc70ef`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
-- Current installed-runtime evidence lineage and pending capture state:
+- Current installed-runtime evidence lineage and Issue #44 candidate snapshot:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
   adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
@@ -478,12 +478,16 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `lightContext`, `client_request_id`, `idempotency_key`, `gateway_lease_id`, and
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
-The split-catalog JSON path in the forward index is pending exact-lineage
-recapture rather than current authority. Future runtime-evidence authority must
-recapture
-`python3 scripts/openclaw-tool-capability-preflight.py --live-installed-openclaw --json`
-from an exact clean head before any production-runtime claim. The
-plain-catalog path is deliberately offline-only: it reports
+Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
+`b4d1d358382bd03e38829473ba77586033a69a53` in
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json`.
+That preflight deliberately used `--skip-live-status-rpc` because the installed
+`subagents.allowLease.status` path may perform incidental lease cleanup. It is
+therefore a fail-closed, no-production-lease-mutation record: disk source
+declarations for allowLease RPCs are preserved, but live reachability, connected
+Gateway build identity, model-callable catalog availability, and
+`agenticOs.runtime.attest` readiness remain unproven. The plain-catalog path is
+deliberately offline-only: it reports
 `classification=offline_schema_validation_only` and can never set
 `runtime_ready=true`. An unsigned catalog mapping cannot mint
 `OpenClawAdapter` runtime authority. Direct construction remains disabled; the
@@ -492,9 +496,8 @@ rejects missing or extra parameters before every application RPC. The future
 CLI subprocess transport remains non-authoritative unless it gains a persistent
 attested connection or a follow-up token authorization path; there is no
 `agenticOs.runtime.identity` RPC to refresh. That contract is covered only by
-synthetic local tests and source-bound local candidate proof until the local
-downstream OpenClaw candidate is exercised through a live attested Gateway
-connection, so it is not current live evidence or production authority. The
+synthetic local tests, installed fail-closed preflight, and the local downstream
+candidate proof below; it is still not production authority. The
 cross-process release-probe entry point likewise rejects unsigned stdin before
 invoking transport. The bounded accepted-session
 probe in
@@ -513,28 +516,36 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-The authoritative candidate proof for the currently implemented runtime surface
-is the isolated real-Gateway probe. It refuses dirty candidate worktrees, starts
-the candidate's token-authenticated Gateway with isolated test state and a
-loopback OpenAI Responses fixture, and requires an actual child result before
-writing hash-only evidence:
+The current Issue #44 candidate proof for the downstream runtime surface is the
+isolated real-Gateway probe. It refuses dirty candidate worktrees, binds
+downstream OpenClaw head `06e6e3f424841d738ec18dbe6a1faac663fe2cb6`, adapts to
+the candidate's `scripts/agentic-os-persistent-lifecycle-runner.mts` harness
+when the legacy E2E file is absent, starts the candidate's token-authenticated
+Gateway with isolated runner and Gateway state, and writes hash-only evidence:
 
 ```bash
 python3 scripts/openclaw-real-gateway-contract-probe.py \
   --openclaw-root /path/to/openclaw-candidate \
-  --evidence-file docs/runtime-evidence/openclaw-real-gateway-contract.json
+  --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json
 ```
 
-The committed JSON at that path is only a sanitized last-run snapshot. It is
-not authoritative for a later PR head unless this command is rerun from that
-exact clean Agentic OS head and the probe validates the embedded
-`agentic_os_head_sha`, source hashes, and hash-only child-result proof before
-writing the file.
+The committed Issue #44 JSON at that path has `status=pass`,
+`runtime_ready_candidate_evidence=true`, and `runtime_ready=false`. It proves
+the candidate's `agenticOs.runtime.attest`, `tools.catalog` corroboration,
+allowLease acquire/status/release, accepted `sessions_spawn`, duplicate spawn
+identity parity, `sessions_list`, `session_status`, `sessions_history`, release
+cleanup, candidate port closure, production config hash stability, zero
+provider-secret environment leakage, and `DB_AUTHORITY_ENABLED=False`. It is
+only a sanitized Phase B candidate snapshot until a different-agent Phase C pass
+reruns from the exact final head before any review request or production
+runtime-readiness claim.
 
-The probe exercises the runtime-discovered `tools.catalog` RPC methods,
-principal-bound allowLease acquire/duplicate/status/release, concurrent spawn
-deduplication, canonical session reads, canonical child lifecycle transitions,
-fail-closed authorization, and the real `spawnSubagentDirect` child runner.
+The legacy probe path still exercises the runtime-discovered `tools.catalog`
+RPC methods, principal-bound allowLease acquire/duplicate/status/release,
+concurrent spawn deduplication, canonical session reads, canonical child
+lifecycle transitions, fail-closed authorization, and the real
+`spawnSubagentDirect` child runner when the downstream candidate provides the
+legacy E2E harness.
 `agentic_adapter_*` release proofs are explicitly disabled future-contract
 proofs in this repository state: the cross-process adapter release entry point
 rejects unsigned input and is not injected into the candidate E2E until a

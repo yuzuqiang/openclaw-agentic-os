@@ -1,7 +1,7 @@
 {
   "classification": "evidence_lineage_correction",
   "current_evidence": {
-    "classification": "pending_exact_head_capture",
+    "classification": "issue44_live_installed_fail_closed_no_production_lease_mutation",
     "generator_binding_requirements": {
       "bound_head_is_ancestor_of_containing_revision": true,
       "bound_tree_matches_bound_head_tree": true,
@@ -20,16 +20,32 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": null,
-      "script_sha256": null,
-      "tree_sha": null
+      "head_sha": "b4d1d358382bd03e38829473ba77586033a69a53",
+      "script_sha256": "709ccdd93b9ae34909acb85521f0a64c357291db35d4ef69660eb93f5995ece9",
+      "tree_sha": "52071254ef3b3fb2c44e96a9b3975cf7037b27f0"
     },
-    "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
-    "raw_status": null,
+    "no_production_lease_mutation": true,
+    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
+    "raw_status": "fail",
     "reviewed_head_sha": null,
-    "sha256": null,
-    "status": "pending_clean_generator_revision_capture",
-    "status_reason": "Previous current evidence was generated from a PR-internal revision that is not an ancestor of GitHub Codex's squash-style reviewed commit lineage. It is no longer advertised as current authority until recaptured from the exact reviewed lineage."
+    "runtime_ready": false,
+    "sha256": "b93d48a102e444228bf6001fc6941083c586fd08c9ca72e49c9fd8bac2423987",
+    "status": "captured_from_clean_generator_revision",
+    "status_reason": "Issue #44 recaptured installed OpenClaw 2026.7.1 from a clean generator head while skipping live allowLease.status to preserve the no-production-lease-mutation boundary. It remains fail-closed because model-callable catalog availability, connected build identity, live allowLease reachability, and agenticOs.runtime.attest readiness are unproven."
+  },
+  "downstream_candidate_evidence": {
+    "agentic_os_head_sha": "377ea08fb2cc240342d4a019444d3374b6e55a0f",
+    "candidate_head_sha": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
+    "classification": "issue44_phase_b_downstream_candidate_snapshot",
+    "db_authority_enabled": false,
+    "isolated_non_production_gateway": true,
+    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
+    "phase_c_exact_head_required_before_review": true,
+    "production_authority_enabled": false,
+    "runtime_ready": false,
+    "runtime_ready_candidate_evidence": true,
+    "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
+    "status": "pass"
   },
   "historical_artifacts": [
     {
@@ -56,5 +72,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "pending_current_evidence"
+  "status": "phase_b_candidate_snapshot_pending_phase_c"
 }
