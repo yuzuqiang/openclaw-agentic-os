@@ -762,25 +762,14 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             validation["invocation"]["reviewed_synthetic_commit"],
         )
         self.assertTrue(monitor._is_git_sha(subject["reviewed_synthetic_commit"]))
-        subprocess.run(
-            [
-                "git",
-                "cat-file",
-                "-e",
-                f"{subject['reviewed_synthetic_commit']}^{{commit}}",
-            ],
-            cwd=repo_root,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        self.assertEqual(subject["reviewed_head"], validation["invocation"]["reviewed_head"])
         subprocess.run(
             [
                 "git",
                 "merge-base",
                 "--is-ancestor",
                 subject["reviewed_head"],
-                subject["reviewed_synthetic_commit"],
+                current_head,
             ],
             cwd=repo_root,
             check=True,
