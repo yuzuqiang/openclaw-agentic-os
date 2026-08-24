@@ -1742,6 +1742,7 @@ def _gateway_status_for_source_bound_names(
     active_catalog_sha256: str | None,
     source_bound_rpc_names: set[str],
     scrub_env_override: bool,
+    skip_status_rpc: bool = False,
 ) -> dict[str, Any]:
     if "subagents.allowLease.status" not in source_bound_rpc_names:
         return {
@@ -1751,6 +1752,19 @@ def _gateway_status_for_source_bound_names(
             "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
             "live_reachability": "unproven",
             "status": "disk_source_declaration_missing",
+        }
+    if skip_status_rpc:
+        return {
+            "method": "subagents.allowLease.status",
+            "request_semantics": "read_only_request",
+            "requested_mutation": False,
+            "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+            "live_reachability": "skipped_no_production_lease_mutation",
+            "status": "skipped_no_production_lease_mutation",
+            "policy": (
+                "caller refused production allowLease.status because the installed "
+                "runtime may perform incidental lease cleanup"
+            ),
         }
     return _run_gateway_allow_lease_status(
         executable,
@@ -1775,6 +1789,7 @@ def _gateway_rpc_evidence(
     gateway_status: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     status_reachable = gateway_status.get("status") == "ok"
+    status_live_reachability = gateway_status.get("live_reachability", "unproven")
     evidence: list[dict[str, Any]] = []
     for name in GATEWAY_RPC_METHOD_NAMES:
         record: dict[str, Any] = {
@@ -1787,6 +1802,8 @@ def _gateway_rpc_evidence(
             "live_reachability": (
                 "reachable"
                 if name == "subagents.allowLease.status" and status_reachable
+                else status_live_reachability
+                if name == "subagents.allowLease.status"
                 else "unproven"
             ),
         }
@@ -2494,6 +2511,7 @@ def live_installed_openclaw_catalog(
     include_env_override: bool = True,
     require_env_override: bool = False,
     scrub_env_override: bool = False,
+    skip_status_rpc: bool = False,
 ) -> dict[str, Any]:
     root, executable, package, runtime_identity_catalog, failure_catalog = _runtime_identity_snapshot(
         runtime_target=runtime_target,
@@ -2553,6 +2571,7 @@ def live_installed_openclaw_catalog(
                 active_catalog_sha256=active_catalog_sha256,
                 source_bound_rpc_names=source_bound_rpc_names,
                 scrub_env_override=scrub_env_override,
+                skip_status_rpc=skip_status_rpc,
             )
         except RuntimeEvidenceError as status_exc:
             status_catalog = status_exc.catalog or {}
@@ -2697,6 +2716,7 @@ def live_installed_openclaw_catalog(
         active_catalog_sha256=active_catalog_sha256,
         source_bound_rpc_names=source_bound_rpc_names,
         scrub_env_override=scrub_env_override,
+        skip_status_rpc=skip_status_rpc,
     )
     _require_runtime_identity_unchanged_after_catalog(
         runtime_identity_catalog=runtime_identity_catalog,
@@ -3518,6 +3538,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--skip-live-status-rpc",
+        action="store_true",
+        help=(
+            "For live installed OpenClaw catalog capture, do not call "
+            "subagents.allowLease.status. This preserves a no-production-lease-"
+            "mutation boundary and fails closed with live reachability unproven."
+        ),
+    )
+    parser.add_argument(
         "--write-evidence",
         help="Write the preflight result and sanitized catalog evidence to this JSON file.",
     )
@@ -3563,7 +3592,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.installed_openclaw_negative_baseline:
                 catalog = installed_negative_baseline_catalog()
             else:
-                catalog = live_installed_openclaw_catalog()
+                catalog = live_installed_openclaw_catalog(
+                    skip_status_rpc=args.skip_live_status_rpc
+                )
         except RuntimeEvidenceError as exc:
             payload = {
                 "classification": "fail_closed_future_contract",

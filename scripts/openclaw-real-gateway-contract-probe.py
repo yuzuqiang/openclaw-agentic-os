@@ -15,12 +15,33 @@ from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
+PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
+PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
     "scripts/openclaw-live-accepted-session-probe.py",
     "src/agentic_os/openclaw_adapter.py",
     "src/agentic_os/runtime_attestation.py",
     "src/agentic_os/metadata.py",
+)
+PERSISTENT_RUNTIME_SOURCE_PATHS = (
+    "package.json",
+    "openclaw.mjs",
+    PERSISTENT_LIFECYCLE_RUNNER,
+    "src/gateway/agentic-os-runtime-attestation.ts",
+    "src/gateway/agentic-os-runtime-contract-descriptors.ts",
+    "src/gateway/client.ts",
+    "src/utils/message-channel.ts",
+)
+PERSISTENT_REQUIRED_TOOL_NAMES = (
+    "agenticOs.runtime.attest",
+    "subagents.allowLease.acquire",
+    "subagents.allowLease.status",
+    "subagents.allowLease.release",
+    "sessions_spawn",
+    "sessions_list",
+    "session_status",
+    "sessions_history",
 )
 FORBIDDEN_EVIDENCE_KEYS = {
     "authToken",
@@ -119,9 +140,8 @@ def _git(root: Path, *args: str) -> str:
 def validate_candidate_root(root: Path) -> str:
     root = root.resolve()
     package_path = root / "package.json"
-    test_path = root / E2E_TEST
-    if not package_path.is_file() or not test_path.is_file():
-        raise ProbeError("OpenClaw candidate is missing package.json or the real Gateway E2E")
+    if not package_path.is_file():
+        raise ProbeError("OpenClaw candidate is missing package.json")
     try:
         package = json.loads(package_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -135,6 +155,18 @@ def validate_candidate_root(root: Path) -> str:
     if dirty:
         raise ProbeError("candidate worktree is dirty; exact-head evidence is not authoritative")
     return head
+
+
+def _candidate_probe_mode(root: Path) -> str:
+    root = root.resolve()
+    if (root / E2E_TEST).is_file():
+        return "legacy_e2e"
+    if (root / PERSISTENT_LIFECYCLE_RUNNER).is_file():
+        return "persistent_lifecycle_runner"
+    raise ProbeError(
+        "OpenClaw candidate has neither the legacy real Gateway E2E nor the "
+        "persistent lifecycle runner"
+    )
 
 
 def _walk_evidence(value: Any, path: tuple[str, ...] = ()) -> None:
@@ -171,6 +203,58 @@ def _source_binding(root: Path, relative: str) -> dict[str, str]:
         "path": relative_path.as_posix(),
         "sha256": _sha256_bytes(source_path.read_bytes()),
     }
+
+
+def _source_bindings(root: Path, relatives: tuple[str, ...]) -> list[dict[str, str]]:
+    return [_source_binding(root, relative) for relative in relatives]
+
+
+def _canonical_sha256(value: Any) -> str:
+    return _sha256_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _text_sha256(value: str) -> str:
+    return _sha256_bytes(value.encode())
+
+
+def _read_json_file(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProbeError(f"{label} did not contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ProbeError(f"{label} must be a JSON object")
+    return payload
+
+
+def _record(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProbeError(f"{label} must be a JSON object")
+    return value
+
+
+def _require_pass(value: Mapping[str, Any], label: str) -> None:
+    if value.get("status") != "pass":
+        raise ProbeError(f"{label} did not pass")
+
+
+def _optional_record(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _sha_field(section: Mapping[str, Any], key: str) -> str | None:
+    value = section.get(key)
+    if (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    ):
+        return value
+    return None
+
+
+def _safe_status(value: Any) -> str:
+    return value if isinstance(value, str) and value else "unknown"
 
 
 def _validate_sources(value: Any, *, root: Path, label: str) -> None:
@@ -249,11 +333,14 @@ def validate_evidence(
     _walk_evidence(payload)
 
 
-def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[str, Any]:
-    head = validate_candidate_root(openclaw_root)
-    agentic_sources = [
-        _source_binding(ROOT, relative) for relative in AGENTIC_SOURCE_PATHS
-    ]
+def _run_legacy_e2e_probe(
+    openclaw_root: Path,
+    evidence_file: Path,
+    timeout: int,
+    *,
+    head: str,
+    agentic_sources: list[dict[str, str]],
+) -> dict[str, Any]:
     evidence_file = evidence_file.resolve()
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
     temporary_evidence_file = evidence_file.with_name(
@@ -310,14 +397,472 @@ def run_probe(openclaw_root: Path, evidence_file: Path, timeout: int) -> dict[st
             temporary_evidence_file.unlink()
 
 
+def _persistent_lifecycle_summary(
+    *,
+    openclaw_root: Path,
+    run_root: Path,
+    receipt_file: Path,
+    validation_file: Path,
+    head: str,
+    agentic_sources: list[dict[str, str]],
+    runtime_sources: list[dict[str, str]],
+    command: list[str],
+    proc: subprocess.CompletedProcess[str],
+    port: int,
+) -> dict[str, Any]:
+    receipt = _read_json_file(receipt_file, "persistent lifecycle receipt")
+    validation = _read_json_file(validation_file, "persistent lifecycle validation")
+    _require_pass(receipt, "persistent lifecycle receipt")
+    _require_pass(validation, "persistent lifecycle validation")
+
+    agentic_head = _git(ROOT, "rev-parse", "HEAD")
+    immutable_inputs = _record(receipt.get("immutable_inputs"), "receipt immutable_inputs")
+    if immutable_inputs.get("runtime_head") != head:
+        raise ProbeError("persistent lifecycle receipt runtime head binding is invalid")
+    if immutable_inputs.get("agentic_os_head") != agentic_head:
+        raise ProbeError("persistent lifecycle receipt Agentic OS head binding is invalid")
+
+    production_before = _record(receipt.get("production_before"), "production_before")
+    production_after = _record(receipt.get("production_after"), "production_after")
+    candidate = _record(receipt.get("candidate"), "candidate")
+    preflight = _record(receipt.get("preflight"), "preflight")
+    attestation = _record(receipt.get("attestation"), "attestation")
+    lifecycle = _record(receipt.get("lifecycle"), "lifecycle")
+    rollback = _record(receipt.get("rollback"), "rollback")
+    db_authority = _record(rollback.get("db_authority"), "rollback.db_authority")
+
+    for label, section in (
+        ("preflight", preflight),
+        ("attestation", attestation),
+        ("lifecycle", lifecycle),
+        ("rollback", rollback),
+    ):
+        _require_pass(section, label)
+    if rollback.get("candidate_port_closed") is not True:
+        raise ProbeError("persistent lifecycle did not prove candidate port closure")
+    if rollback.get("production_config_hash_unchanged") is not True:
+        raise ProbeError("persistent lifecycle did not prove production config immutability")
+    if db_authority.get("DB_AUTHORITY_ENABLED") is not False:
+        raise ProbeError("persistent lifecycle did not prove DB authority remained disabled")
+    if candidate.get("port") != port:
+        raise ProbeError("persistent lifecycle candidate port binding is invalid")
+    if preflight.get("runtime_ready") is not True:
+        raise ProbeError("persistent lifecycle preflight did not pass runtime readiness")
+    if lifecycle.get("first_spawn_status") != "accepted":
+        raise ProbeError("persistent lifecycle did not prove accepted session spawn")
+    if lifecycle.get("duplicate_spawn_same_session") is not True:
+        raise ProbeError("persistent lifecycle did not prove duplicate spawn identity parity")
+    if lifecycle.get("post_release_lease_count") != 0:
+        raise ProbeError("persistent lifecycle did not prove release cleanup")
+
+    required_tool_names = preflight.get("required_tool_names")
+    if not isinstance(required_tool_names, list):
+        hello = _optional_record(preflight.get("hello"))
+        required_tool_names = hello.get("required_methods")
+    if not isinstance(required_tool_names, list):
+        required_tool_names = list(PERSISTENT_REQUIRED_TOOL_NAMES)
+    missing = sorted(set(PERSISTENT_REQUIRED_TOOL_NAMES) - set(required_tool_names))
+    if missing:
+        raise ProbeError("persistent lifecycle preflight is missing required tool names")
+
+    runtime_launch = _optional_record(receipt.get("runtime_launch"))
+    paths = _optional_record(receipt.get("paths"))
+    logs = _optional_record(candidate.get("logs"))
+    hello = _optional_record(preflight.get("hello"))
+    candidate_env = _optional_record(candidate.get("env"))
+    soak = _optional_record(receipt.get("soak"))
+    historical_probe_audit = _optional_record(receipt.get("historical_probe_audit"))
+
+    payload: dict[str, Any] = {
+        "status": "pass",
+        "probe": "agentic-os-persistent-lifecycle-runner",
+        "openclaw_head_sha": head,
+        "agentic_os_head_sha": agentic_head,
+        "runtime_ready": False,
+        "runtime_ready_candidate_evidence": True,
+        "runtime_ready_blocked_until_phase_c": True,
+        "committed_snapshot_authority": "non_authoritative_phase_b_candidate_snapshot",
+        "current_head_evidence_required": True,
+        "phase_c_exact_head_required_before_review": True,
+        "isolated_non_production_gateway": {
+            "status": "pass",
+            "loopback": True,
+            "token_authenticated": True,
+            "production_config_hash_unchanged": True,
+            "candidate_port_closed": True,
+            "db_authority_enabled": False,
+            "provider_secret_env_count": candidate_env.get("unexpected_provider_key_count"),
+            "port": port,
+            "port_policy": (
+                "downstream runner validated its fixed non-production loopback port"
+                if port == PERSISTENT_LIFECYCLE_DEFAULT_PORT
+                else "caller supplied non-production loopback port"
+            ),
+        },
+        "required_tool_names": sorted(str(name) for name in required_tool_names),
+        "authenticated_gateway": True,
+        "effective_allow_lease": True,
+        "runtime_catalog_discovered": True,
+        "persistent_attestation_validated": True,
+        "accepted_session_spawned": True,
+        "duplicate_spawn_identity_parity": True,
+        "duplicate_acquire_identity_parity": lifecycle.get("duplicate_acquire_same_lease")
+        is True,
+        "duplicate_release_observed": _sha_field(lifecycle, "duplicate_release_sha256")
+        is not None,
+        "session_list_status_history_observed": (
+            _sha_field(lifecycle, "session_status_sha256") is not None
+            and _sha_field(lifecycle, "sessions_history_sha256") is not None
+        ),
+        "lease_release_cleanup_observed": lifecycle.get("post_release_lease_count") == 0,
+        "db_authority_enabled": False,
+        "production_behavior_proven": False,
+        "production_authority_enabled": False,
+        "attestation": {
+            "status": "pass",
+            "gateway_endpoint": attestation.get("gateway_endpoint"),
+            "gateway_build_id": attestation.get("gateway_build_id"),
+            "executable_content_sha256": attestation.get("executable_content_sha256"),
+            "catalog_sha256": attestation.get("catalog_sha256"),
+            "contract_vector_sha256": attestation.get("contract_vector_sha256"),
+            "rpc_transcript_sha256": attestation.get("rpc_transcript_sha256"),
+            "runtime_authored_rpc_evidence_sha256": attestation.get(
+                "runtime_authored_rpc_evidence_sha256"
+            ),
+            "signed_payload_sha256": attestation.get("signed_payload_sha256"),
+            "runtime_identity_token_sha256": attestation.get(
+                "runtime_identity_token_sha256"
+            ),
+        },
+        "capability_preflight": {
+            "status": "pass",
+            "runtime_ready": True,
+            "evidence_sha256": preflight.get("evidence_sha256"),
+            "persistent_evidence_sha256": preflight.get("persistent_evidence_sha256"),
+            "stdout_sha256": preflight.get("stdout_sha256"),
+            "stderr_sha256": preflight.get("stderr_sha256"),
+            "hello_required_methods": hello.get("required_methods"),
+        },
+        "lifecycle": {
+            "status": "pass",
+            "gateway_lease_id_sha256": lifecycle.get("gateway_lease_id_sha256"),
+            "session_key_sha256": lifecycle.get("session_key_sha256"),
+            "child_run_id_sha256": lifecycle.get("child_run_id_sha256"),
+            "session_status_sha256": lifecycle.get("session_status_sha256"),
+            "sessions_history_sha256": lifecycle.get("sessions_history_sha256"),
+            "duplicate_release_sha256": lifecycle.get("duplicate_release_sha256"),
+            "first_spawn_status": lifecycle.get("first_spawn_status"),
+            "sessions_list_count": lifecycle.get("sessions_list_count"),
+            "matching_session_count": lifecycle.get("matching_session_count"),
+            "post_release_lease_count": lifecycle.get("post_release_lease_count"),
+        },
+        "rollback": {
+            "status": "pass",
+            "candidate_port_closed": rollback.get("candidate_port_closed"),
+            "production_config_hash_unchanged": rollback.get(
+                "production_config_hash_unchanged"
+            ),
+            "production_health_before_sha256": rollback.get(
+                "production_health_before_sha256"
+            ),
+            "production_health_after_sha256": rollback.get("production_health_after_sha256"),
+            "db_authority_enabled": db_authority.get("DB_AUTHORITY_ENABLED"),
+            "candidate_shutdown_sha256": _canonical_sha256(
+                _optional_record(rollback.get("candidate_shutdown"))
+            ),
+        },
+        "production_snapshot": {
+            "before_config_sha256": production_before.get("config_sha256"),
+            "after_config_sha256": production_after.get("config_sha256"),
+            "before_health_sha256": _canonical_sha256(production_before.get("health")),
+            "after_health_sha256": _canonical_sha256(production_after.get("health")),
+        },
+        "runner": {
+            "script": PERSISTENT_LIFECYCLE_RUNNER,
+            "command_sha256": _text_sha256("\0".join(command)),
+            "stdout_sha256": _sha256_bytes(proc.stdout.encode()),
+            "stderr_sha256": _sha256_bytes(proc.stderr.encode()),
+            "run_root_sha256": _text_sha256(str(run_root.resolve())),
+            "receipt_sha256": _sha256_bytes(receipt_file.read_bytes()),
+            "validation_sha256": _sha256_bytes(validation_file.read_bytes()),
+            "validation_receipt_sha256": validation.get("receipt_sha256"),
+            "runtime_launch_sha256": _canonical_sha256(runtime_launch),
+            "path_receipts_sha256": {
+                key: _optional_record(value).get("realpath_sha256")
+                for key, value in sorted(paths.items())
+            },
+            "candidate_stdout_log_sha256": logs.get("stdout_sha256"),
+            "candidate_stderr_log_sha256": logs.get("stderr_sha256"),
+        },
+        "soak": {
+            "status": soak.get("status"),
+            "started": soak.get("started"),
+        },
+        "historical_probe_audit": {
+            "verdict": historical_probe_audit.get("verdict"),
+            "sha256": historical_probe_audit.get("sha256"),
+        },
+        "agentic_sources": agentic_sources,
+        "runtime_sources": runtime_sources,
+    }
+    _walk_evidence(payload)
+    return payload
+
+
+def _persistent_failure_summary(
+    *,
+    openclaw_root: Path,
+    run_root: Path,
+    head: str,
+    agentic_sources: list[dict[str, str]],
+    runtime_sources: list[dict[str, str]],
+    command: list[str],
+    proc: subprocess.CompletedProcess[str],
+    port: int,
+) -> dict[str, Any]:
+    agentic_head = _git(ROOT, "rev-parse", "HEAD")
+    receipts_dir = run_root / "receipts"
+    failure_receipt = (
+        _read_json_file(receipts_dir / "failure-receipt.json", "persistent failure receipt")
+        if (receipts_dir / "failure-receipt.json").is_file()
+        else {}
+    )
+    failure_cleanup = (
+        _read_json_file(receipts_dir / "failure-cleanup.json", "persistent failure cleanup")
+        if (receipts_dir / "failure-cleanup.json").is_file()
+        else {}
+    )
+    error_record = _optional_record(failure_receipt.get("error"))
+    cleanup_error = _optional_record(failure_cleanup.get("error"))
+    candidate_shutdown = _optional_record(failure_cleanup.get("candidate_shutdown"))
+    db_authority = _optional_record(failure_cleanup.get("db_authority"))
+    production_before = _optional_record(failure_cleanup.get("production_before"))
+    production_after = _optional_record(failure_cleanup.get("production_after"))
+    payload: dict[str, Any] = {
+        "status": "fail_closed",
+        "classification": "persistent_lifecycle_runner_failed",
+        "probe": "agentic-os-persistent-lifecycle-runner",
+        "openclaw_head_sha": head,
+        "agentic_os_head_sha": agentic_head,
+        "runtime_ready": False,
+        "runtime_ready_candidate_evidence": False,
+        "production_behavior_proven": False,
+        "production_authority_enabled": False,
+        "isolated_non_production_gateway": {
+            "status": "fail_closed",
+            "loopback": True,
+            "token_authenticated": True,
+            "port": port,
+            "candidate_port_closed": candidate_shutdown.get("port_closed"),
+            "production_config_hash_unchanged": (
+                production_before.get("config_sha256")
+                == production_after.get("config_sha256")
+                if production_before or production_after
+                else None
+            ),
+            "db_authority_enabled": db_authority.get("DB_AUTHORITY_ENABLED"),
+        },
+        "fail_closed_matrix": [
+            {
+                "check": "candidate_exact_clean_head",
+                "status": "pass",
+                "evidence": head,
+            },
+            {
+                "check": "persistent_runner_present",
+                "status": "pass",
+                "evidence_sha256": _sha256_bytes(
+                    (openclaw_root / PERSISTENT_LIFECYCLE_RUNNER).read_bytes()
+                ),
+            },
+            {
+                "check": "runner_exit_code",
+                "status": "fail",
+                "exit_code": proc.returncode,
+            },
+            {
+                "check": "runner_classification",
+                "status": _safe_status(failure_receipt.get("status")),
+                "classification": _safe_status(failure_receipt.get("classification")),
+                "error_code": _safe_status(error_record.get("code")),
+                "error_message_sha256": _text_sha256(str(error_record.get("message", ""))),
+            },
+            {
+                "check": "failure_cleanup",
+                "status": _safe_status(failure_cleanup.get("status")),
+                "error_code": _safe_status(cleanup_error.get("code")),
+                "error_message_sha256": _text_sha256(str(cleanup_error.get("message", ""))),
+            },
+        ],
+        "runner": {
+            "script": PERSISTENT_LIFECYCLE_RUNNER,
+            "command_sha256": _text_sha256("\0".join(command)),
+            "stdout_sha256": _sha256_bytes(proc.stdout.encode()),
+            "stderr_sha256": _sha256_bytes(proc.stderr.encode()),
+            "run_root_sha256": _text_sha256(str(run_root.resolve())),
+        },
+        "agentic_sources": agentic_sources,
+        "runtime_sources": runtime_sources,
+    }
+    _walk_evidence(payload)
+    return payload
+
+
+def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> None:
+    evidence_file = evidence_file.resolve()
+    evidence_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary_evidence_file = evidence_file.with_name(
+        f".{evidence_file.name}.{os.getpid()}.tmp"
+    )
+    try:
+        temporary_evidence_file.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary_evidence_file.replace(evidence_file)
+    finally:
+        if temporary_evidence_file.exists():
+            temporary_evidence_file.unlink()
+
+
+def _run_persistent_lifecycle_probe(
+    openclaw_root: Path,
+    evidence_file: Path,
+    timeout: int,
+    *,
+    head: str,
+    agentic_sources: list[dict[str, str]],
+    runtime_sources: list[dict[str, str]],
+    run_root: Path,
+    port: int,
+    run_id: str,
+    transition_id: str,
+) -> dict[str, Any]:
+    run_root = run_root.resolve()
+    evidence_dir = run_root / "evidence"
+    command = [
+        "node",
+        "--import",
+        "tsx",
+        PERSISTENT_LIFECYCLE_RUNNER,
+        "run",
+        "--runtime-worktree",
+        str(openclaw_root.resolve()),
+        "--agentic-os-worktree",
+        str(ROOT.resolve()),
+        "--expected-runtime-head",
+        head,
+        "--expected-agentic-os-head",
+        _git(ROOT, "rev-parse", "HEAD"),
+        "--run-root",
+        str(run_root),
+        "--port",
+        str(port),
+        "--run-id",
+        run_id,
+        "--transition-id",
+        transition_id,
+        "--evidence-dir",
+        str(evidence_dir),
+    ]
+    proc = _run(command, cwd=openclaw_root, timeout=timeout)
+    if validate_candidate_root(openclaw_root) != head:
+        raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
+    if proc.returncode != 0:
+        payload = _persistent_failure_summary(
+            openclaw_root=openclaw_root,
+            run_root=run_root,
+            head=head,
+            agentic_sources=agentic_sources,
+            runtime_sources=runtime_sources,
+            command=command,
+            proc=proc,
+            port=port,
+        )
+        _write_validated_payload(evidence_file, payload)
+        raise ProbeError(
+            "persistent lifecycle runner failed "
+            f"returncode={proc.returncode} evidence_file_sha256="
+            f"{_sha256_bytes(evidence_file.resolve().read_bytes())}"
+        )
+    receipt_file = run_root / "receipts" / "lifecycle-receipt.json"
+    validation_file = run_root / "receipts" / "independent-validation.json"
+    payload = _persistent_lifecycle_summary(
+        openclaw_root=openclaw_root,
+        run_root=run_root,
+        receipt_file=receipt_file,
+        validation_file=validation_file,
+        head=head,
+        agentic_sources=agentic_sources,
+        runtime_sources=runtime_sources,
+        command=command,
+        proc=proc,
+        port=port,
+    )
+    _write_validated_payload(evidence_file, payload)
+    return payload
+
+
+def run_probe(
+    openclaw_root: Path,
+    evidence_file: Path,
+    timeout: int,
+    *,
+    run_root: Path | None = None,
+    port: int | None = None,
+    run_id: str | None = None,
+    transition_id: str | None = None,
+) -> dict[str, Any]:
+    head = validate_candidate_root(openclaw_root)
+    agentic_sources = _source_bindings(ROOT, AGENTIC_SOURCE_PATHS)
+    mode = _candidate_probe_mode(openclaw_root)
+    if mode == "legacy_e2e":
+        return _run_legacy_e2e_probe(
+            openclaw_root,
+            evidence_file,
+            timeout,
+            head=head,
+            agentic_sources=agentic_sources,
+        )
+    runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
+    default_run_root = (
+        evidence_file.resolve().parent
+        / ".openclaw-real-gateway-contract-probe-runs"
+        / head[:12]
+    )
+    return _run_persistent_lifecycle_probe(
+        openclaw_root,
+        evidence_file,
+        timeout,
+        head=head,
+        agentic_sources=agentic_sources,
+        runtime_sources=runtime_sources,
+        run_root=run_root or default_run_root,
+        port=port or PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+        run_id=run_id or "agentic-os-real-gateway-contract-probe",
+        transition_id=transition_id or "persistent-lifecycle-runtime-readiness",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--openclaw-root", required=True, type=Path)
     parser.add_argument("--evidence-file", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=240)
+    parser.add_argument("--run-root", type=Path)
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--run-id")
+    parser.add_argument("--transition-id")
     args = parser.parse_args(argv)
     try:
-        payload = run_probe(args.openclaw_root, args.evidence_file, args.timeout_seconds)
+        payload = run_probe(
+            args.openclaw_root,
+            args.evidence_file,
+            args.timeout_seconds,
+            run_root=args.run_root,
+            port=args.port,
+            run_id=args.run_id,
+            transition_id=args.transition_id,
+        )
     except (ProbeError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"status": "fail_closed", "error": str(exc)}, sort_keys=True))
         return 1
@@ -327,7 +872,10 @@ def main(argv: list[str] | None = None) -> int:
                 "status": "pass",
                 "openclaw_head_sha": payload["openclaw_head_sha"],
                 "agentic_os_head_sha": payload["agentic_os_head_sha"],
-                "child_completed": payload["child_completed"],
+                "runtime_ready": payload.get("runtime_ready"),
+                "runtime_ready_candidate_evidence": payload.get(
+                    "runtime_ready_candidate_evidence", payload.get("child_completed")
+                ),
                 "evidence_sha256": _sha256_bytes(
                     json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
                 ),

@@ -1101,6 +1101,77 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     payload["error"],
                 )
 
+    def test_live_installed_preflight_can_skip_status_rpc_for_no_mutation_boundary(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            executable = os.path.join(bin_dir, "openclaw")
+            catalog = {
+                "groups": [
+                    {
+                        "id": "unit",
+                        "tools": [
+                            active_tool_entry(tool_id, include_schema=True)
+                            for tool_id in ACTIVE_TOOL_IDS
+                        ],
+                    }
+                ]
+            }
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    "import sys\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                    f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+                    "    raise SystemExit(0)\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    "    raise SystemExit(88)\n"
+                    "raise SystemExit(2)\n"
+                )
+            os.chmod(executable, 0o755)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--skip-live-status-rpc",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+        rpc_evidence = {
+            item["name"]: item
+            for item in gateway_catalog["rpc_evidence"]
+        }
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.status"]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertIn("subagents.allowLease.status live reachability is unproven", payload["error"])
+        self.assertFalse(payload["runtime_ready"])
+
     def test_live_status_validates_each_returned_lease_item(self) -> None:
         status_payload = {
             "ok": True,

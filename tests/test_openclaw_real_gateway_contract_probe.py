@@ -77,6 +77,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             output.write_text('{"status":"previous"}\n', encoding="utf-8")
             original_run = MODULE._run
             original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
             original_source_binding = MODULE._source_binding
             original_validate_sources = MODULE._validate_sources
             original_git = MODULE._git
@@ -96,6 +97,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = fake_run
                 MODULE.validate_candidate_root = lambda root: "openclaw-head"
+                MODULE._candidate_probe_mode = lambda root: "legacy_e2e"
                 MODULE._source_binding = lambda root, relative: {
                     "path": relative,
                     "sha256": "0" * 64,
@@ -108,7 +110,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 MODULE._run = original_run
                 MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
                 MODULE._source_binding = original_source_binding
+                MODULE._validate_sources = original_validate_sources
                 MODULE._git = original_git
 
     def test_rejects_local_absolute_path_value(self) -> None:
@@ -165,6 +169,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             output = Path(directory) / "evidence.json"
             original_run = MODULE._run
             original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
             original_source_binding = MODULE._source_binding
             original_validate_sources = MODULE._validate_sources
             original_git = MODULE._git
@@ -213,6 +218,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = fake_run
                 MODULE.validate_candidate_root = lambda root: "openclaw-head"
+                MODULE._candidate_probe_mode = lambda root: "legacy_e2e"
                 MODULE._source_binding = lambda root, relative: {
                     "path": relative,
                     "sha256": "0" * 64,
@@ -225,6 +231,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 MODULE._run = original_run
                 MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
                 MODULE._source_binding = original_source_binding
                 MODULE._validate_sources = original_validate_sources
                 MODULE._git = original_git
@@ -293,8 +300,144 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "package.json").write_text('{"name":"openclaw"}\n', encoding="utf-8")
-            with self.assertRaisesRegex(MODULE.ProbeError, "real Gateway E2E"):
+            with self.assertRaisesRegex(MODULE.ProbeError, "git rev-parse HEAD failed"):
                 MODULE.validate_candidate_root(root)
+
+    def test_candidate_probe_mode_uses_persistent_runner_without_legacy_e2e(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+
+            self.assertEqual(MODULE._candidate_probe_mode(root), "persistent_lifecycle_runner")
+
+    def test_candidate_probe_mode_fails_without_supported_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(MODULE.ProbeError, "neither"):
+                MODULE._candidate_probe_mode(Path(directory))
+
+    def test_persistent_lifecycle_summary_is_phase_b_snapshot_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            receipts = run_root / "receipts"
+            receipts.mkdir(parents=True)
+            receipt_file = receipts / "lifecycle-receipt.json"
+            validation_file = receipts / "independent-validation.json"
+            receipt = {
+                "status": "pass",
+                "immutable_inputs": {
+                    "runtime_head": "openclaw-head",
+                    "agentic_os_head": "agentic-head",
+                },
+                "production_before": {
+                    "config_sha256": "0" * 64,
+                    "health": {"reachable": False},
+                },
+                "production_after": {
+                    "config_sha256": "0" * 64,
+                    "health": {"reachable": False},
+                },
+                "candidate": {
+                    "port": MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                    "env": {"unexpected_provider_key_count": 0},
+                    "logs": {"stdout_sha256": "1" * 64, "stderr_sha256": "2" * 64},
+                },
+                "preflight": {
+                    "status": "pass",
+                    "runtime_ready": True,
+                    "required_tool_names": list(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+                    "evidence_sha256": "3" * 64,
+                    "persistent_evidence_sha256": "4" * 64,
+                    "stdout_sha256": "5" * 64,
+                    "stderr_sha256": "6" * 64,
+                    "hello": {
+                        "status": "pass",
+                        "required_methods": list(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+                    },
+                },
+                "attestation": {
+                    "status": "pass",
+                    "gateway_endpoint": "ws://127.0.0.1:20189",
+                    "gateway_build_id": "06e6e3f",
+                    "executable_content_sha256": "7" * 64,
+                    "catalog_sha256": "8" * 64,
+                    "contract_vector_sha256": "9" * 64,
+                    "rpc_transcript_sha256": "a" * 64,
+                    "runtime_authored_rpc_evidence_sha256": "b" * 64,
+                    "signed_payload_sha256": "c" * 64,
+                    "runtime_identity_token_sha256": "d" * 64,
+                },
+                "lifecycle": {
+                    "status": "pass",
+                    "duplicate_acquire_same_lease": True,
+                    "first_spawn_status": "accepted",
+                    "duplicate_spawn_same_session": True,
+                    "post_release_lease_count": 0,
+                    "gateway_lease_id_sha256": "e" * 64,
+                    "session_key_sha256": "f" * 64,
+                    "child_run_id_sha256": "0" * 64,
+                    "session_status_sha256": "1" * 64,
+                    "sessions_history_sha256": "2" * 64,
+                    "duplicate_release_sha256": "3" * 64,
+                    "sessions_list_count": 1,
+                    "matching_session_count": 1,
+                },
+                "rollback": {
+                    "status": "pass",
+                    "candidate_port_closed": True,
+                    "production_config_hash_unchanged": True,
+                    "production_health_before_sha256": "4" * 64,
+                    "production_health_after_sha256": "5" * 64,
+                    "db_authority": {"DB_AUTHORITY_ENABLED": False},
+                    "candidate_shutdown": {"port_closed": True},
+                },
+                "runtime_launch": {"token_sha256": "6" * 64},
+                "paths": {
+                    "run_root": {"realpath_sha256": "7" * 64},
+                    "key_path": {"realpath_sha256": "8" * 64},
+                },
+                "soak": {"status": "prepared_not_started", "started": False},
+                "historical_probe_audit": {
+                    "verdict": "not_authority_for_phase_b",
+                    "sha256": "9" * 64,
+                },
+            }
+            validation = {"status": "pass", "receipt_sha256": "a" * 64}
+            receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+            validation_file.write_text(json.dumps(validation), encoding="utf-8")
+            original_git = MODULE._git
+
+            class Proc:
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+                returncode = 0
+
+            try:
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                payload = MODULE._persistent_lifecycle_summary(
+                    openclaw_root=root,
+                    run_root=run_root,
+                    receipt_file=receipt_file,
+                    validation_file=validation_file,
+                    head="openclaw-head",
+                    agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                    runtime_sources=[{"path": "runtime.ts", "sha256": "1" * 64}],
+                    command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                    proc=Proc(),
+                    port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                )
+            finally:
+                MODULE._git = original_git
+
+        self.assertEqual(payload["status"], "pass")
+        self.assertFalse(payload["runtime_ready"])
+        self.assertTrue(payload["runtime_ready_candidate_evidence"])
+        self.assertTrue(payload["runtime_ready_blocked_until_phase_c"])
+        self.assertFalse(payload["db_authority_enabled"])
+        self.assertNotIn("/private", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("runner stdout", json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":
