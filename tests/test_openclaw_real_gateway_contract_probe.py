@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import get_type_hints
@@ -22,12 +23,15 @@ VALIDATION_HMAC_SECRET = "validation-hmac-secret-for-pr45-review-tests"
 
 class RealGatewayProbeTests(unittest.TestCase):
     def _valid_persistent_receipt(self) -> dict:
+        now_ms = int(time.time() * 1000)
         return {
             "status": "pass",
             "immutable_inputs": {
                 "runtime_head": "openclaw-head",
                 "agentic_os_head": "agentic-head",
                 "contract_vector_sha256": "9" * 64,
+                "run_id": "run-id",
+                "transition_id": "transition-id",
             },
             "production_before": {
                 "config_sha256": "0" * 64,
@@ -66,9 +70,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "runtime_authored_rpc_evidence_sha256": "b" * 64,
                 "signed_payload_sha256": "c" * 64,
                 "runtime_identity_token_sha256": "d" * 64,
+                "expires_at_epoch_ms": now_ms + 60_000,
+                "captured_at_epoch_ms": now_ms,
             },
             "lifecycle": {
                 "status": "pass",
+                "run_id": "run-id",
+                "transition_id": "transition-id",
                 "duplicate_acquire_same_lease": True,
                 "first_spawn_status": "accepted",
                 "duplicate_spawn_same_session": True,
@@ -92,7 +100,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "candidate_shutdown": {"port_closed": True},
             },
             "runtime_launch": {
-                "token_sha256": "6" * 64,
+                "token_sha256": "d" * 64,
                 "executable_sha256": "7" * 64,
             },
             "paths": {
@@ -116,7 +124,10 @@ class RealGatewayProbeTests(unittest.TestCase):
     ) -> tuple[Path, Path]:
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
+        now_ms = int(time.time() * 1000)
         signed_payload = {
+            "issued_at_epoch_ms": now_ms - 1_000,
+            "expires_at_epoch_ms": receipt["attestation"]["expires_at_epoch_ms"],
             "runtime_identity_token_sha256": "d" * 64,
             "rpc_transcript_sha256": "a" * 64,
             "binding": {
@@ -199,6 +210,30 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
         if persistent_evidence_transform is not None:
             persistent_evidence_transform(persistent_evidence)
+        preflight = receipt["preflight"]
+        preflight_required_tool_names = preflight.get("required_tool_names")
+        if not isinstance(preflight_required_tool_names, list):
+            preflight_required_tool_names = []
+        hello_required_methods = preflight.get("hello", {}).get("required_methods")
+        if not isinstance(hello_required_methods, list):
+            hello_required_methods = []
+        preflight_evidence = {
+            "status": "pass",
+            "runtime_ready": True,
+            "required_tool_names": list(preflight_required_tool_names),
+            "hello": {
+                "status": "pass",
+                "required_methods": list(hello_required_methods),
+            },
+        }
+        preflight_evidence_file = receipts / "capability-preflight-attempt-1.json"
+        preflight_evidence_file.write_text(
+            json.dumps(preflight_evidence), encoding="utf-8"
+        )
+        receipt["preflight"]["evidence_file"] = str(preflight_evidence_file)
+        receipt["preflight"]["evidence_sha256"] = MODULE._sha256_bytes(
+            preflight_evidence_file.read_bytes()
+        )
         persistent_evidence_file = receipts / "persistent-attested-preflight-input-attempt-1.json"
         persistent_evidence_file.write_text(json.dumps(persistent_evidence), encoding="utf-8")
         receipt["preflight"]["persistent_evidence_file"] = str(persistent_evidence_file)
@@ -295,6 +330,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                 proc=Proc(),
                 port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                expected_run_id="run-id",
+                expected_transition_id="transition-id",
             )
         finally:
             MODULE._git = original_git
@@ -327,6 +364,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/runtime_attestation.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
+        self.assertIn("src/agentic_os/__init__.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertFalse(hasattr(MODULE, "ADAPTER_PROBE"))
 
     def test_rejects_raw_session_identity(self) -> None:
@@ -692,6 +730,21 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "loopback listener"):
                 self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_gateway_endpoint_credentials_or_query(self) -> None:
+        for endpoint in (
+            "ws://secret@127.0.0.1:20189",
+            "ws://127.0.0.1:20189/?token=raw-secret",
+            "wss://127.0.0.1:20189",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    receipt["attestation"]["gateway_endpoint"] = endpoint
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError, "canonical|credentials"
+                    ):
+                        self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_summary_rejects_provider_secret_leak_count(self) -> None:
         for value in (None, 1):
             with self.subTest(value=value):
@@ -703,6 +756,123 @@ class RealGatewayProbeTests(unittest.TestCase):
                         receipt["candidate"]["env"]["unexpected_provider_key_count"] = value
                     with self.assertRaisesRegex(MODULE.ProbeError, "provider secrets"):
                         self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_requested_identity_mismatch(self) -> None:
+        cases = (
+            ("immutable_inputs", "run_id"),
+            ("immutable_inputs", "transition_id"),
+            ("lifecycle", "run_id"),
+            ("lifecycle", "transition_id"),
+        )
+        for section, key in cases:
+            with self.subTest(section=section, key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    receipt[section][key] = "stale-identity"
+                    with self.assertRaisesRegex(MODULE.ProbeError, "requested lifecycle"):
+                        self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_gateway_token_not_bound_to_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["runtime_launch"]["token_sha256"] = "0" * 64
+            with self.assertRaisesRegex(MODULE.ProbeError, "Gateway token"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_stale_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            old_ms = int(time.time() * 1000) - 120_000
+            receipt["attestation"]["captured_at_epoch_ms"] = old_ms
+            receipt["attestation"]["expires_at_epoch_ms"] = old_ms + 1_000
+            with self.assertRaisesRegex(MODULE.ProbeError, "fresh|capture time"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_missing_preflight_artifact_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            receipt = self._valid_persistent_receipt()
+            receipt_file, validation_file = self._write_persistent_receipts(run_root, receipt)
+            receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+            del receipt["preflight"]["evidence_file"]
+            receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            validation["receipt_sha256"] = MODULE._sha256_bytes(receipt_file.read_bytes())
+            validation["authentication"]["signature"] = hmac.new(
+                VALIDATION_HMAC_SECRET.encode(),
+                MODULE._canonical_json_bytes(MODULE._authentication_payload(validation)),
+                hashlib.sha256,
+            ).hexdigest()
+            validation_file.write_text(json.dumps(validation), encoding="utf-8")
+            original_git = MODULE._git
+            previous_secret = os.environ.get(MODULE.PERSISTENT_VALIDATION_HMAC_ENV)
+            os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = VALIDATION_HMAC_SECRET
+            try:
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                with self.assertRaisesRegex(MODULE.ProbeError, "capability preflight"):
+                    MODULE._persistent_lifecycle_summary(
+                        openclaw_root=Path(directory),
+                        run_root=run_root,
+                        receipt_file=receipt_file,
+                        validation_file=validation_file,
+                        head="openclaw-head",
+                        agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                        proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
+                    )
+            finally:
+                MODULE._git = original_git
+                if previous_secret is None:
+                    os.environ.pop(MODULE.PERSISTENT_VALIDATION_HMAC_ENV, None)
+                else:
+                    os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = previous_secret
+
+    def test_persistent_summary_rejects_preflight_artifact_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            receipt = self._valid_persistent_receipt()
+            receipt_file, validation_file = self._write_persistent_receipts(run_root, receipt)
+            receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+            receipt["preflight"]["evidence_sha256"] = "0" * 64
+            receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            validation["receipt_sha256"] = MODULE._sha256_bytes(receipt_file.read_bytes())
+            validation["authentication"]["signature"] = hmac.new(
+                VALIDATION_HMAC_SECRET.encode(),
+                MODULE._canonical_json_bytes(MODULE._authentication_payload(validation)),
+                hashlib.sha256,
+            ).hexdigest()
+            validation_file.write_text(json.dumps(validation), encoding="utf-8")
+            original_git = MODULE._git
+            previous_secret = os.environ.get(MODULE.PERSISTENT_VALIDATION_HMAC_ENV)
+            os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = VALIDATION_HMAC_SECRET
+            try:
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                with self.assertRaisesRegex(MODULE.ProbeError, "preflight evidence digest"):
+                    MODULE._persistent_lifecycle_summary(
+                        openclaw_root=Path(directory),
+                        run_root=run_root,
+                        receipt_file=receipt_file,
+                        validation_file=validation_file,
+                        head="openclaw-head",
+                        agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                        proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
+                    )
+            finally:
+                MODULE._git = original_git
+                if previous_secret is None:
+                    os.environ.pop(MODULE.PERSISTENT_VALIDATION_HMAC_ENV, None)
+                else:
+                    os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = previous_secret
 
     def test_persistent_summary_rejects_missing_attestation_identity_fields(self) -> None:
         required_keys = (
@@ -786,6 +956,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
                         port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
                     )
             finally:
                 MODULE._git = original_git
@@ -829,6 +1001,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
                         port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
                     )
             finally:
                 MODULE._git = original_git
@@ -863,7 +1037,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             captured_env = {}
             previous_openai_key = os.environ.get("OPENAI_API_KEY")
+            previous_node_options = os.environ.get("NODE_OPTIONS")
             os.environ["OPENAI_API_KEY"] = "sk-test-provider-secret"
+            os.environ["NODE_OPTIONS"] = "--require=/tmp/hook.cjs"
 
             class Proc:
                 returncode = 0
@@ -909,9 +1085,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                     os.environ.pop("OPENAI_API_KEY", None)
                 else:
                     os.environ["OPENAI_API_KEY"] = previous_openai_key
+                if previous_node_options is None:
+                    os.environ.pop("NODE_OPTIONS", None)
+                else:
+                    os.environ["NODE_OPTIONS"] = previous_node_options
 
         self.assertEqual(payload["status"], "pass")
         self.assertNotIn("OPENAI_API_KEY", captured_env)
+        self.assertNotIn("NODE_OPTIONS", captured_env)
         self.assertEqual(captured_env["OPENCLAW_HOME"], str((run_root / "runner-home").resolve()))
         self.assertEqual(
             captured_env["OPENCLAW_STATE_DIR"],

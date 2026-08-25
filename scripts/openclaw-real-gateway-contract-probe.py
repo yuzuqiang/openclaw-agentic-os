@@ -28,6 +28,7 @@ AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
     "scripts/openclaw-live-accepted-session-probe.py",
     "scripts/openclaw-tool-capability-preflight.py",
+    "src/agentic_os/__init__.py",
     "src/agentic_os/openclaw_adapter.py",
     "src/agentic_os/runtime_attestation.py",
     "src/agentic_os/metadata.py",
@@ -121,7 +122,6 @@ RUNNER_ENV_ALLOWLIST = {
     "LC_ALL",
     "LC_CTYPE",
     "LOGNAME",
-    "NODE_OPTIONS",
     "PATH",
     "SHELL",
     "TMP",
@@ -348,6 +348,12 @@ def _validate_gateway_endpoint(endpoint: Any, *, port: int) -> None:
     if not isinstance(endpoint, str) or not endpoint:
         raise ProbeError("persistent lifecycle attestation gateway endpoint is missing")
     parsed = urlparse(endpoint)
+    if parsed.scheme != "ws":
+        raise ProbeError("persistent lifecycle attestation gateway endpoint is not canonical ws")
+    if parsed.username or parsed.password or parsed.path or parsed.params or parsed.query or parsed.fragment:
+        raise ProbeError(
+            "persistent lifecycle attestation gateway endpoint contains non-canonical credentials or path"
+        )
     if parsed.hostname not in {"127.0.0.1", "::1", "localhost"} or parsed.port != port:
         raise ProbeError("persistent lifecycle attestation gateway endpoint is not the requested loopback listener")
 
@@ -464,6 +470,57 @@ def _validate_independent_validation(
         label="persistent lifecycle validation",
         expected_key_env=PERSISTENT_VALIDATION_HMAC_ENV,
     )
+
+
+def _require_epoch_ms_field(section: Mapping[str, Any], key: str, label: str) -> int:
+    value = section.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ProbeError(f"{label}.{key} must be a positive epoch milliseconds integer")
+    return value
+
+
+def _validate_expected_identity(
+    section: Mapping[str, Any],
+    *,
+    key: str,
+    expected: str,
+    label: str,
+) -> None:
+    if section.get(key) != expected:
+        raise ProbeError(f"{label}.{key} does not match requested lifecycle identity")
+
+
+def _validate_capability_preflight_artifact(
+    *,
+    run_root: Path,
+    preflight: Mapping[str, Any],
+    required_tool_names: list[str],
+) -> None:
+    evidence_path = _run_artifact_path(
+        run_root,
+        preflight.get("evidence_file"),
+        "capability preflight evidence",
+    )
+    evidence_sha256 = _require_sha256_field(preflight, "evidence_sha256", "preflight")
+    if _sha256_bytes(evidence_path.read_bytes()) != evidence_sha256:
+        raise ProbeError("capability preflight evidence digest mismatch")
+    evidence = _read_json_file(evidence_path, "capability preflight evidence")
+    _require_pass(evidence, "capability preflight evidence")
+    if evidence.get("runtime_ready") is not True:
+        raise ProbeError("capability preflight evidence did not pass runtime readiness")
+    if "required_tool_names" in evidence:
+        evidence_required_tool_names = _string_list(
+            evidence.get("required_tool_names"),
+            "capability preflight evidence.required_tool_names",
+        )
+    else:
+        hello = _record(evidence.get("hello"), "capability preflight evidence.hello")
+        evidence_required_tool_names = _string_list(
+            hello.get("required_methods"),
+            "capability preflight evidence.hello.required_methods",
+        )
+    if sorted(evidence_required_tool_names) != sorted(required_tool_names):
+        raise ProbeError("capability preflight evidence required tool names mismatch")
 
 
 def _validate_attestation_signature_binding(
@@ -585,6 +642,22 @@ def _validate_persistent_attestation_evidence(
     signed_payload = _record(
         response.get("signed_payload"), "persistent attestation signed payload"
     )
+    now_epoch_ms = int(time.time() * 1000)
+    issued_at_epoch_ms = _require_epoch_ms_field(
+        signed_payload, "issued_at_epoch_ms", "persistent attestation signed payload"
+    )
+    expires_at_epoch_ms = _require_epoch_ms_field(
+        signed_payload, "expires_at_epoch_ms", "persistent attestation signed payload"
+    )
+    captured_at_epoch_ms = _require_epoch_ms_field(
+        attestation, "captured_at_epoch_ms", "attestation"
+    )
+    if not (issued_at_epoch_ms <= captured_at_epoch_ms <= expires_at_epoch_ms):
+        raise ProbeError("persistent attestation capture time is outside signed lifetime")
+    if not (issued_at_epoch_ms <= now_epoch_ms <= expires_at_epoch_ms):
+        raise ProbeError("persistent attestation is not fresh at promotion time")
+    if attestation.get("expires_at_epoch_ms") != expires_at_epoch_ms:
+        raise ProbeError("persistent attestation expiry is not signed-payload bound")
     rpc_evidence = _record(
         evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
     )
@@ -849,6 +922,8 @@ def _persistent_lifecycle_summary(
     command: list[str],
     proc: subprocess.CompletedProcess[str],
     port: int,
+    expected_run_id: str,
+    expected_transition_id: str,
 ) -> dict[str, Any]:
     receipt = _read_json_file(receipt_file, "persistent lifecycle receipt")
     validation = _read_json_file(validation_file, "persistent lifecycle validation")
@@ -864,6 +939,18 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle receipt runtime head binding is invalid")
     if immutable_inputs.get("agentic_os_head") != agentic_head:
         raise ProbeError("persistent lifecycle receipt Agentic OS head binding is invalid")
+    _validate_expected_identity(
+        immutable_inputs,
+        key="run_id",
+        expected=expected_run_id,
+        label="receipt immutable_inputs",
+    )
+    _validate_expected_identity(
+        immutable_inputs,
+        key="transition_id",
+        expected=expected_transition_id,
+        label="receipt immutable_inputs",
+    )
 
     production_before = _record(receipt.get("production_before"), "production_before")
     production_after = _record(receipt.get("production_after"), "production_after")
@@ -901,6 +988,18 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle preflight did not pass runtime readiness")
     if lifecycle.get("first_spawn_status") != "accepted":
         raise ProbeError("persistent lifecycle did not prove accepted session spawn")
+    _validate_expected_identity(
+        lifecycle,
+        key="run_id",
+        expected=expected_run_id,
+        label="lifecycle",
+    )
+    _validate_expected_identity(
+        lifecycle,
+        key="transition_id",
+        expected=expected_transition_id,
+        label="lifecycle",
+    )
     if lifecycle.get("duplicate_spawn_same_session") is not True:
         raise ProbeError("persistent lifecycle did not prove duplicate spawn identity parity")
     if lifecycle.get("duplicate_acquire_same_lease") is not True:
@@ -932,6 +1031,9 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle preflight is missing required tool names")
 
     runtime_launch = _optional_record(receipt.get("runtime_launch"))
+    runtime_launch_token_sha256 = _require_sha256_field(
+        runtime_launch, "token_sha256", "runtime_launch"
+    )
     paths = _optional_record(receipt.get("paths"))
     logs = _optional_record(candidate.get("logs"))
     candidate_env = _optional_record(candidate.get("env"))
@@ -949,6 +1051,15 @@ def _persistent_lifecycle_summary(
         "runtime_identity_token_sha256",
     ):
         _require_sha256_field(attestation, key, "attestation")
+    _require_epoch_ms_field(attestation, "expires_at_epoch_ms", "attestation")
+    _require_epoch_ms_field(attestation, "captured_at_epoch_ms", "attestation")
+    if attestation.get("runtime_identity_token_sha256") != runtime_launch_token_sha256:
+        raise ProbeError("persistent lifecycle Gateway token is not attestation-bound")
+    _validate_capability_preflight_artifact(
+        run_root=run_root,
+        preflight=preflight,
+        required_tool_names=required_tool_names,
+    )
     _validate_persistent_attestation_evidence(
         run_root=run_root,
         preflight=preflight,
@@ -1101,6 +1212,8 @@ def _persistent_lifecycle_summary(
             "validation_sha256": _sha256_bytes(validation_file.read_bytes()),
             "validation_receipt_sha256": validation.get("receipt_sha256"),
             "runtime_launch_sha256": _canonical_sha256(runtime_launch),
+            "expected_run_id_sha256": _text_sha256(expected_run_id),
+            "expected_transition_id_sha256": _text_sha256(expected_transition_id),
             "path_receipts_sha256": {
                 key: _optional_record(value).get("realpath_sha256")
                 for key, value in sorted(paths.items())
@@ -1381,6 +1494,8 @@ def _run_persistent_lifecycle_probe(
             command=command,
             proc=proc,
             port=port,
+            expected_run_id=run_id,
+            expected_transition_id=transition_id,
         )
         if not _wait_for_loopback_port_closed(port):
             process_group_cleanup_attempted = _terminate_process_group(proc)
