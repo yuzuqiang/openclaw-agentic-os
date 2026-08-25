@@ -1035,11 +1035,16 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_run_independent_validator = MODULE._run_independent_validator
             captured_env = {}
+            captured_validator = {}
+            captured_modes = {}
             previous_openai_key = os.environ.get("OPENAI_API_KEY")
             previous_node_options = os.environ.get("NODE_OPTIONS")
+            previous_validation_key = os.environ.get(MODULE.PERSISTENT_VALIDATION_HMAC_ENV)
             os.environ["OPENAI_API_KEY"] = "sk-test-provider-secret"
             os.environ["NODE_OPTIONS"] = "--require=/tmp/hook.cjs"
+            os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = VALIDATION_HMAC_SECRET
 
             class Proc:
                 returncode = 0
@@ -1064,6 +1069,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "runtime_ready_candidate_evidence": True,
                     "isolated_non_production_gateway": {},
                 }
+                MODULE._run_independent_validator = lambda **kwargs: captured_validator.update(
+                    kwargs
+                )
                 payload = MODULE._run_persistent_lifecycle_probe(
                     root,
                     output,
@@ -1076,11 +1084,19 @@ class RealGatewayProbeTests(unittest.TestCase):
                     run_id="run-id",
                     transition_id="transition-id",
                 )
+                for directory_path in (
+                    run_root,
+                    run_root / "runner-home",
+                    run_root / "runner-state",
+                    run_root / "runner-tmp",
+                ):
+                    captured_modes[directory_path.name] = directory_path.stat().st_mode & 0o777
             finally:
                 MODULE._run = original_run
                 MODULE._git = original_git
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._run_independent_validator = original_run_independent_validator
                 if previous_openai_key is None:
                     os.environ.pop("OPENAI_API_KEY", None)
                 else:
@@ -1089,10 +1105,19 @@ class RealGatewayProbeTests(unittest.TestCase):
                     os.environ.pop("NODE_OPTIONS", None)
                 else:
                     os.environ["NODE_OPTIONS"] = previous_node_options
+                if previous_validation_key is None:
+                    os.environ.pop(MODULE.PERSISTENT_VALIDATION_HMAC_ENV, None)
+                else:
+                    os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = previous_validation_key
 
         self.assertEqual(payload["status"], "pass")
         self.assertNotIn("OPENAI_API_KEY", captured_env)
         self.assertNotIn("NODE_OPTIONS", captured_env)
+        self.assertNotIn(MODULE.PERSISTENT_VALIDATION_HMAC_ENV, captured_env)
+        self.assertEqual(
+            captured_validator["validation_file"],
+            run_root.resolve() / "receipts" / "independent-validation.json",
+        )
         self.assertEqual(captured_env["OPENCLAW_HOME"], str((run_root / "runner-home").resolve()))
         self.assertEqual(
             captured_env["OPENCLAW_STATE_DIR"],
@@ -1102,19 +1127,25 @@ class RealGatewayProbeTests(unittest.TestCase):
             captured_env["OPENCLAW_STATE_DIR"],
             "/Users/zuqiangyu/.openclaw/state",
         )
+        self.assertEqual(captured_modes["run"], 0o700)
+        self.assertEqual(captured_modes["runner-home"], 0o700)
+        self.assertEqual(captured_modes["runner-state"], 0o700)
+        self.assertEqual(captured_modes["runner-tmp"], 0o700)
 
-    def test_default_persistent_runner_state_is_outside_evidence_directory(self) -> None:
+    def test_default_persistent_runner_state_is_private_unique_and_outside_evidence_directory(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             evidence_file = root / "docs" / "runtime-evidence" / "probe.json"
-            captured = {}
+            captured = {"run_roots": []}
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_candidate_probe_mode = MODULE._candidate_probe_mode
             original_source_bindings = MODULE._source_bindings
             original_run_persistent = MODULE._run_persistent_lifecycle_probe
 
             def fake_run_persistent(*args, **kwargs):
-                captured["run_root"] = kwargs["run_root"]
+                captured["run_roots"].append(kwargs["run_root"])
                 return {
                     "status": "pass",
                     "openclaw_head_sha": "openclaw-head",
@@ -1129,15 +1160,63 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._source_bindings = lambda *args, **kwargs: []
                 MODULE._run_persistent_lifecycle_probe = fake_run_persistent
                 MODULE.run_probe(root, evidence_file, timeout=1)
+                MODULE.run_probe(root, evidence_file, timeout=1)
             finally:
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._candidate_probe_mode = original_candidate_probe_mode
                 MODULE._source_bindings = original_source_bindings
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
-        run_root = captured["run_root"].resolve()
-        self.assertNotIn("runtime-evidence", run_root.parts)
-        self.assertFalse(str(run_root).startswith(str(root.resolve())))
+        self.assertEqual(len(captured["run_roots"]), 2)
+        self.assertNotEqual(captured["run_roots"][0], captured["run_roots"][1])
+        for run_root in captured["run_roots"]:
+            run_root = run_root.resolve()
+            self.assertNotIn("runtime-evidence", run_root.parts)
+            self.assertFalse(str(run_root).startswith(str(root.resolve())))
+            self.assertEqual(run_root.stat().st_mode & 0o777, 0o700)
+
+    def test_independent_validator_writes_fresh_authenticated_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            receipt = self._valid_persistent_receipt()
+            receipt_file, validation_file = self._write_persistent_receipts(run_root, receipt)
+            validation_file.unlink()
+            previous_secret = os.environ.get(MODULE.PERSISTENT_VALIDATION_HMAC_ENV)
+            os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = VALIDATION_HMAC_SECRET
+            try:
+                MODULE._write_independent_validation_file(
+                    run_root=run_root,
+                    receipt_file=receipt_file,
+                    validation_file=validation_file,
+                )
+            finally:
+                if previous_secret is None:
+                    os.environ.pop(MODULE.PERSISTENT_VALIDATION_HMAC_ENV, None)
+                else:
+                    os.environ[MODULE.PERSISTENT_VALIDATION_HMAC_ENV] = previous_secret
+
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            receipt_payload = json.loads(receipt_file.read_text(encoding="utf-8"))
+            persistent_evidence = json.loads(
+                Path(receipt_payload["preflight"]["persistent_evidence_file"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            response = persistent_evidence["attestation"]["response"]
+            tools_catalog = persistent_evidence["rpc_evidence"]["tools_catalog"]["response"]
+            self.assertEqual(validation["status"], "pass")
+            self.assertEqual(
+                validation["receipt_sha256"], MODULE._sha256_bytes(receipt_file.read_bytes())
+            )
+            self.assertEqual(
+                validation["attestation_response_sha256"], MODULE._canonical_sha256(response)
+            )
+            self.assertEqual(
+                validation["tools_catalog_response_sha256"],
+                MODULE._canonical_sha256(tools_catalog),
+            )
+            self.assertEqual(validation_file.stat().st_mode & 0o777, 0o600)
 
     def test_persistent_runner_timeout_writes_fail_closed_cleanup_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1311,6 +1390,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
 
@@ -1323,6 +1403,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run = lambda *args, **kwargs: Proc()
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: {
                     "status": "pass",
                     "openclaw_head_sha": "openclaw-head",
@@ -1351,6 +1432,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._git = original_git
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
 
@@ -1376,6 +1458,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
 
@@ -1388,6 +1471,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run = lambda *args, **kwargs: Proc()
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: {
                     "status": "pass",
                     "openclaw_head_sha": "openclaw-head",
@@ -1418,6 +1502,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._git = original_git
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
 
@@ -1445,6 +1530,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
 
@@ -1465,6 +1551,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run = fake_run
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
                     MODULE.ProbeError("contradictory receipt")
                 )
@@ -1488,6 +1575,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._git = original_git
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
 
@@ -1516,6 +1604,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
 
@@ -1528,6 +1617,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run = lambda *args, **kwargs: Proc()
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
                     MODULE.ProbeError("contradictory receipt")
                 )
@@ -1551,6 +1641,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._git = original_git
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
 

@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -407,6 +408,19 @@ def _validate_hmac_authentication(
         raise ProbeError(f"{label} authentication signature mismatch")
 
 
+def _hmac_authentication(record: Mapping[str, Any], *, key_env: str) -> dict[str, str]:
+    signature = hmac.new(
+        _hmac_secret_from_env(key_env, "persistent lifecycle validation"),
+        _canonical_json_bytes(_authentication_payload(record)),
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "scheme": "hmac-sha256-env",
+        "key_env": key_env,
+        "signature": signature,
+    }
+
+
 def _catalog_tool_names(response: Mapping[str, Any]) -> set[str]:
     names: set[str] = set()
 
@@ -523,6 +537,125 @@ def _validate_capability_preflight_artifact(
         raise ProbeError("capability preflight evidence required tool names mismatch")
 
 
+def _build_independent_validation_record(*, run_root: Path, receipt_file: Path) -> dict[str, Any]:
+    receipt = _read_json_file(receipt_file, "persistent lifecycle receipt")
+    preflight = _record(receipt.get("preflight"), "preflight")
+    evidence_path = _run_artifact_path(
+        run_root,
+        preflight.get("persistent_evidence_file"),
+        "persistent attestation evidence",
+    )
+    evidence = _read_json_file(evidence_path, "persistent attestation evidence")
+    raw_attestation = _record(
+        evidence.get("attestation"), "persistent attestation evidence attestation"
+    )
+    response = _record(raw_attestation.get("response"), "persistent attestation response")
+    if response.get("signature_algorithm") != "hmac-sha256":
+        raise ProbeError("persistent attestation signature algorithm is invalid")
+    signature = _require_sha256_field(response, "signature", "persistent attestation response")
+    signed_payload = _record(
+        response.get("signed_payload"), "persistent attestation signed payload"
+    )
+    rpc_evidence = _record(
+        evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
+    )
+    tools_catalog = _record(
+        rpc_evidence.get("tools_catalog"), "persistent attestation RPC evidence tools_catalog"
+    )
+    tools_catalog_response = _record(
+        tools_catalog.get("response"), "persistent attestation tools_catalog response"
+    )
+    _validate_runtime_catalog_response(tools_catalog_response)
+    validation: dict[str, Any] = {
+        "schema_version": PERSISTENT_VALIDATION_SCHEMA_VERSION,
+        "status": "pass",
+        "receipt_sha256": _sha256_bytes(receipt_file.read_bytes()),
+        "attestation_response_sha256": _canonical_sha256(response),
+        "tools_catalog_response_sha256": _canonical_sha256(tools_catalog_response),
+        "attestation_signature_verified": True,
+        "attestation_verification": {
+            "schema_version": PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION,
+            "signature_algorithm": "hmac-sha256",
+            "signature_sha256": _text_sha256(signature),
+            "signed_payload_sha256": _canonical_sha256(signed_payload),
+            "verified": True,
+        },
+        "validator_authority": "agentic-os-independent-validation-subprocess",
+        "validator_identity": "agentic-os-persistent-validator",
+        "validator_identity_sha256": _text_sha256("agentic-os-persistent-validator"),
+    }
+    validation["authentication"] = _hmac_authentication(
+        validation, key_env=PERSISTENT_VALIDATION_HMAC_ENV
+    )
+    return validation
+
+
+def _write_independent_validation_file(
+    *,
+    run_root: Path,
+    receipt_file: Path,
+    validation_file: Path,
+) -> None:
+    validation = _build_independent_validation_record(
+        run_root=run_root,
+        receipt_file=receipt_file,
+    )
+    validation_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary_validation_file = validation_file.with_name(
+        f".{validation_file.name}.{os.getpid()}.tmp"
+    )
+    try:
+        temporary_validation_file.write_text(
+            json.dumps(validation, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        os.chmod(temporary_validation_file, 0o600)
+        temporary_validation_file.replace(validation_file)
+        os.chmod(validation_file, 0o600)
+    finally:
+        if temporary_validation_file.exists():
+            temporary_validation_file.unlink()
+
+
+def _validator_env() -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key in RUNNER_ENV_ALLOWLIST and not _is_provider_secret_env_name(key)
+    }
+    key = os.environ.get(PERSISTENT_VALIDATION_HMAC_ENV)
+    if not isinstance(key, str):
+        raise ProbeError("persistent lifecycle validation key is unavailable")
+    env[PERSISTENT_VALIDATION_HMAC_ENV] = key
+    return env
+
+
+def _run_independent_validator(
+    *,
+    run_root: Path,
+    receipt_file: Path,
+    validation_file: Path,
+    timeout: int = 30,
+) -> None:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "__persistent-validator",
+        "--run-root",
+        str(run_root),
+        "--receipt-file",
+        str(receipt_file),
+        "--validation-file",
+        str(validation_file),
+    ]
+    proc = _run(command, cwd=ROOT, env=_validator_env(), timeout=timeout)
+    if proc.returncode != 0:
+        raise ProbeError(
+            "persistent lifecycle independent validator failed "
+            f"stdout_sha256={_sha256_bytes(proc.stdout.encode())} "
+            f"stderr_sha256={_sha256_bytes(proc.stderr.encode())}"
+        )
+
+
 def _validate_attestation_signature_binding(
     response: Mapping[str, Any],
     *,
@@ -577,6 +710,27 @@ def _terminate_process_group(proc: subprocess.CompletedProcess[str]) -> bool:
     except OSError:
         return False
     return True
+
+
+def _prepare_private_directory(directory: Path) -> Path:
+    directory = directory.resolve()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
+    info = directory.stat()
+    if info.st_uid != os.getuid():
+        raise ProbeError(f"{directory.name} is not owned by the current user")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise ProbeError(f"{directory.name} is not private to the current user")
+    return directory
+
+
+def _default_private_run_root(head: str) -> Path:
+    return Path(
+        tempfile.mkdtemp(
+            prefix=f"openclaw-real-gateway-contract-probe-{head[:12]}-",
+            dir=tempfile.gettempdir(),
+        )
+    )
 
 
 def _run_artifact_path(run_root: Path, value: Any, label: str) -> Path:
@@ -1364,13 +1518,13 @@ def _run_persistent_lifecycle_probe(
     run_id: str,
     transition_id: str,
 ) -> dict[str, Any]:
-    run_root = run_root.resolve()
+    run_root = _prepare_private_directory(run_root)
     evidence_dir = run_root / "evidence"
     runner_home = run_root / "runner-home"
     runner_state = run_root / "runner-state"
     runner_tmp = run_root / "runner-tmp"
     for directory in (runner_home, runner_state, runner_tmp):
-        directory.mkdir(parents=True, exist_ok=True)
+        _prepare_private_directory(directory)
     runner_env = _runner_base_env()
     runner_env.update(
         {
@@ -1483,6 +1637,11 @@ def _run_persistent_lifecycle_probe(
             raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
         receipt_file = run_root / "receipts" / "lifecycle-receipt.json"
         validation_file = run_root / "receipts" / "independent-validation.json"
+        _run_independent_validator(
+            run_root=run_root,
+            receipt_file=receipt_file,
+            validation_file=validation_file,
+        )
         payload = _persistent_lifecycle_summary(
             openclaw_root=openclaw_root,
             run_root=run_root,
@@ -1584,11 +1743,7 @@ def run_probe(
             agentic_sources=agentic_sources,
         )
     runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
-    default_run_root = (
-        Path(tempfile.gettempdir())
-        / "openclaw-real-gateway-contract-probe-runs"
-        / head[:12]
-    )
+    default_run_root = _default_private_run_root(head)
     return _run_persistent_lifecycle_probe(
         openclaw_root,
         evidence_file,
@@ -1603,7 +1758,30 @@ def run_probe(
     )
 
 
+def _persistent_validator_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="internal persistent validation writer")
+    parser.add_argument("--run-root", required=True, type=Path)
+    parser.add_argument("--receipt-file", required=True, type=Path)
+    parser.add_argument("--validation-file", required=True, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        _write_independent_validation_file(
+            run_root=args.run_root,
+            receipt_file=args.receipt_file,
+            validation_file=args.validation_file,
+        )
+    except ProbeError as exc:
+        print(json.dumps({"status": "fail_closed", "error": str(exc)}, sort_keys=True))
+        return 1
+    print(json.dumps({"status": "pass"}, sort_keys=True))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv[:1] == ["__persistent-validator"]:
+        return _persistent_validator_main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--openclaw-root", required=True, type=Path)
     parser.add_argument("--evidence-file", required=True, type=Path)
