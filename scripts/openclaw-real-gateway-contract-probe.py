@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import signal
 import socket
 import stat
@@ -399,6 +400,18 @@ def _hmac_secret_from_env(env_name: str, label: str) -> bytes:
     return _validate_hmac_key_material(decoded, label)
 
 
+def _select_validation_anchor_key() -> bytes:
+    if PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV in os.environ:
+        return _hmac_secret_from_env(
+            PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+            "persistent lifecycle validation anchor",
+        )
+    return _validate_hmac_key_material(
+        secrets.token_bytes(32),
+        "persistent lifecycle validation anchor",
+    )
+
+
 def _authentication_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(record)
     payload.pop("authentication", None)
@@ -410,6 +423,7 @@ def _validate_hmac_authentication(
     *,
     label: str,
     expected_key_env: str,
+    expected_key: bytes,
 ) -> None:
     authentication = _record(record.get("authentication"), f"{label} authentication")
     if set(authentication) != {"scheme", "key_env", "signature"}:
@@ -420,7 +434,7 @@ def _validate_hmac_authentication(
         raise ProbeError(f"{label} authentication key authority is invalid")
     signature = _require_sha256_field(authentication, "signature", f"{label} authentication")
     expected = hmac.new(
-        _hmac_secret_from_env(expected_key_env, f"{label} authentication"),
+        _validate_hmac_key_material(expected_key, f"{label} authentication"),
         _canonical_json_bytes(_authentication_payload(record)),
         hashlib.sha256,
     ).hexdigest()
@@ -482,6 +496,7 @@ def _validate_independent_validation(
     receipt_sha256: str,
     attestation_response_sha256: str,
     tools_catalog_response_sha256: str,
+    validation_anchor_key: bytes,
 ) -> None:
     if validation.get("schema_version") != PERSISTENT_VALIDATION_SCHEMA_VERSION:
         raise ProbeError("persistent lifecycle validation schema is invalid")
@@ -503,6 +518,7 @@ def _validate_independent_validation(
         validation,
         label="persistent lifecycle validation",
         expected_key_env=PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+        expected_key=validation_anchor_key,
     )
 
 
@@ -707,15 +723,72 @@ def _consume_attestation_verification_key(run_root: Path) -> bytes:
                 os.close(descriptor)
 
 
-def _validator_env(*, run_root: Path) -> dict[str, str]:
+def _remove_attestation_verification_key(run_root: Path) -> bool:
+    unresolved_root = run_root.absolute()
+    required_flag_names = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required_flag_names):
+        raise ProbeError("secure no-follow attestation key cleanup is unavailable")
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = -1
+    key_directory_fd = -1
+    try:
+        root_fd = os.open(unresolved_root, directory_flags)
+        root_info = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.getuid()
+            or stat.S_IMODE(root_info.st_mode) != 0o700
+        ):
+            raise ProbeError("persistent lifecycle run root is unsafe during key cleanup")
+        try:
+            key_directory_fd = os.open(
+                PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.parent.as_posix(),
+                directory_flags,
+                dir_fd=root_fd,
+            )
+        except FileNotFoundError:
+            return False
+        directory_info = os.fstat(key_directory_fd)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.getuid()
+            or stat.S_IMODE(directory_info.st_mode) != 0o700
+        ):
+            raise ProbeError(
+                "persistent attestation verification key directory is unsafe during cleanup"
+            )
+        key_name = PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
+        try:
+            os.stat(key_name, dir_fd=key_directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        os.unlink(key_name, dir_fd=key_directory_fd)
+        try:
+            os.stat(key_name, dir_fd=key_directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        raise ProbeError("persistent attestation verification key cleanup was incomplete")
+    except ProbeError:
+        raise
+    except OSError as exc:
+        raise ProbeError(
+            "persistent attestation verification key cleanup path is unsafe or unavailable"
+        ) from exc
+    finally:
+        for descriptor in (key_directory_fd, root_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _validator_env(*, run_root: Path, validation_anchor_key: bytes) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
         if key in RUNNER_ENV_ALLOWLIST and not _is_provider_secret_env_name(key)
     }
     attestation_key = _consume_attestation_verification_key(run_root)
-    anchor_key = _hmac_secret_from_env(
-        PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+    anchor_key = _validate_hmac_key_material(
+        validation_anchor_key,
         "persistent lifecycle validation anchor",
     )
     if hmac.compare_digest(attestation_key, anchor_key):
@@ -730,9 +803,13 @@ def _run_independent_validator(
     run_root: Path,
     receipt_file: Path,
     validation_file: Path,
+    validation_anchor_key: bytes,
     timeout: int = 30,
 ) -> None:
-    validator_env = _validator_env(run_root=run_root)
+    validator_env = _validator_env(
+        run_root=run_root,
+        validation_anchor_key=validation_anchor_key,
+    )
     if validation_file.is_symlink():
         raise ProbeError("persistent lifecycle validation output path is unsafe")
     if validation_file.exists():
@@ -1202,6 +1279,7 @@ def _persistent_lifecycle_summary(
     port: int,
     expected_run_id: str,
     expected_transition_id: str,
+    validation_anchor_key: bytes,
 ) -> dict[str, Any]:
     receipt = _read_json_file(receipt_file, "persistent lifecycle receipt")
     validation = _read_json_file(validation_file, "persistent lifecycle validation")
@@ -1375,6 +1453,7 @@ def _persistent_lifecycle_summary(
         receipt_sha256=receipt_sha256,
         attestation_response_sha256=_canonical_sha256(response),
         tools_catalog_response_sha256=_canonical_sha256(tools_catalog_response),
+        validation_anchor_key=validation_anchor_key,
     )
     soak = _optional_record(receipt.get("soak"))
     historical_probe_audit = _optional_record(receipt.get("historical_probe_audit"))
@@ -1629,7 +1708,7 @@ def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> No
             temporary_evidence_file.unlink()
 
 
-def _run_persistent_lifecycle_probe(
+def _run_persistent_lifecycle_probe_once(
     openclaw_root: Path,
     evidence_file: Path,
     timeout: int,
@@ -1641,12 +1720,8 @@ def _run_persistent_lifecycle_probe(
     port: int,
     run_id: str,
     transition_id: str,
+    validation_anchor_key: bytes,
 ) -> dict[str, Any]:
-    _hmac_secret_from_env(
-        PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
-        "persistent lifecycle validation anchor",
-    )
-    run_root = _prepare_private_run_root(run_root)
     evidence_dir = run_root / "evidence"
     runner_home = run_root / "runner-home"
     runner_state = run_root / "runner-state"
@@ -1769,6 +1844,7 @@ def _run_persistent_lifecycle_probe(
             run_root=run_root,
             receipt_file=receipt_file,
             validation_file=validation_file,
+            validation_anchor_key=validation_anchor_key,
         )
         payload = _persistent_lifecycle_summary(
             openclaw_root=openclaw_root,
@@ -1783,6 +1859,7 @@ def _run_persistent_lifecycle_probe(
             port=port,
             expected_run_id=run_id,
             expected_transition_id=transition_id,
+            validation_anchor_key=validation_anchor_key,
         )
         if not _wait_for_loopback_port_closed(port):
             process_group_cleanup_attempted = _terminate_process_group(proc)
@@ -1847,6 +1924,55 @@ def _run_persistent_lifecycle_probe(
             "persistent lifecycle runner evidence was rejected after successful runner exit "
             f"evidence_file_sha256={_sha256_bytes(evidence_file.resolve().read_bytes())}"
         ) from exc
+
+
+def _run_persistent_lifecycle_probe(
+    openclaw_root: Path,
+    evidence_file: Path,
+    timeout: int,
+    *,
+    head: str,
+    agentic_sources: list[dict[str, str]],
+    runtime_sources: list[dict[str, str]],
+    run_root: Path,
+    port: int,
+    run_id: str,
+    transition_id: str,
+) -> dict[str, Any]:
+    validation_anchor_key = _select_validation_anchor_key()
+    prepared_run_root = _prepare_private_run_root(run_root)
+    result: dict[str, Any] | None = None
+    primary_error: BaseException | None = None
+    try:
+        result = _run_persistent_lifecycle_probe_once(
+            openclaw_root,
+            evidence_file,
+            timeout,
+            head=head,
+            agentic_sources=agentic_sources,
+            runtime_sources=runtime_sources,
+            run_root=prepared_run_root,
+            port=port,
+            run_id=run_id,
+            transition_id=transition_id,
+            validation_anchor_key=validation_anchor_key,
+        )
+    except BaseException as exc:
+        primary_error = exc
+    try:
+        _remove_attestation_verification_key(prepared_run_root)
+    except ProbeError as cleanup_error:
+        if primary_error is not None:
+            raise ProbeError(
+                f"{primary_error}; persistent attestation key cleanup also failed: "
+                f"{cleanup_error}"
+            ) from primary_error
+        raise
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if result is None:
+        raise ProbeError("persistent lifecycle runner produced no result")
+    return result
 
 
 def run_probe(

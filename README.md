@@ -529,6 +529,16 @@ python3 scripts/openclaw-real-gateway-contract-probe.py \
   --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json
 ```
 
+No validation-key environment setup is required for this command. The trusted
+probe parent generates an ephemeral 32-byte validation-anchor key when
+`AGENTIC_OS_PERSISTENT_VALIDATION_ANCHOR_HMAC_KEY_HEX` is absent, retains it
+only in parent memory, and passes it only to the independent validator. The
+candidate runner receives neither validation key in its environment or argv,
+and its one-shot attestation key is securely removed on every exit path. An
+explicit lowercase 64-hex validation-anchor value remains supported for
+controlled reproducibility and is rejected if weak, malformed, or reused as
+the attestation key.
+
 The committed Issue #44 JSON at that path is retained only as immutable
 historical output. The forward evidence index now marks it
 `invalid_fail_closed_review_findings`, with `runtime_ready_candidate_evidence=false`
