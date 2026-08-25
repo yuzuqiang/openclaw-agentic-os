@@ -534,7 +534,10 @@ probe parent generates an ephemeral 32-byte validation-anchor key when
 `AGENTIC_OS_PERSISTENT_VALIDATION_ANCHOR_HMAC_KEY_HEX` is absent, retains it
 only in parent memory, and passes it only to the independent validator. The
 candidate runner receives neither validation key in its environment or argv,
-and its one-shot attestation key is securely removed on every exit path. An
+and its one-shot attestation key is securely removed on every exit path. Before
+launch, the parent pins the private run root and artifact subtrees with
+no-follow directory descriptors; post-run validation rejects device/inode
+replacement and cleanup remains bound to the original key directory. An
 explicit lowercase 64-hex validation-anchor value remains supported for
 controlled reproducibility and is rejected if weak, malformed, or reused as
 the attestation key.

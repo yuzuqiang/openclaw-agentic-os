@@ -5,6 +5,7 @@ import hmac
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -45,6 +46,20 @@ class RealGatewayProbeTests(unittest.TestCase):
             os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = (
                 self._previous_validation_anchor
             )
+
+    def _validator_env_for_path(
+        self,
+        run_root: Path,
+        validation_anchor_key: bytes,
+    ) -> dict[str, str]:
+        pinned = MODULE._pin_prepared_run_root(run_root.resolve())
+        try:
+            return MODULE._validator_env(
+                run_root=pinned,
+                validation_anchor_key=validation_anchor_key,
+            )
+        finally:
+            pinned.close()
 
     def _valid_persistent_receipt(self) -> dict:
         now_ms = int(time.time() * 1000)
@@ -1090,10 +1105,19 @@ class RealGatewayProbeTests(unittest.TestCase):
                 stdout = ""
                 stderr = ""
 
-            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+            def fake_run(
+                command,
+                *,
+                cwd,
+                env=None,
+                timeout=240,
+                start_new_session=False,
+                pass_fds=(),
+            ):
                 self.assertIsNotNone(env)
                 self.assertIs(start_new_session, True)
                 captured_env.update(env)
+                captured_env["candidate_pass_fds"] = pass_fds
                 return Proc()
 
             try:
@@ -1164,9 +1188,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn(
             MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, captured_env
         )
+        self.assertEqual(captured_env["candidate_pass_fds"], ())
         self.assertEqual(
-            captured_validator["validation_file"],
-            run_root.resolve() / "receipts" / "independent-validation.json",
+            captured_validator["pinned_run_root"].original_path,
+            run_root.resolve(),
         )
         self.assertEqual(captured_env["OPENCLAW_HOME"], str((run_root / "runner-home").resolve()))
         self.assertEqual(
@@ -1200,7 +1225,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 captured["runner_command"] = list(command)
                 captured["runner_env"] = dict(env or {})
                 key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-                key_path.parent.mkdir(parents=True, mode=0o700)
+                key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
@@ -1210,7 +1235,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 captured["validator_calls"] = int(captured.get("validator_calls", 0)) + 1
                 captured["validation_anchor_key"] = kwargs["validation_anchor_key"]
                 captured["validator_env"] = MODULE._validator_env(
-                    run_root=kwargs["run_root"],
+                    run_root=kwargs["pinned_run_root"],
                     validation_anchor_key=kwargs["validation_anchor_key"],
                 )
 
@@ -1400,25 +1425,19 @@ class RealGatewayProbeTests(unittest.TestCase):
             os.chmod(run_root, 0o700)
             validation_file.unlink()
             key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-            key_path.parent.mkdir(mode=0o700)
+            key_path.parent.mkdir(exist_ok=True, mode=0o700)
             os.chmod(key_path.parent, 0o700)
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
             os.chmod(key_path, 0o600)
-            with mock.patch.dict(
-                os.environ,
-                {
-                    MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV: (
-                        VALIDATION_ANCHOR_HMAC_SECRET_HEX
-                    )
-                },
-            ):
+            pinned = MODULE._pin_prepared_run_root(run_root.resolve())
+            try:
                 MODULE._run_independent_validator(
-                    run_root=run_root,
-                    receipt_file=receipt_file,
-                    validation_file=validation_file,
                     validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                    pinned_run_root=pinned,
                     timeout=5,
                 )
+            finally:
+                pinned.close()
 
             validation = json.loads(validation_file.read_text(encoding="utf-8"))
             self.assertTrue(validation["attestation_signature_verified"])
@@ -1533,7 +1552,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"
             key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-            key_path.parent.mkdir(parents=True, mode=0o700)
+            key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(run_root, 0o700)
             os.chmod(key_path.parent, 0o700)
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
@@ -1546,8 +1565,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                     )
                 },
             ):
-                validator_env = MODULE._validator_env(
-                    run_root=run_root,
+                validator_env = self._validator_env_for_path(
+                    run_root,
                     validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
                 )
 
@@ -1567,7 +1586,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 root = Path(directory)
                 run_root = root / "run"
                 key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-                key_path.parent.mkdir(parents=True, mode=0o700)
+                key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(run_root, 0o700)
                 os.chmod(key_path.parent, 0o700)
                 if case == "symlink":
@@ -1589,8 +1608,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                     },
                 ):
                     with self.assertRaisesRegex(MODULE.ProbeError, "unsafe|weak"):
-                        MODULE._validator_env(
-                            run_root=run_root,
+                        self._validator_env_for_path(
+                            run_root,
                             validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
                         )
 
@@ -1599,7 +1618,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             root = Path(directory)
             run_root = root / "run"
             key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-            key_path.parent.mkdir(parents=True, mode=0o700)
+            key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(run_root, 0o700)
             os.chmod(key_path.parent, 0o700)
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
@@ -1622,6 +1641,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     swapped = True
                 return original_open(path, flags, mode, dir_fd=dir_fd)
 
+            pinned = MODULE._pin_prepared_run_root(run_root.resolve())
             with mock.patch.object(MODULE.os, "open", swap_before_key_open), mock.patch.dict(
                 os.environ,
                 {
@@ -1631,17 +1651,20 @@ class RealGatewayProbeTests(unittest.TestCase):
                 },
             ):
                 with self.assertRaisesRegex(MODULE.ProbeError, "unsafe|unavailable"):
-                    MODULE._validator_env(
-                        run_root=run_root,
-                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
-                    )
+                    try:
+                        MODULE._validator_env(
+                            run_root=pinned,
+                            validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        )
+                    finally:
+                        pinned.close()
             self.assertTrue(swapped)
 
     def test_validator_env_fails_explicitly_when_validation_anchor_is_weak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"
             key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-            key_path.parent.mkdir(parents=True, mode=0o700)
+            key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(run_root, 0o700)
             os.chmod(key_path.parent, 0o700)
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
@@ -1649,8 +1672,8 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 MODULE.ProbeError, "validation anchor.*weak"
             ):
-                MODULE._validator_env(
-                    run_root=run_root,
+                self._validator_env_for_path(
+                    run_root,
                     validation_anchor_key=b"weak",
                 )
             self.assertFalse(key_path.exists())
@@ -1659,7 +1682,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"
             key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-            key_path.parent.mkdir(parents=True, mode=0o700)
+            key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(run_root, 0o700)
             os.chmod(key_path.parent, 0o700)
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
@@ -1673,8 +1696,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 },
             ):
                 with self.assertRaisesRegex(MODULE.ProbeError, "domain separated"):
-                    MODULE._validator_env(
-                        run_root=run_root,
+                    self._validator_env_for_path(
+                        run_root,
                         validation_anchor_key=ATTESTATION_HMAC_SECRET,
                     )
 
@@ -1755,7 +1778,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 captured["start_new_session"] = start_new_session
                 key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-                key_path.parent.mkdir(parents=True, mode=0o700)
+                key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
@@ -1822,7 +1845,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 captured["start_new_session"] = start_new_session
                 key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-                key_path.parent.mkdir(parents=True, mode=0o700)
+                key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
@@ -1881,7 +1904,7 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
-                key_path.parent.mkdir(parents=True, mode=0o700)
+                key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
@@ -1920,6 +1943,278 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertFalse(
                 (run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH).exists()
             )
+
+    def test_whole_run_root_replacement_is_rejected_and_cleanup_targets_original_inode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            moved_root = root / "run-original"
+            replacement_key = b"replacement key must survive"
+            validator_called = False
+
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                original_key_path = (
+                    run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+                )
+                original_key_path.write_bytes(ATTESTATION_HMAC_SECRET)
+                os.chmod(original_key_path, 0o600)
+                run_root.rename(moved_root)
+                run_root.mkdir(mode=0o700)
+                for name in MODULE.PINNED_RUN_SUBDIRECTORIES:
+                    (run_root / name).mkdir(mode=0o700)
+                replacement_key_path = (
+                    run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+                )
+                replacement_key_path.write_bytes(replacement_key)
+                os.chmod(replacement_key_path, 0o600)
+                return Proc()
+
+            def unexpected_validator(**kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            with mock.patch.object(MODULE, "_run", side_effect=fake_run), mock.patch.object(
+                MODULE, "_git", return_value="agentic-head"
+            ), mock.patch.object(
+                MODULE, "_run_independent_validator", side_effect=unexpected_validator
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "run-root pathname identity changed"
+                ):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        root / "evidence.json",
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+
+            self.assertFalse(validator_called)
+            self.assertFalse(
+                (moved_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH).exists()
+            )
+            self.assertEqual(
+                (run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH).read_bytes(),
+                replacement_key,
+            )
+
+    def test_pinned_subtree_replacement_is_rejected_and_cleanup_uses_original_keys(
+        self,
+    ) -> None:
+        for swapped_subtree in MODULE.PINNED_RUN_SUBDIRECTORIES:
+            with self.subTest(subtree=swapped_subtree), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_root = root / "run"
+                moved_subtree = run_root / f"{swapped_subtree}-original"
+                marker = b"replacement subtree marker"
+                validator_called = False
+
+                class Proc:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+
+                def fake_run(
+                    command, *, cwd, env=None, timeout=240, start_new_session=False
+                ):
+                    key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+                    key_path.write_bytes(ATTESTATION_HMAC_SECRET)
+                    os.chmod(key_path, 0o600)
+                    subtree = run_root / swapped_subtree
+                    subtree.rename(moved_subtree)
+                    subtree.mkdir(mode=0o700)
+                    (subtree / "replacement-marker").write_bytes(marker)
+                    if swapped_subtree == "keys":
+                        replacement_key_path = (
+                            run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+                        )
+                        replacement_key_path.write_bytes(b"replacement key")
+                        os.chmod(replacement_key_path, 0o600)
+                    return Proc()
+
+                def unexpected_validator(**kwargs):
+                    nonlocal validator_called
+                    validator_called = True
+
+                with mock.patch.object(
+                    MODULE, "_run", side_effect=fake_run
+                ), mock.patch.object(
+                    MODULE, "_git", return_value="agentic-head"
+                ), mock.patch.object(
+                    MODULE, "_run_independent_validator", side_effect=unexpected_validator
+                ):
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError,
+                        f"pinned {swapped_subtree} subtree identity changed",
+                    ):
+                        MODULE._run_persistent_lifecycle_probe(
+                            root,
+                            root / "evidence.json",
+                            timeout=1,
+                            head="openclaw-head",
+                            agentic_sources=[],
+                            runtime_sources=[],
+                            run_root=run_root,
+                            port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                            run_id="run-id",
+                            transition_id="transition-id",
+                        )
+
+                self.assertFalse(validator_called)
+                original_keys = (
+                    moved_subtree
+                    if swapped_subtree == "keys"
+                    else run_root / "keys"
+                )
+                self.assertFalse(
+                    (original_keys / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name).exists()
+                )
+                self.assertEqual(
+                    (run_root / swapped_subtree / "replacement-marker").read_bytes(),
+                    marker,
+                )
+                if swapped_subtree == "keys":
+                    self.assertEqual(
+                        (
+                            run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+                        ).read_bytes(),
+                        b"replacement key",
+                    )
+
+    def test_pinned_artifact_file_replacement_during_read_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = MODULE._prepare_private_run_root(Path(directory) / "run")
+            pinned = MODULE._pin_prepared_run_root(run_root)
+            artifact = run_root / "evidence" / "artifact.json"
+            original_artifact = artifact.with_name("artifact-original.json")
+            artifact.write_text('{"status":"pass"}', encoding="utf-8")
+            original_read = MODULE.os.read
+            swapped = False
+
+            def swap_after_open(descriptor, size):
+                nonlocal swapped
+                chunk = original_read(descriptor, size)
+                if not swapped:
+                    artifact.rename(original_artifact)
+                    artifact.write_text('{"status":"replacement"}', encoding="utf-8")
+                    swapped = True
+                return chunk
+
+            try:
+                with mock.patch.object(MODULE.os, "read", side_effect=swap_after_open):
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError, "file changed during pinned access"
+                    ):
+                        MODULE._read_pinned_artifact_bytes(
+                            pinned,
+                            "evidence/artifact.json",
+                            "test artifact",
+                        )
+            finally:
+                pinned.close()
+
+            self.assertTrue(swapped)
+            self.assertEqual(
+                json.loads(artifact.read_text(encoding="utf-8"))["status"],
+                "replacement",
+            )
+
+    def test_pinned_run_root_rejects_post_pin_permission_widening(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = MODULE._prepare_private_run_root(Path(directory) / "run")
+            pinned = MODULE._pin_prepared_run_root(run_root)
+            os.chmod(run_root, 0o755)
+            try:
+                with self.assertRaisesRegex(MODULE.ProbeError, "run root is unsafe"):
+                    MODULE._assert_pinned_run_root_identity(pinned)
+            finally:
+                os.chmod(run_root, 0o700)
+                pinned.close()
+
+    def test_pinned_validator_receives_only_explicit_run_capability_fds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = MODULE._prepare_private_run_root(Path(directory) / "run")
+            pinned = MODULE._pin_prepared_run_root(run_root)
+            key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+            key_path.write_bytes(ATTESTATION_HMAC_SECRET)
+            os.chmod(key_path, 0o600)
+            captured = {}
+
+            class Proc:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(
+                command,
+                *,
+                cwd,
+                env=None,
+                timeout=240,
+                start_new_session=False,
+                pass_fds=(),
+            ):
+                captured["command"] = list(command)
+                captured["pass_fds"] = pass_fds
+                return Proc()
+
+            try:
+                with mock.patch.object(MODULE, "_run", side_effect=fake_run):
+                    MODULE._run_independent_validator(
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        pinned_run_root=pinned,
+                    )
+            finally:
+                pinned.close()
+
+            self.assertEqual(captured["pass_fds"], pinned.validator_fds())
+            command = captured["command"]
+            for name in ("root", *MODULE.PINNED_RUN_SUBDIRECTORIES):
+                self.assertIn(f"--{name}-fd", command)
+                self.assertIn(f"--{name}-device", command)
+                self.assertIn(f"--{name}-inode", command)
+
+    def test_candidate_subprocess_does_not_inherit_pinned_run_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = MODULE._prepare_private_run_root(root / "run")
+            pinned = MODULE._pin_prepared_run_root(run_root)
+            descriptors = pinned.validator_fds()
+            child_code = (
+                "import json, os, sys\n"
+                "visible = []\n"
+                "for raw in sys.argv[1:]:\n"
+                "    try:\n"
+                "        os.fstat(int(raw))\n"
+                "    except OSError:\n"
+                "        continue\n"
+                "    visible.append(int(raw))\n"
+                "print(json.dumps(visible))\n"
+            )
+            try:
+                proc = MODULE._run(
+                    [sys.executable, "-c", child_code, *map(str, descriptors)],
+                    cwd=root,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout=5,
+                )
+            finally:
+                pinned.close()
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(proc.stdout), [])
 
     def test_attestation_key_cleanup_failure_retains_primary_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

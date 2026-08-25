@@ -157,6 +157,50 @@ class CandidatePortOpenError(ProbeError):
     pass
 
 
+PINNED_RUN_SUBDIRECTORIES = ("keys", "receipts", "evidence")
+
+
+class _PinnedDirectory:
+    def __init__(self, *, name: str, fd: int, device: int, inode: int) -> None:
+        self.name = name
+        self.fd = fd
+        self.device = device
+        self.inode = inode
+
+
+class _PinnedRunRoot:
+    def __init__(
+        self,
+        *,
+        original_path: Path,
+        root: _PinnedDirectory,
+        keys: _PinnedDirectory,
+        receipts: _PinnedDirectory,
+        evidence: _PinnedDirectory,
+    ) -> None:
+        self.original_path = original_path
+        self.root = root
+        self.keys = keys
+        self.receipts = receipts
+        self.evidence = evidence
+        self.closed = False
+
+    def directory(self, name: str) -> _PinnedDirectory:
+        if name not in PINNED_RUN_SUBDIRECTORIES:
+            raise ProbeError(f"untrusted persistent lifecycle artifact directory: {name}")
+        return getattr(self, name)
+
+    def validator_fds(self) -> tuple[int, ...]:
+        return (self.root.fd, self.keys.fd, self.receipts.fd, self.evidence.fd)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for directory in (self.evidence, self.receipts, self.keys, self.root):
+            os.close(directory.fd)
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -168,6 +212,7 @@ def _run(
     env: dict[str, str] | None = None,
     timeout: int = 240,
     start_new_session: bool = False,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     proc = subprocess.Popen(
         command,
@@ -177,6 +222,8 @@ def _run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=start_new_session,
+        close_fds=True,
+        pass_fds=pass_fds,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
@@ -545,16 +592,17 @@ def _validate_capability_preflight_artifact(
     run_root: Path,
     preflight: Mapping[str, Any],
     required_tool_names: list[str],
+    pinned_run_root: _PinnedRunRoot | None = None,
 ) -> None:
-    evidence_path = _run_artifact_path(
-        run_root,
-        preflight.get("evidence_file"),
-        "capability preflight evidence",
+    evidence, evidence_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=preflight.get("evidence_file"),
+        label="capability preflight evidence",
     )
     evidence_sha256 = _require_sha256_field(preflight, "evidence_sha256", "preflight")
-    if _sha256_bytes(evidence_path.read_bytes()) != evidence_sha256:
+    if _sha256_bytes(evidence_bytes) != evidence_sha256:
         raise ProbeError("capability preflight evidence digest mismatch")
-    evidence = _read_json_file(evidence_path, "capability preflight evidence")
     _require_pass(evidence, "capability preflight evidence")
     if evidence.get("runtime_ready") is not True:
         raise ProbeError("capability preflight evidence did not pass runtime readiness")
@@ -573,15 +621,29 @@ def _validate_capability_preflight_artifact(
         raise ProbeError("capability preflight evidence required tool names mismatch")
 
 
-def _build_independent_validation_record(*, run_root: Path, receipt_file: Path) -> dict[str, Any]:
-    receipt = _read_json_file(receipt_file, "persistent lifecycle receipt")
-    preflight = _record(receipt.get("preflight"), "preflight")
-    evidence_path = _run_artifact_path(
-        run_root,
-        preflight.get("persistent_evidence_file"),
-        "persistent attestation evidence",
+def _build_independent_validation_record(
+    *,
+    run_root: Path,
+    receipt_file: Path,
+    pinned_run_root: _PinnedRunRoot | None = None,
+) -> dict[str, Any]:
+    receipt, receipt_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=(
+            "receipts/lifecycle-receipt.json"
+            if pinned_run_root is not None
+            else str(receipt_file)
+        ),
+        label="persistent lifecycle receipt",
     )
-    evidence = _read_json_file(evidence_path, "persistent attestation evidence")
+    preflight = _record(receipt.get("preflight"), "preflight")
+    evidence, _ = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=preflight.get("persistent_evidence_file"),
+        label="persistent attestation evidence",
+    )
     raw_attestation = _record(
         evidence.get("attestation"), "persistent attestation evidence attestation"
     )
@@ -615,7 +677,7 @@ def _build_independent_validation_record(*, run_root: Path, receipt_file: Path) 
     validation: dict[str, Any] = {
         "schema_version": PERSISTENT_VALIDATION_SCHEMA_VERSION,
         "status": "pass",
-        "receipt_sha256": _sha256_bytes(receipt_file.read_bytes()),
+        "receipt_sha256": _sha256_bytes(receipt_bytes),
         "attestation_response_sha256": _canonical_sha256(response),
         "tools_catalog_response_sha256": _canonical_sha256(tools_catalog_response),
         "attestation_signature_verified": True,
@@ -641,11 +703,54 @@ def _write_independent_validation_file(
     run_root: Path,
     receipt_file: Path,
     validation_file: Path,
+    pinned_run_root: _PinnedRunRoot | None = None,
 ) -> None:
     validation = _build_independent_validation_record(
         run_root=run_root,
         receipt_file=receipt_file,
+        pinned_run_root=pinned_run_root,
     )
+    if pinned_run_root is not None:
+        _assert_pinned_run_root_identity(pinned_run_root)
+        output = (json.dumps(validation, indent=2, sort_keys=True) + "\n").encode()
+        file_name = "independent-validation.json"
+        temporary_name = f".{file_name}.{os.getpid()}.tmp"
+        temporary_fd = -1
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=pinned_run_root.receipts.fd,
+            )
+            offset = 0
+            while offset < len(output):
+                offset += os.write(temporary_fd, output[offset:])
+            os.fchmod(temporary_fd, 0o600)
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = -1
+            os.replace(
+                temporary_name,
+                file_name,
+                src_dir_fd=pinned_run_root.receipts.fd,
+                dst_dir_fd=pinned_run_root.receipts.fd,
+            )
+            _assert_pinned_run_root_identity(pinned_run_root)
+            return
+        except ProbeError:
+            raise
+        except OSError as exc:
+            raise ProbeError(
+                "persistent lifecycle validation output path is unsafe or unavailable"
+            ) from exc
+        finally:
+            if temporary_fd >= 0:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=pinned_run_root.receipts.fd)
+            except FileNotFoundError:
+                pass
     validation_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary_validation_file = validation_file.with_name(
         f".{validation_file.name}.{os.getpid()}.tmp"
@@ -662,39 +767,16 @@ def _write_independent_validation_file(
             temporary_validation_file.unlink()
 
 
-def _consume_attestation_verification_key(run_root: Path) -> bytes:
-    unresolved_root = run_root.absolute()
-    required_flag_names = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
-    if any(not hasattr(os, name) for name in required_flag_names):
-        raise ProbeError("secure no-follow attestation key access is unavailable")
-    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-    key_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
-    root_fd = -1
-    key_directory_fd = -1
+def _consume_attestation_verification_key(run_root: _PinnedRunRoot) -> bytes:
+    _assert_pinned_run_root_identity(run_root)
+    key_name = PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
     key_fd = -1
     try:
-        root_fd = os.open(unresolved_root, directory_flags)
-        root_info = os.fstat(root_fd)
-        if (
-            not stat.S_ISDIR(root_info.st_mode)
-            or root_info.st_uid != os.getuid()
-            or stat.S_IMODE(root_info.st_mode) != 0o700
-        ):
-            raise ProbeError("persistent lifecycle run root is unsafe")
-        key_directory_fd = os.open(
-            PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.parent.as_posix(),
-            directory_flags,
-            dir_fd=root_fd,
+        key_fd = os.open(
+            key_name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=run_root.keys.fd,
         )
-        directory_info = os.fstat(key_directory_fd)
-        if (
-            not stat.S_ISDIR(directory_info.st_mode)
-            or directory_info.st_uid != os.getuid()
-            or stat.S_IMODE(directory_info.st_mode) != 0o700
-        ):
-            raise ProbeError("persistent attestation verification key directory is unsafe")
-        key_name = PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
-        key_fd = os.open(key_name, key_flags, dir_fd=key_directory_fd)
         key_info = os.fstat(key_fd)
         if (
             not stat.S_ISREG(key_info.st_mode)
@@ -706,10 +788,18 @@ def _consume_attestation_verification_key(run_root: Path) -> bytes:
         key = _validate_hmac_key_material(
             os.read(key_fd, 33), "persistent attestation verification"
         )
-        current_info = os.stat(key_name, dir_fd=key_directory_fd, follow_symlinks=False)
-        if (current_info.st_dev, current_info.st_ino) != (key_info.st_dev, key_info.st_ino):
+        current_info = os.stat(
+            key_name,
+            dir_fd=run_root.keys.fd,
+            follow_symlinks=False,
+        )
+        if (current_info.st_dev, current_info.st_ino) != (
+            key_info.st_dev,
+            key_info.st_ino,
+        ):
             raise ProbeError("persistent attestation verification key changed during access")
-        os.unlink(key_name, dir_fd=key_directory_fd)
+        os.unlink(key_name, dir_fd=run_root.keys.fd)
+        _assert_pinned_run_root_identity(run_root)
         return key
     except ProbeError:
         raise
@@ -718,69 +808,39 @@ def _consume_attestation_verification_key(run_root: Path) -> bytes:
             "persistent attestation verification key path is unsafe or unavailable"
         ) from exc
     finally:
-        for descriptor in (key_fd, key_directory_fd, root_fd):
-            if descriptor >= 0:
-                os.close(descriptor)
+        if key_fd >= 0:
+            os.close(key_fd)
 
 
-def _remove_attestation_verification_key(run_root: Path) -> bool:
-    unresolved_root = run_root.absolute()
-    required_flag_names = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
-    if any(not hasattr(os, name) for name in required_flag_names):
-        raise ProbeError("secure no-follow attestation key cleanup is unavailable")
-    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-    root_fd = -1
-    key_directory_fd = -1
+def _remove_attestation_verification_key(run_root: _PinnedRunRoot) -> bool:
+    if run_root.closed:
+        raise ProbeError("persistent lifecycle pinned run root is closed during cleanup")
+    key_name = PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
     try:
-        root_fd = os.open(unresolved_root, directory_flags)
-        root_info = os.fstat(root_fd)
-        if (
-            not stat.S_ISDIR(root_info.st_mode)
-            or root_info.st_uid != os.getuid()
-            or stat.S_IMODE(root_info.st_mode) != 0o700
-        ):
-            raise ProbeError("persistent lifecycle run root is unsafe during key cleanup")
-        try:
-            key_directory_fd = os.open(
-                PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.parent.as_posix(),
-                directory_flags,
-                dir_fd=root_fd,
-            )
-        except FileNotFoundError:
-            return False
-        directory_info = os.fstat(key_directory_fd)
-        if (
-            not stat.S_ISDIR(directory_info.st_mode)
-            or directory_info.st_uid != os.getuid()
-            or stat.S_IMODE(directory_info.st_mode) != 0o700
-        ):
-            raise ProbeError(
-                "persistent attestation verification key directory is unsafe during cleanup"
-            )
-        key_name = PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
-        try:
-            os.stat(key_name, dir_fd=key_directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        os.unlink(key_name, dir_fd=key_directory_fd)
-        try:
-            os.stat(key_name, dir_fd=key_directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return True
-        raise ProbeError("persistent attestation verification key cleanup was incomplete")
-    except ProbeError:
-        raise
+        os.stat(key_name, dir_fd=run_root.keys.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
     except OSError as exc:
         raise ProbeError(
             "persistent attestation verification key cleanup path is unsafe or unavailable"
         ) from exc
-    finally:
-        for descriptor in (key_directory_fd, root_fd):
-            if descriptor >= 0:
-                os.close(descriptor)
+    try:
+        os.unlink(key_name, dir_fd=run_root.keys.fd)
+        os.stat(key_name, dir_fd=run_root.keys.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        raise ProbeError(
+            "persistent attestation verification key cleanup path is unsafe or unavailable"
+        ) from exc
+    raise ProbeError("persistent attestation verification key cleanup was incomplete")
 
 
-def _validator_env(*, run_root: Path, validation_anchor_key: bytes) -> dict[str, str]:
+def _validator_env(
+    *,
+    run_root: _PinnedRunRoot,
+    validation_anchor_key: bytes,
+) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
@@ -800,32 +860,61 @@ def _validator_env(*, run_root: Path, validation_anchor_key: bytes) -> dict[str,
 
 def _run_independent_validator(
     *,
-    run_root: Path,
-    receipt_file: Path,
-    validation_file: Path,
+    pinned_run_root: _PinnedRunRoot,
     validation_anchor_key: bytes,
     timeout: int = 30,
 ) -> None:
     validator_env = _validator_env(
-        run_root=run_root,
+        run_root=pinned_run_root,
         validation_anchor_key=validation_anchor_key,
     )
-    if validation_file.is_symlink():
-        raise ProbeError("persistent lifecycle validation output path is unsafe")
-    if validation_file.exists():
-        validation_file.unlink()
+    _assert_pinned_run_root_identity(pinned_run_root)
+    validation_name = "independent-validation.json"
+    try:
+        validation_info = os.stat(
+            validation_name,
+            dir_fd=pinned_run_root.receipts.fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(validation_info.st_mode):
+            raise ProbeError("persistent lifecycle validation output path is unsafe")
+        os.unlink(validation_name, dir_fd=pinned_run_root.receipts.fd)
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
         "__persistent-validator",
-        "--run-root",
-        str(run_root),
-        "--receipt-file",
-        str(receipt_file),
-        "--validation-file",
-        str(validation_file),
+        "--run-root-path",
+        str(pinned_run_root.original_path),
     ]
-    proc = _run(command, cwd=ROOT, env=validator_env, timeout=timeout)
+    for name in ("root", *PINNED_RUN_SUBDIRECTORIES):
+        directory = (
+            pinned_run_root.root
+            if name == "root"
+            else pinned_run_root.directory(name)
+        )
+        command.extend(
+            [
+                f"--{name}-fd",
+                str(directory.fd),
+                f"--{name}-device",
+                str(directory.device),
+                f"--{name}-inode",
+                str(directory.inode),
+            ]
+        )
+    pass_fds = pinned_run_root.validator_fds()
+    _assert_pinned_run_root_identity(pinned_run_root)
+    proc = _run(
+        command,
+        cwd=ROOT,
+        env=validator_env,
+        timeout=timeout,
+        pass_fds=pass_fds,
+    )
+    _assert_pinned_run_root_identity(pinned_run_root)
     if proc.returncode != 0:
         raise ProbeError(
             "persistent lifecycle independent validator failed "
@@ -925,6 +1014,277 @@ def _prepare_private_run_root(directory: Path) -> Path:
     return resolved
 
 
+def _secure_directory_flags() -> int:
+    required_flag_names = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if os.name != "posix" or any(not hasattr(os, name) for name in required_flag_names):
+        raise ProbeError("secure pinned run-root directory access is unavailable")
+    return os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _pinned_directory(name: str, descriptor: int) -> _PinnedDirectory:
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ProbeError(f"persistent lifecycle pinned {name} directory is unsafe")
+    os.set_inheritable(descriptor, False)
+    return _PinnedDirectory(
+        name=name,
+        fd=descriptor,
+        device=info.st_dev,
+        inode=info.st_ino,
+    )
+
+
+def _descriptor_path(descriptor: int) -> Path:
+    for base in (Path("/dev/fd"), Path("/proc/self/fd")):
+        if base.is_dir():
+            return base / str(descriptor)
+    raise ProbeError("fd-pinned filesystem paths are unavailable")
+
+
+def _pin_prepared_run_root(run_root: Path) -> _PinnedRunRoot:
+    for name in PINNED_RUN_SUBDIRECTORIES:
+        _prepare_private_directory(run_root / name)
+    flags = _secure_directory_flags()
+    opened: list[int] = []
+    try:
+        root_fd = os.open(run_root, flags)
+        opened.append(root_fd)
+        root = _pinned_directory("root", root_fd)
+        subdirectories: dict[str, _PinnedDirectory] = {}
+        for name in PINNED_RUN_SUBDIRECTORIES:
+            descriptor = os.open(name, flags, dir_fd=root_fd)
+            opened.append(descriptor)
+            subdirectories[name] = _pinned_directory(name, descriptor)
+        pinned = _PinnedRunRoot(
+            original_path=run_root,
+            root=root,
+            keys=subdirectories["keys"],
+            receipts=subdirectories["receipts"],
+            evidence=subdirectories["evidence"],
+        )
+        _assert_pinned_run_root_identity(pinned)
+        return pinned
+    except Exception:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+        raise
+
+
+def _pinned_run_root_from_inherited_fds(
+    *,
+    original_path: Path,
+    root_fd: int,
+    keys_fd: int,
+    receipts_fd: int,
+    evidence_fd: int,
+    expected_identities: Mapping[str, tuple[int, int]],
+) -> _PinnedRunRoot:
+    directories = {
+        "root": _pinned_directory("root", root_fd),
+        "keys": _pinned_directory("keys", keys_fd),
+        "receipts": _pinned_directory("receipts", receipts_fd),
+        "evidence": _pinned_directory("evidence", evidence_fd),
+    }
+    for name, directory in directories.items():
+        if (directory.device, directory.inode) != expected_identities[name]:
+            raise ProbeError(f"persistent lifecycle inherited {name} fd identity mismatch")
+    pinned = _PinnedRunRoot(
+        original_path=original_path,
+        root=directories["root"],
+        keys=directories["keys"],
+        receipts=directories["receipts"],
+        evidence=directories["evidence"],
+    )
+    _assert_pinned_run_root_identity(pinned)
+    return pinned
+
+
+def _assert_pinned_run_root_identity(pinned: _PinnedRunRoot) -> None:
+    if pinned.closed:
+        raise ProbeError("persistent lifecycle pinned run root is closed")
+    try:
+        root_info = os.fstat(pinned.root.fd)
+        if (root_info.st_dev, root_info.st_ino) != (
+            pinned.root.device,
+            pinned.root.inode,
+        ):
+            raise ProbeError("persistent lifecycle pinned run-root fd identity changed")
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.getuid()
+            or stat.S_IMODE(root_info.st_mode) != 0o700
+        ):
+            raise ProbeError("persistent lifecycle pinned run root is unsafe")
+        path_info = os.stat(pinned.original_path, follow_symlinks=False)
+        if (path_info.st_dev, path_info.st_ino) != (
+            pinned.root.device,
+            pinned.root.inode,
+        ):
+            raise ProbeError("persistent lifecycle run-root pathname identity changed")
+        for name in PINNED_RUN_SUBDIRECTORIES:
+            directory = pinned.directory(name)
+            descriptor_info = os.fstat(directory.fd)
+            entry_info = os.stat(name, dir_fd=pinned.root.fd, follow_symlinks=False)
+            expected = (directory.device, directory.inode)
+            if (
+                (descriptor_info.st_dev, descriptor_info.st_ino) != expected
+                or (entry_info.st_dev, entry_info.st_ino) != expected
+            ):
+                raise ProbeError(
+                    f"persistent lifecycle pinned {name} subtree identity changed"
+                )
+            if (
+                not stat.S_ISDIR(descriptor_info.st_mode)
+                or descriptor_info.st_uid != os.getuid()
+                or stat.S_IMODE(descriptor_info.st_mode) != 0o700
+            ):
+                raise ProbeError(f"persistent lifecycle pinned {name} subtree is unsafe")
+    except ProbeError:
+        raise
+    except OSError as exc:
+        raise ProbeError(
+            "persistent lifecycle run-root or pinned subtree identity is unavailable"
+        ) from exc
+
+
+def _pinned_artifact_parts(
+    pinned: _PinnedRunRoot,
+    value: Any,
+    label: str,
+) -> tuple[str, tuple[str, ...]]:
+    if not isinstance(value, str) or not value:
+        raise ProbeError(f"{label} path is missing")
+    candidate = Path(os.path.normpath(value))
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.relative_to(pinned.original_path)
+        except ValueError as exc:
+            raise ProbeError(f"{label} path is outside the isolated run root") from exc
+    if candidate.is_absolute() or not candidate.parts or any(
+        part in {"", ".", ".."} for part in candidate.parts
+    ):
+        raise ProbeError(f"{label} path is unsafe")
+    subtree, *remaining = candidate.parts
+    if subtree not in {"receipts", "evidence"} or not remaining:
+        raise ProbeError(f"{label} path is outside pinned artifact subtrees")
+    return subtree, tuple(remaining)
+
+
+def _read_pinned_artifact_bytes(
+    pinned: _PinnedRunRoot,
+    value: Any,
+    label: str,
+) -> bytes:
+    _assert_pinned_run_root_identity(pinned)
+    subtree, parts = _pinned_artifact_parts(pinned, value, label)
+    directory_fd = pinned.directory(subtree).fd
+    opened_directories: list[int] = []
+    file_fd = -1
+    directory_flags = _secure_directory_flags()
+    file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        for part in parts[:-1]:
+            directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            opened_directories.append(directory_fd)
+            info = os.fstat(directory_fd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise ProbeError(f"{label} parent directory is unsafe")
+        file_name = parts[-1]
+        file_fd = os.open(file_name, file_flags, dir_fd=directory_fd)
+        file_info = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(file_info.st_mode)
+            or file_info.st_uid != os.getuid()
+            or file_info.st_nlink != 1
+        ):
+            raise ProbeError(f"{label} file is unsafe")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        current_info = os.stat(file_name, dir_fd=directory_fd, follow_symlinks=False)
+        if (current_info.st_dev, current_info.st_ino) != (
+            file_info.st_dev,
+            file_info.st_ino,
+        ):
+            raise ProbeError(f"{label} file changed during pinned access")
+        _assert_pinned_run_root_identity(pinned)
+        return b"".join(chunks)
+    except ProbeError:
+        raise
+    except OSError as exc:
+        raise ProbeError(f"{label} path is unsafe or unavailable") from exc
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        for descriptor in reversed(opened_directories):
+            os.close(descriptor)
+
+
+def _read_pinned_json_file(
+    pinned: _PinnedRunRoot,
+    value: Any,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    raw = _read_pinned_artifact_bytes(pinned, value, label)
+    return _json_object_from_bytes(raw, label), raw
+
+
+def _json_object_from_bytes(raw: bytes, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProbeError(f"{label} did not contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ProbeError(f"{label} must be a JSON object")
+    return payload
+
+
+def _read_run_json_artifact(
+    *,
+    run_root: Path,
+    pinned_run_root: _PinnedRunRoot | None,
+    value: Any,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    if pinned_run_root is not None:
+        return _read_pinned_json_file(pinned_run_root, value, label)
+    path = _run_artifact_path(run_root, value, label)
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ProbeError(f"cannot read {label}: {path}") from exc
+    return _json_object_from_bytes(raw, label), raw
+
+
+def _read_optional_pinned_receipt_json(
+    pinned: _PinnedRunRoot,
+    file_name: str,
+    label: str,
+) -> dict[str, Any]:
+    if Path(file_name).name != file_name:
+        raise ProbeError(f"{label} file name is unsafe")
+    _assert_pinned_run_root_identity(pinned)
+    try:
+        os.stat(file_name, dir_fd=pinned.receipts.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ProbeError(f"{label} path is unsafe or unavailable") from exc
+    payload, _ = _read_pinned_json_file(
+        pinned,
+        f"receipts/{file_name}",
+        label,
+    )
+    return payload
+
+
 def _default_private_run_root(head: str) -> Path:
     return Path(
         tempfile.mkdtemp(
@@ -969,18 +1329,19 @@ def _validate_persistent_attestation_evidence(
     runtime_head: str,
     agentic_head: str,
     port: int,
+    pinned_run_root: _PinnedRunRoot | None = None,
 ) -> None:
-    evidence_path = _run_artifact_path(
-        run_root,
-        preflight.get("persistent_evidence_file"),
-        "persistent attestation evidence",
+    evidence, evidence_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=preflight.get("persistent_evidence_file"),
+        label="persistent attestation evidence",
     )
     evidence_sha256 = _require_sha256_field(
         preflight, "persistent_evidence_sha256", "preflight"
     )
-    if _sha256_bytes(evidence_path.read_bytes()) != evidence_sha256:
+    if _sha256_bytes(evidence_bytes) != evidence_sha256:
         raise ProbeError("persistent attestation evidence digest mismatch")
-    evidence = _read_json_file(evidence_path, "persistent attestation evidence")
     if evidence.get("schema_version") != PERSISTENT_ATTESTATION_SCHEMA_VERSION:
         raise ProbeError("persistent attestation evidence schema mismatch")
     if evidence.get("expected_runtime_head") != runtime_head:
@@ -1280,12 +1641,38 @@ def _persistent_lifecycle_summary(
     expected_run_id: str,
     expected_transition_id: str,
     validation_anchor_key: bytes,
+    pinned_run_root: _PinnedRunRoot | None = None,
 ) -> dict[str, Any]:
-    receipt = _read_json_file(receipt_file, "persistent lifecycle receipt")
-    validation = _read_json_file(validation_file, "persistent lifecycle validation")
+    if pinned_run_root is not None:
+        _assert_pinned_run_root_identity(pinned_run_root)
+    receipt, receipt_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=(
+            "receipts/lifecycle-receipt.json"
+            if pinned_run_root is not None
+            else str(receipt_file)
+        ),
+        label="persistent lifecycle receipt",
+    )
+    validation, validation_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=(
+            "receipts/independent-validation.json"
+            if pinned_run_root is not None
+            else str(validation_file)
+        ),
+        label="persistent lifecycle validation",
+    )
+    run_root_display = str(
+        pinned_run_root.original_path
+        if pinned_run_root is not None
+        else run_root.resolve()
+    )
     _require_pass(receipt, "persistent lifecycle receipt")
     _require_pass(validation, "persistent lifecycle validation")
-    receipt_sha256 = _sha256_bytes(receipt_file.read_bytes())
+    receipt_sha256 = _sha256_bytes(receipt_bytes)
     if validation.get("receipt_sha256") != receipt_sha256:
         raise ProbeError("persistent lifecycle validation is not bound to the promoted receipt")
 
@@ -1415,6 +1802,7 @@ def _persistent_lifecycle_summary(
         run_root=run_root,
         preflight=preflight,
         required_tool_names=required_tool_names,
+        pinned_run_root=pinned_run_root,
     )
     _validate_persistent_attestation_evidence(
         run_root=run_root,
@@ -1426,14 +1814,13 @@ def _persistent_lifecycle_summary(
         runtime_head=head,
         agentic_head=agentic_head,
         port=port,
+        pinned_run_root=pinned_run_root,
     )
-    persistent_evidence_path = _run_artifact_path(
-        run_root,
-        preflight.get("persistent_evidence_file"),
-        "persistent attestation evidence",
-    )
-    persistent_evidence = _read_json_file(
-        persistent_evidence_path, "persistent attestation evidence"
+    persistent_evidence, _ = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=preflight.get("persistent_evidence_file"),
+        label="persistent attestation evidence",
     )
     raw_attestation = _record(
         persistent_evidence.get("attestation"), "persistent attestation evidence attestation"
@@ -1564,9 +1951,9 @@ def _persistent_lifecycle_summary(
             "command_sha256": _text_sha256("\0".join(command)),
             "stdout_sha256": _sha256_bytes(proc.stdout.encode()),
             "stderr_sha256": _sha256_bytes(proc.stderr.encode()),
-            "run_root_sha256": _text_sha256(str(run_root.resolve())),
+            "run_root_sha256": _text_sha256(run_root_display),
             "receipt_sha256": receipt_sha256,
-            "validation_sha256": _sha256_bytes(validation_file.read_bytes()),
+            "validation_sha256": _sha256_bytes(validation_bytes),
             "validation_receipt_sha256": validation.get("receipt_sha256"),
             "runtime_launch_sha256": _canonical_sha256(runtime_launch),
             "expected_run_id_sha256": _text_sha256(expected_run_id),
@@ -1603,19 +1990,38 @@ def _persistent_failure_summary(
     command: list[str],
     proc: subprocess.CompletedProcess[str],
     port: int,
+    pinned_run_root: _PinnedRunRoot | None = None,
 ) -> dict[str, Any]:
     agentic_head = _git(ROOT, "rev-parse", "HEAD")
-    receipts_dir = run_root / "receipts"
-    failure_receipt = (
-        _read_json_file(receipts_dir / "failure-receipt.json", "persistent failure receipt")
-        if (receipts_dir / "failure-receipt.json").is_file()
-        else {}
-    )
-    failure_cleanup = (
-        _read_json_file(receipts_dir / "failure-cleanup.json", "persistent failure cleanup")
-        if (receipts_dir / "failure-cleanup.json").is_file()
-        else {}
-    )
+    if pinned_run_root is None:
+        receipts_dir = run_root / "receipts"
+        failure_receipt = (
+            _read_json_file(
+                receipts_dir / "failure-receipt.json", "persistent failure receipt"
+            )
+            if (receipts_dir / "failure-receipt.json").is_file()
+            else {}
+        )
+        failure_cleanup = (
+            _read_json_file(
+                receipts_dir / "failure-cleanup.json", "persistent failure cleanup"
+            )
+            if (receipts_dir / "failure-cleanup.json").is_file()
+            else {}
+        )
+        run_root_display = str(run_root.resolve())
+    else:
+        failure_receipt = _read_optional_pinned_receipt_json(
+            pinned_run_root,
+            "failure-receipt.json",
+            "persistent failure receipt",
+        )
+        failure_cleanup = _read_optional_pinned_receipt_json(
+            pinned_run_root,
+            "failure-cleanup.json",
+            "persistent failure cleanup",
+        )
+        run_root_display = str(pinned_run_root.original_path)
     error_record = _optional_record(failure_receipt.get("error"))
     cleanup_error = _optional_record(failure_cleanup.get("error"))
     candidate_shutdown = _optional_record(failure_cleanup.get("candidate_shutdown"))
@@ -1683,7 +2089,7 @@ def _persistent_failure_summary(
             "command_sha256": _text_sha256("\0".join(command)),
             "stdout_sha256": _sha256_bytes(proc.stdout.encode()),
             "stderr_sha256": _sha256_bytes(proc.stderr.encode()),
-            "run_root_sha256": _text_sha256(str(run_root.resolve())),
+            "run_root_sha256": _text_sha256(run_root_display),
         },
         "agentic_sources": agentic_sources,
         "runtime_sources": runtime_sources,
@@ -1721,13 +2127,16 @@ def _run_persistent_lifecycle_probe_once(
     run_id: str,
     transition_id: str,
     validation_anchor_key: bytes,
+    pinned_run_root: _PinnedRunRoot,
 ) -> dict[str, Any]:
+    _assert_pinned_run_root_identity(pinned_run_root)
     evidence_dir = run_root / "evidence"
     runner_home = run_root / "runner-home"
     runner_state = run_root / "runner-state"
     runner_tmp = run_root / "runner-tmp"
     for directory in (runner_home, runner_state, runner_tmp):
         _prepare_private_directory(directory)
+    _assert_pinned_run_root_identity(pinned_run_root)
     runner_env = _runner_base_env()
     runner_env.update(
         {
@@ -1787,6 +2196,7 @@ def _run_persistent_lifecycle_probe_once(
             command=command,
             proc=proc,
             port=port,
+            pinned_run_root=pinned_run_root,
         )
         payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
         payload["fail_closed_matrix"].append(
@@ -1803,6 +2213,7 @@ def _run_persistent_lifecycle_probe_once(
             "persistent lifecycle runner timed out "
             f"evidence_file_sha256={_sha256_bytes(evidence_file.resolve().read_bytes())}"
         ) from exc
+    _assert_pinned_run_root_identity(pinned_run_root)
     if proc.returncode != 0:
         process_group_cleanup_attempted = _terminate_process_group(proc)
         port_closed = _wait_for_loopback_port_closed(port)
@@ -1815,6 +2226,7 @@ def _run_persistent_lifecycle_probe_once(
             command=command,
             proc=proc,
             port=port,
+            pinned_run_root=pinned_run_root,
         )
         payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
         payload["fail_closed_matrix"].append(
@@ -1836,16 +2248,20 @@ def _run_persistent_lifecycle_probe_once(
             f"{_sha256_bytes(evidence_file.resolve().read_bytes())}"
         )
     try:
+        _assert_pinned_run_root_identity(pinned_run_root)
         if validate_candidate_root(openclaw_root) != head:
             raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
-        receipt_file = run_root / "receipts" / "lifecycle-receipt.json"
-        validation_file = run_root / "receipts" / "independent-validation.json"
-        _run_independent_validator(
-            run_root=run_root,
-            receipt_file=receipt_file,
-            validation_file=validation_file,
-            validation_anchor_key=validation_anchor_key,
+        receipt_file = _descriptor_path(pinned_run_root.receipts.fd) / (
+            "lifecycle-receipt.json"
         )
+        validation_file = _descriptor_path(pinned_run_root.receipts.fd) / (
+            "independent-validation.json"
+        )
+        _run_independent_validator(
+            validation_anchor_key=validation_anchor_key,
+            pinned_run_root=pinned_run_root,
+        )
+        _assert_pinned_run_root_identity(pinned_run_root)
         payload = _persistent_lifecycle_summary(
             openclaw_root=openclaw_root,
             run_root=run_root,
@@ -1860,6 +2276,7 @@ def _run_persistent_lifecycle_probe_once(
             expected_run_id=run_id,
             expected_transition_id=transition_id,
             validation_anchor_key=validation_anchor_key,
+            pinned_run_root=pinned_run_root,
         )
         if not _wait_for_loopback_port_closed(port):
             process_group_cleanup_attempted = _terminate_process_group(proc)
@@ -1873,6 +2290,7 @@ def _run_persistent_lifecycle_probe_once(
                 command=command,
                 proc=proc,
                 port=port,
+                pinned_run_root=pinned_run_root,
             )
             payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
             payload["fail_closed_matrix"].append(
@@ -1888,6 +2306,7 @@ def _run_persistent_lifecycle_probe_once(
                 "persistent lifecycle runner succeeded but candidate port remained open before cleanup"
             )
         payload["isolated_non_production_gateway"]["candidate_port_closed"] = True
+        _assert_pinned_run_root_identity(pinned_run_root)
         _write_validated_payload(evidence_file, payload)
         return payload
     except Exception as exc:
@@ -1904,6 +2323,7 @@ def _run_persistent_lifecycle_probe_once(
             command=command,
             proc=proc,
             port=port,
+            pinned_run_root=pinned_run_root,
         )
         payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
         payload["fail_closed_matrix"].append(
@@ -1941,6 +2361,7 @@ def _run_persistent_lifecycle_probe(
 ) -> dict[str, Any]:
     validation_anchor_key = _select_validation_anchor_key()
     prepared_run_root = _prepare_private_run_root(run_root)
+    pinned_run_root = _pin_prepared_run_root(prepared_run_root)
     result: dict[str, Any] | None = None
     primary_error: BaseException | None = None
     try:
@@ -1956,18 +2377,24 @@ def _run_persistent_lifecycle_probe(
             run_id=run_id,
             transition_id=transition_id,
             validation_anchor_key=validation_anchor_key,
+            pinned_run_root=pinned_run_root,
         )
     except BaseException as exc:
         primary_error = exc
+    cleanup_error: ProbeError | None = None
     try:
-        _remove_attestation_verification_key(prepared_run_root)
-    except ProbeError as cleanup_error:
+        _remove_attestation_verification_key(pinned_run_root)
+    except ProbeError as exc:
+        cleanup_error = exc
+    finally:
+        pinned_run_root.close()
+    if cleanup_error is not None:
         if primary_error is not None:
             raise ProbeError(
                 f"{primary_error}; persistent attestation key cleanup also failed: "
                 f"{cleanup_error}"
             ) from primary_error
-        raise
+        raise cleanup_error
     if primary_error is not None:
         raise primary_error.with_traceback(primary_error.__traceback__)
     if result is None:
@@ -2014,19 +2441,56 @@ def run_probe(
 
 def _persistent_validator_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="internal persistent validation writer")
-    parser.add_argument("--run-root", required=True, type=Path)
-    parser.add_argument("--receipt-file", required=True, type=Path)
-    parser.add_argument("--validation-file", required=True, type=Path)
+    parser.add_argument("--run-root-path", type=Path)
+    for name in ("root", *PINNED_RUN_SUBDIRECTORIES):
+        parser.add_argument(f"--{name}-fd", type=int)
+        parser.add_argument(f"--{name}-device", type=int)
+        parser.add_argument(f"--{name}-inode", type=int)
     args = parser.parse_args(argv)
+    pinned_run_root: _PinnedRunRoot | None = None
     try:
+        pinned_values = {
+            name: (
+                getattr(args, f"{name}_fd"),
+                getattr(args, f"{name}_device"),
+                getattr(args, f"{name}_inode"),
+            )
+            for name in ("root", *PINNED_RUN_SUBDIRECTORIES)
+        }
+        if args.run_root_path is None or any(
+            not all(isinstance(value, int) and value >= 0 for value in values)
+            for values in pinned_values.values()
+        ):
+            raise ProbeError("persistent validator pinned fd contract is incomplete")
+        pinned_run_root = _pinned_run_root_from_inherited_fds(
+            original_path=args.run_root_path,
+            root_fd=pinned_values["root"][0],
+            keys_fd=pinned_values["keys"][0],
+            receipts_fd=pinned_values["receipts"][0],
+            evidence_fd=pinned_values["evidence"][0],
+            expected_identities={
+                name: (values[1], values[2]) for name, values in pinned_values.items()
+            },
+        )
+        run_root = _descriptor_path(pinned_run_root.root.fd)
+        receipt_file = _descriptor_path(pinned_run_root.receipts.fd) / (
+            "lifecycle-receipt.json"
+        )
+        validation_file = _descriptor_path(pinned_run_root.receipts.fd) / (
+            "independent-validation.json"
+        )
         _write_independent_validation_file(
-            run_root=args.run_root,
-            receipt_file=args.receipt_file,
-            validation_file=args.validation_file,
+            run_root=run_root,
+            receipt_file=receipt_file,
+            validation_file=validation_file,
+            pinned_run_root=pinned_run_root,
         )
     except ProbeError as exc:
         print(json.dumps({"status": "fail_closed", "error": str(exc)}, sort_keys=True))
         return 1
+    finally:
+        if pinned_run_root is not None:
+            pinned_run_root.close()
     print(json.dumps({"status": "pass"}, sort_keys=True))
     return 0
 
