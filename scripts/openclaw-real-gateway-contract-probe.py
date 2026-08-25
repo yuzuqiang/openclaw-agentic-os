@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import signal
@@ -26,9 +27,15 @@ PERSISTENT_ATTESTATION_SCHEMA_VERSION = "agentic-os.persistent-attested-prefligh
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
     "scripts/openclaw-live-accepted-session-probe.py",
+    "scripts/openclaw-tool-capability-preflight.py",
     "src/agentic_os/openclaw_adapter.py",
     "src/agentic_os/runtime_attestation.py",
     "src/agentic_os/metadata.py",
+)
+PERSISTENT_VALIDATION_HMAC_ENV = "AGENTIC_OS_PERSISTENT_VALIDATION_HMAC_KEY"
+PERSISTENT_VALIDATION_SCHEMA_VERSION = "agentic-os.persistent-lifecycle-independent-validation.v1"
+PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION = (
+    "agentic-os.persistent-attestation-verification.v1"
 )
 PERSISTENT_RUNTIME_SOURCE_PATHS = (
     "package.json",
@@ -107,9 +114,38 @@ REQUIRED_CHILD_HASH_PROOFS = (
     "child_session_key_sha256",
     "task_marker_sha256",
 )
+RUNNER_ENV_ALLOWLIST = {
+    "CI",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "NODE_OPTIONS",
+    "PATH",
+    "SHELL",
+    "TMP",
+    "TMPDIR",
+    "TEMP",
+    "USER",
+}
+PROVIDER_SECRET_ENV_MARKERS = (
+    "ANTHROPIC",
+    "API_KEY",
+    "AZURE_OPENAI",
+    "GEMINI",
+    "GOOGLE_API",
+    "OPENAI",
+    "SECRET",
+    "TOKEN",
+)
 
 
 class ProbeError(RuntimeError):
+    pass
+
+
+class CandidatePortOpenError(ProbeError):
     pass
 
 
@@ -233,7 +269,17 @@ def _source_bindings(root: Path, relatives: tuple[str, ...]) -> list[dict[str, s
 
 
 def _canonical_sha256(value: Any) -> str:
-    return _sha256_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    return _sha256_bytes(_canonical_json_bytes(value))
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 def _text_sha256(value: str) -> str:
@@ -306,6 +352,145 @@ def _validate_gateway_endpoint(endpoint: Any, *, port: int) -> None:
         raise ProbeError("persistent lifecycle attestation gateway endpoint is not the requested loopback listener")
 
 
+def _is_provider_secret_env_name(name: str) -> bool:
+    upper = name.upper()
+    return any(marker in upper for marker in PROVIDER_SECRET_ENV_MARKERS)
+
+
+def _runner_base_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in RUNNER_ENV_ALLOWLIST and not _is_provider_secret_env_name(key)
+    }
+
+
+def _hmac_secret_from_env(env_name: str, label: str) -> bytes:
+    value = os.environ.get(env_name)
+    if not isinstance(value, str) or len(value.encode()) < 32:
+        raise ProbeError(f"{label} key is unavailable or too weak")
+    return value.encode()
+
+
+def _authentication_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(record)
+    payload.pop("authentication", None)
+    return payload
+
+
+def _validate_hmac_authentication(
+    record: Mapping[str, Any],
+    *,
+    label: str,
+    expected_key_env: str,
+) -> None:
+    authentication = _record(record.get("authentication"), f"{label} authentication")
+    if set(authentication) != {"scheme", "key_env", "signature"}:
+        raise ProbeError(f"{label} authentication shape is invalid")
+    if authentication.get("scheme") != "hmac-sha256-env":
+        raise ProbeError(f"{label} authentication scheme is invalid")
+    if authentication.get("key_env") != expected_key_env:
+        raise ProbeError(f"{label} authentication key authority is invalid")
+    signature = _require_sha256_field(authentication, "signature", f"{label} authentication")
+    expected = hmac.new(
+        _hmac_secret_from_env(expected_key_env, f"{label} authentication"),
+        _canonical_json_bytes(_authentication_payload(record)),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise ProbeError(f"{label} authentication signature mismatch")
+
+
+def _catalog_tool_names(response: Mapping[str, Any]) -> set[str]:
+    names: set[str] = set()
+
+    def collect_tool(tool: Any) -> None:
+        if not isinstance(tool, Mapping):
+            return
+        for key in ("name", "id"):
+            value = tool.get(key)
+            if isinstance(value, str) and value:
+                names.add(value)
+
+    tools = response.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            collect_tool(tool)
+    groups = response.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            group_tools = group.get("tools")
+            if isinstance(group_tools, list):
+                for tool in group_tools:
+                    collect_tool(tool)
+    return names
+
+
+def _validate_runtime_catalog_response(response: Mapping[str, Any]) -> None:
+    missing = sorted(set(PERSISTENT_REQUIRED_TOOL_NAMES) - _catalog_tool_names(response))
+    if missing:
+        raise ProbeError(
+            "persistent lifecycle authenticated tools.catalog response is missing required tools"
+        )
+
+
+def _validate_independent_validation(
+    validation: Mapping[str, Any],
+    *,
+    receipt_sha256: str,
+    attestation_response_sha256: str,
+    tools_catalog_response_sha256: str,
+) -> None:
+    if validation.get("schema_version") != PERSISTENT_VALIDATION_SCHEMA_VERSION:
+        raise ProbeError("persistent lifecycle validation schema is invalid")
+    if validation.get("receipt_sha256") != receipt_sha256:
+        raise ProbeError("persistent lifecycle validation is not bound to the promoted receipt")
+    if validation.get("attestation_response_sha256") != attestation_response_sha256:
+        raise ProbeError("persistent lifecycle validation is not bound to the attestation response")
+    if validation.get("tools_catalog_response_sha256") != tools_catalog_response_sha256:
+        raise ProbeError("persistent lifecycle validation is not bound to the tools catalog")
+    if validation.get("attestation_signature_verified") is not True:
+        raise ProbeError("persistent lifecycle validation did not authenticate attestation signature")
+    authority = _require_non_empty_string(validation, "validator_authority", "validation")
+    if authority == "agentic-os-persistent-lifecycle-runner":
+        raise ProbeError("persistent lifecycle validation authority is not independent")
+    identity = _require_non_empty_string(validation, "validator_identity", "validation")
+    if validation.get("validator_identity_sha256") != _text_sha256(identity):
+        raise ProbeError("persistent lifecycle validation identity digest mismatch")
+    _validate_hmac_authentication(
+        validation,
+        label="persistent lifecycle validation",
+        expected_key_env=PERSISTENT_VALIDATION_HMAC_ENV,
+    )
+
+
+def _validate_attestation_signature_binding(
+    response: Mapping[str, Any],
+    *,
+    validation: Mapping[str, Any],
+) -> None:
+    if response.get("signature_algorithm") != "hmac-sha256":
+        raise ProbeError("persistent attestation signature algorithm is invalid")
+    _require_sha256_field(response, "signature", "persistent attestation response")
+    verification = _record(
+        validation.get("attestation_verification"), "persistent attestation verification"
+    )
+    if verification.get("schema_version") != PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION:
+        raise ProbeError("persistent attestation verification schema is invalid")
+    if verification.get("signature_algorithm") != response.get("signature_algorithm"):
+        raise ProbeError("persistent attestation verification algorithm mismatch")
+    if verification.get("signature_sha256") != _text_sha256(str(response.get("signature"))):
+        raise ProbeError("persistent attestation verification signature digest mismatch")
+    if verification.get("signed_payload_sha256") != _canonical_sha256(
+        _record(response.get("signed_payload"), "persistent attestation signed payload")
+    ):
+        raise ProbeError("persistent attestation verification payload digest mismatch")
+    if verification.get("verified") is not True:
+        raise ProbeError("persistent attestation signature was not verified")
+
+
 def _loopback_port_closed(port: int) -> bool:
     for host in ("127.0.0.1", "::1"):
         try:
@@ -366,6 +551,7 @@ def _validate_persistent_attestation_evidence(
     run_root: Path,
     preflight: Mapping[str, Any],
     attestation: Mapping[str, Any],
+    validation: Mapping[str, Any],
     immutable_inputs: Mapping[str, Any],
     runtime_sources: list[dict[str, str]],
     runtime_head: str,
@@ -395,6 +581,7 @@ def _validate_persistent_attestation_evidence(
         evidence.get("attestation"), "persistent attestation evidence attestation"
     )
     response = _record(raw_attestation.get("response"), "persistent attestation response")
+    _validate_attestation_signature_binding(response, validation=validation)
     signed_payload = _record(
         response.get("signed_payload"), "persistent attestation signed payload"
     )
@@ -474,6 +661,8 @@ def _validate_persistent_attestation_evidence(
         )
         if _canonical_sha256(response_record) != raw_response_digest:
             raise ProbeError(f"persistent attestation RPC evidence {key} response mismatch")
+        if key == "tools_catalog":
+            _validate_runtime_catalog_response(response_record)
         transcript_records.append(
             {
                 "key": key,
@@ -721,6 +910,8 @@ def _persistent_lifecycle_summary(
     _require_sha256_field(lifecycle, "gateway_lease_id_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "session_key_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "child_run_id_sha256", "lifecycle")
+    _require_sha256_field(lifecycle, "session_status_sha256", "lifecycle")
+    _require_sha256_field(lifecycle, "sessions_history_sha256", "lifecycle")
     if lifecycle.get("matching_session_count") != 1:
         raise ProbeError("persistent lifecycle did not prove matching accepted session identity")
 
@@ -762,11 +953,39 @@ def _persistent_lifecycle_summary(
         run_root=run_root,
         preflight=preflight,
         attestation=attestation,
+        validation=validation,
         immutable_inputs=immutable_inputs,
         runtime_sources=runtime_sources,
         runtime_head=head,
         agentic_head=agentic_head,
         port=port,
+    )
+    persistent_evidence_path = _run_artifact_path(
+        run_root,
+        preflight.get("persistent_evidence_file"),
+        "persistent attestation evidence",
+    )
+    persistent_evidence = _read_json_file(
+        persistent_evidence_path, "persistent attestation evidence"
+    )
+    raw_attestation = _record(
+        persistent_evidence.get("attestation"), "persistent attestation evidence attestation"
+    )
+    response = _record(raw_attestation.get("response"), "persistent attestation response")
+    rpc_evidence = _record(
+        persistent_evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
+    )
+    tools_catalog = _record(
+        rpc_evidence.get("tools_catalog"), "persistent attestation RPC evidence tools_catalog"
+    )
+    tools_catalog_response = _record(
+        tools_catalog.get("response"), "persistent attestation tools_catalog response"
+    )
+    _validate_independent_validation(
+        validation,
+        receipt_sha256=receipt_sha256,
+        attestation_response_sha256=_canonical_sha256(response),
+        tools_catalog_response_sha256=_canonical_sha256(tools_catalog_response),
     )
     soak = _optional_record(receipt.get("soak"))
     historical_probe_audit = _optional_record(receipt.get("historical_probe_audit"))
@@ -808,10 +1027,7 @@ def _persistent_lifecycle_summary(
         is True,
         "duplicate_release_observed": _sha_field(lifecycle, "duplicate_release_sha256")
         is not None,
-        "session_list_status_history_observed": (
-            _sha_field(lifecycle, "session_status_sha256") is not None
-            and _sha_field(lifecycle, "sessions_history_sha256") is not None
-        ),
+        "session_list_status_history_observed": True,
         "lease_release_cleanup_observed": lifecycle.get("post_release_lease_count") == 0,
         "db_authority_enabled": False,
         "production_behavior_proven": False,
@@ -1042,7 +1258,7 @@ def _run_persistent_lifecycle_probe(
     runner_tmp = run_root / "runner-tmp"
     for directory in (runner_home, runner_state, runner_tmp):
         directory.mkdir(parents=True, exist_ok=True)
-    runner_env = dict(os.environ)
+    runner_env = _runner_base_env()
     runner_env.update(
         {
             "HOME": str(runner_home),
@@ -1166,9 +1382,39 @@ def _run_persistent_lifecycle_probe(
             proc=proc,
             port=port,
         )
+        if not _wait_for_loopback_port_closed(port):
+            process_group_cleanup_attempted = _terminate_process_group(proc)
+            port_closed = _wait_for_loopback_port_closed(port)
+            if not port_closed:
+                payload = _persistent_failure_summary(
+                    openclaw_root=openclaw_root,
+                    run_root=run_root,
+                    head=head,
+                    agentic_sources=agentic_sources,
+                    runtime_sources=runtime_sources,
+                    command=command,
+                    proc=proc,
+                    port=port,
+                )
+                payload["isolated_non_production_gateway"]["candidate_port_closed"] = False
+                payload["fail_closed_matrix"].append(
+                    {
+                        "check": "post_success_port_closure",
+                        "status": "fail",
+                        "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                        "candidate_port_closed": False,
+                    }
+                )
+                _write_validated_payload(evidence_file, payload)
+                raise CandidatePortOpenError(
+                    "persistent lifecycle runner succeeded but candidate port remained open"
+                )
+        payload["isolated_non_production_gateway"]["candidate_port_closed"] = True
         _write_validated_payload(evidence_file, payload)
         return payload
     except Exception as exc:
+        if isinstance(exc, CandidatePortOpenError):
+            raise
         process_group_cleanup_attempted = _terminate_process_group(proc)
         port_closed = _wait_for_loopback_port_closed(port)
         payload = _persistent_failure_summary(
