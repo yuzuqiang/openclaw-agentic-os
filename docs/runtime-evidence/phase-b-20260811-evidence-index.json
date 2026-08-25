@@ -36,16 +36,18 @@
   "downstream_candidate_evidence": {
     "agentic_os_head_sha": "377ea08fb2cc240342d4a019444d3374b6e55a0f",
     "candidate_head_sha": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
-    "classification": "issue44_phase_b_downstream_candidate_snapshot",
+    "classification": "issue44_phase_b_downstream_candidate_snapshot_invalidated_by_review",
     "db_authority_enabled": false,
     "isolated_non_production_gateway": true,
     "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
     "phase_c_exact_head_required_before_review": true,
     "production_authority_enabled": false,
     "runtime_ready": false,
-    "runtime_ready_candidate_evidence": true,
+    "runtime_ready_candidate_evidence": false,
     "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
-    "status": "pass"
+    "status": "invalid_fail_closed_review_findings",
+    "status_reason": "Codex review for PR #45 head 77cd70269addce7756fe4347c21685ef293fc916 found that the generator accepted mismatched validation receipt bindings and other unauthenticated runtime proof fields; this historical JSON remains byte-for-byte immutable but is no longer candidate pass evidence.",
+    "validation_receipt_bound": false
   },
   "historical_artifacts": [
     {
@@ -72,5 +74,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "phase_b_candidate_snapshot_pending_phase_c"
+  "status": "phase_b_snapshot_invalidated_pending_recapture"
 }

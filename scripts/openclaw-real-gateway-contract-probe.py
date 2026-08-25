@@ -7,10 +7,14 @@ import argparse
 import hashlib
 import json
 import os
+import signal
+import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,17 +121,32 @@ def _run(
     cwd: Path,
     env: dict[str, str] | None = None,
     timeout: int = 240,
+    start_new_session: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    proc = subprocess.Popen(
         command,
         cwd=cwd,
         env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
+        start_new_session=start_new_session,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        if start_new_session:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            proc.kill()
+        stdout, stderr = proc.communicate()
+        exc.stdout = stdout
+        exc.stderr = stderr
+        raise
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -251,6 +270,39 @@ def _sha_field(section: Mapping[str, Any], key: str) -> str | None:
     ):
         return value
     return None
+
+
+def _require_sha256_field(section: Mapping[str, Any], key: str, label: str) -> str:
+    value = _sha_field(section, key)
+    if value is None:
+        raise ProbeError(f"{label}.{key} must be a lowercase SHA-256 hex digest")
+    return value
+
+
+def _string_list(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise ProbeError(f"{label} must be a non-empty list")
+    if not all(isinstance(item, str) and item for item in value):
+        raise ProbeError(f"{label} must contain only non-empty strings")
+    return value
+
+
+def _validate_gateway_endpoint(endpoint: Any, *, port: int) -> None:
+    if not isinstance(endpoint, str) or not endpoint:
+        raise ProbeError("persistent lifecycle attestation gateway endpoint is missing")
+    parsed = urlparse(endpoint)
+    if parsed.hostname not in {"127.0.0.1", "::1", "localhost"} or parsed.port != port:
+        raise ProbeError("persistent lifecycle attestation gateway endpoint is not the requested loopback listener")
+
+
+def _loopback_port_closed(port: int) -> bool:
+    for host in ("127.0.0.1", "::1"):
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return False
+        except OSError:
+            continue
+    return True
 
 
 def _safe_status(value: Any) -> str:
@@ -414,6 +466,9 @@ def _persistent_lifecycle_summary(
     validation = _read_json_file(validation_file, "persistent lifecycle validation")
     _require_pass(receipt, "persistent lifecycle receipt")
     _require_pass(validation, "persistent lifecycle validation")
+    receipt_sha256 = _sha256_bytes(receipt_file.read_bytes())
+    if validation.get("receipt_sha256") != receipt_sha256:
+        raise ProbeError("persistent lifecycle validation is not bound to the promoted receipt")
 
     agentic_head = _git(ROOT, "rev-parse", "HEAD")
     immutable_inputs = _record(receipt.get("immutable_inputs"), "receipt immutable_inputs")
@@ -442,6 +497,14 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle did not prove candidate port closure")
     if rollback.get("production_config_hash_unchanged") is not True:
         raise ProbeError("persistent lifecycle did not prove production config immutability")
+    production_before_config_sha256 = _require_sha256_field(
+        production_before, "config_sha256", "production_before"
+    )
+    production_after_config_sha256 = _require_sha256_field(
+        production_after, "config_sha256", "production_after"
+    )
+    if production_before_config_sha256 != production_after_config_sha256:
+        raise ProbeError("persistent lifecycle production config hashes changed")
     if db_authority.get("DB_AUTHORITY_ENABLED") is not False:
         raise ProbeError("persistent lifecycle did not prove DB authority remained disabled")
     if candidate.get("port") != port:
@@ -454,13 +517,23 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle did not prove duplicate spawn identity parity")
     if lifecycle.get("post_release_lease_count") != 0:
         raise ProbeError("persistent lifecycle did not prove release cleanup")
+    _require_sha256_field(lifecycle, "session_key_sha256", "lifecycle")
+    _require_sha256_field(lifecycle, "child_run_id_sha256", "lifecycle")
+    if lifecycle.get("matching_session_count") != 1:
+        raise ProbeError("persistent lifecycle did not prove matching accepted session identity")
 
     required_tool_names = preflight.get("required_tool_names")
-    if not isinstance(required_tool_names, list):
-        hello = _optional_record(preflight.get("hello"))
-        required_tool_names = hello.get("required_methods")
-    if not isinstance(required_tool_names, list):
-        required_tool_names = list(PERSISTENT_REQUIRED_TOOL_NAMES)
+    hello = _optional_record(preflight.get("hello"))
+    if "required_tool_names" in preflight:
+        required_tool_names = _string_list(
+            required_tool_names, "preflight.required_tool_names"
+        )
+    elif "required_methods" in hello:
+        required_tool_names = _string_list(
+            hello.get("required_methods"), "preflight.hello.required_methods"
+        )
+    else:
+        raise ProbeError("persistent lifecycle preflight is missing required tool names")
     missing = sorted(set(PERSISTENT_REQUIRED_TOOL_NAMES) - set(required_tool_names))
     if missing:
         raise ProbeError("persistent lifecycle preflight is missing required tool names")
@@ -468,8 +541,10 @@ def _persistent_lifecycle_summary(
     runtime_launch = _optional_record(receipt.get("runtime_launch"))
     paths = _optional_record(receipt.get("paths"))
     logs = _optional_record(candidate.get("logs"))
-    hello = _optional_record(preflight.get("hello"))
     candidate_env = _optional_record(candidate.get("env"))
+    if candidate_env.get("unexpected_provider_key_count") != 0:
+        raise ProbeError("persistent lifecycle candidate environment includes provider secrets")
+    _validate_gateway_endpoint(attestation.get("gateway_endpoint"), port=port)
     soak = _optional_record(receipt.get("soak"))
     historical_probe_audit = _optional_record(receipt.get("historical_probe_audit"))
 
@@ -572,8 +647,8 @@ def _persistent_lifecycle_summary(
             ),
         },
         "production_snapshot": {
-            "before_config_sha256": production_before.get("config_sha256"),
-            "after_config_sha256": production_after.get("config_sha256"),
+            "before_config_sha256": production_before_config_sha256,
+            "after_config_sha256": production_after_config_sha256,
             "before_health_sha256": _canonical_sha256(production_before.get("health")),
             "after_health_sha256": _canonical_sha256(production_after.get("health")),
         },
@@ -583,7 +658,7 @@ def _persistent_lifecycle_summary(
             "stdout_sha256": _sha256_bytes(proc.stdout.encode()),
             "stderr_sha256": _sha256_bytes(proc.stderr.encode()),
             "run_root_sha256": _text_sha256(str(run_root.resolve())),
-            "receipt_sha256": _sha256_bytes(receipt_file.read_bytes()),
+            "receipt_sha256": receipt_sha256,
             "validation_sha256": _sha256_bytes(validation_file.read_bytes()),
             "validation_receipt_sha256": validation.get("receipt_sha256"),
             "runtime_launch_sha256": _canonical_sha256(runtime_launch),
@@ -781,7 +856,44 @@ def _run_persistent_lifecycle_probe(
         "--evidence-dir",
         str(evidence_dir),
     ]
-    proc = _run(command, cwd=openclaw_root, env=runner_env, timeout=timeout)
+    try:
+        proc = _run(
+            command,
+            cwd=openclaw_root,
+            env=runner_env,
+            timeout=timeout,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        proc = subprocess.CompletedProcess(command, 124, stdout, stderr)
+        port_closed = _loopback_port_closed(port)
+        payload = _persistent_failure_summary(
+            openclaw_root=openclaw_root,
+            run_root=run_root,
+            head=head,
+            agentic_sources=agentic_sources,
+            runtime_sources=runtime_sources,
+            command=command,
+            proc=proc,
+            port=port,
+        )
+        payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
+        payload["fail_closed_matrix"].append(
+            {
+                "check": "timeout_process_group_cleanup",
+                "status": "pass" if port_closed else "fail",
+                "candidate_port_closed": port_closed,
+            }
+        )
+        _write_validated_payload(evidence_file, payload)
+        if not port_closed:
+            raise ProbeError("persistent lifecycle runner timed out and candidate port remained open") from exc
+        raise ProbeError(
+            "persistent lifecycle runner timed out "
+            f"evidence_file_sha256={_sha256_bytes(evidence_file.resolve().read_bytes())}"
+        ) from exc
     if validate_candidate_root(openclaw_root) != head:
         raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
     if proc.returncode != 0:
@@ -842,8 +954,8 @@ def run_probe(
         )
     runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
     default_run_root = (
-        evidence_file.resolve().parent
-        / ".openclaw-real-gateway-contract-probe-runs"
+        Path(tempfile.gettempdir())
+        / "openclaw-real-gateway-contract-probe-runs"
         / head[:12]
     )
     return _run_persistent_lifecycle_probe(

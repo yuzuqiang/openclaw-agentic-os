@@ -17,6 +17,135 @@ SPEC.loader.exec_module(MODULE)
 
 
 class RealGatewayProbeTests(unittest.TestCase):
+    def _valid_persistent_receipt(self) -> dict:
+        return {
+            "status": "pass",
+            "immutable_inputs": {
+                "runtime_head": "openclaw-head",
+                "agentic_os_head": "agentic-head",
+            },
+            "production_before": {
+                "config_sha256": "0" * 64,
+                "health": {"reachable": False},
+            },
+            "production_after": {
+                "config_sha256": "0" * 64,
+                "health": {"reachable": False},
+            },
+            "candidate": {
+                "port": MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                "env": {"unexpected_provider_key_count": 0},
+                "logs": {"stdout_sha256": "1" * 64, "stderr_sha256": "2" * 64},
+            },
+            "preflight": {
+                "status": "pass",
+                "runtime_ready": True,
+                "required_tool_names": list(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+                "evidence_sha256": "3" * 64,
+                "persistent_evidence_sha256": "4" * 64,
+                "stdout_sha256": "5" * 64,
+                "stderr_sha256": "6" * 64,
+                "hello": {
+                    "status": "pass",
+                    "required_methods": list(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+                },
+            },
+            "attestation": {
+                "status": "pass",
+                "gateway_endpoint": "ws://127.0.0.1:20189",
+                "gateway_build_id": "06e6e3f",
+                "executable_content_sha256": "7" * 64,
+                "catalog_sha256": "8" * 64,
+                "contract_vector_sha256": "9" * 64,
+                "rpc_transcript_sha256": "a" * 64,
+                "runtime_authored_rpc_evidence_sha256": "b" * 64,
+                "signed_payload_sha256": "c" * 64,
+                "runtime_identity_token_sha256": "d" * 64,
+            },
+            "lifecycle": {
+                "status": "pass",
+                "duplicate_acquire_same_lease": True,
+                "first_spawn_status": "accepted",
+                "duplicate_spawn_same_session": True,
+                "post_release_lease_count": 0,
+                "gateway_lease_id_sha256": "e" * 64,
+                "session_key_sha256": "f" * 64,
+                "child_run_id_sha256": "0" * 64,
+                "session_status_sha256": "1" * 64,
+                "sessions_history_sha256": "2" * 64,
+                "duplicate_release_sha256": "3" * 64,
+                "sessions_list_count": 1,
+                "matching_session_count": 1,
+            },
+            "rollback": {
+                "status": "pass",
+                "candidate_port_closed": True,
+                "production_config_hash_unchanged": True,
+                "production_health_before_sha256": "4" * 64,
+                "production_health_after_sha256": "5" * 64,
+                "db_authority": {"DB_AUTHORITY_ENABLED": False},
+                "candidate_shutdown": {"port_closed": True},
+            },
+            "runtime_launch": {"token_sha256": "6" * 64},
+            "paths": {
+                "run_root": {"realpath_sha256": "7" * 64},
+                "key_path": {"realpath_sha256": "8" * 64},
+            },
+            "soak": {"status": "prepared_not_started", "started": False},
+            "historical_probe_audit": {
+                "verdict": "not_authority_for_phase_b",
+                "sha256": "9" * 64,
+            },
+        }
+
+    def _write_persistent_receipts(
+        self,
+        run_root: Path,
+        receipt: dict,
+        validation: dict | None = None,
+    ) -> tuple[Path, Path]:
+        receipts = run_root / "receipts"
+        receipts.mkdir(parents=True)
+        receipt_file = receipts / "lifecycle-receipt.json"
+        validation_file = receipts / "independent-validation.json"
+        receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+        if validation is None:
+            validation = {
+                "status": "pass",
+                "receipt_sha256": MODULE._sha256_bytes(receipt_file.read_bytes()),
+            }
+        validation_file.write_text(json.dumps(validation), encoding="utf-8")
+        return receipt_file, validation_file
+
+    def _call_persistent_summary(self, root: Path, receipt: dict, validation: dict | None = None):
+        run_root = root / "run"
+        receipt_file, validation_file = self._write_persistent_receipts(
+            run_root, receipt, validation
+        )
+        original_git = MODULE._git
+
+        class Proc:
+            stdout = "runner stdout"
+            stderr = "runner stderr"
+            returncode = 0
+
+        try:
+            MODULE._git = lambda git_root, *args: "agentic-head"
+            return MODULE._persistent_lifecycle_summary(
+                openclaw_root=root,
+                run_root=run_root,
+                receipt_file=receipt_file,
+                validation_file=validation_file,
+                head="openclaw-head",
+                agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                runtime_sources=[{"path": "runtime.ts", "sha256": "1" * 64}],
+                command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                proc=Proc(),
+                port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+            )
+        finally:
+            MODULE._git = original_git
+
     def test_runtime_annotations_resolve(self) -> None:
         self.assertEqual(
             get_type_hints(MODULE._validate_sha256_field)["payload"],
@@ -317,6 +446,84 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "neither"):
                 MODULE._candidate_probe_mode(Path(directory))
 
+    def test_persistent_summary_rejects_validation_receipt_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            validation = {"status": "pass", "receipt_sha256": "a" * 64}
+            with self.assertRaisesRegex(MODULE.ProbeError, "not bound"):
+                self._call_persistent_summary(Path(directory), receipt, validation)
+
+    def test_persistent_summary_rejects_missing_required_tool_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            del receipt["preflight"]["required_tool_names"]
+            del receipt["preflight"]["hello"]["required_methods"]
+            with self.assertRaisesRegex(MODULE.ProbeError, "required tool names"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_malformed_required_tool_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["preflight"]["required_tool_names"] = ["sessions_spawn", 7]
+            with self.assertRaisesRegex(MODULE.ProbeError, "non-empty strings"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_missing_session_identity_digests(self) -> None:
+        for key in ("session_key_sha256", "child_run_id_sha256"):
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    del receipt["lifecycle"][key]
+                    with self.assertRaisesRegex(MODULE.ProbeError, key):
+                        self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_missing_matching_session_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["matching_session_count"] = 0
+            with self.assertRaisesRegex(MODULE.ProbeError, "matching accepted session"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_changed_production_config_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["production_after"]["config_sha256"] = "1" * 64
+            with self.assertRaisesRegex(MODULE.ProbeError, "production config hashes changed"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_missing_production_config_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            del receipt["production_after"]["config_sha256"]
+            with self.assertRaisesRegex(MODULE.ProbeError, "production_after.config_sha256"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_non_loopback_gateway_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["attestation"]["gateway_endpoint"] = "ws://192.168.50.90:20189"
+            with self.assertRaisesRegex(MODULE.ProbeError, "loopback listener"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_wrong_gateway_endpoint_port(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["attestation"]["gateway_endpoint"] = "ws://127.0.0.1:20190"
+            with self.assertRaisesRegex(MODULE.ProbeError, "loopback listener"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_provider_secret_leak_count(self) -> None:
+        for value in (None, 1):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    if value is None:
+                        del receipt["candidate"]["env"]["unexpected_provider_key_count"]
+                    else:
+                        receipt["candidate"]["env"]["unexpected_provider_key_count"] = value
+                    with self.assertRaisesRegex(MODULE.ProbeError, "provider secrets"):
+                        self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_lifecycle_summary_is_phase_b_snapshot_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -404,8 +611,11 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "sha256": "9" * 64,
                 },
             }
-            validation = {"status": "pass", "receipt_sha256": "a" * 64}
             receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
+            validation = {
+                "status": "pass",
+                "receipt_sha256": MODULE._sha256_bytes(receipt_file.read_bytes()),
+            }
             validation_file.write_text(json.dumps(validation), encoding="utf-8")
             original_git = MODULE._git
 
@@ -455,8 +665,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 stdout = ""
                 stderr = ""
 
-            def fake_run(command, *, cwd, env=None, timeout=240):
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 self.assertIsNotNone(env)
+                self.assertIs(start_new_session, True)
                 captured_env.update(env)
                 return Proc()
 
@@ -499,6 +710,95 @@ class RealGatewayProbeTests(unittest.TestCase):
             captured_env["OPENCLAW_STATE_DIR"],
             "/Users/zuqiangyu/.openclaw/state",
         )
+
+    def test_default_persistent_runner_state_is_outside_evidence_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "docs" / "runtime-evidence" / "probe.json"
+            captured = {}
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_source_bindings = MODULE._source_bindings
+            original_run_persistent = MODULE._run_persistent_lifecycle_probe
+
+            def fake_run_persistent(*args, **kwargs):
+                captured["run_root"] = kwargs["run_root"]
+                return {
+                    "status": "pass",
+                    "openclaw_head_sha": "openclaw-head",
+                    "agentic_os_head_sha": "agentic-head",
+                    "runtime_ready": False,
+                    "runtime_ready_candidate_evidence": True,
+                }
+
+            try:
+                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
+                MODULE._source_bindings = lambda *args, **kwargs: []
+                MODULE._run_persistent_lifecycle_probe = fake_run_persistent
+                MODULE.run_probe(root, evidence_file, timeout=1)
+            finally:
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._source_bindings = original_source_bindings
+                MODULE._run_persistent_lifecycle_probe = original_run_persistent
+
+        run_root = captured["run_root"].resolve()
+        self.assertNotIn("runtime-evidence", run_root.parts)
+        self.assertFalse(str(run_root).startswith(str(root.resolve())))
+
+    def test_persistent_runner_timeout_writes_fail_closed_cleanup_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            run_root = root / "run"
+            output = root / "evidence.json"
+            captured = {}
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_loopback_port_closed = MODULE._loopback_port_closed
+
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                captured["start_new_session"] = start_new_session
+                raise MODULE.subprocess.TimeoutExpired(
+                    command,
+                    timeout,
+                    output="runner stdout",
+                    stderr="runner stderr",
+                )
+
+            try:
+                MODULE._run = fake_run
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE._loopback_port_closed = lambda port: True
+                with self.assertRaisesRegex(MODULE.ProbeError, "timed out"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE._loopback_port_closed = original_loopback_port_closed
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIs(captured["start_new_session"], True)
+            self.assertEqual(payload["status"], "fail_closed")
+            self.assertIs(
+                payload["isolated_non_production_gateway"]["candidate_port_closed"],
+                True,
+            )
+            self.assertIn("timeout_process_group_cleanup", json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":

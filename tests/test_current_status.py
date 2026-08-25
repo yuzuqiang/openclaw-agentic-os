@@ -184,7 +184,7 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(live["status"], "phase_b_candidate_snapshot_pending_phase_c")
+        self.assertEqual(live["status"], "phase_b_snapshot_invalidated_pending_recapture")
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
         local_p03 = live["local_p03_runtime_heartbeat_shadow"]
@@ -229,7 +229,7 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(index["status"], "phase_b_candidate_snapshot_pending_phase_c")
+        self.assertEqual(index["status"], "phase_b_snapshot_invalidated_pending_recapture")
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
             index["current_evidence"]["status"],
@@ -272,6 +272,9 @@ class CurrentStatusTests(unittest.TestCase):
         issue44_candidate_payload = json.loads(
             issue44_candidate_path.read_text(encoding="utf-8")
         )
+        self.assertEqual(issue44_candidate["status"], "invalid_fail_closed_review_findings")
+        self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
+        self.assertFalse(issue44_candidate["validation_receipt_bound"])
         self.assertEqual(issue44_candidate_payload["status"], "pass")
         self.assertFalse(issue44_candidate_payload["runtime_ready"])
         self.assertTrue(issue44_candidate_payload["runtime_ready_candidate_evidence"])
@@ -490,7 +493,7 @@ class CurrentStatusTests(unittest.TestCase):
             self.assertFalse(evidence_path.exists())
             return
         self.assertEqual(current["status"], "captured_from_clean_generator_revision")
-        self.assertEqual(index["status"], "phase_b_candidate_snapshot_pending_phase_c")
+        self.assertEqual(index["status"], "phase_b_snapshot_invalidated_pending_recapture")
         self.assertEqual(
             current["sha256"], hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         )
@@ -506,6 +509,9 @@ class CurrentStatusTests(unittest.TestCase):
             candidate["sha256"], hashlib.sha256(candidate_path.read_bytes()).hexdigest()
         )
         candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+        self.assertEqual(candidate["status"], "invalid_fail_closed_review_findings")
+        self.assertFalse(candidate["runtime_ready_candidate_evidence"])
+        self.assertFalse(candidate["validation_receipt_bound"])
         self.assertEqual(candidate_payload["status"], "pass")
         self.assertFalse(candidate_payload["runtime_ready"])
         self.assertTrue(candidate_payload["runtime_ready_candidate_evidence"])

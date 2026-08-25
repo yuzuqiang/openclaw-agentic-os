@@ -44,7 +44,7 @@
     "evidence_index": {
       "current_evidence_status": "captured_from_clean_generator_revision",
       "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
-      "status": "phase_b_candidate_snapshot_pending_phase_c"
+      "status": "phase_b_snapshot_invalidated_pending_recapture"
     },
     "issue44_live_installed_preflight": {
       "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
@@ -59,15 +59,16 @@
     "issue44_downstream_persistent_lifecycle_probe": {
       "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
       "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
-      "status": "pass",
+      "status": "invalid_fail_closed_review_findings",
       "runtime_ready": false,
-      "runtime_ready_candidate_evidence": true,
+      "runtime_ready_candidate_evidence": false,
       "runtime_ready_blocked_until_phase_c": true,
       "openclaw_head_sha": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
       "agentic_os_head_sha": "377ea08fb2cc240342d4a019444d3374b6e55a0f",
       "isolated_non_production_gateway": true,
       "token_authenticated": true,
       "production_config_hash_unchanged": true,
+      "validation_receipt_bound": false,
       "candidate_port_closed": true,
       "db_authority_enabled": false,
       "phase_c_exact_head_required_before_review": true,
@@ -102,7 +103,7 @@
     },
     "production_behavior_proven": false,
     "runtime_ready": false,
-    "status": "phase_b_candidate_snapshot_pending_phase_c"
+    "status": "phase_b_snapshot_invalidated_pending_recapture"
   },
   "production_authority": {
     "db_authority_enabled": false,
