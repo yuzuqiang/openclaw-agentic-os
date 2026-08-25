@@ -18,7 +18,7 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `57ed45c818d0b60e6a53c7410fb75fe8bf3de68fa63edfa831546a8968fc70ef`
+- Current corrected design artifact SHA-256: `046c14e18506839cee576c2e68117467a7d2046fb3d908ed6fd2f7ea4698f10d`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)

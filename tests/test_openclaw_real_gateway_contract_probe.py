@@ -932,6 +932,136 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(cleanup["status"], "fail")
 
+    def test_persistent_runner_success_rejection_cleans_candidate_gateway(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            captured = {}
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_process_group = MODULE._terminate_process_group
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                captured["start_new_session"] = start_new_session
+                return Proc()
+
+            def fake_terminate(proc):
+                captured["cleanup_attempted"] = True
+                return True
+
+            try:
+                MODULE._run = fake_run
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
+                    MODULE.ProbeError("contradictory receipt")
+                )
+                MODULE._wait_for_loopback_port_closed = lambda port: True
+                MODULE._terminate_process_group = fake_terminate
+                with self.assertRaisesRegex(MODULE.ProbeError, "evidence was rejected"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=root / "run",
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_process_group = original_terminate_process_group
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIs(captured["start_new_session"], True)
+            self.assertIs(captured["cleanup_attempted"], True)
+            self.assertEqual(payload["status"], "fail_closed")
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_validation_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "pass")
+            self.assertIs(cleanup["candidate_port_closed"], True)
+
+    def test_persistent_runner_success_rejection_fails_when_candidate_gateway_remains_open(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_process_group = MODULE._terminate_process_group
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            try:
+                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
+                    MODULE.ProbeError("contradictory receipt")
+                )
+                MODULE._wait_for_loopback_port_closed = lambda port: False
+                MODULE._terminate_process_group = lambda proc: True
+                with self.assertRaisesRegex(MODULE.ProbeError, "port remained open"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=root / "run",
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_process_group = original_terminate_process_group
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_validation_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "fail")
+            self.assertIs(cleanup["candidate_port_closed"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

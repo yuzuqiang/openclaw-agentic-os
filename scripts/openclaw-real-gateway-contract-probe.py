@@ -1149,24 +1149,57 @@ def _run_persistent_lifecycle_probe(
             f"returncode={proc.returncode} evidence_file_sha256="
             f"{_sha256_bytes(evidence_file.resolve().read_bytes())}"
         )
-    if validate_candidate_root(openclaw_root) != head:
-        raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
-    receipt_file = run_root / "receipts" / "lifecycle-receipt.json"
-    validation_file = run_root / "receipts" / "independent-validation.json"
-    payload = _persistent_lifecycle_summary(
-        openclaw_root=openclaw_root,
-        run_root=run_root,
-        receipt_file=receipt_file,
-        validation_file=validation_file,
-        head=head,
-        agentic_sources=agentic_sources,
-        runtime_sources=runtime_sources,
-        command=command,
-        proc=proc,
-        port=port,
-    )
-    _write_validated_payload(evidence_file, payload)
-    return payload
+    try:
+        if validate_candidate_root(openclaw_root) != head:
+            raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
+        receipt_file = run_root / "receipts" / "lifecycle-receipt.json"
+        validation_file = run_root / "receipts" / "independent-validation.json"
+        payload = _persistent_lifecycle_summary(
+            openclaw_root=openclaw_root,
+            run_root=run_root,
+            receipt_file=receipt_file,
+            validation_file=validation_file,
+            head=head,
+            agentic_sources=agentic_sources,
+            runtime_sources=runtime_sources,
+            command=command,
+            proc=proc,
+            port=port,
+        )
+        _write_validated_payload(evidence_file, payload)
+        return payload
+    except Exception as exc:
+        process_group_cleanup_attempted = _terminate_process_group(proc)
+        port_closed = _wait_for_loopback_port_closed(port)
+        payload = _persistent_failure_summary(
+            openclaw_root=openclaw_root,
+            run_root=run_root,
+            head=head,
+            agentic_sources=agentic_sources,
+            runtime_sources=runtime_sources,
+            command=command,
+            proc=proc,
+            port=port,
+        )
+        payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
+        payload["fail_closed_matrix"].append(
+            {
+                "check": "post_success_validation_process_group_cleanup",
+                "status": "pass" if port_closed else "fail",
+                "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                "candidate_port_closed": port_closed,
+                "rejected_after_runner_success": True,
+            }
+        )
+        _write_validated_payload(evidence_file, payload)
+        if not port_closed:
+            raise ProbeError(
+                "persistent lifecycle runner evidence was rejected and candidate port remained open"
+            ) from exc
+        raise ProbeError(
+            "persistent lifecycle runner evidence was rejected after successful runner exit "
+            f"evidence_file_sha256={_sha256_bytes(evidence_file.resolve().read_bytes())}"
+        ) from exc
 
 
 def run_probe(
