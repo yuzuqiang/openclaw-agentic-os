@@ -34,7 +34,13 @@ AGENTIC_SOURCE_PATHS = (
     "src/agentic_os/runtime_attestation.py",
     "src/agentic_os/metadata.py",
 )
-PERSISTENT_VALIDATION_HMAC_ENV = "AGENTIC_OS_PERSISTENT_VALIDATION_HMAC_KEY"
+PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV = (
+    "AGENTIC_OS_PERSISTENT_ATTESTATION_VERIFICATION_HMAC_KEY_HEX"
+)
+PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV = (
+    "AGENTIC_OS_PERSISTENT_VALIDATION_ANCHOR_HMAC_KEY_HEX"
+)
+PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH = Path("keys/agentic-os-attestation.key")
 PERSISTENT_VALIDATION_SCHEMA_VERSION = "agentic-os.persistent-lifecycle-independent-validation.v1"
 PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION = (
     "agentic-os.persistent-attestation-verification.v1"
@@ -372,11 +378,25 @@ def _runner_base_env() -> dict[str, str]:
     }
 
 
+def _validate_hmac_key_material(value: bytes, label: str) -> bytes:
+    if len(value) != 32 or len(set(value)) < 16:
+        raise ProbeError(f"{label} key is unavailable or too weak")
+    return value
+
+
 def _hmac_secret_from_env(env_name: str, label: str) -> bytes:
     value = os.environ.get(env_name)
-    if not isinstance(value, str) or len(value.encode()) < 32:
-        raise ProbeError(f"{label} key is unavailable or too weak")
-    return value.encode()
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ProbeError(f"{label} key is unavailable, weak, or unsafe")
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError as exc:
+        raise ProbeError(f"{label} key is unavailable, weak, or unsafe") from exc
+    return _validate_hmac_key_material(decoded, label)
 
 
 def _authentication_payload(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -482,7 +502,7 @@ def _validate_independent_validation(
     _validate_hmac_authentication(
         validation,
         label="persistent lifecycle validation",
-        expected_key_env=PERSISTENT_VALIDATION_HMAC_ENV,
+        expected_key_env=PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
     )
 
 
@@ -556,6 +576,16 @@ def _build_independent_validation_record(*, run_root: Path, receipt_file: Path) 
     signed_payload = _record(
         response.get("signed_payload"), "persistent attestation signed payload"
     )
+    expected_signature = hmac.new(
+        _hmac_secret_from_env(
+            PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV,
+            "persistent attestation verification",
+        ),
+        _canonical_json_bytes(signed_payload),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        raise ProbeError("persistent attestation signature mismatch")
     rpc_evidence = _record(
         evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
     )
@@ -585,7 +615,7 @@ def _build_independent_validation_record(*, run_root: Path, receipt_file: Path) 
         "validator_identity_sha256": _text_sha256("agentic-os-persistent-validator"),
     }
     validation["authentication"] = _hmac_authentication(
-        validation, key_env=PERSISTENT_VALIDATION_HMAC_ENV
+        validation, key_env=PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV
     )
     return validation
 
@@ -616,16 +646,82 @@ def _write_independent_validation_file(
             temporary_validation_file.unlink()
 
 
-def _validator_env() -> dict[str, str]:
+def _consume_attestation_verification_key(run_root: Path) -> bytes:
+    unresolved_root = run_root.absolute()
+    required_flag_names = ("O_CLOEXEC", "O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, name) for name in required_flag_names):
+        raise ProbeError("secure no-follow attestation key access is unavailable")
+    directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    key_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    root_fd = -1
+    key_directory_fd = -1
+    key_fd = -1
+    try:
+        root_fd = os.open(unresolved_root, directory_flags)
+        root_info = os.fstat(root_fd)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.getuid()
+            or stat.S_IMODE(root_info.st_mode) != 0o700
+        ):
+            raise ProbeError("persistent lifecycle run root is unsafe")
+        key_directory_fd = os.open(
+            PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.parent.as_posix(),
+            directory_flags,
+            dir_fd=root_fd,
+        )
+        directory_info = os.fstat(key_directory_fd)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.getuid()
+            or stat.S_IMODE(directory_info.st_mode) != 0o700
+        ):
+            raise ProbeError("persistent attestation verification key directory is unsafe")
+        key_name = PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
+        key_fd = os.open(key_name, key_flags, dir_fd=key_directory_fd)
+        key_info = os.fstat(key_fd)
+        if (
+            not stat.S_ISREG(key_info.st_mode)
+            or key_info.st_uid != os.getuid()
+            or stat.S_IMODE(key_info.st_mode) != 0o600
+            or key_info.st_nlink != 1
+        ):
+            raise ProbeError("persistent attestation verification key file is unsafe")
+        key = _validate_hmac_key_material(
+            os.read(key_fd, 33), "persistent attestation verification"
+        )
+        current_info = os.stat(key_name, dir_fd=key_directory_fd, follow_symlinks=False)
+        if (current_info.st_dev, current_info.st_ino) != (key_info.st_dev, key_info.st_ino):
+            raise ProbeError("persistent attestation verification key changed during access")
+        os.unlink(key_name, dir_fd=key_directory_fd)
+        return key
+    except ProbeError:
+        raise
+    except OSError as exc:
+        raise ProbeError(
+            "persistent attestation verification key path is unsafe or unavailable"
+        ) from exc
+    finally:
+        for descriptor in (key_fd, key_directory_fd, root_fd):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _validator_env(*, run_root: Path) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
         if key in RUNNER_ENV_ALLOWLIST and not _is_provider_secret_env_name(key)
     }
-    key = os.environ.get(PERSISTENT_VALIDATION_HMAC_ENV)
-    if not isinstance(key, str):
-        raise ProbeError("persistent lifecycle validation key is unavailable")
-    env[PERSISTENT_VALIDATION_HMAC_ENV] = key
+    attestation_key = _consume_attestation_verification_key(run_root)
+    anchor_key = _hmac_secret_from_env(
+        PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "persistent lifecycle validation anchor",
+    )
+    if hmac.compare_digest(attestation_key, anchor_key):
+        raise ProbeError("persistent lifecycle HMAC keys are not domain separated")
+    env[PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV] = attestation_key.hex()
+    env[PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = anchor_key.hex()
     return env
 
 
@@ -636,6 +732,11 @@ def _run_independent_validator(
     validation_file: Path,
     timeout: int = 30,
 ) -> None:
+    validator_env = _validator_env(run_root=run_root)
+    if validation_file.is_symlink():
+        raise ProbeError("persistent lifecycle validation output path is unsafe")
+    if validation_file.exists():
+        validation_file.unlink()
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -647,7 +748,7 @@ def _run_independent_validator(
         "--validation-file",
         str(validation_file),
     ]
-    proc = _run(command, cwd=ROOT, env=_validator_env(), timeout=timeout)
+    proc = _run(command, cwd=ROOT, env=validator_env, timeout=timeout)
     if proc.returncode != 0:
         raise ProbeError(
             "persistent lifecycle independent validator failed "
@@ -722,6 +823,29 @@ def _prepare_private_directory(directory: Path) -> Path:
     if stat.S_IMODE(info.st_mode) & 0o077:
         raise ProbeError(f"{directory.name} is not private to the current user")
     return directory
+
+
+def _prepare_private_run_root(directory: Path) -> Path:
+    unresolved = directory.absolute()
+    if unresolved.is_symlink():
+        raise ProbeError("persistent lifecycle run root must not be a symlink")
+    if unresolved.exists():
+        info = unresolved.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ProbeError("persistent lifecycle run root must be a directory")
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ProbeError(
+                "persistent lifecycle pre-existing run root must be owner-owned mode 0700"
+            )
+        if any(unresolved.iterdir()):
+            raise ProbeError("persistent lifecycle pre-existing run root must be empty")
+    else:
+        unresolved.mkdir(parents=True, mode=0o700)
+    resolved = unresolved.resolve()
+    info = resolved.stat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise ProbeError("persistent lifecycle run root is not private to the current user")
+    return resolved
 
 
 def _default_private_run_root(head: str) -> Path:
@@ -1518,7 +1642,11 @@ def _run_persistent_lifecycle_probe(
     run_id: str,
     transition_id: str,
 ) -> dict[str, Any]:
-    run_root = _prepare_private_directory(run_root)
+    _hmac_secret_from_env(
+        PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+        "persistent lifecycle validation anchor",
+    )
+    run_root = _prepare_private_run_root(run_root)
     evidence_dir = run_root / "evidence"
     runner_home = run_root / "runner-home"
     runner_state = run_root / "runner-state"
@@ -1743,7 +1871,7 @@ def run_probe(
             agentic_sources=agentic_sources,
         )
     runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
-    default_run_root = _default_private_run_root(head)
+    selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
     return _run_persistent_lifecycle_probe(
         openclaw_root,
         evidence_file,
@@ -1751,7 +1879,7 @@ def run_probe(
         head=head,
         agentic_sources=agentic_sources,
         runtime_sources=runtime_sources,
-        run_root=run_root or default_run_root,
+        run_root=selected_run_root,
         port=port or PERSISTENT_LIFECYCLE_DEFAULT_PORT,
         run_id=run_id or "agentic-os-real-gateway-contract-probe",
         transition_id=transition_id or "persistent-lifecycle-runtime-readiness",
