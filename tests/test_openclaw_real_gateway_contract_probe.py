@@ -1182,6 +1182,76 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertEqual(cleanup["status"], "fail")
             self.assertIs(cleanup["candidate_port_closed"], False)
 
+    def test_persistent_runner_success_rejects_port_closed_only_by_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            waits = iter([False, True])
+            captured = {}
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_process_group = MODULE._terminate_process_group
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            try:
+                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE._persistent_lifecycle_summary = lambda **kwargs: {
+                    "status": "pass",
+                    "openclaw_head_sha": "openclaw-head",
+                    "agentic_os_head_sha": "agentic-head",
+                    "runtime_ready": False,
+                    "runtime_ready_candidate_evidence": True,
+                    "isolated_non_production_gateway": {"candidate_port_closed": True},
+                }
+                MODULE._wait_for_loopback_port_closed = lambda port: next(waits)
+                MODULE._terminate_process_group = lambda proc: captured.setdefault(
+                    "cleanup_attempted", True
+                )
+                with self.assertRaisesRegex(MODULE.ProbeError, "remained open before cleanup"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=root / "run",
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_process_group = original_terminate_process_group
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_port_closure"
+            )
+            self.assertEqual(payload["status"], "fail_closed")
+            self.assertEqual(cleanup["status"], "fail")
+            self.assertIs(cleanup["process_group_cleanup_attempted"], True)
+            self.assertIs(cleanup["candidate_port_closed"], True)
+            self.assertIs(captured["cleanup_attempted"], True)
+
     def test_persistent_runner_success_rejection_cleans_candidate_gateway(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

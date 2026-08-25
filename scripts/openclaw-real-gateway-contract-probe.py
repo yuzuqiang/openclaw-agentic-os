@@ -1385,30 +1385,29 @@ def _run_persistent_lifecycle_probe(
         if not _wait_for_loopback_port_closed(port):
             process_group_cleanup_attempted = _terminate_process_group(proc)
             port_closed = _wait_for_loopback_port_closed(port)
-            if not port_closed:
-                payload = _persistent_failure_summary(
-                    openclaw_root=openclaw_root,
-                    run_root=run_root,
-                    head=head,
-                    agentic_sources=agentic_sources,
-                    runtime_sources=runtime_sources,
-                    command=command,
-                    proc=proc,
-                    port=port,
-                )
-                payload["isolated_non_production_gateway"]["candidate_port_closed"] = False
-                payload["fail_closed_matrix"].append(
-                    {
-                        "check": "post_success_port_closure",
-                        "status": "fail",
-                        "process_group_cleanup_attempted": process_group_cleanup_attempted,
-                        "candidate_port_closed": False,
-                    }
-                )
-                _write_validated_payload(evidence_file, payload)
-                raise CandidatePortOpenError(
-                    "persistent lifecycle runner succeeded but candidate port remained open"
-                )
+            payload = _persistent_failure_summary(
+                openclaw_root=openclaw_root,
+                run_root=run_root,
+                head=head,
+                agentic_sources=agentic_sources,
+                runtime_sources=runtime_sources,
+                command=command,
+                proc=proc,
+                port=port,
+            )
+            payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
+            payload["fail_closed_matrix"].append(
+                {
+                    "check": "post_success_port_closure",
+                    "status": "fail",
+                    "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                    "candidate_port_closed": port_closed,
+                }
+            )
+            _write_validated_payload(evidence_file, payload)
+            raise CandidatePortOpenError(
+                "persistent lifecycle runner succeeded but candidate port remained open before cleanup"
+            )
         payload["isolated_non_production_gateway"]["candidate_port_closed"] = True
         _write_validated_payload(evidence_file, payload)
         return payload
