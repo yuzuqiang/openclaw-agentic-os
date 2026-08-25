@@ -529,16 +529,16 @@ python3 scripts/openclaw-real-gateway-contract-probe.py \
   --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json
 ```
 
-The committed Issue #44 JSON at that path has `status=pass`,
-`runtime_ready_candidate_evidence=true`, and `runtime_ready=false`. It proves
-the candidate's `agenticOs.runtime.attest`, `tools.catalog` corroboration,
-allowLease acquire/status/release, accepted `sessions_spawn`, duplicate spawn
-identity parity, `sessions_list`, `session_status`, `sessions_history`, release
-cleanup, candidate port closure, production config hash stability, zero
-provider-secret environment leakage, and `DB_AUTHORITY_ENABLED=False`. It is
-only a sanitized Phase B candidate snapshot until a different-agent Phase C pass
-reruns from the exact final head before any review request or production
-runtime-readiness claim.
+The committed Issue #44 JSON at that path is retained only as immutable
+historical output. The forward evidence index now marks it
+`invalid_fail_closed_review_findings`, with `runtime_ready_candidate_evidence=false`
+and `validation_receipt_bound=false`, because review found that the generator
+accepted unauthenticated receipt fields. It must not be treated as proof of
+`agenticOs.runtime.attest`, `tools.catalog` corroboration, allowLease behavior,
+accepted `sessions_spawn`, duplicate identity parity, session reads, release
+cleanup, candidate port closure, production config stability, provider-secret
+isolation, or DB-authority isolation until a corrected exact-head capture and a
+different-agent Phase C pass exist.
 
 The legacy probe path still exercises the runtime-discovered `tools.catalog`
 RPC methods, principal-bound allowLease acquire/duplicate/status/release,

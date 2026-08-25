@@ -23,6 +23,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             "immutable_inputs": {
                 "runtime_head": "openclaw-head",
                 "agentic_os_head": "agentic-head",
+                "contract_vector_sha256": "9" * 64,
             },
             "production_before": {
                 "config_sha256": "0" * 64,
@@ -86,7 +87,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "db_authority": {"DB_AUTHORITY_ENABLED": False},
                 "candidate_shutdown": {"port_closed": True},
             },
-            "runtime_launch": {"token_sha256": "6" * 64},
+            "runtime_launch": {
+                "token_sha256": "6" * 64,
+                "executable_sha256": "7" * 64,
+            },
             "paths": {
                 "run_root": {"realpath_sha256": "7" * 64},
                 "key_path": {"realpath_sha256": "8" * 64},
@@ -106,6 +110,84 @@ class RealGatewayProbeTests(unittest.TestCase):
     ) -> tuple[Path, Path]:
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
+        signed_payload = {
+            "runtime_identity_token_sha256": "d" * 64,
+            "rpc_transcript_sha256": "a" * 64,
+            "binding": {
+                "executable": {"content_sha256": "7" * 64},
+                "catalog": {
+                    "sha256": "8" * 64,
+                    "contract_vector_sha256": "9" * 64,
+                },
+                "gateway": {
+                    "endpoint": f"ws://127.0.0.1:{MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT}",
+                    "build_id": "06e6e3f",
+                },
+            },
+        }
+        rpc_evidence = {
+            "tools_catalog": {
+                "method": "tools.catalog",
+                "request_params": {},
+                "response": {"tools": []},
+                "raw_response_sha256": MODULE._canonical_sha256({"tools": []}),
+            },
+            "allow_lease_status": {
+                "method": "subagents.allowLease.status",
+                "request_params": {},
+                "response": {"leases": []},
+                "raw_response_sha256": MODULE._canonical_sha256({"leases": []}),
+            },
+        }
+        expected_transcript_sha256 = MODULE._canonical_sha256(
+            {
+                "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+                "records": [
+                    {
+                        "key": key,
+                        "method": rpc_evidence[key]["method"],
+                        "request_params": {},
+                        "raw_response_sha256": rpc_evidence[key]["raw_response_sha256"],
+                    }
+                    for key in ("tools_catalog", "allow_lease_status")
+                ],
+            }
+        )
+        signed_payload["rpc_transcript_sha256"] = expected_transcript_sha256
+        persistent_evidence = {
+            "schema_version": MODULE.PERSISTENT_ATTESTATION_SCHEMA_VERSION,
+            "expected_runtime_head": "openclaw-head",
+            "expected_agentic_os_head": "agentic-head",
+            "runtime": {
+                "executable_sha256": "7" * 64,
+                "expected_catalog_sha256": "8" * 64,
+            },
+            "attestation": {
+                "request_params": {
+                    "expected_executable_sha256": "7" * 64,
+                    "expected_catalog_sha256": "8" * 64,
+                },
+                "response": {"signed_payload": signed_payload},
+                "runtime_identity_token_sha256": "d" * 64,
+            },
+            "rpc_evidence": rpc_evidence,
+        }
+        persistent_evidence_file = receipts / "persistent-attested-preflight-input-attempt-1.json"
+        persistent_evidence_file.write_text(json.dumps(persistent_evidence), encoding="utf-8")
+        receipt["preflight"]["persistent_evidence_file"] = str(persistent_evidence_file)
+        receipt["preflight"]["persistent_evidence_sha256"] = MODULE._sha256_bytes(
+            persistent_evidence_file.read_bytes()
+        )
+        if receipt["attestation"].get("signed_payload_sha256") == "c" * 64:
+            receipt["attestation"]["signed_payload_sha256"] = MODULE._canonical_sha256(
+                signed_payload
+            )
+        if receipt["attestation"].get("runtime_authored_rpc_evidence_sha256") == "b" * 64:
+            receipt["attestation"]["runtime_authored_rpc_evidence_sha256"] = (
+                MODULE._canonical_sha256(rpc_evidence)
+            )
+        if receipt["attestation"].get("rpc_transcript_sha256") == "a" * 64:
+            receipt["attestation"]["rpc_transcript_sha256"] = expected_transcript_sha256
         receipt_file = receipts / "lifecycle-receipt.json"
         validation_file = receipts / "independent-validation.json"
         receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
@@ -138,7 +220,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 validation_file=validation_file,
                 head="openclaw-head",
                 agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                runtime_sources=[{"path": "runtime.ts", "sha256": "1" * 64}],
+                runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
                 command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                 proc=Proc(),
                 port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -477,6 +559,20 @@ class RealGatewayProbeTests(unittest.TestCase):
                     with self.assertRaisesRegex(MODULE.ProbeError, key):
                         self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_missing_lease_identity_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            del receipt["lifecycle"]["gateway_lease_id_sha256"]
+            with self.assertRaisesRegex(MODULE.ProbeError, "gateway_lease_id_sha256"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_duplicate_acquire_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["duplicate_acquire_same_lease"] = False
+            with self.assertRaisesRegex(MODULE.ProbeError, "duplicate acquire lease"):
+                self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_summary_rejects_missing_matching_session_observation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
@@ -524,122 +620,50 @@ class RealGatewayProbeTests(unittest.TestCase):
                     with self.assertRaisesRegex(MODULE.ProbeError, "provider secrets"):
                         self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_missing_attestation_identity_fields(self) -> None:
+        required_keys = (
+            "gateway_build_id",
+            "executable_content_sha256",
+            "catalog_sha256",
+            "contract_vector_sha256",
+            "rpc_transcript_sha256",
+            "runtime_authored_rpc_evidence_sha256",
+            "signed_payload_sha256",
+            "runtime_identity_token_sha256",
+        )
+        for key in required_keys:
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    del receipt["attestation"][key]
+                    with self.assertRaisesRegex(MODULE.ProbeError, key):
+                        self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_corrupt_attestation_bindings(self) -> None:
+        cases = {
+            "gateway_build_id": "unrelated-build",
+            "executable_content_sha256": "0" * 64,
+            "catalog_sha256": "0" * 64,
+            "contract_vector_sha256": "0" * 64,
+            "rpc_transcript_sha256": "0" * 64,
+            "runtime_authored_rpc_evidence_sha256": "0" * 64,
+            "signed_payload_sha256": "0" * 64,
+            "runtime_identity_token_sha256": "0" * 64,
+        }
+        for key, value in cases.items():
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    receipt["attestation"][key] = value
+                    with self.assertRaises(MODULE.ProbeError):
+                        self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_lifecycle_summary_is_phase_b_snapshot_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            run_root = root / "run"
-            receipts = run_root / "receipts"
-            receipts.mkdir(parents=True)
-            receipt_file = receipts / "lifecycle-receipt.json"
-            validation_file = receipts / "independent-validation.json"
-            receipt = {
-                "status": "pass",
-                "immutable_inputs": {
-                    "runtime_head": "openclaw-head",
-                    "agentic_os_head": "agentic-head",
-                },
-                "production_before": {
-                    "config_sha256": "0" * 64,
-                    "health": {"reachable": False},
-                },
-                "production_after": {
-                    "config_sha256": "0" * 64,
-                    "health": {"reachable": False},
-                },
-                "candidate": {
-                    "port": MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
-                    "env": {"unexpected_provider_key_count": 0},
-                    "logs": {"stdout_sha256": "1" * 64, "stderr_sha256": "2" * 64},
-                },
-                "preflight": {
-                    "status": "pass",
-                    "runtime_ready": True,
-                    "required_tool_names": list(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
-                    "evidence_sha256": "3" * 64,
-                    "persistent_evidence_sha256": "4" * 64,
-                    "stdout_sha256": "5" * 64,
-                    "stderr_sha256": "6" * 64,
-                    "hello": {
-                        "status": "pass",
-                        "required_methods": list(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
-                    },
-                },
-                "attestation": {
-                    "status": "pass",
-                    "gateway_endpoint": "ws://127.0.0.1:20189",
-                    "gateway_build_id": "06e6e3f",
-                    "executable_content_sha256": "7" * 64,
-                    "catalog_sha256": "8" * 64,
-                    "contract_vector_sha256": "9" * 64,
-                    "rpc_transcript_sha256": "a" * 64,
-                    "runtime_authored_rpc_evidence_sha256": "b" * 64,
-                    "signed_payload_sha256": "c" * 64,
-                    "runtime_identity_token_sha256": "d" * 64,
-                },
-                "lifecycle": {
-                    "status": "pass",
-                    "duplicate_acquire_same_lease": True,
-                    "first_spawn_status": "accepted",
-                    "duplicate_spawn_same_session": True,
-                    "post_release_lease_count": 0,
-                    "gateway_lease_id_sha256": "e" * 64,
-                    "session_key_sha256": "f" * 64,
-                    "child_run_id_sha256": "0" * 64,
-                    "session_status_sha256": "1" * 64,
-                    "sessions_history_sha256": "2" * 64,
-                    "duplicate_release_sha256": "3" * 64,
-                    "sessions_list_count": 1,
-                    "matching_session_count": 1,
-                },
-                "rollback": {
-                    "status": "pass",
-                    "candidate_port_closed": True,
-                    "production_config_hash_unchanged": True,
-                    "production_health_before_sha256": "4" * 64,
-                    "production_health_after_sha256": "5" * 64,
-                    "db_authority": {"DB_AUTHORITY_ENABLED": False},
-                    "candidate_shutdown": {"port_closed": True},
-                },
-                "runtime_launch": {"token_sha256": "6" * 64},
-                "paths": {
-                    "run_root": {"realpath_sha256": "7" * 64},
-                    "key_path": {"realpath_sha256": "8" * 64},
-                },
-                "soak": {"status": "prepared_not_started", "started": False},
-                "historical_probe_audit": {
-                    "verdict": "not_authority_for_phase_b",
-                    "sha256": "9" * 64,
-                },
-            }
-            receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
-            validation = {
-                "status": "pass",
-                "receipt_sha256": MODULE._sha256_bytes(receipt_file.read_bytes()),
-            }
-            validation_file.write_text(json.dumps(validation), encoding="utf-8")
-            original_git = MODULE._git
-
-            class Proc:
-                stdout = "runner stdout"
-                stderr = "runner stderr"
-                returncode = 0
-
-            try:
-                MODULE._git = lambda git_root, *args: "agentic-head"
-                payload = MODULE._persistent_lifecycle_summary(
-                    openclaw_root=root,
-                    run_root=run_root,
-                    receipt_file=receipt_file,
-                    validation_file=validation_file,
-                    head="openclaw-head",
-                    agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                    runtime_sources=[{"path": "runtime.ts", "sha256": "1" * 64}],
-                    command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
-                    proc=Proc(),
-                    port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
-                )
-            finally:
-                MODULE._git = original_git
+            payload = self._call_persistent_summary(
+                Path(directory),
+                self._valid_persistent_receipt(),
+            )
 
         self.assertEqual(payload["status"], "pass")
         self.assertFalse(payload["runtime_ready"])
@@ -758,7 +782,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             captured = {}
             original_run = MODULE._run
             original_git = MODULE._git
-            original_loopback_port_closed = MODULE._loopback_port_closed
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 captured["start_new_session"] = start_new_session
@@ -772,7 +796,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = fake_run
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                MODULE._loopback_port_closed = lambda port: True
+                MODULE._wait_for_loopback_port_closed = lambda port: True
                 with self.assertRaisesRegex(MODULE.ProbeError, "timed out"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -789,7 +813,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 MODULE._run = original_run
                 MODULE._git = original_git
-                MODULE._loopback_port_closed = original_loopback_port_closed
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertIs(captured["start_new_session"], True)
@@ -799,6 +823,114 @@ class RealGatewayProbeTests(unittest.TestCase):
                 True,
             )
             self.assertIn("timeout_process_group_cleanup", json.dumps(payload, sort_keys=True))
+
+    def test_persistent_runner_failure_writes_fail_closed_cleanup_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            run_root = root / "run"
+            output = root / "evidence.json"
+            captured = {}
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_process_group = MODULE._terminate_process_group
+
+            class Proc:
+                returncode = 1
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                captured["start_new_session"] = start_new_session
+                return Proc()
+
+            try:
+                MODULE._run = fake_run
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE._wait_for_loopback_port_closed = lambda port: True
+                MODULE._terminate_process_group = lambda proc: True
+                with self.assertRaisesRegex(MODULE.ProbeError, "runner failed"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_process_group = original_terminate_process_group
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIs(captured["start_new_session"], True)
+            self.assertEqual(payload["status"], "fail_closed")
+            self.assertIs(
+                payload["isolated_non_production_gateway"]["candidate_port_closed"],
+                True,
+            )
+            self.assertIn("failure_process_group_cleanup", json.dumps(payload, sort_keys=True))
+
+    def test_persistent_runner_failure_rejects_unverified_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_process_group = MODULE._terminate_process_group
+
+            class Proc:
+                returncode = 1
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            try:
+                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE._wait_for_loopback_port_closed = lambda port: False
+                MODULE._terminate_process_group = lambda proc: True
+                with self.assertRaisesRegex(MODULE.ProbeError, "port remained open"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=root / "run",
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_process_group = original_terminate_process_group
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertFalse(
+                payload["isolated_non_production_gateway"]["candidate_port_closed"]
+            )
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "failure_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "fail")
 
 
 if __name__ == "__main__":

@@ -236,7 +236,12 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             index["current_evidence"]["status"],
-            "captured_from_clean_generator_revision",
+            "invalid_capability_source_drift_pending_recapture",
+        )
+        self.assertFalse(
+            index["current_evidence"]["generator_binding_requirements"][
+                "no_capability_source_drift_after_bound_head"
+            ]
         )
         current_evidence_path = root / index["current_evidence"]["path"]
         self.assertTrue(current_evidence_path.exists())
@@ -492,8 +497,27 @@ class CurrentStatusTests(unittest.TestCase):
             self.assertEqual(index["status"], "pending_current_evidence")
             self.assertFalse(evidence_path.exists())
             return
-        self.assertEqual(current["status"], "captured_from_clean_generator_revision")
+        self.assertIn(
+            current["status"],
+            {
+                "captured_from_clean_generator_revision",
+                "invalid_capability_source_drift_pending_recapture",
+            },
+        )
         self.assertEqual(index["status"], "phase_b_snapshot_invalidated_pending_recapture")
+        if current["status"] == "invalid_capability_source_drift_pending_recapture":
+            self.assertFalse(
+                current["generator_binding_requirements"][
+                    "no_capability_source_drift_after_bound_head"
+                ]
+            )
+            self.assertIn("immutable historical fail-closed output", current["status_reason"])
+        else:
+            self.assertTrue(
+                current["generator_binding_requirements"][
+                    "no_capability_source_drift_after_bound_head"
+                ]
+            )
         self.assertEqual(
             current["sha256"], hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         )
@@ -680,7 +704,7 @@ class CurrentStatusTests(unittest.TestCase):
             ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
             check=True,
         )
-        subprocess.run(
+        drift_check = subprocess.run(
             [
                 "git",
                 "-C",
@@ -691,8 +715,19 @@ class CurrentStatusTests(unittest.TestCase):
                 "--",
                 *binding["capability_source_paths"],
             ],
-            check=True,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
+        if current["status"] == "invalid_capability_source_drift_pending_recapture":
+            self.assertNotEqual(drift_check.returncode, 0)
+            self.assertFalse(
+                current["generator_binding_requirements"][
+                    "no_capability_source_drift_after_bound_head"
+                ]
+            )
+        else:
+            self.assertEqual(drift_check.returncode, 0)
 
 
 if __name__ == "__main__":

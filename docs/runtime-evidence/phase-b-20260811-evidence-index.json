@@ -16,7 +16,7 @@
         "src/agentic_os/runtime_attestation.py",
         "src/agentic_os/__init__.py"
       ],
-      "no_capability_source_drift_after_bound_head": true,
+      "no_capability_source_drift_after_bound_head": false,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
@@ -30,8 +30,8 @@
     "reviewed_head_sha": null,
     "runtime_ready": false,
     "sha256": "5288657875ac2a92c9ca8dd6b4dbe4a7b6fffd90baf1ac87afefc251fdc59a01",
-    "status": "captured_from_clean_generator_revision",
-    "status_reason": "Issue #44 recaptured installed OpenClaw 2026.7.1 from a clean generator head while skipping live allowLease.status to preserve the no-production-lease-mutation boundary. It remains fail-closed because model-callable catalog availability, connected build identity, live allowLease reachability, and agenticOs.runtime.attest readiness are unproven."
+    "status": "invalid_capability_source_drift_pending_recapture",
+    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 capture was generated before later changes to declared capability source paths, including scripts/openclaw-real-gateway-contract-probe.py. It remains immutable historical fail-closed output, but it is no longer current evidence until recaptured from the corrected exact head."
   },
   "downstream_candidate_evidence": {
     "agentic_os_head_sha": "377ea08fb2cc240342d4a019444d3374b6e55a0f",

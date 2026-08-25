@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
 from urllib.parse import urlparse
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
 PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
+PERSISTENT_ATTESTATION_SCHEMA_VERSION = "agentic-os.persistent-attested-preflight-evidence.v1"
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
     "scripts/openclaw-live-accepted-session-probe.py",
@@ -146,7 +148,9 @@ def _run(
         exc.stdout = stdout
         exc.stderr = stderr
         raise
-    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+    completed.pid = proc.pid  # type: ignore[attr-defined]
+    return completed
 
 
 def _git(root: Path, *args: str) -> str:
@@ -279,6 +283,13 @@ def _require_sha256_field(section: Mapping[str, Any], key: str, label: str) -> s
     return value
 
 
+def _require_non_empty_string(section: Mapping[str, Any], key: str, label: str) -> str:
+    value = section.get(key)
+    if not isinstance(value, str) or not value:
+        raise ProbeError(f"{label}.{key} must be a non-empty string")
+    return value
+
+
 def _string_list(value: Any, label: str) -> list[str]:
     if not isinstance(value, list) or not value:
         raise ProbeError(f"{label} must be a non-empty list")
@@ -303,6 +314,194 @@ def _loopback_port_closed(port: int) -> bool:
         except OSError:
             continue
     return True
+
+
+def _wait_for_loopback_port_closed(port: int, *, timeout_seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if _loopback_port_closed(port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _terminate_process_group(proc: subprocess.CompletedProcess[str]) -> bool:
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        return False
+    return True
+
+
+def _run_artifact_path(run_root: Path, value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ProbeError(f"{label} path is missing")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = run_root / candidate
+    resolved_root = run_root.resolve()
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ProbeError(f"{label} path is outside the isolated run root") from exc
+    if not resolved.is_file():
+        raise ProbeError(f"{label} file is missing")
+    return resolved
+
+
+def _runtime_source_digest(runtime_sources: list[dict[str, str]], path: str) -> str:
+    matches = [source.get("sha256") for source in runtime_sources if source.get("path") == path]
+    if len(matches) != 1 or _sha_field({"sha256": matches[0]}, "sha256") is None:
+        raise ProbeError(f"runtime source binding for {path} is missing or invalid")
+    return str(matches[0])
+
+
+def _validate_persistent_attestation_evidence(
+    *,
+    run_root: Path,
+    preflight: Mapping[str, Any],
+    attestation: Mapping[str, Any],
+    immutable_inputs: Mapping[str, Any],
+    runtime_sources: list[dict[str, str]],
+    runtime_head: str,
+    agentic_head: str,
+    port: int,
+) -> None:
+    evidence_path = _run_artifact_path(
+        run_root,
+        preflight.get("persistent_evidence_file"),
+        "persistent attestation evidence",
+    )
+    evidence_sha256 = _require_sha256_field(
+        preflight, "persistent_evidence_sha256", "preflight"
+    )
+    if _sha256_bytes(evidence_path.read_bytes()) != evidence_sha256:
+        raise ProbeError("persistent attestation evidence digest mismatch")
+    evidence = _read_json_file(evidence_path, "persistent attestation evidence")
+    if evidence.get("schema_version") != PERSISTENT_ATTESTATION_SCHEMA_VERSION:
+        raise ProbeError("persistent attestation evidence schema mismatch")
+    if evidence.get("expected_runtime_head") != runtime_head:
+        raise ProbeError("persistent attestation runtime head binding mismatch")
+    if evidence.get("expected_agentic_os_head") != agentic_head:
+        raise ProbeError("persistent attestation Agentic OS head binding mismatch")
+
+    runtime = _record(evidence.get("runtime"), "persistent attestation runtime")
+    raw_attestation = _record(
+        evidence.get("attestation"), "persistent attestation evidence attestation"
+    )
+    response = _record(raw_attestation.get("response"), "persistent attestation response")
+    signed_payload = _record(
+        response.get("signed_payload"), "persistent attestation signed payload"
+    )
+    rpc_evidence = _record(
+        evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
+    )
+    binding = _record(signed_payload.get("binding"), "persistent attestation binding")
+    executable = _record(binding.get("executable"), "persistent attestation executable")
+    catalog = _record(binding.get("catalog"), "persistent attestation catalog")
+    gateway = _record(binding.get("gateway"), "persistent attestation gateway")
+
+    executable_digest = _require_sha256_field(
+        attestation, "executable_content_sha256", "attestation"
+    )
+    if executable_digest != _runtime_source_digest(runtime_sources, "openclaw.mjs"):
+        raise ProbeError("persistent attestation executable digest is not source-bound")
+    if runtime.get("executable_sha256") != executable_digest:
+        raise ProbeError("persistent attestation executable digest is not runtime-bound")
+    if executable.get("content_sha256") != executable_digest:
+        raise ProbeError("persistent attestation executable digest is not signed-payload bound")
+    request_params = _record(
+        raw_attestation.get("request_params"), "persistent attestation request params"
+    )
+    if request_params.get("expected_executable_sha256") != executable_digest:
+        raise ProbeError("persistent attestation executable digest is not request-bound")
+
+    catalog_digest = _require_sha256_field(attestation, "catalog_sha256", "attestation")
+    if runtime.get("expected_catalog_sha256") != catalog_digest:
+        raise ProbeError("persistent attestation catalog digest is not runtime-bound")
+    if request_params.get("expected_catalog_sha256") != catalog_digest:
+        raise ProbeError("persistent attestation catalog digest is not request-bound")
+    if catalog.get("sha256") != catalog_digest:
+        raise ProbeError("persistent attestation catalog digest is not signed-payload bound")
+
+    contract_vector_digest = _require_sha256_field(
+        attestation, "contract_vector_sha256", "attestation"
+    )
+    if immutable_inputs.get("contract_vector_sha256") != contract_vector_digest:
+        raise ProbeError("persistent attestation contract vector is not immutable-input bound")
+    if catalog.get("contract_vector_sha256") != contract_vector_digest:
+        raise ProbeError("persistent attestation contract vector is not signed-payload bound")
+
+    endpoint = attestation.get("gateway_endpoint")
+    _validate_gateway_endpoint(endpoint, port=port)
+    if gateway.get("endpoint") != endpoint:
+        raise ProbeError("persistent attestation Gateway endpoint is not signed-payload bound")
+    build_id = _require_non_empty_string(attestation, "gateway_build_id", "attestation")
+    if gateway.get("build_id") != build_id:
+        raise ProbeError("persistent attestation Gateway build is not signed-payload bound")
+
+    signed_payload_digest = _require_sha256_field(
+        attestation, "signed_payload_sha256", "attestation"
+    )
+    if _canonical_sha256(signed_payload) != signed_payload_digest:
+        raise ProbeError("persistent attestation signed payload digest mismatch")
+    rpc_evidence_digest = _require_sha256_field(
+        attestation, "runtime_authored_rpc_evidence_sha256", "attestation"
+    )
+    if _canonical_sha256(rpc_evidence) != rpc_evidence_digest:
+        raise ProbeError("persistent attestation RPC evidence digest mismatch")
+    transcript_records: list[dict[str, Any]] = []
+    for key, method in (
+        ("tools_catalog", "tools.catalog"),
+        ("allow_lease_status", "subagents.allowLease.status"),
+    ):
+        record = _record(rpc_evidence.get(key), f"persistent attestation RPC evidence {key}")
+        if record.get("method") != method:
+            raise ProbeError(f"persistent attestation RPC evidence {key} method mismatch")
+        request = _record(record.get("request_params"), f"persistent attestation {key} request")
+        if request:
+            raise ProbeError(f"persistent attestation RPC evidence {key} request is not empty")
+        response_record = _record(
+            record.get("response"), f"persistent attestation {key} response"
+        )
+        raw_response_digest = _require_sha256_field(
+            record, "raw_response_sha256", f"persistent attestation RPC evidence {key}"
+        )
+        if _canonical_sha256(response_record) != raw_response_digest:
+            raise ProbeError(f"persistent attestation RPC evidence {key} response mismatch")
+        transcript_records.append(
+            {
+                "key": key,
+                "method": method,
+                "request_params": {},
+                "raw_response_sha256": raw_response_digest,
+            }
+        )
+    transcript_digest = _require_sha256_field(
+        attestation, "rpc_transcript_sha256", "attestation"
+    )
+    expected_transcript_digest = _canonical_sha256(
+        {
+            "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+            "records": transcript_records,
+        }
+    )
+    if transcript_digest != expected_transcript_digest:
+        raise ProbeError("persistent attestation transcript digest mismatch")
+    if signed_payload.get("rpc_transcript_sha256") != transcript_digest:
+        raise ProbeError("persistent attestation transcript digest is not signed-payload bound")
+    identity_digest = _require_sha256_field(
+        attestation, "runtime_identity_token_sha256", "attestation"
+    )
+    if raw_attestation.get("runtime_identity_token_sha256") != identity_digest:
+        raise ProbeError("persistent attestation runtime identity is not evidence-bound")
+    if signed_payload.get("runtime_identity_token_sha256") != identity_digest:
+        raise ProbeError("persistent attestation runtime identity is not signed-payload bound")
 
 
 def _safe_status(value: Any) -> str:
@@ -515,8 +714,11 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle did not prove accepted session spawn")
     if lifecycle.get("duplicate_spawn_same_session") is not True:
         raise ProbeError("persistent lifecycle did not prove duplicate spawn identity parity")
+    if lifecycle.get("duplicate_acquire_same_lease") is not True:
+        raise ProbeError("persistent lifecycle did not prove duplicate acquire lease identity parity")
     if lifecycle.get("post_release_lease_count") != 0:
         raise ProbeError("persistent lifecycle did not prove release cleanup")
+    _require_sha256_field(lifecycle, "gateway_lease_id_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "session_key_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "child_run_id_sha256", "lifecycle")
     if lifecycle.get("matching_session_count") != 1:
@@ -545,6 +747,27 @@ def _persistent_lifecycle_summary(
     if candidate_env.get("unexpected_provider_key_count") != 0:
         raise ProbeError("persistent lifecycle candidate environment includes provider secrets")
     _validate_gateway_endpoint(attestation.get("gateway_endpoint"), port=port)
+    _require_non_empty_string(attestation, "gateway_build_id", "attestation")
+    for key in (
+        "executable_content_sha256",
+        "catalog_sha256",
+        "contract_vector_sha256",
+        "rpc_transcript_sha256",
+        "runtime_authored_rpc_evidence_sha256",
+        "signed_payload_sha256",
+        "runtime_identity_token_sha256",
+    ):
+        _require_sha256_field(attestation, key, "attestation")
+    _validate_persistent_attestation_evidence(
+        run_root=run_root,
+        preflight=preflight,
+        attestation=attestation,
+        immutable_inputs=immutable_inputs,
+        runtime_sources=runtime_sources,
+        runtime_head=head,
+        agentic_head=agentic_head,
+        port=port,
+    )
     soak = _optional_record(receipt.get("soak"))
     historical_probe_audit = _optional_record(receipt.get("historical_probe_audit"))
 
@@ -868,7 +1091,7 @@ def _run_persistent_lifecycle_probe(
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         proc = subprocess.CompletedProcess(command, 124, stdout, stderr)
-        port_closed = _loopback_port_closed(port)
+        port_closed = _wait_for_loopback_port_closed(port)
         payload = _persistent_failure_summary(
             openclaw_root=openclaw_root,
             run_root=run_root,
@@ -894,9 +1117,9 @@ def _run_persistent_lifecycle_probe(
             "persistent lifecycle runner timed out "
             f"evidence_file_sha256={_sha256_bytes(evidence_file.resolve().read_bytes())}"
         ) from exc
-    if validate_candidate_root(openclaw_root) != head:
-        raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
     if proc.returncode != 0:
+        process_group_cleanup_attempted = _terminate_process_group(proc)
+        port_closed = _wait_for_loopback_port_closed(port)
         payload = _persistent_failure_summary(
             openclaw_root=openclaw_root,
             run_root=run_root,
@@ -907,12 +1130,27 @@ def _run_persistent_lifecycle_probe(
             proc=proc,
             port=port,
         )
+        payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
+        payload["fail_closed_matrix"].append(
+            {
+                "check": "failure_process_group_cleanup",
+                "status": "pass" if port_closed else "fail",
+                "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                "candidate_port_closed": port_closed,
+            }
+        )
         _write_validated_payload(evidence_file, payload)
+        if not port_closed:
+            raise ProbeError(
+                "persistent lifecycle runner failed and candidate port remained open"
+            )
         raise ProbeError(
             "persistent lifecycle runner failed "
             f"returncode={proc.returncode} evidence_file_sha256="
             f"{_sha256_bytes(evidence_file.resolve().read_bytes())}"
         )
+    if validate_candidate_root(openclaw_root) != head:
+        raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
     receipt_file = run_root / "receipts" / "lifecycle-receipt.json"
     validation_file = run_root / "receipts" / "independent-validation.json"
     payload = _persistent_lifecycle_summary(

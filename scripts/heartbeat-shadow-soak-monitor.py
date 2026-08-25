@@ -315,11 +315,11 @@ def _validation_subject_excluded_paths(
 
 
 def _git_tracked_tree_subject_sha256(
-    repo_root: Path, excluded_paths: Sequence[str]
+    repo_root: Path, excluded_paths: Sequence[str], *, ref: str = "HEAD"
 ) -> str:
     excluded = set(excluded_paths)
     result = subprocess.run(
-        ["git", "ls-tree", "-rz", "HEAD"],
+        ["git", "ls-tree", "-rz", ref],
         cwd=repo_root,
         check=False,
         stdout=subprocess.PIPE,
@@ -327,7 +327,8 @@ def _git_tracked_tree_subject_sha256(
     )
     if result.returncode != 0:
         raise MonitorError(
-            f"git validation subject tree failed: {result.stderr.decode('utf-8', 'replace').strip()}"
+            f"git validation subject tree failed for {ref}: "
+            f"{result.stderr.decode('utf-8', 'replace').strip()}"
         )
     digest = hashlib.sha256()
     observed_exclusions: set[str] = set()
@@ -1505,15 +1506,34 @@ def _validate_independent_validation_implementation_subject(
     if sorted(excluded_paths) != expected_exclusions:
         raise MonitorError("independent validation implementation subject exclusions mismatch")
     synthetic_commit = subject.get("reviewed_synthetic_commit")
-    if synthetic_commit is not None and not _is_git_sha(synthetic_commit):
+    if not _is_git_sha(synthetic_commit):
         raise MonitorError("independent validation reviewed synthetic commit is invalid")
     reviewed_head = subject.get("reviewed_head")
-    if reviewed_head is not None and not _is_git_sha(reviewed_head):
+    if not _is_git_sha(reviewed_head):
         raise MonitorError("independent validation reviewed head is invalid")
-    current = _git_tracked_tree_subject_sha256(
-        _repo_root_from_config(config),
+    invocation = validation.get("invocation")
+    if not isinstance(invocation, Mapping):
+        raise MonitorError("independent validation invocation provenance is missing")
+    if invocation.get("reviewed_synthetic_commit") != synthetic_commit:
+        raise MonitorError("independent validation reviewed synthetic commit mismatch")
+    if invocation.get("reviewed_head") != reviewed_head:
+        raise MonitorError("independent validation reviewed head mismatch")
+    repo_root = _repo_root_from_config(config)
+    target = _independent_validation_implementation_head(config)
+    if not _git_check(repo_root, ["cat-file", "-e", f"{synthetic_commit}^{{commit}}"]):
+        raise MonitorError("independent validation reviewed synthetic commit is unavailable")
+    if not _git_check(repo_root, ["merge-base", "--is-ancestor", synthetic_commit, target]):
+        raise MonitorError(
+            "independent validation reviewed synthetic commit is not an ancestor of the target"
+        )
+    reviewed = _git_tracked_tree_subject_sha256(
+        repo_root,
         expected_exclusions,
+        ref=str(synthetic_commit),
     )
+    if not hmac.compare_digest(str(tree_sha), reviewed):
+        raise MonitorError("independent validation reviewed implementation subject mismatch")
+    current = _git_tracked_tree_subject_sha256(repo_root, expected_exclusions, ref=target)
     if not hmac.compare_digest(str(tree_sha), current):
         raise MonitorError("independent validation implementation subject mismatch")
     return str(tree_sha)

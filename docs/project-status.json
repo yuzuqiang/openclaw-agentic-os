@@ -42,7 +42,7 @@
   },
   "live_runtime_evidence": {
     "evidence_index": {
-      "current_evidence_status": "captured_from_clean_generator_revision",
+      "current_evidence_status": "invalid_capability_source_drift_pending_recapture",
       "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
       "status": "phase_b_snapshot_invalidated_pending_recapture"
     },

@@ -832,9 +832,22 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             repo_root,
             subject["excluded_paths"],
         )
-        self.assertTrue(monitor._is_sha256(current_tree_sha256))
-        self.assertTrue(monitor._is_sha256(subject["tree_sha256"]))
         self.assertNotEqual(subject["tree_sha256"], current_tree_sha256)
+        with self.assertRaisesRegex(
+            monitor.MonitorError,
+            "reviewed synthetic commit is unavailable|not an ancestor of the target|implementation subject mismatch",
+        ):
+            monitor._validate_independent_validation_implementation_subject(
+                {
+                    "repo_root": str(repo_root),
+                    "independent_validation_path": str(validation_path),
+                    "exact_heads": {
+                        "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                        "monitor_implementation_head": current_head,
+                    },
+                },
+                validation,
+            )
         self.assertEqual(
             len(monitor._sha256_file(validation_path)),
             64,
@@ -900,7 +913,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with mock.patch.object(monitor, "REPO_ROOT", repo_root):
                 with self.assertRaisesRegex(
                     monitor.MonitorError,
-                    "implementation subject mismatch|signature mismatch",
+                    "implementation subject mismatch|signature mismatch|reviewed synthetic commit is unavailable|not an ancestor of the target",
                 ):
                     monitor._build_config(args)
 
@@ -1101,6 +1114,46 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
             monitor._assert_start_git_contract(config)
             monitor._validate_independent_validation_provenance(config, validation)
+
+            forged_tree = copy.deepcopy(validation)
+            forged_tree["implementation_subject"] = {
+                **subject,
+                "tree_sha256": "0" * 64,
+            }
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed implementation subject mismatch",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    forged_tree,
+                )
+
+            unavailable_subject = copy.deepcopy(validation)
+            unavailable_subject["implementation_subject"] = {
+                **subject,
+                "reviewed_synthetic_commit": "f" * 40,
+            }
+            unavailable_subject["invocation"]["reviewed_synthetic_commit"] = "f" * 40
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed synthetic commit is unavailable",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    unavailable_subject,
+                )
+
+            invocation_mismatch = copy.deepcopy(validation)
+            invocation_mismatch["invocation"]["reviewed_head"] = "e" * 40
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed head mismatch",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    invocation_mismatch,
+                )
 
             missing_anchor_exclusion = copy.deepcopy(validation)
             missing_anchor_exclusion["implementation_subject"] = {
