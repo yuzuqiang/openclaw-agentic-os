@@ -1671,6 +1671,62 @@ def _validate_persistent_attestation_evidence(
         raise ProbeError("persistent attestation runtime identity is not signed-payload bound")
 
 
+def _validate_duplicate_release_identity(lifecycle: Mapping[str, Any]) -> dict[str, str]:
+    release_status = _require_non_empty_string(
+        lifecycle, "release_status", "lifecycle"
+    )
+    if release_status != "released":
+        raise ProbeError("persistent lifecycle primary release status was not successful")
+    duplicate_release_status = _require_non_empty_string(
+        lifecycle, "duplicate_release_status", "lifecycle"
+    )
+    if duplicate_release_status != release_status:
+        raise ProbeError("persistent lifecycle duplicate release status mismatch")
+
+    primary_release_sha256 = _require_sha256_field(
+        lifecycle, "primary_release_sha256", "lifecycle"
+    )
+    duplicate_release_sha256 = _require_sha256_field(
+        lifecycle, "duplicate_release_sha256", "lifecycle"
+    )
+    if duplicate_release_sha256 != primary_release_sha256:
+        raise ProbeError("persistent lifecycle duplicate release response digest mismatch")
+
+    identity_pairs = (
+        (
+            "release_gateway_lease_id_sha256",
+            "duplicate_release_gateway_lease_id_sha256",
+            "Gateway lease id",
+        ),
+        (
+            "release_owner_metadata_sha256",
+            "duplicate_release_owner_metadata_sha256",
+            "owner metadata",
+        ),
+        (
+            "release_idempotency_key_sha256",
+            "duplicate_release_idempotency_key_sha256",
+            "idempotency key",
+        ),
+    )
+    identity: dict[str, str] = {
+        "release_status": release_status,
+        "duplicate_release_status": duplicate_release_status,
+        "primary_release_sha256": primary_release_sha256,
+        "duplicate_release_sha256": duplicate_release_sha256,
+    }
+    for primary_key, duplicate_key, label in identity_pairs:
+        primary_digest = _require_sha256_field(lifecycle, primary_key, "lifecycle")
+        duplicate_digest = _require_sha256_field(lifecycle, duplicate_key, "lifecycle")
+        if duplicate_digest != primary_digest:
+            raise ProbeError(
+                f"persistent lifecycle duplicate release {label} identity mismatch"
+            )
+        identity[primary_key] = primary_digest
+        identity[duplicate_key] = duplicate_digest
+    return identity
+
+
 def _safe_status(value: Any) -> str:
     return value if isinstance(value, str) and value else "unknown"
 
@@ -1944,9 +2000,7 @@ def _persistent_lifecycle_summary(
     _require_sha256_field(lifecycle, "child_run_id_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "session_status_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "sessions_history_sha256", "lifecycle")
-    duplicate_release_sha256 = _require_sha256_field(
-        lifecycle, "duplicate_release_sha256", "lifecycle"
-    )
+    duplicate_release_identity = _validate_duplicate_release_identity(lifecycle)
     if lifecycle.get("matching_session_count") != 1:
         raise ProbeError("persistent lifecycle did not prove matching accepted session identity")
     runtime_launch_sources = _validate_runtime_launch_sources(runtime_launch_sources)
@@ -2113,7 +2167,7 @@ def _persistent_lifecycle_summary(
             "child_run_id_sha256": lifecycle.get("child_run_id_sha256"),
             "session_status_sha256": lifecycle.get("session_status_sha256"),
             "sessions_history_sha256": lifecycle.get("sessions_history_sha256"),
-            "duplicate_release_sha256": duplicate_release_sha256,
+            **duplicate_release_identity,
             "first_spawn_status": lifecycle.get("first_spawn_status"),
             "sessions_list_count": lifecycle.get("sessions_list_count"),
             "matching_session_count": lifecycle.get("matching_session_count"),

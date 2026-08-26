@@ -132,7 +132,16 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "child_run_id_sha256": "0" * 64,
                 "session_status_sha256": "1" * 64,
                 "sessions_history_sha256": "2" * 64,
+                "release_status": "released",
+                "duplicate_release_status": "released",
+                "primary_release_sha256": "3" * 64,
                 "duplicate_release_sha256": "3" * 64,
+                "release_gateway_lease_id_sha256": "e" * 64,
+                "duplicate_release_gateway_lease_id_sha256": "e" * 64,
+                "release_owner_metadata_sha256": "4" * 64,
+                "duplicate_release_owner_metadata_sha256": "4" * 64,
+                "release_idempotency_key_sha256": "5" * 64,
+                "duplicate_release_idempotency_key_sha256": "5" * 64,
                 "sessions_list_count": 1,
                 "matching_session_count": 1,
             },
@@ -819,6 +828,33 @@ class RealGatewayProbeTests(unittest.TestCase):
                     ):
                         self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_failed_primary_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["release_status"] = "rejected"
+            with self.assertRaisesRegex(MODULE.ProbeError, "primary release status"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_arbitrary_duplicate_release_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["duplicate_release_sha256"] = "4" * 64
+            with self.assertRaisesRegex(MODULE.ProbeError, "duplicate release response"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_mismatched_duplicate_release_identity(self) -> None:
+        for key, message in (
+            ("duplicate_release_gateway_lease_id_sha256", "Gateway lease id"),
+            ("duplicate_release_owner_metadata_sha256", "owner metadata"),
+            ("duplicate_release_idempotency_key_sha256", "idempotency key"),
+        ):
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    receipt["lifecycle"][key] = "6" * 64
+                    with self.assertRaisesRegex(MODULE.ProbeError, message):
+                        self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_summary_rejects_missing_matching_session_observation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
@@ -1155,6 +1191,15 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertTrue(payload["runtime_ready_candidate_evidence"])
         self.assertTrue(payload["runtime_ready_blocked_until_phase_c"])
         self.assertTrue(payload["duplicate_release_identity_parity"])
+        self.assertEqual(payload["lifecycle"]["release_status"], "released")
+        self.assertEqual(
+            payload["lifecycle"]["primary_release_sha256"],
+            payload["lifecycle"]["duplicate_release_sha256"],
+        )
+        self.assertEqual(
+            payload["lifecycle"]["release_gateway_lease_id_sha256"],
+            payload["lifecycle"]["duplicate_release_gateway_lease_id_sha256"],
+        )
         self.assertEqual(
             [item["path"] for item in payload["runtime_launch_sources"]],
             list(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS),
