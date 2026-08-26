@@ -868,15 +868,30 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "acquired lease"):
                 self._call_persistent_summary(Path(directory), receipt)
 
-    def test_persistent_summary_rejects_missing_matching_session_observation(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            receipt = self._valid_persistent_receipt()
-            receipt["lifecycle"]["matching_session_count"] = 0
-            with self.assertRaisesRegex(MODULE.ProbeError, "matching accepted session"):
-                self._call_persistent_summary(Path(directory), receipt)
+    def test_persistent_summary_rejects_non_integer_lifecycle_counts(self) -> None:
+        for value in (None, 0, True, 1.0):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    if value is None:
+                        del receipt["lifecycle"]["matching_session_count"]
+                    else:
+                        receipt["lifecycle"]["matching_session_count"] = value
+                    with self.assertRaisesRegex(MODULE.ProbeError, "matching accepted session"):
+                        self._call_persistent_summary(Path(directory), receipt)
+        for value in (None, False, 0.0, 1):
+            with self.subTest(post_release_lease_count=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    if value is None:
+                        del receipt["lifecycle"]["post_release_lease_count"]
+                    else:
+                        receipt["lifecycle"]["post_release_lease_count"] = value
+                    with self.assertRaisesRegex(MODULE.ProbeError, "release cleanup"):
+                        self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_inconsistent_session_list_count(self) -> None:
-        for value in (None, 0):
+        for value in (None, 0, True, 1.0):
             with self.subTest(value=value):
                 with tempfile.TemporaryDirectory() as directory:
                     receipt = self._valid_persistent_receipt()
@@ -931,7 +946,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_provider_secret_leak_count(self) -> None:
-        for value in (None, 1):
+        for value in (None, False, 0.0, 1):
             with self.subTest(value=value):
                 with tempfile.TemporaryDirectory() as directory:
                     receipt = self._valid_persistent_receipt()
