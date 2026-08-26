@@ -172,7 +172,8 @@ def write_contract_candidate_dist(install_root):
     ) as handle:
         handle.write(
             'const REQUEST_FIELDS = ["challenge", "client_process_id", '
-            '"expected_executable_sha256", "expected_catalog_sha256"];'
+            '"expected_executable_sha256", "expected_catalog_sha256", '
+            '"expected_runtime_identity_token_sha256"];'
         )
 
 
@@ -440,6 +441,9 @@ def build_persistent_evidence(
                 "client_process_id": "p03-persistent-runner:test",
                 "expected_executable_sha256": launcher_sha,
                 "expected_catalog_sha256": canonical_sha256(runtime_methods),
+                "expected_runtime_identity_token_sha256": signed_payload[
+                    "runtime_identity_token_sha256"
+                ],
             },
             "response": attestation_response,
             "response_sha256": canonical_sha256(attestation_response),
@@ -865,6 +869,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "client_process_id",
                     "expected_executable_sha256",
                     "expected_catalog_sha256",
+                    "expected_runtime_identity_token_sha256",
                 ],
                 "method": "agenticOs.runtime.attest",
                 "parameters": [
@@ -872,6 +877,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "client_process_id",
                     "expected_catalog_sha256",
                     "expected_executable_sha256",
+                    "expected_runtime_identity_token_sha256",
                 ],
                 "status": "source_bound_exact",
             },
@@ -4135,6 +4141,25 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("HMAC mismatch", payload["error"])
+
+    def test_persistent_attested_preflight_rejects_unbound_runtime_identity_digest(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["attestation"]["request_params"][
+                "expected_runtime_identity_token_sha256"
+            ] = "0" * 64
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("runtime identity token digest is not request-bound", payload["error"])
 
     def test_persistent_attested_preflight_rejects_stale_attestation(self) -> None:
         module = load_preflight_module()

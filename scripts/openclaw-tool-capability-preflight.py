@@ -55,6 +55,7 @@ ATTESTATION_REQUEST_PARAMETERS = (
     "client_process_id",
     "expected_executable_sha256",
     "expected_catalog_sha256",
+    "expected_runtime_identity_token_sha256",
 )
 MODEL_CALLABLE_TOOL_NAMES = (
     "sessions_spawn",
@@ -2202,6 +2203,12 @@ def _validate_persistent_attestation(
         != signed_payload.get("runtime_identity_token_sha256")
     ):
         raise AdapterContractError("persistent runtime identity token digest mismatch")
+    if request_params.get("expected_runtime_identity_token_sha256") != signed_payload.get(
+        "runtime_identity_token_sha256"
+    ):
+        raise AdapterContractError(
+            "persistent runtime identity token digest is not request-bound"
+        )
     _require_sha256(
         signed_payload.get("runtime_identity_token_sha256"),
         "persistent runtime identity token digest",
