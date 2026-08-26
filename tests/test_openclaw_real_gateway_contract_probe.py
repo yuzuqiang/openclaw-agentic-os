@@ -860,12 +860,32 @@ class RealGatewayProbeTests(unittest.TestCase):
                     with self.assertRaisesRegex(MODULE.ProbeError, message):
                         self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_release_identity_not_acquired(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["release_gateway_lease_id_sha256"] = "6" * 64
+            receipt["lifecycle"]["duplicate_release_gateway_lease_id_sha256"] = "6" * 64
+            with self.assertRaisesRegex(MODULE.ProbeError, "acquired lease"):
+                self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_summary_rejects_missing_matching_session_observation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
             receipt["lifecycle"]["matching_session_count"] = 0
             with self.assertRaisesRegex(MODULE.ProbeError, "matching accepted session"):
                 self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_inconsistent_session_list_count(self) -> None:
+        for value in (None, 0):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    if value is None:
+                        del receipt["lifecycle"]["sessions_list_count"]
+                    else:
+                        receipt["lifecycle"]["sessions_list_count"] = value
+                    with self.assertRaisesRegex(MODULE.ProbeError, "sessions list count"):
+                        self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_changed_production_config_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1080,6 +1100,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                     receipt["attestation"][key] = value
                     with self.assertRaises(MODULE.ProbeError):
                         self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_launch_executable_attestation_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["runtime_launch"]["executable_sha256"] = "6" * 64
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtime launch executable"):
+                self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_missing_attestation_signature(self) -> None:
         def remove_signature(evidence):

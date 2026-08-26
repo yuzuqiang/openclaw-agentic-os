@@ -2031,14 +2031,28 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle did not prove duplicate acquire lease identity parity")
     if lifecycle.get("post_release_lease_count") != 0:
         raise ProbeError("persistent lifecycle did not prove release cleanup")
-    _require_sha256_field(lifecycle, "gateway_lease_id_sha256", "lifecycle")
+    gateway_lease_id_sha256 = _require_sha256_field(
+        lifecycle, "gateway_lease_id_sha256", "lifecycle"
+    )
     _require_sha256_field(lifecycle, "session_key_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "child_run_id_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "session_status_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "sessions_history_sha256", "lifecycle")
     duplicate_release_identity = _validate_duplicate_release_identity(lifecycle)
+    if (
+        duplicate_release_identity["release_gateway_lease_id_sha256"]
+        != gateway_lease_id_sha256
+    ):
+        raise ProbeError("persistent lifecycle release Gateway lease id did not match acquired lease")
     if lifecycle.get("matching_session_count") != 1:
         raise ProbeError("persistent lifecycle did not prove matching accepted session identity")
+    sessions_list_count = lifecycle.get("sessions_list_count")
+    if (
+        not isinstance(sessions_list_count, int)
+        or isinstance(sessions_list_count, bool)
+        or sessions_list_count < lifecycle["matching_session_count"]
+    ):
+        raise ProbeError("persistent lifecycle sessions list count is inconsistent")
     runtime_launch_sources = _validate_runtime_launch_sources(runtime_launch_sources)
 
     required_tool_names = preflight.get("required_tool_names")
@@ -2061,6 +2075,9 @@ def _persistent_lifecycle_summary(
     runtime_launch_token_sha256 = _require_sha256_field(
         runtime_launch, "token_sha256", "runtime_launch"
     )
+    runtime_launch_executable_sha256 = _require_sha256_field(
+        runtime_launch, "executable_sha256", "runtime_launch"
+    )
     paths = _optional_record(receipt.get("paths"))
     logs = _optional_record(candidate.get("logs"))
     candidate_env = _optional_record(candidate.get("env"))
@@ -2068,8 +2085,12 @@ def _persistent_lifecycle_summary(
         raise ProbeError("persistent lifecycle candidate environment includes provider secrets")
     _validate_gateway_endpoint(attestation.get("gateway_endpoint"), port=port)
     _require_non_empty_string(attestation, "gateway_build_id", "attestation")
+    attestation_executable_sha256 = _require_sha256_field(
+        attestation, "executable_content_sha256", "attestation"
+    )
+    if runtime_launch_executable_sha256 != attestation_executable_sha256:
+        raise ProbeError("persistent lifecycle runtime launch executable is not attestation-bound")
     for key in (
-        "executable_content_sha256",
         "catalog_sha256",
         "contract_vector_sha256",
         "rpc_transcript_sha256",
