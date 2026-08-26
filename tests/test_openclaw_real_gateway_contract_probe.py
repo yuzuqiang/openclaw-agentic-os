@@ -1142,6 +1142,29 @@ class RealGatewayProbeTests(unittest.TestCase):
                     tools_catalog_response={"tools": []},
                 )
 
+    def test_persistent_summary_accepts_runtime_methods_catalog_for_gateway_rpc_names(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            payload = self._call_persistent_summary(
+                Path(directory),
+                receipt,
+                tools_catalog_response={
+                    "groups": [],
+                    "runtimeMethods": [
+                        {"name": name}
+                        for name in MODULE.PERSISTENT_REQUIRED_TOOL_NAMES
+                        if name != "agenticOs.runtime.attest"
+                    ],
+                },
+            )
+            self.assertTrue(payload["runtime_catalog_discovered"])
+            self.assertEqual(
+                sorted(payload["required_tool_names"]),
+                sorted(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+            )
+
     def test_persistent_summary_rejects_unauthenticated_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"

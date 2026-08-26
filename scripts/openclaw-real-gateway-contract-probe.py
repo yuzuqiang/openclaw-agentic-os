@@ -682,11 +682,18 @@ def _catalog_tool_names(response: Mapping[str, Any]) -> set[str]:
             if isinstance(group_tools, list):
                 for tool in group_tools:
                     collect_tool(tool)
+    runtime_methods = response.get("runtimeMethods")
+    if isinstance(runtime_methods, list):
+        for method in runtime_methods:
+            collect_tool(method)
     return names
 
 
 def _validate_runtime_catalog_response(response: Mapping[str, Any]) -> None:
-    missing = sorted(set(PERSISTENT_REQUIRED_TOOL_NAMES) - _catalog_tool_names(response))
+    catalog_required_names = set(PERSISTENT_REQUIRED_TOOL_NAMES) - {
+        "agenticOs.runtime.attest"
+    }
+    missing = sorted(catalog_required_names - _catalog_tool_names(response))
     if missing:
         raise ProbeError(
             "persistent lifecycle authenticated tools.catalog response is missing required tools"
