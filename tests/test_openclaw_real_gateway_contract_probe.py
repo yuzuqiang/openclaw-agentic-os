@@ -2131,6 +2131,92 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "replacement",
             )
 
+    def _assert_same_inode_artifact_mutation_during_read_is_rejected(
+        self,
+        mutate,
+        expected_final_status: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = MODULE._prepare_private_run_root(Path(directory) / "run")
+            pinned = MODULE._pin_prepared_run_root(run_root)
+            artifact = run_root / "evidence" / "artifact.json"
+            artifact.write_text('{"status":"pass"}', encoding="utf-8")
+            before = artifact.stat()
+            original_read = MODULE.os.read
+            mutated = False
+
+            def mutate_same_inode_after_open(descriptor, size):
+                nonlocal mutated
+                chunk = original_read(descriptor, size)
+                if not mutated:
+                    mutate(artifact)
+                    mutated = True
+                return chunk
+
+            try:
+                with mock.patch.object(
+                    MODULE.os, "read", side_effect=mutate_same_inode_after_open
+                ):
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError, "file changed during pinned access"
+                    ):
+                        MODULE._read_pinned_artifact_bytes(
+                            pinned,
+                            "evidence/artifact.json",
+                            "test artifact",
+                        )
+            finally:
+                pinned.close()
+
+            after = artifact.stat()
+            self.assertTrue(mutated)
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+            self.assertEqual(
+                json.loads(artifact.read_text(encoding="utf-8"))["status"],
+                expected_final_status,
+            )
+
+    def test_pinned_artifact_equal_length_same_inode_overwrite_is_rejected(self) -> None:
+        def mutate(artifact: Path) -> None:
+            with artifact.open("r+b") as handle:
+                handle.write(b'{"status":"evil"}')
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        self._assert_same_inode_artifact_mutation_during_read_is_rejected(
+            mutate,
+            "evil",
+        )
+
+    def test_pinned_artifact_same_inode_truncate_rewrite_is_rejected(self) -> None:
+        def mutate(artifact: Path) -> None:
+            with artifact.open("r+b") as handle:
+                handle.truncate(0)
+                handle.write(b'{"status":"evil"}')
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        self._assert_same_inode_artifact_mutation_during_read_is_rejected(
+            mutate,
+            "evil",
+        )
+
+    def test_pinned_artifact_same_inode_aba_mutation_is_rejected(self) -> None:
+        def mutate(artifact: Path) -> None:
+            with artifact.open("r+b") as handle:
+                handle.write(b'{"status":"evil"}')
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.seek(0)
+                handle.write(b'{"status":"pass"}')
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        self._assert_same_inode_artifact_mutation_during_read_is_rejected(
+            mutate,
+            "pass",
+        )
+
     def test_pinned_run_root_rejects_post_pin_permission_widening(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_root = MODULE._prepare_private_run_root(Path(directory) / "run")

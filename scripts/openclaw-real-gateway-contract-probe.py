@@ -1202,17 +1202,50 @@ def _read_pinned_artifact_bytes(
             or file_info.st_nlink != 1
         ):
             raise ProbeError(f"{label} file is unsafe")
+        stable_snapshot = (
+            file_info.st_dev,
+            file_info.st_ino,
+            file_info.st_mode,
+            file_info.st_uid,
+            file_info.st_gid,
+            file_info.st_nlink,
+            file_info.st_size,
+            file_info.st_mtime_ns,
+            file_info.st_ctime_ns,
+        )
         chunks: list[bytes] = []
         while True:
             chunk = os.read(file_fd, 1024 * 1024)
             if not chunk:
                 break
             chunks.append(chunk)
+        post_read_info = os.fstat(file_fd)
+        post_read_snapshot = (
+            post_read_info.st_dev,
+            post_read_info.st_ino,
+            post_read_info.st_mode,
+            post_read_info.st_uid,
+            post_read_info.st_gid,
+            post_read_info.st_nlink,
+            post_read_info.st_size,
+            post_read_info.st_mtime_ns,
+            post_read_info.st_ctime_ns,
+        )
+        if post_read_snapshot != stable_snapshot:
+            raise ProbeError(f"{label} file changed during pinned access")
         current_info = os.stat(file_name, dir_fd=directory_fd, follow_symlinks=False)
-        if (current_info.st_dev, current_info.st_ino) != (
-            file_info.st_dev,
-            file_info.st_ino,
-        ):
+        current_snapshot = (
+            current_info.st_dev,
+            current_info.st_ino,
+            current_info.st_mode,
+            current_info.st_uid,
+            current_info.st_gid,
+            current_info.st_nlink,
+            current_info.st_size,
+            current_info.st_mtime_ns,
+            current_info.st_ctime_ns,
+        )
+        if current_snapshot != stable_snapshot:
             raise ProbeError(f"{label} file changed during pinned access")
         _assert_pinned_run_root_identity(pinned)
         return b"".join(chunks)
