@@ -34,20 +34,23 @@
     "status_reason": "Issue #44 installed OpenClaw 2026.7.1 capture was generated before later changes to declared capability source paths, including scripts/openclaw-real-gateway-contract-probe.py. It remains immutable historical fail-closed output, but it is no longer current evidence until recaptured from the corrected exact head."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "377ea08fb2cc240342d4a019444d3374b6e55a0f",
-    "candidate_head_sha": "06e6e3f424841d738ec18dbe6a1faac663fe2cb6",
-    "classification": "issue44_phase_b_downstream_candidate_snapshot_invalidated_by_review",
+    "agentic_os_head_sha": "7332a7955fc51582d5314cf2637f0ff2a8a16dc9",
+    "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+    "canonical_payload_sha256": "f761f2af25e51b17ece53ae4ec3ed36acccdad0d38c31c8cf7db9980fe3daa64",
+    "classification": "issue44_phase_b_round3_downstream_candidate_evidence_pending_phase_c",
     "db_authority_enabled": false,
+    "duplicate_release_identity_parity": true,
     "isolated_non_production_gateway": true,
-    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
+    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json",
     "phase_c_exact_head_required_before_review": true,
     "production_authority_enabled": false,
+    "runner_sha256": "afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6",
     "runtime_ready": false,
-    "runtime_ready_candidate_evidence": false,
-    "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
-    "status": "invalid_fail_closed_review_findings",
-    "status_reason": "Codex review for PR #45 head 77cd70269addce7756fe4347c21685ef293fc916 found that the generator accepted mismatched validation receipt bindings and other unauthenticated runtime proof fields; this historical JSON remains byte-for-byte immutable but is no longer candidate pass evidence.",
-    "validation_receipt_bound": false
+    "runtime_ready_candidate_evidence": true,
+    "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
+    "status": "phase_b_candidate_evidence_pending_phase_c",
+    "status_reason": "Round 3 recapture from clean exact heads produced source-bound persistent lifecycle evidence with authenticated validation, Gateway-token-bound attestation, and primary/duplicate release identity parity. It remains Phase B candidate evidence only until a different-agent exact-head Phase C PASS.",
+    "validation_receipt_bound": true
   },
   "historical_artifacts": [
     {
@@ -61,18 +64,18 @@
       "immutable_historical_bytes": true,
       "interpretation": "superseded false negative: tools.catalog was incorrectly treated as the Gateway RPC registry",
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
-      "raw_status": "fail"
+      "raw_status": "fail",
+      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342"
     },
     {
       "epoch_policy": "frozen historical record; current evidence is namespaced only in this sidecar",
       "immutable_historical_bytes": true,
       "interpretation": "historical revalidation only; not current-head authority",
       "path": "docs/runtime-evidence/phase-b-revalidation-20260809.json",
-      "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3",
-      "raw_status": "superseded"
+      "raw_status": "superseded",
+      "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3"
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "phase_b_snapshot_invalidated_pending_recapture"
+  "status": "phase_b_candidate_evidence_pending_phase_c"
 }

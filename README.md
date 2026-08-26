@@ -18,7 +18,7 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `046c14e18506839cee576c2e68117467a7d2046fb3d908ed6fd2f7ea4698f10d`
+- Current corrected design artifact SHA-256: `99bc82e59da686320a94265cd6b566fee2ddac6ecee57f05c5b993e0e118e908`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -518,7 +518,7 @@ model-callable `tools.catalog` evidence with Gateway source declarations.
 
 The current Issue #44 candidate proof for the downstream runtime surface is the
 isolated real-Gateway probe. It refuses dirty candidate worktrees, binds
-downstream OpenClaw head `06e6e3f424841d738ec18dbe6a1faac663fe2cb6`, adapts to
+downstream OpenClaw head `602cc113bc65877c501c304ef7bbb86d0313eeb6`, adapts to
 the candidate's `scripts/agentic-os-persistent-lifecycle-runner.mts` harness
 when the legacy E2E file is absent, starts the candidate's token-authenticated
 Gateway with isolated runner and Gateway state, and writes hash-only evidence:
@@ -526,7 +526,7 @@ Gateway with isolated runner and Gateway state, and writes hash-only evidence:
 ```bash
 python3 scripts/openclaw-real-gateway-contract-probe.py \
   --openclaw-root /path/to/openclaw-candidate \
-  --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json
+  --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json
 ```
 
 No validation-key environment setup is required for this command. The trusted
@@ -542,16 +542,19 @@ explicit lowercase 64-hex validation-anchor value remains supported for
 controlled reproducibility and is rejected if weak, malformed, or reused as
 the attestation key.
 
-The committed Issue #44 JSON at that path is retained only as immutable
-historical output. The forward evidence index now marks it
-`invalid_fail_closed_review_findings`, with `runtime_ready_candidate_evidence=false`
-and `validation_receipt_bound=false`, because review found that the generator
-accepted unauthenticated receipt fields. It must not be treated as proof of
-`agenticOs.runtime.attest`, `tools.catalog` corroboration, allowLease behavior,
-accepted `sessions_spawn`, duplicate identity parity, session reads, release
-cleanup, candidate port closure, production config stability, provider-secret
-isolation, or DB-authority isolation until a corrected exact-head capture and a
-different-agent Phase C pass exist.
+The current round-3 JSON at that path is Phase B candidate evidence only. It
+binds Agentic OS head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9`, downstream
+runner SHA-256
+`afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6`,
+authenticated validation, Gateway-token-bound attestation, duplicate acquire
+and spawn identity parity, primary/duplicate release response parity, release
+Gateway lease identity parity, release owner metadata parity, release
+idempotency-key parity, candidate port closure, production config stability,
+provider-secret isolation, and DB-authority isolation. `runtime_ready` remains
+`false`: the evidence is blocked from promotion until a different-agent
+exact-head Phase C pass. The 2026-08-24 JSON is retained byte-for-byte as
+historical invalidated evidence under
+`invalid_fail_closed_review_findings`.
 
 The legacy probe path still exercises the runtime-discovered `tools.catalog`
 RPC methods, principal-bound allowLease acquire/duplicate/status/release,

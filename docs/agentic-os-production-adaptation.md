@@ -23,6 +23,8 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-08-26: Recaptured the Issue #44 downstream candidate evidence after the final Phase B producer/validator contract remediation:
+  - Corrections: the local downstream OpenClaw candidate at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6` now emits runtime/Gateway-authored persistent lifecycle evidence through `scripts/agentic-os-persistent-lifecycle-runner.mts` with runner SHA-256 `afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6`. The clean Agentic OS head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9` accepts the source-bound preflight catalog and request-bound attestation identity evidence. `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json` is Phase B candidate evidence with authenticated validation, Gateway-token-bound attestation, duplicate acquire/spawn parity, primary/duplicate release response parity, release Gateway lease identity parity, release owner metadata parity, release idempotency-key parity, candidate port closure, production config stability, provider-secret isolation, and DB-authority isolation. It keeps `runtime_ready=false` and `runtime_ready_blocked_until_phase_c=true`; a different-agent exact-head Phase C PASS is still required before review or promotion.
 - 2026-08-24: Added the Issue #44 live downstream runtime readiness gate:
   - Corrections: installed OpenClaw 2026.7.1 was recaptured from a clean generator head with `--skip-live-status-rpc`, preserving a no-production-lease-mutation boundary and failing closed because catalog availability, connected build identity, live allowLease reachability, and `agenticOs.runtime.attest` readiness remain unproven. The local downstream OpenClaw candidate at exact head `06e6e3f424841d738ec18dbe6a1faac663fe2cb6` was exercised through its persistent lifecycle runner with isolated runner/Gateway state and token-authenticated loopback Gateway evidence, but that historical snapshot is now failed evidence: `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks it `invalid_fail_closed_review_findings` with `runtime_ready_candidate_evidence=false` because Codex review found unauthenticated proof fields in the generator. A corrected clean-head recapture plus different-agent exact-head Phase C is required before any candidate runtime-readiness evidence can be promoted; production authority and `agentic_os.DB_AUTHORITY_ENABLED` remain disabled.
 - 2026-08-13: Added the local-only P0.3 runtime-attestation and Heartbeat shadow batch:
@@ -132,9 +134,12 @@ Current-vs-proposed truth:
   installed 2026.7.1 catalog call failed, `subagents.allowLease.status` was
   intentionally skipped to avoid possible production lease cleanup, and
   connected Gateway build plus attestation readiness remain unproven. The
-  downstream candidate snapshot passes its isolated persistent lifecycle runner,
-  but is Phase B candidate evidence only; a different-agent exact-head Phase C
-  rerun is required before any production-runtime claim. A plain catalog
+  2026-08-26 downstream candidate snapshot at OpenClaw
+  `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic OS
+  `7332a7955fc51582d5314cf2637f0ff2a8a16dc9` passes its isolated persistent
+  lifecycle runner with authenticated validation and duplicate release identity
+  parity, but is Phase B candidate evidence only; a different-agent exact-head
+  Phase C rerun is required before any production-runtime claim. A plain catalog
   validates only an offline declared schema; unsigned mappings cannot mint
   production adapter authority. The production adapter remains inert until a
   real transport-bound attestor exists. Cross-process release-probe input is
