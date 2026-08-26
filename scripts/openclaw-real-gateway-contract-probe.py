@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import signal
+import shutil
 import socket
 import stat
 import subprocess
@@ -18,7 +19,7 @@ import tempfile
 import time
 from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,11 @@ PERSISTENT_RUNTIME_SOURCE_PATHS = (
     "src/gateway/agentic-os-runtime-contract-descriptors.ts",
     "src/gateway/client.ts",
     "src/utils/message-channel.ts",
+)
+PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
+    "runtime-launcher:node",
+    "runtime-preload:tsx",
+    "runtime-preload-package:tsx",
 )
 PERSISTENT_REQUIRED_TOOL_NAMES = (
     "agenticOs.runtime.attest",
@@ -321,6 +327,156 @@ def _source_binding(root: Path, relative: str) -> dict[str, str]:
 
 def _source_bindings(root: Path, relatives: tuple[str, ...]) -> list[dict[str, str]]:
     return [_source_binding(root, relative) for relative in relatives]
+
+
+def _runtime_file_binding(path: Path, label: str) -> dict[str, str]:
+    resolved = path.resolve()
+    try:
+        info = resolved.stat()
+    except OSError as exc:
+        raise ProbeError(f"{label} runtime launch source is missing") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ProbeError(f"{label} runtime launch source is not a regular file")
+    return {
+        "path": label,
+        "sha256": _sha256_bytes(resolved.read_bytes()),
+        "realpath_sha256": _text_sha256(str(resolved)),
+    }
+
+
+def _node_import_resolution_to_path(value: str, label: str) -> Path:
+    specifier = value.strip()
+    if not specifier:
+        raise ProbeError(f"{label} runtime launch source resolution is empty")
+    parsed = urlparse(specifier)
+    if parsed.scheme == "file":
+        return Path(unquote(parsed.path)).resolve()
+    if parsed.scheme:
+        raise ProbeError(f"{label} runtime launch source did not resolve to a file")
+    candidate = Path(specifier)
+    if not candidate.is_absolute():
+        raise ProbeError(f"{label} runtime launch source did not resolve absolutely")
+    return candidate.resolve()
+
+
+def _resolve_node_import_path(
+    *,
+    openclaw_root: Path,
+    node_executable: Path,
+    runner_env: Mapping[str, str],
+    specifier: str,
+    label: str,
+) -> Path:
+    resolver = (
+        "const resolved = await import.meta.resolve(process.argv[1]);"
+        "console.log(resolved);"
+    )
+    proc = _run(
+        [str(node_executable), "--input-type=module", "-e", resolver, specifier],
+        cwd=openclaw_root,
+        env=dict(runner_env),
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        raise ProbeError(
+            f"{label} runtime launch source could not be resolved "
+            f"stderr_sha256={_sha256_bytes(proc.stderr.encode())}"
+        )
+    return _node_import_resolution_to_path(proc.stdout, label)
+
+
+def _find_node_package_root(module_path: Path, package_name: str) -> Path:
+    for candidate in (module_path.parent, *module_path.parents):
+        package_json = candidate / "package.json"
+        if not package_json.is_file():
+            continue
+        try:
+            payload = json.loads(package_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProbeError(f"{package_name} runtime package metadata is invalid") from exc
+        if isinstance(payload, dict) and payload.get("name") == package_name:
+            return candidate.resolve()
+    raise ProbeError(f"{package_name} runtime package root could not be resolved")
+
+
+def _directory_tree_sha256(root: Path) -> str:
+    root = root.resolve()
+    if not root.is_dir():
+        raise ProbeError("runtime launch package root is missing")
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if not files:
+        raise ProbeError("runtime launch package root is empty")
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(_sha256_bytes(path.read_bytes()).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
+    resolved = path.resolve()
+    return {
+        "path": label,
+        "sha256": _directory_tree_sha256(resolved),
+        "realpath_sha256": _text_sha256(str(resolved)),
+    }
+
+
+def _runtime_launch_bindings(
+    openclaw_root: Path, runner_env: Mapping[str, str]
+) -> tuple[Path, str, list[dict[str, str]]]:
+    node = shutil.which("node", path=runner_env.get("PATH"))
+    if node is None:
+        raise ProbeError("runtime Node launcher could not be resolved")
+    node_executable = Path(node).resolve()
+    tsx_preload = _resolve_node_import_path(
+        openclaw_root=openclaw_root,
+        node_executable=node_executable,
+        runner_env=runner_env,
+        specifier="tsx",
+        label="tsx",
+    )
+    tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    return (
+        node_executable,
+        tsx_preload.as_uri(),
+        [
+            _runtime_file_binding(node_executable, "runtime-launcher:node"),
+            _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
+            _runtime_directory_binding(
+                tsx_package_root, "runtime-preload-package:tsx"
+            ),
+        ],
+    )
+
+
+def _validate_runtime_launch_sources(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ProbeError("runtime launch source binding is missing")
+    by_path = {
+        item.get("path"): item
+        for item in value
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    missing = sorted(set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS) - set(by_path))
+    if missing:
+        raise ProbeError("runtime launch source binding is incomplete")
+    validated: list[dict[str, str]] = []
+    for label in PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS:
+        item = by_path[label]
+        _require_sha256_field(item, "sha256", label)
+        _require_sha256_field(item, "realpath_sha256", label)
+        validated.append(
+            {
+                "path": label,
+                "sha256": str(item["sha256"]),
+                "realpath_sha256": str(item["realpath_sha256"]),
+            }
+        )
+    return validated
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -1668,6 +1824,7 @@ def _persistent_lifecycle_summary(
     head: str,
     agentic_sources: list[dict[str, str]],
     runtime_sources: list[dict[str, str]],
+    runtime_launch_sources: list[dict[str, str]],
     command: list[str],
     proc: subprocess.CompletedProcess[str],
     port: int,
@@ -1787,8 +1944,12 @@ def _persistent_lifecycle_summary(
     _require_sha256_field(lifecycle, "child_run_id_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "session_status_sha256", "lifecycle")
     _require_sha256_field(lifecycle, "sessions_history_sha256", "lifecycle")
+    duplicate_release_sha256 = _require_sha256_field(
+        lifecycle, "duplicate_release_sha256", "lifecycle"
+    )
     if lifecycle.get("matching_session_count") != 1:
         raise ProbeError("persistent lifecycle did not prove matching accepted session identity")
+    runtime_launch_sources = _validate_runtime_launch_sources(runtime_launch_sources)
 
     required_tool_names = preflight.get("required_tool_names")
     hello = _optional_record(preflight.get("hello"))
@@ -1913,8 +2074,8 @@ def _persistent_lifecycle_summary(
         "duplicate_spawn_identity_parity": True,
         "duplicate_acquire_identity_parity": lifecycle.get("duplicate_acquire_same_lease")
         is True,
-        "duplicate_release_observed": _sha_field(lifecycle, "duplicate_release_sha256")
-        is not None,
+        "duplicate_release_observed": True,
+        "duplicate_release_identity_parity": True,
         "session_list_status_history_observed": True,
         "lease_release_cleanup_observed": lifecycle.get("post_release_lease_count") == 0,
         "db_authority_enabled": False,
@@ -1952,7 +2113,7 @@ def _persistent_lifecycle_summary(
             "child_run_id_sha256": lifecycle.get("child_run_id_sha256"),
             "session_status_sha256": lifecycle.get("session_status_sha256"),
             "sessions_history_sha256": lifecycle.get("sessions_history_sha256"),
-            "duplicate_release_sha256": lifecycle.get("duplicate_release_sha256"),
+            "duplicate_release_sha256": duplicate_release_sha256,
             "first_spawn_status": lifecycle.get("first_spawn_status"),
             "sessions_list_count": lifecycle.get("sessions_list_count"),
             "matching_session_count": lifecycle.get("matching_session_count"),
@@ -2008,6 +2169,7 @@ def _persistent_lifecycle_summary(
         },
         "agentic_sources": agentic_sources,
         "runtime_sources": runtime_sources,
+        "runtime_launch_sources": runtime_launch_sources,
     }
     _walk_evidence(payload)
     return payload
@@ -2020,6 +2182,7 @@ def _persistent_failure_summary(
     head: str,
     agentic_sources: list[dict[str, str]],
     runtime_sources: list[dict[str, str]],
+    runtime_launch_sources: list[dict[str, str]],
     command: list[str],
     proc: subprocess.CompletedProcess[str],
     port: int,
@@ -2126,6 +2289,7 @@ def _persistent_failure_summary(
         },
         "agentic_sources": agentic_sources,
         "runtime_sources": runtime_sources,
+        "runtime_launch_sources": runtime_launch_sources,
     }
     _walk_evidence(payload)
     return payload
@@ -2182,10 +2346,13 @@ def _run_persistent_lifecycle_probe_once(
             "OPENCLAW_DISABLE_AUTO_UPDATE": "1",
         }
     )
+    node_executable, tsx_preload_specifier, runtime_launch_sources = (
+        _runtime_launch_bindings(openclaw_root, runner_env)
+    )
     command = [
-        "node",
+        str(node_executable),
         "--import",
-        "tsx",
+        tsx_preload_specifier,
         PERSISTENT_LIFECYCLE_RUNNER,
         "run",
         "--runtime-worktree",
@@ -2226,6 +2393,7 @@ def _run_persistent_lifecycle_probe_once(
             head=head,
             agentic_sources=agentic_sources,
             runtime_sources=runtime_sources,
+            runtime_launch_sources=runtime_launch_sources,
             command=command,
             proc=proc,
             port=port,
@@ -2256,6 +2424,7 @@ def _run_persistent_lifecycle_probe_once(
             head=head,
             agentic_sources=agentic_sources,
             runtime_sources=runtime_sources,
+            runtime_launch_sources=runtime_launch_sources,
             command=command,
             proc=proc,
             port=port,
@@ -2303,6 +2472,7 @@ def _run_persistent_lifecycle_probe_once(
             head=head,
             agentic_sources=agentic_sources,
             runtime_sources=runtime_sources,
+            runtime_launch_sources=runtime_launch_sources,
             command=command,
             proc=proc,
             port=port,
@@ -2320,6 +2490,7 @@ def _run_persistent_lifecycle_probe_once(
                 head=head,
                 agentic_sources=agentic_sources,
                 runtime_sources=runtime_sources,
+                runtime_launch_sources=runtime_launch_sources,
                 command=command,
                 proc=proc,
                 port=port,
@@ -2353,6 +2524,7 @@ def _run_persistent_lifecycle_probe_once(
             head=head,
             agentic_sources=agentic_sources,
             runtime_sources=runtime_sources,
+            runtime_launch_sources=runtime_launch_sources,
             command=command,
             proc=proc,
             port=port,

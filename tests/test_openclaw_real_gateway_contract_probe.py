@@ -38,8 +38,15 @@ class RealGatewayProbeTests(unittest.TestCase):
         os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = (
             VALIDATION_ANCHOR_HMAC_SECRET_HEX
         )
+        self._original_runtime_launch_bindings = MODULE._runtime_launch_bindings
+        MODULE._runtime_launch_bindings = lambda _root, _env: (
+            Path("/bound/node"),
+            "file:///bound/node_modules/tsx/dist/loader.mjs",
+            self._valid_runtime_launch_sources(),
+        )
 
     def tearDown(self) -> None:
+        MODULE._runtime_launch_bindings = self._original_runtime_launch_bindings
         if self._previous_validation_anchor is None:
             os.environ.pop(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, None)
         else:
@@ -152,6 +159,16 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "sha256": "9" * 64,
             },
         }
+
+    def _valid_runtime_launch_sources(self) -> list[dict[str, str]]:
+        return [
+            {
+                "path": label,
+                "sha256": format(index + 10, "x") * 64,
+                "realpath_sha256": format(index + 13, "x") * 64,
+            }
+            for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
+        ]
 
     def _write_persistent_receipts(
         self,
@@ -370,6 +387,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 head="openclaw-head",
                 agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
                 runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                runtime_launch_sources=self._valid_runtime_launch_sources(),
                 command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                 proc=Proc(),
                 port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -685,6 +703,54 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "neither"):
                 MODULE._candidate_probe_mode(Path(directory))
 
+    def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            node = bin_dir / "node"
+            node.write_text("#!/bin/sh\n", encoding="utf-8")
+            node.chmod(0o755)
+            tsx_root = root / "node_modules" / "tsx"
+            loader = tsx_root / "dist" / "loader.mjs"
+            loader.parent.mkdir(parents=True)
+            (tsx_root / "package.json").write_text('{"name":"tsx"}\n', encoding="utf-8")
+            loader.write_text("export default null;\n", encoding="utf-8")
+
+            class Proc:
+                returncode = 0
+                stdout = loader.resolve().as_uri() + "\n"
+                stderr = ""
+
+            def fake_run(command, *, cwd, env=None, timeout=240, **_kwargs):
+                self.assertEqual(Path(command[0]), node.resolve())
+                self.assertEqual(cwd, root)
+                self.assertEqual(env["PATH"], str(bin_dir))
+                return Proc()
+
+            with mock.patch.object(
+                MODULE, "_runtime_launch_bindings", self._original_runtime_launch_bindings
+            ), mock.patch.object(MODULE, "_run", side_effect=fake_run):
+                resolved_node, tsx_import, bindings = MODULE._runtime_launch_bindings(
+                    root,
+                    {"PATH": str(bin_dir)},
+                )
+
+            self.assertEqual(resolved_node, node.resolve())
+            self.assertEqual(tsx_import, loader.resolve().as_uri())
+            by_path = {item["path"]: item for item in bindings}
+            self.assertEqual(
+                by_path["runtime-launcher:node"]["sha256"],
+                MODULE._sha256_bytes(node.resolve().read_bytes()),
+            )
+            self.assertEqual(
+                by_path["runtime-preload:tsx"]["sha256"],
+                MODULE._sha256_bytes(loader.resolve().read_bytes()),
+            )
+            self.assertIn("runtime-preload-package:tsx", by_path)
+            serialized = json.dumps(bindings, sort_keys=True)
+            self.assertNotIn(str(root), serialized)
+
     def test_persistent_summary_rejects_validation_receipt_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
@@ -738,6 +804,20 @@ class RealGatewayProbeTests(unittest.TestCase):
             receipt["lifecycle"]["duplicate_acquire_same_lease"] = False
             with self.assertRaisesRegex(MODULE.ProbeError, "duplicate acquire lease"):
                 self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_missing_duplicate_release_identity_digest(self) -> None:
+        for value in (None, "not-a-sha"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+                    if value is None:
+                        del receipt["lifecycle"]["duplicate_release_sha256"]
+                    else:
+                        receipt["lifecycle"]["duplicate_release_sha256"] = value
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError, "duplicate_release_sha256"
+                    ):
+                        self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_missing_matching_session_observation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -862,6 +942,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         head="openclaw-head",
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
                         runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
                         port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -906,6 +987,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         head="openclaw-head",
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
                         runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
                         port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -999,6 +1081,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         head="openclaw-head",
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
                         runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
                         port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -1045,6 +1128,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         head="openclaw-head",
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
                         runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
                         port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -1070,6 +1154,11 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertFalse(payload["runtime_ready"])
         self.assertTrue(payload["runtime_ready_candidate_evidence"])
         self.assertTrue(payload["runtime_ready_blocked_until_phase_c"])
+        self.assertTrue(payload["duplicate_release_identity_parity"])
+        self.assertEqual(
+            [item["path"] for item in payload["runtime_launch_sources"]],
+            list(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS),
+        )
         self.assertFalse(payload["db_authority_enabled"])
         self.assertNotIn("/private", json.dumps(payload, sort_keys=True))
         self.assertNotIn("runner stdout", json.dumps(payload, sort_keys=True))
@@ -1084,6 +1173,8 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
+            original_runtime_launch_bindings = MODULE._runtime_launch_bindings
+            captured_command = {}
             captured_env = {}
             captured_validator = {}
             captured_modes = {}
@@ -1116,6 +1207,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             ):
                 self.assertIsNotNone(env)
                 self.assertIs(start_new_session, True)
+                captured_command["command"] = list(command)
                 captured_env.update(env)
                 captured_env["candidate_pass_fds"] = pass_fds
                 return Proc()
@@ -1134,6 +1226,11 @@ class RealGatewayProbeTests(unittest.TestCase):
                 }
                 MODULE._run_independent_validator = lambda **kwargs: captured_validator.update(
                     kwargs
+                )
+                MODULE._runtime_launch_bindings = lambda _root, _env: (
+                    Path("/bound/node"),
+                    "file:///bound/node_modules/tsx/dist/loader.mjs",
+                    self._valid_runtime_launch_sources(),
                 )
                 payload = MODULE._run_persistent_lifecycle_probe(
                     root,
@@ -1160,6 +1257,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._runtime_launch_bindings = original_runtime_launch_bindings
                 if previous_openai_key is None:
                     os.environ.pop("OPENAI_API_KEY", None)
                 else:
@@ -1182,6 +1280,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                     )
 
         self.assertEqual(payload["status"], "pass")
+        command = captured_command["command"]
+        self.assertEqual(command[0], "/bound/node")
+        self.assertEqual(
+            command[1:3],
+            ["--import", "file:///bound/node_modules/tsx/dist/loader.mjs"],
+        )
+        self.assertNotEqual(command[2], "tsx")
         self.assertNotIn("OPENAI_API_KEY", captured_env)
         self.assertNotIn("NODE_OPTIONS", captured_env)
         self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, captured_env)
@@ -1266,6 +1371,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
                 MODULE, "_run", side_effect=fake_run
+            ), mock.patch.object(
+                MODULE,
+                "_runtime_launch_bindings",
+                return_value=(
+                    Path("/bound/node"),
+                    "file:///bound/node_modules/tsx/dist/loader.mjs",
+                    self._valid_runtime_launch_sources(),
+                ),
             ), mock.patch.object(
                 MODULE, "_run_independent_validator", side_effect=fake_validator
             ), mock.patch.object(
