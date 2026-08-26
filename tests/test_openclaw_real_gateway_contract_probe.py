@@ -186,6 +186,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         validation: dict | None = None,
         tools_catalog_response: dict | None = None,
         persistent_evidence_transform=None,
+        preflight_evidence_transform=None,
     ) -> tuple[Path, Path]:
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
@@ -293,6 +294,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "required_methods": list(hello_required_methods),
             },
         }
+        if preflight_evidence_transform is not None:
+            preflight_evidence_transform(preflight_evidence)
         preflight_evidence_file = receipts / "capability-preflight-attempt-1.json"
         preflight_evidence_file.write_text(
             json.dumps(preflight_evidence), encoding="utf-8"
@@ -366,6 +369,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         validation: dict | None = None,
         tools_catalog_response: dict | None = None,
         persistent_evidence_transform=None,
+        preflight_evidence_transform=None,
     ):
         run_root = root / "run"
         receipt_file, validation_file = self._write_persistent_receipts(
@@ -374,6 +378,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             validation,
             tools_catalog_response=tools_catalog_response,
             persistent_evidence_transform=persistent_evidence_transform,
+            preflight_evidence_transform=preflight_evidence_transform,
         )
         original_git = MODULE._git
 
@@ -1164,6 +1169,41 @@ class RealGatewayProbeTests(unittest.TestCase):
                 sorted(payload["required_tool_names"]),
                 sorted(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
             )
+
+    def test_persistent_summary_accepts_source_bound_preflight_catalog_without_legacy_hello(
+        self,
+    ) -> None:
+        gateway_names = [
+            name
+            for name in MODULE.PERSISTENT_REQUIRED_TOOL_NAMES
+            if name.startswith("subagents.")
+        ]
+        model_names = [
+            name
+            for name in MODULE.PERSISTENT_REQUIRED_TOOL_NAMES
+            if name.startswith("sessions_") or name == "session_status"
+        ]
+
+        def use_source_bound_catalog(preflight_evidence: dict) -> None:
+            preflight_evidence.pop("required_tool_names")
+            preflight_evidence.pop("hello")
+            preflight_evidence["catalog"] = {
+                "model_tool_catalog": {"required_tool_names": model_names},
+                "gateway_rpc_catalog": {"source_bound_rpc_names": gateway_names},
+                "attestation_rpc_catalog": {"method": "agenticOs.runtime.attest"},
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            payload = self._call_persistent_summary(
+                Path(directory),
+                self._valid_persistent_receipt(),
+                preflight_evidence_transform=use_source_bound_catalog,
+            )
+
+        self.assertEqual(
+            sorted(payload["required_tool_names"]),
+            sorted(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+        )
 
     def test_persistent_summary_rejects_unauthenticated_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

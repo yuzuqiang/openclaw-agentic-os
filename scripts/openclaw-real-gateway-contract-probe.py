@@ -774,6 +774,35 @@ def _validate_capability_preflight_artifact(
             evidence.get("required_tool_names"),
             "capability preflight evidence.required_tool_names",
         )
+    elif "catalog" in evidence:
+        catalog = _record(evidence.get("catalog"), "capability preflight evidence.catalog")
+        model_catalog = _record(
+            catalog.get("model_tool_catalog"),
+            "capability preflight evidence.catalog.model_tool_catalog",
+        )
+        gateway_catalog = _record(
+            catalog.get("gateway_rpc_catalog"),
+            "capability preflight evidence.catalog.gateway_rpc_catalog",
+        )
+        attestation_catalog = _record(
+            catalog.get("attestation_rpc_catalog"),
+            "capability preflight evidence.catalog.attestation_rpc_catalog",
+        )
+        evidence_required_tool_names = [
+            *_string_list(
+                model_catalog.get("required_tool_names"),
+                "capability preflight evidence.catalog.model_tool_catalog.required_tool_names",
+            ),
+            *_string_list(
+                gateway_catalog.get("source_bound_rpc_names"),
+                "capability preflight evidence.catalog.gateway_rpc_catalog.source_bound_rpc_names",
+            ),
+            _require_non_empty_string(
+                attestation_catalog,
+                "method",
+                "capability preflight evidence.catalog.attestation_rpc_catalog",
+            ),
+        ]
     else:
         hello = _record(evidence.get("hello"), "capability preflight evidence.hello")
         evidence_required_tool_names = _string_list(
