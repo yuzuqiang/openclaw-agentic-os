@@ -191,6 +191,10 @@ class CandidatePortOpenError(ProbeError):
     pass
 
 
+class DuplicateJsonKeyError(ProbeError):
+    pass
+
+
 PINNED_RUN_SUBDIRECTORIES = ("keys", "receipts", "evidence")
 
 
@@ -566,6 +570,28 @@ def _validate_runtime_launch_sources(value: Any) -> list[dict[str, str]]:
     return validated
 
 
+def _assert_runtime_launch_sources_still_bound(
+    *,
+    openclaw_root: Path,
+    runner_env: Mapping[str, str],
+    expected_node_executable: Path,
+    expected_tsx_preload_specifier: str,
+    expected_sources: list[dict[str, str]],
+) -> None:
+    node_executable, tsx_preload_specifier, current_sources = _runtime_launch_bindings(
+        openclaw_root,
+        runner_env,
+    )
+    if node_executable != expected_node_executable:
+        raise ProbeError("runtime Node launcher binding changed after candidate runner exit")
+    if tsx_preload_specifier != expected_tsx_preload_specifier:
+        raise ProbeError("runtime tsx preload binding changed after candidate runner exit")
+    if _validate_runtime_launch_sources(current_sources) != _validate_runtime_launch_sources(
+        expected_sources
+    ):
+        raise ProbeError("runtime launch source binding changed after candidate runner exit")
+
+
 def _canonical_sha256(value: Any) -> str:
     return _sha256_bytes(_canonical_json_bytes(value))
 
@@ -586,12 +612,9 @@ def _text_sha256(value: str) -> str:
 
 def _read_json_file(path: Path, label: str) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        return _json_object_from_bytes(path.read_bytes(), label)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProbeError(f"{label} did not contain valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ProbeError(f"{label} must be a JSON object")
-    return payload
 
 
 def _record(value: Any, label: str) -> dict[str, Any]:
@@ -1271,6 +1294,8 @@ def _run_independent_validator(
         os.unlink(validation_name, dir_fd=pinned_run_root.receipts.fd)
     command = [
         sys.executable,
+        "-I",
+        "-S",
         "-c",
         STDIN_VALIDATOR_BOOTSTRAP,
         validator_path,
@@ -1299,7 +1324,7 @@ def _run_independent_validator(
     _assert_pinned_run_root_identity(pinned_run_root)
     proc = _run(
         command,
-        cwd=ROOT,
+        cwd=pinned_run_root.original_path,
         env=validator_env,
         timeout=timeout,
         pass_fds=pass_fds,
@@ -1673,8 +1698,20 @@ def _read_pinned_json_file(
 
 
 def _json_object_from_bytes(raw: bytes, label: str) -> dict[str, Any]:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise DuplicateJsonKeyError(
+                    f"{label} contains duplicate JSON key: {key}"
+                )
+            payload[key] = value
+        return payload
+
     try:
-        payload = json.loads(raw)
+        payload = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except DuplicateJsonKeyError:
+        raise
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProbeError(f"{label} did not contain valid JSON") from exc
     if not isinstance(payload, dict):
@@ -2104,12 +2141,7 @@ def _run_legacy_e2e_probe(
             )
         if validate_candidate_root(openclaw_root) != head:
             raise ProbeError("OpenClaw candidate changed while the real Gateway E2E was running")
-        try:
-            payload = json.loads(temporary_evidence_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ProbeError("real Gateway E2E did not write valid evidence") from exc
-        if not isinstance(payload, dict):
-            raise ProbeError("real Gateway evidence must be a JSON object")
+        payload = _read_json_file(temporary_evidence_file, "real Gateway evidence")
         agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
         payload["agentic_os_head_sha"] = agentic_os_head
         payload["committed_snapshot_authority"] = "non_authoritative_last_run_snapshot"
@@ -2821,6 +2853,13 @@ def _run_persistent_lifecycle_probe_once(
         _assert_pinned_run_root_identity(pinned_run_root)
         if validate_candidate_root(openclaw_root) != head:
             raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
+        _assert_runtime_launch_sources_still_bound(
+            openclaw_root=openclaw_root,
+            runner_env=runner_env,
+            expected_node_executable=node_executable,
+            expected_tsx_preload_specifier=tsx_preload_specifier,
+            expected_sources=runtime_launch_sources,
+        )
         receipt_file = _descriptor_path(pinned_run_root.receipts.fd) / (
             "lifecycle-receipt.json"
         )

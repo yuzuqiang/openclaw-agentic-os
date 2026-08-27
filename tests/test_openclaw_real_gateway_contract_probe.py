@@ -792,6 +792,63 @@ class RealGatewayProbeTests(unittest.TestCase):
             serialized = json.dumps(bindings, sort_keys=True)
             self.assertNotIn(str(root), serialized)
 
+    def test_runtime_launch_revalidation_rejects_changed_source_digest(self) -> None:
+        expected_sources = self._valid_runtime_launch_sources()
+        changed_sources = [dict(item) for item in expected_sources]
+        changed_sources[0]["sha256"] = "0" * 64
+
+        with mock.patch.object(
+            MODULE,
+            "_runtime_launch_bindings",
+            return_value=(
+                Path("/bound/node"),
+                "file:///bound/node_modules/tsx/dist/loader.mjs",
+                changed_sources,
+            ),
+        ):
+            with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
+                MODULE._assert_runtime_launch_sources_still_bound(
+                    openclaw_root=Path("/unused"),
+                    runner_env={},
+                    expected_node_executable=Path("/bound/node"),
+                    expected_tsx_preload_specifier=(
+                        "file:///bound/node_modules/tsx/dist/loader.mjs"
+                    ),
+                    expected_sources=expected_sources,
+                )
+
+    def test_runtime_launch_revalidation_rejects_changed_launcher_path(self) -> None:
+        with mock.patch.object(
+            MODULE,
+            "_runtime_launch_bindings",
+            return_value=(
+                Path("/other/node"),
+                "file:///bound/node_modules/tsx/dist/loader.mjs",
+                self._valid_runtime_launch_sources(),
+            ),
+        ):
+            with self.assertRaisesRegex(MODULE.ProbeError, "Node launcher binding changed"):
+                MODULE._assert_runtime_launch_sources_still_bound(
+                    openclaw_root=Path("/unused"),
+                    runner_env={},
+                    expected_node_executable=Path("/bound/node"),
+                    expected_tsx_preload_specifier=(
+                        "file:///bound/node_modules/tsx/dist/loader.mjs"
+                    ),
+                    expected_sources=self._valid_runtime_launch_sources(),
+                )
+
+    def test_runtime_evidence_json_rejects_duplicate_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            path.write_text(
+                '{"status":"fail","nested":{"status":"fail","status":"pass"}}',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "duplicate JSON key: status"):
+                MODULE._read_json_file(path, "persistent lifecycle receipt")
+
     def test_persistent_summary_rejects_validation_receipt_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
@@ -2733,6 +2790,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 input_bytes=None,
             ):
                 captured["command"] = list(command)
+                captured["cwd"] = cwd
                 captured["pass_fds"] = pass_fds
                 captured["input_bytes"] = input_bytes
                 captured["copy_path_exists_during_launch"] = (
@@ -2776,10 +2834,11 @@ class RealGatewayProbeTests(unittest.TestCase):
             pinned_fds = pinned.validator_fds()
             self.assertEqual(captured["pass_fds"], pinned_fds)
             command = captured["command"]
-            self.assertEqual(command[1], "-c")
-            self.assertEqual(command[2], MODULE.STDIN_VALIDATOR_BOOTSTRAP)
+            self.assertEqual(captured["cwd"], pinned.original_path)
+            self.assertEqual(command[1:4], ["-I", "-S", "-c"])
+            self.assertEqual(command[4], MODULE.STDIN_VALIDATOR_BOOTSTRAP)
             self.assertEqual(
-                command[3],
+                command[5],
                 str(
                     (
                         MODULE.ROOT
@@ -2789,10 +2848,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(
                 MODULE._sha256_bytes(captured["input_bytes"]),
-                command[4],
+                command[6],
             )
-            self.assertEqual(command[5], "__persistent-validator")
-            self.assertNotIn("bound-independent-validator.py", command[3])
+            self.assertEqual(command[7], "__persistent-validator")
+            self.assertNotIn("bound-independent-validator.py", command[5])
             self.assertFalse(captured["copy_path_exists_during_launch"])
             for name in ("root", *MODULE.PINNED_RUN_SUBDIRECTORIES):
                 self.assertIn(f"--{name}-fd", command)
@@ -3200,6 +3259,90 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(cleanup["status"], "fail")
             self.assertIs(cleanup["candidate_port_closed"], False)
+
+    def test_persistent_runner_success_revalidates_runtime_launch_bindings_before_validator(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            validator_called = False
+            bindings = [
+                (
+                    Path("/bound/node"),
+                    "file:///bound/node_modules/tsx/dist/loader.mjs",
+                    self._valid_runtime_launch_sources(),
+                ),
+                (
+                    Path("/bound/node"),
+                    "file:///bound/node_modules/tsx/dist/loader.mjs",
+                    [
+                        {
+                            **item,
+                            "sha256": (
+                                "0" * 64
+                                if item["path"] == "runtime-launcher:node"
+                                else item["sha256"]
+                            ),
+                        }
+                        for item in self._valid_runtime_launch_sources()
+                    ],
+                ),
+            ]
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            def unexpected_validator(**_kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            try:
+                with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
+                    MODULE, "_git", return_value="agentic-head"
+                ), mock.patch.object(
+                    MODULE, "validate_candidate_root", return_value="openclaw-head"
+                ), mock.patch.object(
+                    MODULE, "_runtime_launch_bindings", side_effect=bindings
+                ), mock.patch.object(
+                    MODULE, "_run_independent_validator", side_effect=unexpected_validator
+                ), mock.patch.object(
+                    MODULE, "_wait_for_loopback_port_closed", return_value=True
+                ), mock.patch.object(
+                    MODULE, "_terminate_process_group", return_value=True
+                ):
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError,
+                        "evidence was rejected after successful runner exit",
+                    ):
+                        MODULE._run_persistent_lifecycle_probe(
+                            root,
+                            output,
+                            timeout=1,
+                            head="openclaw-head",
+                            agentic_sources=[],
+                            runtime_sources=[],
+                            run_root=root / "run",
+                            port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                            run_id="run-id",
+                            transition_id="transition-id",
+                        )
+            finally:
+                self.assertFalse(validator_called)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "fail_closed")
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_validation_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "pass")
 
     def test_persistent_runner_success_rejects_port_closed_only_by_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
