@@ -70,6 +70,8 @@ class RealGatewayProbeTests(unittest.TestCase):
 
     def _valid_persistent_receipt(self) -> dict:
         now_ms = int(time.time() * 1000)
+        production_health = {"reachable": False}
+        production_health_sha256 = MODULE._canonical_sha256(production_health)
         return {
             "status": "pass",
             "immutable_inputs": {
@@ -81,11 +83,11 @@ class RealGatewayProbeTests(unittest.TestCase):
             },
             "production_before": {
                 "config_sha256": "0" * 64,
-                "health": {"reachable": False},
+                "health": production_health,
             },
             "production_after": {
                 "config_sha256": "0" * 64,
-                "health": {"reachable": False},
+                "health": production_health,
             },
             "candidate": {
                 "port": MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
@@ -149,8 +151,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "status": "pass",
                 "candidate_port_closed": True,
                 "production_config_hash_unchanged": True,
-                "production_health_before_sha256": "4" * 64,
-                "production_health_after_sha256": "5" * 64,
+                "production_health_before_sha256": production_health_sha256,
+                "production_health_after_sha256": production_health_sha256,
                 "db_authority": {"DB_AUTHORITY_ENABLED": False},
                 "candidate_shutdown": {"port_closed": True},
             },
@@ -230,8 +232,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             "allow_lease_status": {
                 "method": "subagents.allowLease.status",
                 "request_params": {},
-                "response": {"leases": []},
-                "raw_response_sha256": MODULE._canonical_sha256({"leases": []}),
+                "response": {"status": "ok", "leases": []},
+                "raw_response_sha256": MODULE._canonical_sha256(
+                    {"status": "ok", "leases": []}
+                ),
             },
         }
         expected_transcript_sha256 = MODULE._canonical_sha256(
@@ -491,13 +495,17 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_source_binding = MODULE._source_binding
             original_validate_sources = MODULE._validate_sources
             original_git = MODULE._git
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
 
             class Proc:
                 returncode = 0
                 stdout = ""
                 stderr = ""
 
-            def fake_run(command, *, cwd, env=None, timeout=240):
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                self.assertIs(start_new_session, True)
                 self.assertIsNotNone(env)
                 temp_path = Path(env["AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE"])
                 self.assertNotEqual(temp_path, output)
@@ -513,6 +521,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "sha256": "0" * 64,
                 }
                 MODULE._git = lambda root, *args: "agentic-head"
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 with self.assertRaisesRegex(MODULE.ProbeError, "head binding"):
                     MODULE.run_probe(Path(directory), output, timeout=1)
                 self.assertEqual(output.read_text(encoding="utf-8"), '{"status":"previous"}\n')
@@ -524,6 +533,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._source_binding = original_source_binding
                 MODULE._validate_sources = original_validate_sources
                 MODULE._git = original_git
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
     def test_rejects_local_absolute_path_value(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw value"):
@@ -600,13 +612,17 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_source_binding = MODULE._source_binding
             original_validate_sources = MODULE._validate_sources
             original_git = MODULE._git
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
 
             class Proc:
                 returncode = 0
                 stdout = ""
                 stderr = ""
 
-            def fake_run(command, *, cwd, env=None, timeout=240):
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                self.assertIs(start_new_session, True)
                 self.assertIsNotNone(env)
                 self.assertNotIn("AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT", env)
                 self.assertNotIn("OPENAI_API_KEY", env)
@@ -657,6 +673,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 }
                 MODULE._validate_sources = lambda value, *, root, label: None
                 MODULE._git = lambda root, *args: "agentic-head"
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 with mock.patch.dict(
                     os.environ,
                     {
@@ -677,6 +694,49 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._source_binding = original_source_binding
                 MODULE._validate_sources = original_validate_sources
                 MODULE._git = original_git
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
+
+    def test_legacy_runner_timeout_requires_process_group_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "evidence.json"
+            original_run = MODULE._run
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_source_binding = MODULE._source_binding
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
+
+            def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                self.assertIs(start_new_session, True)
+                raise MODULE.subprocess.TimeoutExpired(
+                    command,
+                    timeout,
+                    output="runner stdout",
+                    stderr="runner stderr",
+                )
+
+            try:
+                MODULE._run = fake_run
+                MODULE.validate_candidate_root = lambda root: "openclaw-head"
+                MODULE._candidate_probe_mode = lambda root: "legacy_e2e"
+                MODULE._source_binding = lambda root, relative: {
+                    "path": relative,
+                    "sha256": "0" * 64,
+                }
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, False)
+                with self.assertRaisesRegex(MODULE.ProbeError, "process group remained alive"):
+                    MODULE.run_probe(Path(directory), output, timeout=1)
+            finally:
+                MODULE._run = original_run
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._source_binding = original_source_binding
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
     def test_evidence_requires_non_authoritative_snapshot_annotations(self) -> None:
         payload = {
@@ -1029,6 +1089,54 @@ class RealGatewayProbeTests(unittest.TestCase):
                     persistent_evidence_transform=add_lifecycle_observations,
                 )
 
+    def test_persistent_summary_rejects_malformed_allow_lease_status_response(
+        self,
+    ) -> None:
+        for response in (
+            {"leases": []},
+            {"status": "error", "leases": []},
+            {"status": "ok", "leases": "none"},
+        ):
+            with self.subTest(response=response):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+
+                    def replace_allow_lease_status(payload: dict) -> None:
+                        record = payload["rpc_evidence"]["allow_lease_status"]
+                        record["response"] = response
+                        record["raw_response_sha256"] = MODULE._canonical_sha256(response)
+                        payload["attestation"]["response"]["signed_payload"][
+                            "rpc_transcript_sha256"
+                        ] = MODULE._canonical_sha256(
+                            {
+                                "schema_version": MODULE.PERSISTENT_RPC_TRANSCRIPT_SCHEMA_VERSION,
+                                "records": [
+                                    {
+                                        "key": key,
+                                        "method": payload["rpc_evidence"][key]["method"],
+                                        "request_params": {},
+                                        "raw_response_sha256": payload["rpc_evidence"][key][
+                                            "raw_response_sha256"
+                                        ],
+                                    }
+                                    for key in ("tools_catalog", "allow_lease_status")
+                                ],
+                            }
+                        )
+                        signed_payload = payload["attestation"]["response"]["signed_payload"]
+                        payload["attestation"]["response"]["signature"] = hmac.new(
+                            ATTESTATION_HMAC_SECRET,
+                            MODULE._canonical_json_bytes(signed_payload),
+                            hashlib.sha256,
+                        ).hexdigest()
+
+                    with self.assertRaisesRegex(MODULE.ProbeError, "allowLease status"):
+                        self._call_persistent_summary(
+                            Path(directory),
+                            receipt,
+                            persistent_evidence_transform=replace_allow_lease_status,
+                        )
+
     def test_persistent_summary_rejects_missing_required_tool_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
@@ -1171,6 +1279,24 @@ class RealGatewayProbeTests(unittest.TestCase):
             receipt = self._valid_persistent_receipt()
             del receipt["production_after"]["config_sha256"]
             with self.assertRaisesRegex(MODULE.ProbeError, "production_after.config_sha256"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_production_health_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["rollback"]["production_health_before_sha256"] = "f" * 64
+            with self.assertRaisesRegex(MODULE.ProbeError, "health before digest mismatch"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_changed_production_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            after_health = {"reachable": True}
+            receipt["production_after"]["health"] = after_health
+            receipt["rollback"]["production_health_after_sha256"] = MODULE._canonical_sha256(
+                after_health
+            )
+            with self.assertRaisesRegex(MODULE.ProbeError, "production health changed"):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_non_loopback_gateway_endpoint(self) -> None:
@@ -1589,6 +1715,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
             original_runtime_launch_bindings = MODULE._runtime_launch_bindings
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
             captured_command = {}
             captured_env = {}
             captured_validator = {}
@@ -1647,6 +1776,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "file:///bound/node_modules/tsx/dist/loader.mjs",
                     self._valid_runtime_launch_sources(),
                 )
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 payload = MODULE._run_persistent_lifecycle_probe(
                     root,
                     output,
@@ -1673,6 +1803,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._runtime_launch_bindings = original_runtime_launch_bindings
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
                 if previous_openai_key is None:
                     os.environ.pop("OPENAI_API_KEY", None)
                 else:
@@ -1798,6 +1931,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE, "_run_independent_validator", side_effect=fake_validator
             ), mock.patch.object(
                 MODULE, "_persistent_lifecycle_summary", side_effect=fake_summary
+            ), mock.patch.object(
+                MODULE, "_terminate_and_verify_process_group", return_value=(True, True)
             ), mock.patch("builtins.print"):
                 exit_code = MODULE.main(
                     [
@@ -2399,6 +2534,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
+            original_wait_for_process_group_reaped = MODULE._wait_for_process_group_reaped
 
             class Proc:
                 returncode = 1
@@ -2506,6 +2642,62 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertFalse(
                 (run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH).exists()
             )
+
+    def test_persistent_runner_reaps_process_group_before_validator_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            run_root = root / "run"
+            output = root / "evidence.json"
+            validator_called = False
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            def unexpected_validator(**_kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
+                MODULE, "_git", return_value="agentic-head"
+            ), mock.patch.object(
+                MODULE, "validate_candidate_root", return_value="openclaw-head"
+            ), mock.patch.object(
+                MODULE, "_wait_for_loopback_port_closed", return_value=True
+            ), mock.patch.object(
+                MODULE, "_terminate_and_verify_process_group", return_value=(True, False)
+            ), mock.patch.object(
+                MODULE, "_run_independent_validator", side_effect=unexpected_validator
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "process group alive before validator"
+                ):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+
+            self.assertFalse(validator_called)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "pre_validator_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "fail")
+            self.assertFalse(cleanup["process_group_reaped"])
 
     def test_whole_run_root_replacement_is_rejected_and_cleanup_targets_original_inode(
         self,
@@ -3180,6 +3372,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_git = MODULE._git
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
+            original_wait_for_process_group_reaped = MODULE._wait_for_process_group_reaped
 
             class Proc:
                 returncode = 1
@@ -3191,6 +3384,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE._wait_for_loopback_port_closed = lambda port: False
                 MODULE._terminate_process_group = lambda proc: True
+                MODULE._wait_for_process_group_reaped = lambda proc: True
                 with self.assertRaisesRegex(MODULE.ProbeError, "port remained open"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -3209,6 +3403,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._git = original_git
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
+                MODULE._wait_for_process_group_reaped = original_wait_for_process_group_reaped
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(
@@ -3235,6 +3430,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
 
             class Proc:
                 returncode = 0
@@ -3255,6 +3453,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "isolated_non_production_gateway": {"candidate_port_closed": True},
                 }
                 MODULE._wait_for_loopback_port_closed = lambda port: False
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = lambda proc: True
                 with self.assertRaisesRegex(MODULE.ProbeError, "candidate port remained open"):
                     MODULE._run_persistent_lifecycle_probe(
@@ -3277,6 +3476,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             cleanup = next(
@@ -3387,6 +3589,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
 
             class Proc:
                 returncode = 0
@@ -3407,6 +3612,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "isolated_non_production_gateway": {"candidate_port_closed": True},
                 }
                 MODULE._wait_for_loopback_port_closed = lambda port: next(waits)
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = lambda proc: captured.setdefault(
                     "cleanup_attempted", True
                 )
@@ -3431,6 +3637,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             cleanup = next(
@@ -3459,6 +3668,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
 
             class Proc:
                 returncode = 0
@@ -3482,6 +3694,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE.ProbeError("contradictory receipt")
                 )
                 MODULE._wait_for_loopback_port_closed = lambda port: True
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = fake_terminate
                 with self.assertRaisesRegex(MODULE.ProbeError, "evidence was rejected"):
                     MODULE._run_persistent_lifecycle_probe(
@@ -3504,6 +3717,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertIs(captured["start_new_session"], True)
@@ -3533,6 +3749,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_run_independent_validator = MODULE._run_independent_validator
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
 
             class Proc:
                 returncode = 0
@@ -3548,6 +3767,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE.ProbeError("contradictory receipt")
                 )
                 MODULE._wait_for_loopback_port_closed = lambda port: False
+                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = lambda proc: True
                 with self.assertRaisesRegex(MODULE.ProbeError, "port remained open"):
                     MODULE._run_persistent_lifecycle_probe(
@@ -3570,6 +3790,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_independent_validator = original_run_independent_validator
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             cleanup = next(

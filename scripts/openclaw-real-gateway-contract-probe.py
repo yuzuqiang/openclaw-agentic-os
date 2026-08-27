@@ -191,6 +191,10 @@ class CandidatePortOpenError(ProbeError):
     pass
 
 
+class CandidateProcessGroupOpenError(ProbeError):
+    pass
+
+
 class DuplicateJsonKeyError(ProbeError):
     pass
 
@@ -286,6 +290,7 @@ def _run(
         stdout_raw, stderr_raw = proc.communicate()
         stdout = _decode_process_stream(stdout_raw)
         stderr = _decode_process_stream(stderr_raw)
+        exc.pid = proc.pid  # type: ignore[attr-defined]
         exc.stdout = stdout
         exc.stderr = stderr
         raise
@@ -1407,6 +1412,38 @@ def _terminate_process_group(proc: subprocess.CompletedProcess[str]) -> bool:
     return True
 
 
+def _process_group_reaped(proc: subprocess.CompletedProcess[str]) -> bool:
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _wait_for_process_group_reaped(
+    proc: subprocess.CompletedProcess[str], *, timeout_seconds: float = 5.0
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if _process_group_reaped(proc):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _terminate_and_verify_process_group(
+    proc: subprocess.CompletedProcess[str],
+) -> tuple[bool, bool]:
+    attempted = _terminate_process_group(proc)
+    return attempted, _wait_for_process_group_reaped(proc)
+
+
 def _prepare_private_directory(directory: Path) -> Path:
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1801,6 +1838,17 @@ def _reject_unsupported_persistent_rpc_records(rpc_evidence: Mapping[str, Any]) 
         )
 
 
+def _validate_allow_lease_status_response(response: Mapping[str, Any]) -> None:
+    if response.get("status") != "ok":
+        raise ProbeError("persistent attestation allowLease status response did not pass")
+    leases = response.get("leases")
+    if not isinstance(leases, list):
+        raise ProbeError("persistent attestation allowLease status leases are malformed")
+    for lease in leases:
+        if not isinstance(lease, dict):
+            raise ProbeError("persistent attestation allowLease status lease is malformed")
+
+
 def _validate_persistent_attestation_evidence(
     *,
     run_root: Path,
@@ -1919,7 +1967,11 @@ def _validate_persistent_attestation_evidence(
     transcript_records: list[dict[str, Any]] = []
     for key, method, response_validator in (
         ("tools_catalog", "tools.catalog", _validate_runtime_catalog_response),
-        ("allow_lease_status", "subagents.allowLease.status", None),
+        (
+            "allow_lease_status",
+            "subagents.allowLease.status",
+            _validate_allow_lease_status_response,
+        ),
     ):
         record = _record(rpc_evidence.get(key), f"persistent attestation RPC evidence {key}")
         if record.get("method") != method:
@@ -2131,8 +2183,38 @@ def _run_legacy_e2e_probe(
         "test/vitest/vitest.e2e.config.ts",
         E2E_TEST,
     ]
+    proc: subprocess.CompletedProcess[str] | None = None
     try:
-        proc = _run(command, cwd=openclaw_root, env=env, timeout=timeout)
+        try:
+            proc = _run(
+                command,
+                cwd=openclaw_root,
+                env=env,
+                timeout=timeout,
+                start_new_session=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            proc = subprocess.CompletedProcess(command, 124, stdout, stderr)
+            pid = getattr(exc, "pid", None)
+            if isinstance(pid, int):
+                proc.pid = pid  # type: ignore[attr-defined]
+            cleanup_attempted, process_group_reaped = _terminate_and_verify_process_group(proc)
+            if not process_group_reaped:
+                raise ProbeError(
+                    "real Gateway E2E timed out and candidate process group remained alive"
+                ) from exc
+            raise ProbeError(
+                "real Gateway E2E timed out "
+                f"process_group_cleanup_attempted={cleanup_attempted}"
+            ) from exc
+        cleanup_attempted, process_group_reaped = _terminate_and_verify_process_group(proc)
+        if not process_group_reaped:
+            raise ProbeError(
+                "real Gateway E2E left candidate process group alive "
+                f"process_group_cleanup_attempted={cleanup_attempted}"
+            )
         if proc.returncode != 0:
             raise ProbeError(
                 "real Gateway E2E failed "
@@ -2260,6 +2342,24 @@ def _persistent_lifecycle_summary(
     )
     if production_before_config_sha256 != production_after_config_sha256:
         raise ProbeError("persistent lifecycle production config hashes changed")
+    production_before_health = _record(
+        production_before.get("health"), "production_before.health"
+    )
+    production_after_health = _record(
+        production_after.get("health"), "production_after.health"
+    )
+    production_health_before_sha256 = _require_sha256_field(
+        rollback, "production_health_before_sha256", "rollback"
+    )
+    production_health_after_sha256 = _require_sha256_field(
+        rollback, "production_health_after_sha256", "rollback"
+    )
+    if _canonical_sha256(production_before_health) != production_health_before_sha256:
+        raise ProbeError("persistent lifecycle production health before digest mismatch")
+    if _canonical_sha256(production_after_health) != production_health_after_sha256:
+        raise ProbeError("persistent lifecycle production health after digest mismatch")
+    if production_health_before_sha256 != production_health_after_sha256:
+        raise ProbeError("persistent lifecycle production health changed")
     if db_authority.get("DB_AUTHORITY_ENABLED") is not False:
         raise ProbeError("persistent lifecycle did not prove DB authority remained disabled")
     if candidate.get("port") != port:
@@ -2786,6 +2886,12 @@ def _run_persistent_lifecycle_probe_once(
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         proc = subprocess.CompletedProcess(command, 124, stdout, stderr)
+        pid = getattr(exc, "pid", None)
+        if isinstance(pid, int):
+            proc.pid = pid  # type: ignore[attr-defined]
+        process_group_cleanup_attempted, process_group_reaped = (
+            _terminate_and_verify_process_group(proc)
+        )
         port_closed = _wait_for_loopback_port_closed(port)
         payload = _persistent_failure_summary(
             openclaw_root=openclaw_root,
@@ -2803,11 +2909,17 @@ def _run_persistent_lifecycle_probe_once(
         payload["fail_closed_matrix"].append(
             {
                 "check": "timeout_process_group_cleanup",
-                "status": "pass" if port_closed else "fail",
+                "status": "pass" if process_group_reaped and port_closed else "fail",
+                "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                "process_group_reaped": process_group_reaped,
                 "candidate_port_closed": port_closed,
             }
         )
         _write_validated_payload(evidence_file, payload)
+        if not process_group_reaped:
+            raise ProbeError(
+                "persistent lifecycle runner timed out and candidate process group remained alive"
+            ) from exc
         if not port_closed:
             raise ProbeError("persistent lifecycle runner timed out and candidate port remained open") from exc
         raise ProbeError(
@@ -2816,7 +2928,9 @@ def _run_persistent_lifecycle_probe_once(
         ) from exc
     _assert_pinned_run_root_identity(pinned_run_root)
     if proc.returncode != 0:
-        process_group_cleanup_attempted = _terminate_process_group(proc)
+        process_group_cleanup_attempted, process_group_reaped = (
+            _terminate_and_verify_process_group(proc)
+        )
         port_closed = _wait_for_loopback_port_closed(port)
         payload = _persistent_failure_summary(
             openclaw_root=openclaw_root,
@@ -2834,12 +2948,17 @@ def _run_persistent_lifecycle_probe_once(
         payload["fail_closed_matrix"].append(
             {
                 "check": "failure_process_group_cleanup",
-                "status": "pass" if port_closed else "fail",
+                "status": "pass" if process_group_reaped and port_closed else "fail",
                 "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                "process_group_reaped": process_group_reaped,
                 "candidate_port_closed": port_closed,
             }
         )
         _write_validated_payload(evidence_file, payload)
+        if not process_group_reaped:
+            raise ProbeError(
+                "persistent lifecycle runner failed and candidate process group remained alive"
+            )
         if not port_closed:
             raise ProbeError(
                 "persistent lifecycle runner failed and candidate port remained open"
@@ -2860,6 +2979,37 @@ def _run_persistent_lifecycle_probe_once(
             expected_tsx_preload_specifier=tsx_preload_specifier,
             expected_sources=runtime_launch_sources,
         )
+        process_group_cleanup_attempted, process_group_reaped = (
+            _terminate_and_verify_process_group(proc)
+        )
+        if not process_group_reaped:
+            port_closed = _wait_for_loopback_port_closed(port)
+            payload = _persistent_failure_summary(
+                openclaw_root=openclaw_root,
+                run_root=run_root,
+                head=head,
+                agentic_sources=agentic_sources,
+                runtime_sources=runtime_sources,
+                runtime_launch_sources=runtime_launch_sources,
+                command=command,
+                proc=proc,
+                port=port,
+                pinned_run_root=pinned_run_root,
+            )
+            payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
+            payload["fail_closed_matrix"].append(
+                {
+                    "check": "pre_validator_process_group_cleanup",
+                    "status": "fail",
+                    "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                    "process_group_reaped": process_group_reaped,
+                    "candidate_port_closed": port_closed,
+                }
+            )
+            _write_validated_payload(evidence_file, payload)
+            raise CandidateProcessGroupOpenError(
+                "persistent lifecycle runner left candidate process group alive before validator"
+            )
         receipt_file = _descriptor_path(pinned_run_root.receipts.fd) / (
             "lifecycle-receipt.json"
         )
@@ -2922,7 +3072,7 @@ def _run_persistent_lifecycle_probe_once(
         _write_validated_payload(evidence_file, payload)
         return payload
     except Exception as exc:
-        if isinstance(exc, CandidatePortOpenError):
+        if isinstance(exc, (CandidatePortOpenError, CandidateProcessGroupOpenError)):
             raise
         process_group_cleanup_attempted = _terminate_process_group(proc)
         port_closed = _wait_for_loopback_port_closed(port)
