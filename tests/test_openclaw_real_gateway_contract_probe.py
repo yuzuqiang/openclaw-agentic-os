@@ -72,12 +72,13 @@ class RealGatewayProbeTests(unittest.TestCase):
         now_ms = int(time.time() * 1000)
         production_health = {"reachable": False}
         production_health_sha256 = MODULE._canonical_sha256(production_health)
+        contract_vector_sha256 = MODULE._expected_persistent_contract_vector_sha256()
         return {
             "status": "pass",
             "immutable_inputs": {
                 "runtime_head": "openclaw-head",
                 "agentic_os_head": "agentic-head",
-                "contract_vector_sha256": "9" * 64,
+                "contract_vector_sha256": contract_vector_sha256,
                 "run_id": "run-id",
                 "transition_id": "transition-id",
             },
@@ -113,7 +114,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "gateway_build_id": "06e6e3f",
                 "executable_content_sha256": "7" * 64,
                 "catalog_sha256": "8" * 64,
-                "contract_vector_sha256": "9" * 64,
+                "contract_vector_sha256": contract_vector_sha256,
                 "rpc_transcript_sha256": "a" * 64,
                 "runtime_authored_rpc_evidence_sha256": "b" * 64,
                 "signed_payload_sha256": "c" * 64,
@@ -181,6 +182,14 @@ class RealGatewayProbeTests(unittest.TestCase):
             for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
         ]
 
+    def _resign_attestation_response(self, response: dict) -> None:
+        signed_payload = response["signed_payload"]
+        response["signature"] = hmac.new(
+            ATTESTATION_HMAC_SECRET,
+            MODULE._canonical_json_bytes(signed_payload),
+            hashlib.sha256,
+        ).hexdigest()
+
     def _write_persistent_receipts(
         self,
         run_root: Path,
@@ -193,22 +202,58 @@ class RealGatewayProbeTests(unittest.TestCase):
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
         now_ms = int(time.time() * 1000)
+        source_records = [{"path": "openclaw.mjs", "sha256": "7" * 64}]
+        request_params = {
+            "challenge": "challenge-1",
+            "client_process_id": "persistent-runner:unit-test",
+            "expected_executable_sha256": "7" * 64,
+            "expected_catalog_sha256": "8" * 64,
+            "expected_runtime_identity_token_sha256": "d" * 64,
+        }
         signed_payload = {
+            "schema_version": "agentic-os.openclaw-attestation.v1",
+            "online": True,
+            "challenge": request_params["challenge"],
+            "nonce": request_params["challenge"],
             "issued_at_epoch_ms": now_ms - 1_000,
             "expires_at_epoch_ms": receipt["attestation"]["expires_at_epoch_ms"],
+            "client_process_id": request_params["client_process_id"],
             "runtime_identity_token_sha256": "d" * 64,
+            "owner_scope_id": "e" * 64,
             "rpc_transcript_sha256": "a" * 64,
             "binding": {
-                "executable": {"content_sha256": "7" * 64},
+                "executable": {
+                    "path_sha256": "6" * 64,
+                    "content_sha256": "7" * 64,
+                },
+                "install": {
+                    "root_sha256": "5" * 64,
+                    "package_json_sha256": "4" * 64,
+                    "package_name": "openclaw",
+                    "version": "0.0.0-test",
+                },
+                "sources": source_records,
+                "sources_sha256": MODULE._canonical_sha256(source_records),
                 "catalog": {
+                    "authority": "tools.catalog.runtimeMethods",
                     "sha256": "8" * 64,
-                    "contract_vector_sha256": "9" * 64,
+                    "contract_vector_sha256": receipt["attestation"].get(
+                        "contract_vector_sha256",
+                        MODULE._expected_persistent_contract_vector_sha256(),
+                    ),
                 },
                 "gateway": {
                     "endpoint": f"ws://127.0.0.1:{MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT}",
+                    "version": "0.0.0-test",
                     "build_id": "06e6e3f",
+                    "process_identity": "gateway-process:test",
+                },
+                "transport": {
+                    "kind": "gateway-websocket",
+                    "identity": "gateway-websocket:test",
                 },
             },
+            "method_bindings": MODULE._expected_method_bindings_payload(),
         }
         if tools_catalog_response is None:
             tools_catalog_response = {
@@ -274,10 +319,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "expected_catalog_sha256": "8" * 64,
             },
             "attestation": {
-                "request_params": {
-                    "expected_executable_sha256": "7" * 64,
-                    "expected_catalog_sha256": "8" * 64,
-                },
+                "request_params": request_params,
                 "response": attestation_response,
                 "runtime_identity_token_sha256": "d" * 64,
             },
@@ -1370,6 +1412,61 @@ class RealGatewayProbeTests(unittest.TestCase):
             receipt["attestation"]["expires_at_epoch_ms"] = old_ms + 1_000
             with self.assertRaisesRegex(MODULE.ProbeError, "fresh|capture time"):
                 self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_overlong_attestation_lifetime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["attestation"]["expires_at_epoch_ms"] = (
+                int(time.time() * 1000)
+                + MODULE.PERSISTENT_ATTESTATION_MAX_LIFETIME_MS
+                + 120_000
+            )
+            with self.assertRaisesRegex(MODULE.ProbeError, "lifetime"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_signed_attestation_contract_drift(self) -> None:
+        cases = (
+            ("missing_schema", lambda payload: payload.pop("schema_version")),
+            ("offline", lambda payload: payload.__setitem__("online", False)),
+            (
+                "wrong_challenge",
+                lambda payload: payload.__setitem__("challenge", "other-challenge"),
+            ),
+            (
+                "wrong_client_process",
+                lambda payload: payload.__setitem__(
+                    "client_process_id", "other-process"
+                ),
+            ),
+            (
+                "missing_method_binding",
+                lambda payload: payload["method_bindings"].pop("session_status"),
+            ),
+            (
+                "missing_transport_binding",
+                lambda payload: payload["binding"].pop("transport"),
+            ),
+        )
+        for name, mutate in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    receipt = self._valid_persistent_receipt()
+
+                    def drift(payload: dict) -> None:
+                        response = payload["attestation"]["response"]
+                        signed_payload = response["signed_payload"]
+                        mutate(signed_payload)
+                        self._resign_attestation_response(response)
+
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError,
+                        "signed payload|online|challenge|client process|method bindings|binding|transport",
+                    ):
+                        self._call_persistent_summary(
+                            Path(directory),
+                            receipt,
+                            persistent_evidence_transform=drift,
+                        )
 
     def test_persistent_summary_rejects_missing_preflight_artifact_binding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

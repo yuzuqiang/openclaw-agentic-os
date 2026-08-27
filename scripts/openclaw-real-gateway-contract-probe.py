@@ -80,6 +80,73 @@ PERSISTENT_REQUIRED_TOOL_NAMES = (
     "session_status",
     "sessions_history",
 )
+PERSISTENT_ATTESTATION_MAX_LIFETIME_MS = 300_000
+PERSISTENT_ATTESTATION_SIGNED_PAYLOAD_KEYS = (
+    "schema_version",
+    "online",
+    "challenge",
+    "nonce",
+    "issued_at_epoch_ms",
+    "expires_at_epoch_ms",
+    "client_process_id",
+    "runtime_identity_token_sha256",
+    "owner_scope_id",
+    "binding",
+    "method_bindings",
+    "rpc_transcript_sha256",
+)
+PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    "allow_lease_acquire": (
+        "subagents.allowLease.acquire",
+        (
+            "client_lease_id",
+            "idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "ttl_ms",
+        ),
+    ),
+    "allow_lease_status": ("subagents.allowLease.status", ()),
+    "allow_lease_release": (
+        "subagents.allowLease.release",
+        (
+            "client_lease_id",
+            "release_idempotency_key",
+            "run_id",
+            "phase",
+            "transition_id",
+            "agent_id",
+            "requester_agent_id",
+            "gateway_lease_id",
+        ),
+    ),
+    "sessions_spawn": (
+        "sessions_spawn",
+        (
+            "task",
+            "taskName",
+            "runtime",
+            "mode",
+            "agentId",
+            "cleanup",
+            "context",
+            "lightContext",
+            "client_request_id",
+            "idempotency_key",
+            "gateway_lease_id",
+            "metadata",
+        ),
+    ),
+    "sessions_list": ("sessions_list", ()),
+    "session_status": ("session_status", ("sessionKey",)),
+    "sessions_history": (
+        "sessions_history",
+        ("sessionKey", "limit", "includeTools"),
+    ),
+}
 STDIN_VALIDATOR_BOOTSTRAP = "\n".join(
     (
         "import hashlib, sys",
@@ -628,6 +695,15 @@ def _record(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
+def _require_exact_keys(
+    section: Mapping[str, Any],
+    expected: tuple[str, ...],
+    label: str,
+) -> None:
+    if set(section) != set(expected):
+        raise ProbeError(f"{label} keys are not contract-exact")
+
+
 def _require_pass(value: Mapping[str, Any], label: str) -> None:
     if value.get("status") != "pass":
         raise ProbeError(f"{label} did not pass")
@@ -682,6 +758,182 @@ def _validate_gateway_endpoint(endpoint: Any, *, port: int) -> None:
         )
     if parsed.hostname not in {"127.0.0.1", "::1", "localhost"} or parsed.port != port:
         raise ProbeError("persistent lifecycle attestation gateway endpoint is not the requested loopback listener")
+
+
+def _expected_method_bindings_payload() -> dict[str, dict[str, Any]]:
+    return {
+        logical_name: {
+            "method": method,
+            "parameter_names": list(parameters),
+        }
+        for logical_name, (method, parameters) in PERSISTENT_METHOD_BINDINGS.items()
+    }
+
+
+def _expected_runtime_methods_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": method,
+            "parameters": list(parameters),
+        }
+        for method, parameters in PERSISTENT_METHOD_BINDINGS.values()
+    ]
+
+
+def _expected_persistent_contract_vector_sha256() -> str:
+    return _canonical_sha256(
+        {
+            "schema_version": "agentic-os.runtime-contract-vector.v1",
+            "runtime_methods": _expected_runtime_methods_catalog(),
+            "method_bindings": _expected_method_bindings_payload(),
+        }
+    )
+
+
+def _validate_signed_attestation_contract(
+    *,
+    signed_payload: Mapping[str, Any],
+    request_params: Mapping[str, Any],
+    endpoint: str,
+    build_id: str,
+    contract_vector_sha256: str,
+    now_epoch_ms: int,
+    issued_at_epoch_ms: int,
+    expires_at_epoch_ms: int,
+) -> None:
+    _require_exact_keys(
+        signed_payload,
+        PERSISTENT_ATTESTATION_SIGNED_PAYLOAD_KEYS,
+        "persistent attestation signed payload",
+    )
+    if signed_payload.get("schema_version") != "agentic-os.openclaw-attestation.v1":
+        raise ProbeError("persistent attestation signed payload schema mismatch")
+    if signed_payload.get("online") is not True:
+        raise ProbeError("persistent attestation signed payload is not online")
+    challenge = _require_non_empty_string(
+        request_params, "challenge", "persistent attestation request params"
+    )
+    if signed_payload.get("challenge") != challenge:
+        raise ProbeError("persistent attestation challenge is not request-bound")
+    if signed_payload.get("nonce") != challenge:
+        raise ProbeError("persistent attestation nonce is not request-bound")
+    client_process_id = _require_non_empty_string(
+        request_params,
+        "client_process_id",
+        "persistent attestation request params",
+    )
+    if signed_payload.get("client_process_id") != client_process_id:
+        raise ProbeError("persistent attestation client process is not request-bound")
+    if expires_at_epoch_ms <= issued_at_epoch_ms:
+        raise ProbeError("persistent attestation lifetime is invalid")
+    if expires_at_epoch_ms - issued_at_epoch_ms > PERSISTENT_ATTESTATION_MAX_LIFETIME_MS:
+        raise ProbeError("persistent attestation lifetime exceeds maximum")
+    if issued_at_epoch_ms > now_epoch_ms + 30_000:
+        raise ProbeError("persistent attestation issue time is in the future")
+
+    identity_digest = _require_sha256_field(
+        signed_payload,
+        "runtime_identity_token_sha256",
+        "persistent attestation signed payload",
+    )
+    if request_params.get("expected_runtime_identity_token_sha256") != identity_digest:
+        raise ProbeError("persistent attestation runtime identity is not request-bound")
+    _require_sha256_field(
+        signed_payload, "owner_scope_id", "persistent attestation signed payload"
+    )
+
+    method_bindings = _record(
+        signed_payload.get("method_bindings"),
+        "persistent attestation signed method bindings",
+    )
+    if dict(method_bindings) != _expected_method_bindings_payload():
+        raise ProbeError("persistent attestation signed method bindings mismatch")
+    if _expected_persistent_contract_vector_sha256() != contract_vector_sha256:
+        raise ProbeError("persistent attestation contract vector does not match signed methods")
+
+    binding = _record(
+        signed_payload.get("binding"), "persistent attestation runtime binding"
+    )
+    _require_exact_keys(
+        binding,
+        ("executable", "install", "sources", "sources_sha256", "catalog", "gateway", "transport"),
+        "persistent attestation runtime binding",
+    )
+    executable = _record(
+        binding.get("executable"), "persistent attestation executable binding"
+    )
+    _require_exact_keys(
+        executable, ("path_sha256", "content_sha256"), "persistent attestation executable binding"
+    )
+    _require_sha256_field(executable, "path_sha256", "persistent attestation executable binding")
+    _require_sha256_field(executable, "content_sha256", "persistent attestation executable binding")
+
+    install = _record(binding.get("install"), "persistent attestation install binding")
+    _require_exact_keys(
+        install,
+        ("root_sha256", "package_json_sha256", "package_name", "version"),
+        "persistent attestation install binding",
+    )
+    _require_sha256_field(install, "root_sha256", "persistent attestation install binding")
+    _require_sha256_field(
+        install, "package_json_sha256", "persistent attestation install binding"
+    )
+    _require_non_empty_string(install, "package_name", "persistent attestation install binding")
+    _require_non_empty_string(install, "version", "persistent attestation install binding")
+
+    sources = binding.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise ProbeError("persistent attestation runtime sources must be a non-empty list")
+    seen_source_paths: set[str] = set()
+    for source in sources:
+        source_record = _record(source, "persistent attestation runtime source")
+        _require_exact_keys(
+            source_record, ("path", "sha256"), "persistent attestation runtime source"
+        )
+        source_path = _require_non_empty_string(
+            source_record, "path", "persistent attestation runtime source"
+        )
+        if source_path.startswith("/") or ".." in Path(source_path).parts:
+            raise ProbeError("persistent attestation runtime source path is invalid")
+        if source_path in seen_source_paths:
+            raise ProbeError("persistent attestation runtime source paths are not unique")
+        seen_source_paths.add(source_path)
+        _require_sha256_field(source_record, "sha256", "persistent attestation runtime source")
+    if binding.get("sources_sha256") != _canonical_sha256(sources):
+        raise ProbeError("persistent attestation runtime sources digest mismatch")
+
+    catalog = _record(binding.get("catalog"), "persistent attestation catalog binding")
+    _require_exact_keys(
+        catalog,
+        ("authority", "sha256", "contract_vector_sha256"),
+        "persistent attestation catalog binding",
+    )
+    if catalog.get("authority") != "tools.catalog.runtimeMethods":
+        raise ProbeError("persistent attestation catalog authority mismatch")
+    _require_sha256_field(catalog, "sha256", "persistent attestation catalog binding")
+    if catalog.get("contract_vector_sha256") != contract_vector_sha256:
+        raise ProbeError("persistent attestation contract vector is not signed-payload bound")
+
+    gateway = _record(binding.get("gateway"), "persistent attestation gateway binding")
+    _require_exact_keys(
+        gateway,
+        ("endpoint", "version", "build_id", "process_identity"),
+        "persistent attestation gateway binding",
+    )
+    if gateway.get("endpoint") != endpoint:
+        raise ProbeError("persistent attestation Gateway endpoint is not signed-payload bound")
+    _require_non_empty_string(gateway, "version", "persistent attestation gateway binding")
+    if gateway.get("build_id") != build_id:
+        raise ProbeError("persistent attestation Gateway build is not signed-payload bound")
+    _require_non_empty_string(
+        gateway, "process_identity", "persistent attestation gateway binding"
+    )
+
+    transport = _record(binding.get("transport"), "persistent attestation transport binding")
+    _require_exact_keys(transport, ("kind", "identity"), "persistent attestation transport binding")
+    if transport.get("kind") != "gateway-websocket":
+        raise ProbeError("persistent attestation transport kind mismatch")
+    _require_non_empty_string(transport, "identity", "persistent attestation transport binding")
 
 
 def _is_provider_secret_env_name(name: str) -> bool:
@@ -1953,6 +2205,16 @@ def _validate_persistent_attestation_evidence(
     build_id = _require_non_empty_string(attestation, "gateway_build_id", "attestation")
     if gateway.get("build_id") != build_id:
         raise ProbeError("persistent attestation Gateway build is not signed-payload bound")
+    _validate_signed_attestation_contract(
+        signed_payload=signed_payload,
+        request_params=request_params,
+        endpoint=endpoint,
+        build_id=build_id,
+        contract_vector_sha256=contract_vector_digest,
+        now_epoch_ms=now_epoch_ms,
+        issued_at_epoch_ms=issued_at_epoch_ms,
+        expires_at_epoch_ms=expires_at_epoch_ms,
+    )
 
     signed_payload_digest = _require_sha256_field(
         attestation, "signed_payload_sha256", "attestation"
