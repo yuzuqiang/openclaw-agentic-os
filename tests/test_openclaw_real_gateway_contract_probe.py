@@ -234,24 +234,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "raw_response_sha256": MODULE._canonical_sha256({"leases": []}),
             },
         }
-        lifecycle_observations_response = {
-            "schema_version": MODULE.PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION,
-            "lifecycle_sha256": MODULE._canonical_sha256(
-                MODULE._lifecycle_observation_snapshot(receipt["lifecycle"])
-            ),
-            "observations": MODULE._lifecycle_observation_snapshot(receipt["lifecycle"]),
-        }
-        rpc_evidence["lifecycle_observations"] = {
-            "method": "agenticOs.lifecycle.observations",
-            "request_params": {},
-            "response": lifecycle_observations_response,
-            "raw_response_sha256": MODULE._canonical_sha256(
-                lifecycle_observations_response
-            ),
-        }
         expected_transcript_sha256 = MODULE._canonical_sha256(
             {
-                "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+                "schema_version": MODULE.PERSISTENT_RPC_TRANSCRIPT_SCHEMA_VERSION,
                 "records": [
                     {
                         "key": key,
@@ -262,7 +247,6 @@ class RealGatewayProbeTests(unittest.TestCase):
                     for key in (
                         "tools_catalog",
                         "allow_lease_status",
-                        "lifecycle_observations",
                     )
                 ],
             }
@@ -343,6 +327,9 @@ class RealGatewayProbeTests(unittest.TestCase):
         validation_file = receipts / "independent-validation.json"
         receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
         if validation is None:
+            lifecycle_attestation = MODULE._lifecycle_attestation_record(
+                receipt["lifecycle"]
+            )
             validation = {
                 "schema_version": MODULE.PERSISTENT_VALIDATION_SCHEMA_VERSION,
                 "status": "pass",
@@ -353,9 +340,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "tools_catalog_response_sha256": MODULE._canonical_sha256(
                     tools_catalog_response
                 ),
-                "lifecycle_observations_response_sha256": MODULE._canonical_sha256(
-                    lifecycle_observations_response
+                "lifecycle_attestation_sha256": MODULE._canonical_sha256(
+                    lifecycle_attestation
                 ),
+                "lifecycle_attestation": lifecycle_attestation,
                 "attestation_signature_verified": True,
                 "attestation_verification": {
                     "schema_version": MODULE.PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION,
@@ -811,7 +799,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "not bound"):
                 self._call_persistent_summary(Path(directory), receipt, validation)
 
-    def test_persistent_summary_rejects_validation_lifecycle_observation_mismatch(
+    def test_persistent_summary_rejects_validation_lifecycle_attestation_mismatch(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -823,7 +811,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 receipt,
             )
             validation = json.loads(validation_file.read_text(encoding="utf-8"))
-            validation["lifecycle_observations_response_sha256"] = "0" * 64
+            validation["lifecycle_attestation_sha256"] = "0" * 64
             validation["authentication"] = {
                 "scheme": "hmac-sha256-env",
                 "key_env": MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
@@ -843,7 +831,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             try:
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                with self.assertRaisesRegex(MODULE.ProbeError, "lifecycle observations"):
+                with self.assertRaisesRegex(MODULE.ProbeError, "lifecycle attestation"):
                     MODULE._persistent_lifecycle_summary(
                         openclaw_root=root,
                         run_root=run_root,
@@ -871,20 +859,90 @@ class RealGatewayProbeTests(unittest.TestCase):
                 else:
                     os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = previous_secret
 
-    def test_persistent_summary_rejects_missing_lifecycle_observation_transcript(
+    def test_persistent_summary_rejects_missing_signed_lifecycle_attestation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = self._valid_persistent_receipt()
+            run_root = root / "run"
+            receipt_file, validation_file = self._write_persistent_receipts(
+                run_root,
+                receipt,
+            )
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            validation.pop("lifecycle_attestation")
+            validation["authentication"]["signature"] = hmac.new(
+                VALIDATION_ANCHOR_HMAC_SECRET,
+                MODULE._canonical_json_bytes(MODULE._authentication_payload(validation)),
+                hashlib.sha256,
+            ).hexdigest()
+            validation_file.write_text(json.dumps(validation), encoding="utf-8")
+            original_git = MODULE._git
+            previous_secret = os.environ.get(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV)
+            os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = (
+                VALIDATION_ANCHOR_HMAC_SECRET_HEX
+            )
+            try:
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                with self.assertRaisesRegex(MODULE.ProbeError, "lifecycle attestation"):
+                    MODULE._persistent_lifecycle_summary(
+                        openclaw_root=root,
+                        run_root=run_root,
+                        receipt_file=receipt_file,
+                        validation_file=validation_file,
+                        head="openclaw-head",
+                        agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
+                        command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                        proc=type(
+                            "Proc",
+                            (),
+                            {"stdout": "", "stderr": "", "returncode": 0},
+                        )(),
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                    )
+            finally:
+                MODULE._git = original_git
+                if previous_secret is None:
+                    os.environ.pop(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, None)
+                else:
+                    os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = previous_secret
+
+    def test_persistent_summary_rejects_fake_gateway_lifecycle_observation_rpc(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
 
-            def remove_lifecycle_observations(evidence: dict) -> None:
-                evidence["rpc_evidence"].pop("lifecycle_observations")
+            def add_lifecycle_observations(evidence: dict) -> None:
+                lifecycle_observations_response = {
+                    "schema_version": MODULE.PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION,
+                    "lifecycle_sha256": MODULE._canonical_sha256(
+                        MODULE._lifecycle_observation_snapshot(receipt["lifecycle"])
+                    ),
+                    "observations": MODULE._lifecycle_observation_snapshot(
+                        receipt["lifecycle"]
+                    ),
+                }
+                evidence["rpc_evidence"]["lifecycle_observations"] = {
+                    "method": "agenticOs.lifecycle.observations",
+                    "request_params": {},
+                    "response": lifecycle_observations_response,
+                    "raw_response_sha256": MODULE._canonical_sha256(
+                        lifecycle_observations_response
+                    ),
+                }
 
-            with self.assertRaisesRegex(MODULE.ProbeError, "lifecycle_observations"):
+            with self.assertRaisesRegex(MODULE.ProbeError, "unsupported non-Gateway"):
                 self._call_persistent_summary(
                     Path(directory),
                     receipt,
-                    persistent_evidence_transform=remove_lifecycle_observations,
+                    persistent_evidence_transform=add_lifecycle_observations,
                 )
 
     def test_persistent_summary_rejects_missing_required_tool_metadata(self) -> None:
@@ -1325,6 +1383,14 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertEqual(
                 sorted(payload["required_tool_names"]),
                 sorted(MODULE.PERSISTENT_REQUIRED_TOOL_NAMES),
+            )
+            self.assertEqual(
+                payload["lifecycle_attestation"]["record_transport"],
+                "non_rpc_pinned_run_root_receipt",
+            )
+            self.assertEqual(
+                payload["lifecycle_attestation"]["signed_by"],
+                "independent_validation_hmac",
             )
 
     def test_persistent_summary_accepts_source_bound_preflight_catalog_without_legacy_hello(
@@ -1781,6 +1847,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             response = persistent_evidence["attestation"]["response"]
             tools_catalog = persistent_evidence["rpc_evidence"]["tools_catalog"]["response"]
+            self.assertEqual(
+                sorted(persistent_evidence["rpc_evidence"]),
+                ["allow_lease_status", "tools_catalog"],
+            )
             self.assertEqual(validation["status"], "pass")
             self.assertEqual(
                 validation["receipt_sha256"], MODULE._sha256_bytes(receipt_file.read_bytes())
@@ -1791,6 +1861,18 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertEqual(
                 validation["tools_catalog_response_sha256"],
                 MODULE._canonical_sha256(tools_catalog),
+            )
+            self.assertEqual(
+                validation["lifecycle_attestation"],
+                MODULE._lifecycle_attestation_record(receipt_payload["lifecycle"]),
+            )
+            self.assertEqual(
+                validation["lifecycle_attestation_sha256"],
+                MODULE._canonical_sha256(validation["lifecycle_attestation"]),
+            )
+            self.assertEqual(
+                validation["lifecycle_attestation"]["record_transport"],
+                "non_rpc_pinned_run_root_receipt",
             )
             self.assertEqual(validation_file.stat().st_mode & 0o777, 0o600)
 
@@ -2702,6 +2784,102 @@ class RealGatewayProbeTests(unittest.TestCase):
                 self.assertIn(f"--{name}-fd", command)
                 self.assertIn(f"--{name}-device", command)
                 self.assertIn(f"--{name}-inode", command)
+
+    def test_validator_fd_launch_ignores_post_verification_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            receipt_file, validation_file = self._write_persistent_receipts(
+                run_root, self._valid_persistent_receipt()
+            )
+            os.chmod(run_root, 0o700)
+            validation_file.unlink()
+            key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+            key_path.parent.mkdir(exist_ok=True, mode=0o700)
+            os.chmod(key_path.parent, 0o700)
+            key_path.write_bytes(ATTESTATION_HMAC_SECRET)
+            os.chmod(key_path, 0o600)
+            pinned = MODULE._pin_prepared_run_root(run_root.resolve())
+            source_binding = [
+                {
+                    "path": "scripts/openclaw-real-gateway-contract-probe.py",
+                    "sha256": MODULE._sha256_bytes(
+                        (
+                            MODULE.ROOT
+                            / "scripts/openclaw-real-gateway-contract-probe.py"
+                        ).read_bytes()
+                    ),
+                }
+            ]
+            original_run = MODULE._run
+            tampered_script = run_root / "keys" / "bound-independent-validator.py"
+            tampered_marker = run_root / "receipts" / "tampered-validator-ran.json"
+            malicious_source = "\n".join(
+                (
+                    "import json, os",
+                    f"marker = {str(tampered_marker)!r}",
+                    "visible_fds = []",
+                    "for fd in range(3, 64):",
+                    "    try:",
+                    "        os.fstat(fd)",
+                    "    except OSError:",
+                    "        continue",
+                    "    visible_fds.append(fd)",
+                    "payload = {",
+                    f"    'attestation_key': os.environ.get({MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV!r}),",
+                    f"    'validation_key': os.environ.get({MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV!r}),",
+                    "    'visible_fds': visible_fds,",
+                    "}",
+                    "with open(marker, 'w', encoding='utf-8') as handle:",
+                    "    json.dump(payload, handle, sort_keys=True)",
+                )
+            )
+
+            def replace_then_run(
+                command,
+                *,
+                cwd,
+                env=None,
+                timeout=240,
+                start_new_session=False,
+                pass_fds=(),
+            ):
+                tampered_script.write_text(malicious_source, encoding="utf-8")
+                os.chmod(tampered_script, 0o700)
+                return original_run(
+                    command,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                    start_new_session=start_new_session,
+                    pass_fds=pass_fds,
+                )
+
+            try:
+                with mock.patch.object(
+                    MODULE,
+                    "_run",
+                    side_effect=replace_then_run,
+                ), mock.patch.object(
+                    MODULE,
+                    "_source_bindings",
+                    return_value=source_binding,
+                ):
+                    MODULE._run_independent_validator(
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        pinned_run_root=pinned,
+                        agentic_sources=source_binding,
+                        timeout=5,
+                    )
+            finally:
+                pinned.close()
+
+            self.assertTrue(tampered_script.exists())
+            self.assertFalse(tampered_marker.exists())
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            self.assertEqual(validation["status"], "pass")
+            serialized = validation_file.read_text(encoding="utf-8")
+            self.assertNotIn(ATTESTATION_HMAC_SECRET_HEX, serialized)
+            self.assertNotIn(VALIDATION_ANCHOR_HMAC_SECRET_HEX, serialized)
 
     def test_candidate_subprocess_does_not_inherit_pinned_run_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

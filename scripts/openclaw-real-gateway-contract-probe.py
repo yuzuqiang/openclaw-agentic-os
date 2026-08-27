@@ -49,6 +49,10 @@ PERSISTENT_VALIDATION_SCHEMA_VERSION = "agentic-os.persistent-lifecycle-independ
 PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION = (
     "agentic-os.persistent-attestation-verification.v1"
 )
+PERSISTENT_RPC_TRANSCRIPT_SCHEMA_VERSION = "agentic-os.persistent-rpc-transcript.v1"
+PERSISTENT_LIFECYCLE_ATTESTATION_SCHEMA_VERSION = (
+    "agentic-os.persistent-lifecycle-attestation.v1"
+)
 PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION = (
     "agentic-os.persistent-lifecycle-observations.v1"
 )
@@ -861,12 +865,39 @@ def _lifecycle_observation_snapshot(lifecycle: Mapping[str, Any]) -> dict[str, A
     return {key: lifecycle.get(key) for key in LIFECYCLE_OBSERVATION_FIELDS}
 
 
-def _validate_lifecycle_observations_response(
+def _lifecycle_attestation_record(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
+    observations = _lifecycle_observation_snapshot(lifecycle)
+    return {
+        "schema_version": PERSISTENT_LIFECYCLE_ATTESTATION_SCHEMA_VERSION,
+        "record_authority": "agentic-os-persistent-lifecycle-runner-receipt",
+        "authentication_authority": "agentic-os-independent-validation-subprocess",
+        "record_transport": "non_rpc_pinned_run_root_receipt",
+        "observations_schema_version": PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION,
+        "lifecycle_sha256": _canonical_sha256(observations),
+        "observations": observations,
+    }
+
+
+def _validate_lifecycle_attestation_record(
     response: Mapping[str, Any],
     *,
     lifecycle: Mapping[str, Any],
 ) -> None:
-    if response.get("schema_version") != PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION:
+    if response.get("schema_version") != PERSISTENT_LIFECYCLE_ATTESTATION_SCHEMA_VERSION:
+        raise ProbeError("persistent lifecycle attestation schema is invalid")
+    if response.get("record_authority") != "agentic-os-persistent-lifecycle-runner-receipt":
+        raise ProbeError("persistent lifecycle attestation authority is invalid")
+    if (
+        response.get("authentication_authority")
+        != "agentic-os-independent-validation-subprocess"
+    ):
+        raise ProbeError("persistent lifecycle attestation authentication authority is invalid")
+    if response.get("record_transport") != "non_rpc_pinned_run_root_receipt":
+        raise ProbeError("persistent lifecycle attestation transport is invalid")
+    if (
+        response.get("observations_schema_version")
+        != PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION
+    ):
         raise ProbeError("persistent lifecycle observations schema is invalid")
     observations = _record(
         response.get("observations"), "persistent lifecycle observations"
@@ -884,7 +915,7 @@ def _validate_independent_validation(
     receipt_sha256: str,
     attestation_response_sha256: str,
     tools_catalog_response_sha256: str,
-    lifecycle_observations_response_sha256: str,
+    lifecycle_attestation: Mapping[str, Any],
     validation_anchor_key: bytes,
 ) -> None:
     if validation.get("schema_version") != PERSISTENT_VALIDATION_SCHEMA_VERSION:
@@ -895,12 +926,24 @@ def _validate_independent_validation(
         raise ProbeError("persistent lifecycle validation is not bound to the attestation response")
     if validation.get("tools_catalog_response_sha256") != tools_catalog_response_sha256:
         raise ProbeError("persistent lifecycle validation is not bound to the tools catalog")
+    if "lifecycle_observations_response_sha256" in validation:
+        raise ProbeError(
+            "persistent lifecycle validation uses legacy RPC lifecycle observations"
+        )
+    validation_lifecycle_attestation = _record(
+        validation.get("lifecycle_attestation"),
+        "persistent lifecycle validation lifecycle attestation",
+    )
+    if _canonical_sha256(validation_lifecycle_attestation) != _canonical_sha256(
+        lifecycle_attestation
+    ):
+        raise ProbeError("persistent lifecycle validation lifecycle attestation mismatch")
     if (
-        validation.get("lifecycle_observations_response_sha256")
-        != lifecycle_observations_response_sha256
+        validation.get("lifecycle_attestation_sha256")
+        != _canonical_sha256(lifecycle_attestation)
     ):
         raise ProbeError(
-            "persistent lifecycle validation is not bound to lifecycle observations"
+            "persistent lifecycle validation is not bound to lifecycle attestation"
         )
     if validation.get("attestation_signature_verified") is not True:
         raise ProbeError("persistent lifecycle validation did not authenticate attestation signature")
@@ -1046,6 +1089,7 @@ def _build_independent_validation_record(
     rpc_evidence = _record(
         evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
     )
+    _reject_unsupported_persistent_rpc_records(rpc_evidence)
     tools_catalog = _record(
         rpc_evidence.get("tools_catalog"), "persistent attestation RPC evidence tools_catalog"
     )
@@ -1053,41 +1097,16 @@ def _build_independent_validation_record(
         tools_catalog.get("response"), "persistent attestation tools_catalog response"
     )
     _validate_runtime_catalog_response(tools_catalog_response)
-    lifecycle_observations = _record(
-        rpc_evidence.get("lifecycle_observations"),
-        "persistent attestation RPC evidence lifecycle_observations",
-    )
-    if lifecycle_observations.get("method") != "agenticOs.lifecycle.observations":
-        raise ProbeError(
-            "persistent attestation lifecycle observations method mismatch"
-        )
-    if _record(
-        lifecycle_observations.get("request_params"),
-        "persistent attestation lifecycle observations request",
-    ):
-        raise ProbeError("persistent attestation lifecycle observations request is not empty")
-    lifecycle_observations_response = _record(
-        lifecycle_observations.get("response"),
-        "persistent attestation lifecycle observations response",
-    )
-    raw_lifecycle_observations_digest = _require_sha256_field(
-        lifecycle_observations,
-        "raw_response_sha256",
-        "persistent attestation RPC evidence lifecycle_observations",
-    )
-    if _canonical_sha256(lifecycle_observations_response) != raw_lifecycle_observations_digest:
-        raise ProbeError("persistent attestation lifecycle observations response mismatch")
-    _validate_lifecycle_observations_response(
-        lifecycle_observations_response,
-        lifecycle=lifecycle,
-    )
+    lifecycle_attestation = _lifecycle_attestation_record(lifecycle)
+    _validate_lifecycle_attestation_record(lifecycle_attestation, lifecycle=lifecycle)
     validation: dict[str, Any] = {
         "schema_version": PERSISTENT_VALIDATION_SCHEMA_VERSION,
         "status": "pass",
         "receipt_sha256": _sha256_bytes(receipt_bytes),
         "attestation_response_sha256": _canonical_sha256(response),
         "tools_catalog_response_sha256": _canonical_sha256(tools_catalog_response),
-        "lifecycle_observations_response_sha256": raw_lifecycle_observations_digest,
+        "lifecycle_attestation_sha256": _canonical_sha256(lifecycle_attestation),
+        "lifecycle_attestation": lifecycle_attestation,
         "attestation_signature_verified": True,
         "attestation_verification": {
             "schema_version": PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION,
@@ -1783,6 +1802,16 @@ def _runtime_source_digest(runtime_sources: list[dict[str, str]], path: str) -> 
     return str(matches[0])
 
 
+def _reject_unsupported_persistent_rpc_records(rpc_evidence: Mapping[str, Any]) -> None:
+    expected = {"tools_catalog", "allow_lease_status"}
+    unexpected = sorted(set(rpc_evidence) - expected)
+    if unexpected:
+        raise ProbeError(
+            "persistent attestation RPC evidence contains unsupported non-Gateway records: "
+            + ", ".join(unexpected)
+        )
+
+
 def _validate_persistent_attestation_evidence(
     *,
     run_root: Path,
@@ -1843,6 +1872,7 @@ def _validate_persistent_attestation_evidence(
     rpc_evidence = _record(
         evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
     )
+    _reject_unsupported_persistent_rpc_records(rpc_evidence)
     binding = _record(signed_payload.get("binding"), "persistent attestation binding")
     executable = _record(binding.get("executable"), "persistent attestation executable")
     catalog = _record(binding.get("catalog"), "persistent attestation catalog")
@@ -1901,14 +1931,6 @@ def _validate_persistent_attestation_evidence(
     for key, method, response_validator in (
         ("tools_catalog", "tools.catalog", _validate_runtime_catalog_response),
         ("allow_lease_status", "subagents.allowLease.status", None),
-        (
-            "lifecycle_observations",
-            "agenticOs.lifecycle.observations",
-            lambda response: _validate_lifecycle_observations_response(
-                response,
-                lifecycle=lifecycle,
-            ),
-        ),
     ):
         record = _record(rpc_evidence.get(key), f"persistent attestation RPC evidence {key}")
         if record.get("method") != method:
@@ -1939,7 +1961,7 @@ def _validate_persistent_attestation_evidence(
     )
     expected_transcript_digest = _canonical_sha256(
         {
-            "schema_version": "agentic-os.persistent-rpc-transcript.v1",
+            "schema_version": PERSISTENT_RPC_TRANSCRIPT_SCHEMA_VERSION,
             "records": transcript_records,
         }
     )
@@ -2399,28 +2421,20 @@ def _persistent_lifecycle_summary(
     rpc_evidence = _record(
         persistent_evidence.get("rpc_evidence"), "persistent attestation RPC evidence"
     )
+    _reject_unsupported_persistent_rpc_records(rpc_evidence)
     tools_catalog = _record(
         rpc_evidence.get("tools_catalog"), "persistent attestation RPC evidence tools_catalog"
     )
     tools_catalog_response = _record(
         tools_catalog.get("response"), "persistent attestation tools_catalog response"
     )
-    lifecycle_observations = _record(
-        rpc_evidence.get("lifecycle_observations"),
-        "persistent attestation RPC evidence lifecycle_observations",
-    )
-    lifecycle_observations_response = _record(
-        lifecycle_observations.get("response"),
-        "persistent attestation lifecycle observations response",
-    )
+    lifecycle_attestation = _lifecycle_attestation_record(lifecycle)
     _validate_independent_validation(
         validation,
         receipt_sha256=receipt_sha256,
         attestation_response_sha256=_canonical_sha256(response),
         tools_catalog_response_sha256=_canonical_sha256(tools_catalog_response),
-        lifecycle_observations_response_sha256=_canonical_sha256(
-            lifecycle_observations_response
-        ),
+        lifecycle_attestation=lifecycle_attestation,
         validation_anchor_key=validation_anchor_key,
     )
     soak = _optional_record(receipt.get("soak"))
@@ -2483,6 +2497,21 @@ def _persistent_lifecycle_summary(
             "runtime_identity_token_sha256": attestation.get(
                 "runtime_identity_token_sha256"
             ),
+        },
+        "lifecycle_attestation": {
+            "status": "pass",
+            "schema_version": lifecycle_attestation.get("schema_version"),
+            "record_authority": lifecycle_attestation.get("record_authority"),
+            "authentication_authority": lifecycle_attestation.get(
+                "authentication_authority"
+            ),
+            "record_transport": lifecycle_attestation.get("record_transport"),
+            "observations_schema_version": lifecycle_attestation.get(
+                "observations_schema_version"
+            ),
+            "lifecycle_sha256": lifecycle_attestation.get("lifecycle_sha256"),
+            "sha256": _canonical_sha256(lifecycle_attestation),
+            "signed_by": "independent_validation_hmac",
         },
         "capability_preflight": {
             "status": "pass",

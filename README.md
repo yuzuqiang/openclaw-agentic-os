@@ -550,10 +550,13 @@ authenticated validation, Gateway-token-bound attestation, duplicate acquire
 and spawn identity parity, primary/duplicate release response parity, release
 Gateway lease identity parity, release owner metadata parity, release
 idempotency-key parity, candidate port closure, production config stability,
-provider-secret isolation, and DB-authority isolation. `runtime_ready` remains
-`false`: the evidence is blocked from promotion until a different-agent
-exact-head Phase C pass. The 2026-08-24 JSON is retained byte-for-byte as
-historical invalidated evidence under
+provider-secret isolation, and DB-authority isolation. The runtime-signed RPC
+transcript is limited to `tools.catalog` and `subagents.allowLease.status`;
+lifecycle observations are bound separately as a non-RPC receipt attestation
+signed by the independent validator. `runtime_ready` remains `false`: the
+evidence is blocked from promotion until a different-agent exact-head Phase C
+pass. The 2026-08-24 JSON is retained byte-for-byte as historical invalidated
+evidence under
 `invalid_fail_closed_review_findings`.
 
 The legacy probe path still exercises the runtime-discovered `tools.catalog`
