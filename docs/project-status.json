@@ -95,7 +95,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "99bc82e59da686320a94265cd6b566fee2ddac6ecee57f05c5b993e0e118e908",
+      "sha256": "10d38e6e14e6b8ccc44c05098d2de2ef4c45db2d2a051f20f71bc5a87a7aa143",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",
