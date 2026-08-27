@@ -76,6 +76,28 @@ PERSISTENT_REQUIRED_TOOL_NAMES = (
     "session_status",
     "sessions_history",
 )
+FD_VALIDATOR_BOOTSTRAP = "\n".join(
+    (
+        "import os, sys",
+        "path = sys.argv[1]",
+        "fd = int(os.path.basename(path))",
+        "os.lseek(fd, 0, os.SEEK_SET)",
+        "chunks = []",
+        "while True:",
+        "    chunk = os.read(fd, 1048576)",
+        "    if not chunk:",
+        "        break",
+        "    chunks.append(chunk)",
+        "sys.argv = [path, *sys.argv[2:]]",
+        "globals_dict = {",
+        "    '__name__': '__main__',",
+        "    '__file__': path,",
+        "    '__package__': None,",
+        "    '__cached__': None,",
+        "}",
+        "exec(compile(b''.join(chunks), path, 'exec'), globals_dict)",
+    )
+)
 FORBIDDEN_EVIDENCE_KEYS = {
     "authToken",
     "childResult",
@@ -216,6 +238,21 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _sha256_fd(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as exc:
+        raise ProbeError("fd-pinned validator source digest failed") from exc
+    return digest.hexdigest()
+
+
 def _run(
     command: list[str],
     *,
@@ -352,11 +389,11 @@ def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -
         )
 
 
-def _bound_validator_script_path(
+def _bound_validator_script_fd(
     *,
     agentic_sources: list[dict[str, str]],
     pinned_run_root: _PinnedRunRoot,
-) -> Path:
+) -> int:
     _assert_agentic_sources_still_bound(agentic_sources)
     validator_path = (ROOT / "scripts/openclaw-real-gateway-contract-probe.py").resolve()
     try:
@@ -376,6 +413,7 @@ def _bound_validator_script_path(
     _assert_pinned_run_root_identity(pinned_run_root)
     copy_name = "bound-independent-validator.py"
     copy_fd = -1
+    read_fd = -1
     try:
         copy_fd = os.open(
             copy_name,
@@ -390,11 +428,25 @@ def _bound_validator_script_path(
         os.fsync(copy_fd)
         os.close(copy_fd)
         copy_fd = -1
-        copy_path = pinned_run_root.original_path / "keys" / copy_name
-        if _sha256_bytes(copy_path.read_bytes()) != expected_digest:
+        read_fd = os.open(
+            copy_name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=pinned_run_root.keys.fd,
+        )
+        copy_info = os.fstat(read_fd)
+        if (
+            not stat.S_ISREG(copy_info.st_mode)
+            or copy_info.st_uid != os.getuid()
+            or stat.S_IMODE(copy_info.st_mode) != 0o600
+        ):
+            raise ProbeError("persistent lifecycle validator copy is unsafe")
+        if _sha256_fd(read_fd) != expected_digest:
             raise ProbeError("persistent lifecycle validator copy digest mismatch")
+        os.unlink(copy_name, dir_fd=pinned_run_root.keys.fd)
         _assert_agentic_sources_still_bound(agentic_sources)
-        return copy_path
+        result_fd = read_fd
+        read_fd = -1
+        return result_fd
     except FileExistsError as exc:
         raise ProbeError("persistent lifecycle validator executable copy already exists") from exc
     except OSError as exc:
@@ -402,6 +454,8 @@ def _bound_validator_script_path(
     finally:
         if copy_fd >= 0:
             os.close(copy_fd)
+        if read_fd >= 0:
+            os.close(read_fd)
 
 
 def _runtime_file_binding(path: Path, label: str) -> dict[str, str]:
@@ -1219,61 +1273,67 @@ def _run_independent_validator(
     agentic_sources: list[dict[str, str]],
     timeout: int = 30,
 ) -> None:
-    validator_path = _bound_validator_script_path(
+    validator_fd = _bound_validator_script_fd(
         agentic_sources=agentic_sources,
         pinned_run_root=pinned_run_root,
     )
-    validator_env = _validator_env(
-        run_root=pinned_run_root,
-        validation_anchor_key=validation_anchor_key,
-    )
-    validator_env["AGENTIC_OS_PROBE_ROOT"] = str(ROOT.resolve())
-    _assert_pinned_run_root_identity(pinned_run_root)
-    validation_name = "independent-validation.json"
     try:
-        validation_info = os.stat(
-            validation_name,
-            dir_fd=pinned_run_root.receipts.fd,
-            follow_symlinks=False,
+        validator_path = _descriptor_path(validator_fd)
+        validator_env = _validator_env(
+            run_root=pinned_run_root,
+            validation_anchor_key=validation_anchor_key,
         )
-    except FileNotFoundError:
-        pass
-    else:
-        if not stat.S_ISREG(validation_info.st_mode):
-            raise ProbeError("persistent lifecycle validation output path is unsafe")
-        os.unlink(validation_name, dir_fd=pinned_run_root.receipts.fd)
-    command = [
-        sys.executable,
-        str(validator_path),
-        "__persistent-validator",
-        "--run-root-path",
-        str(pinned_run_root.original_path),
-    ]
-    for name in ("root", *PINNED_RUN_SUBDIRECTORIES):
-        directory = (
-            pinned_run_root.root
-            if name == "root"
-            else pinned_run_root.directory(name)
+        validator_env["AGENTIC_OS_PROBE_ROOT"] = str(ROOT.resolve())
+        _assert_pinned_run_root_identity(pinned_run_root)
+        validation_name = "independent-validation.json"
+        try:
+            validation_info = os.stat(
+                validation_name,
+                dir_fd=pinned_run_root.receipts.fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISREG(validation_info.st_mode):
+                raise ProbeError("persistent lifecycle validation output path is unsafe")
+            os.unlink(validation_name, dir_fd=pinned_run_root.receipts.fd)
+        command = [
+            sys.executable,
+            "-c",
+            FD_VALIDATOR_BOOTSTRAP,
+            str(validator_path),
+            "__persistent-validator",
+            "--run-root-path",
+            str(pinned_run_root.original_path),
+        ]
+        for name in ("root", *PINNED_RUN_SUBDIRECTORIES):
+            directory = (
+                pinned_run_root.root
+                if name == "root"
+                else pinned_run_root.directory(name)
+            )
+            command.extend(
+                [
+                    f"--{name}-fd",
+                    str(directory.fd),
+                    f"--{name}-device",
+                    str(directory.device),
+                    f"--{name}-inode",
+                    str(directory.inode),
+                ]
+            )
+        pass_fds = (*pinned_run_root.validator_fds(), validator_fd)
+        _assert_pinned_run_root_identity(pinned_run_root)
+        proc = _run(
+            command,
+            cwd=ROOT,
+            env=validator_env,
+            timeout=timeout,
+            pass_fds=pass_fds,
         )
-        command.extend(
-            [
-                f"--{name}-fd",
-                str(directory.fd),
-                f"--{name}-device",
-                str(directory.device),
-                f"--{name}-inode",
-                str(directory.inode),
-            ]
-        )
-    pass_fds = pinned_run_root.validator_fds()
-    _assert_pinned_run_root_identity(pinned_run_root)
-    proc = _run(
-        command,
-        cwd=ROOT,
-        env=validator_env,
-        timeout=timeout,
-        pass_fds=pass_fds,
-    )
+    finally:
+        os.close(validator_fd)
     _assert_pinned_run_root_identity(pinned_run_root)
     if proc.returncode != 0:
         raise ProbeError(

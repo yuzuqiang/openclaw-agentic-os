@@ -2651,6 +2651,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             ):
                 captured["command"] = list(command)
                 captured["pass_fds"] = pass_fds
+                captured["copy_path_exists_during_launch"] = (
+                    run_root / "keys" / "bound-independent-validator.py"
+                ).exists()
                 (run_root / "receipts" / "independent-validation.json").write_text(
                     json.dumps({"status": "pass"}),
                     encoding="utf-8",
@@ -2686,9 +2689,15 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 pinned.close()
 
-            self.assertEqual(captured["pass_fds"], pinned.validator_fds())
+            pinned_fds = pinned.validator_fds()
+            self.assertEqual(captured["pass_fds"][: len(pinned_fds)], pinned_fds)
             command = captured["command"]
-            self.assertTrue(command[1].endswith("bound-independent-validator.py"))
+            validator_fd = captured["pass_fds"][-1]
+            self.assertEqual(command[1], "-c")
+            self.assertEqual(command[2], MODULE.FD_VALIDATOR_BOOTSTRAP)
+            self.assertEqual(command[3], str(MODULE._descriptor_path(validator_fd)))
+            self.assertNotIn("bound-independent-validator.py", command[3])
+            self.assertFalse(captured["copy_path_exists_during_launch"])
             for name in ("root", *MODULE.PINNED_RUN_SUBDIRECTORIES):
                 self.assertIn(f"--{name}-fd", command)
                 self.assertIn(f"--{name}-device", command)
