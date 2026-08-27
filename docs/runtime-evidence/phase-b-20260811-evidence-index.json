@@ -46,10 +46,10 @@
     "production_authority_enabled": false,
     "runner_sha256": "afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6",
     "runtime_ready": false,
-    "runtime_ready_candidate_evidence": true,
+    "runtime_ready_candidate_evidence": false,
     "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
-    "status": "phase_b_candidate_evidence_pending_phase_c",
-    "status_reason": "Round 3 recapture from clean exact heads produced source-bound persistent lifecycle evidence with authenticated validation, Gateway-token-bound attestation, and primary/duplicate release identity parity. It remains Phase B candidate evidence only until a different-agent exact-head Phase C PASS.",
+    "status": "invalid_capability_source_drift_pending_recapture",
+    "status_reason": "Round 3 remains immutable historical output, but it binds Agentic OS head 7332a7955fc51582d5314cf2637f0ff2a8a16dc9, records generator hashes that no longer match the reviewed tree, and predates the lifecycle-attestation evidence now required by the corrected validator. It is not current candidate evidence until recaptured from a clean exact head.",
     "validation_receipt_bound": true
   },
   "historical_artifacts": [
@@ -77,5 +77,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "phase_b_candidate_evidence_pending_phase_c"
+  "status": "invalid_runtime_evidence_pending_clean_recapture"
 }

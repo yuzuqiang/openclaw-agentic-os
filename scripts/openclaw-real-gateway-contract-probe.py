@@ -325,10 +325,10 @@ def validate_candidate_root(root: Path) -> str:
 
 def _candidate_probe_mode(root: Path) -> str:
     root = root.resolve()
-    if (root / E2E_TEST).is_file():
-        return "legacy_e2e"
     if (root / PERSISTENT_LIFECYCLE_RUNNER).is_file():
         return "persistent_lifecycle_runner"
+    if (root / E2E_TEST).is_file():
+        return "legacy_e2e"
     raise ProbeError(
         "OpenClaw candidate has neither the legacy real Gateway E2E nor the "
         "persistent lifecycle runner"
@@ -2116,7 +2116,7 @@ def _run_legacy_e2e_probe(
     temporary_evidence_file = evidence_file.with_name(
         f".{evidence_file.name}.{os.getpid()}.tmp"
     )
-    env = dict(os.environ)
+    env = _runner_base_env()
     env.update(
         {
             "AGENTIC_OS_EXPECTED_OPENCLAW_HEAD": head,

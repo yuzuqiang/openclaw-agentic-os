@@ -8004,7 +8004,7 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(
             project_status["live_runtime_evidence"]["status"],
-            "phase_b_candidate_evidence_pending_phase_c",
+            "invalid_runtime_evidence_pending_clean_recapture",
         )
         self.assertEqual(project_status["production_authority"]["status"], "disabled")
         self.assertFalse(DB_AUTHORITY_ENABLED)

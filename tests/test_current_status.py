@@ -184,7 +184,7 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(live["status"], "phase_b_candidate_evidence_pending_phase_c")
+        self.assertEqual(live["status"], "invalid_runtime_evidence_pending_clean_recapture")
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
         local_p03 = live["local_p03_runtime_heartbeat_shadow"]
@@ -229,10 +229,14 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(index["status"], "phase_b_candidate_evidence_pending_phase_c")
+        self.assertEqual(index["status"], "invalid_runtime_evidence_pending_clean_recapture")
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
             index["current_evidence"]["status"],
+        )
+        self.assertEqual(
+            live["evidence_index"]["downstream_candidate_status"],
+            index["downstream_candidate_evidence"]["status"],
         )
         self.assertEqual(
             index["current_evidence"]["status"],
@@ -277,8 +281,11 @@ class CurrentStatusTests(unittest.TestCase):
         issue44_candidate_payload = json.loads(
             issue44_candidate_path.read_text(encoding="utf-8")
         )
-        self.assertEqual(issue44_candidate["status"], "phase_b_candidate_evidence_pending_phase_c")
-        self.assertTrue(issue44_candidate["runtime_ready_candidate_evidence"])
+        self.assertEqual(
+            issue44_candidate["status"],
+            "invalid_capability_source_drift_pending_recapture",
+        )
+        self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
         self.assertTrue(issue44_candidate["validation_receipt_bound"])
         self.assertTrue(issue44_candidate["duplicate_release_identity_parity"])
         self.assertEqual(issue44_candidate_payload["status"], "pass")
@@ -505,7 +512,7 @@ class CurrentStatusTests(unittest.TestCase):
                 "invalid_capability_source_drift_pending_recapture",
             },
         )
-        self.assertEqual(index["status"], "phase_b_candidate_evidence_pending_phase_c")
+        self.assertEqual(index["status"], "invalid_runtime_evidence_pending_clean_recapture")
         if current["status"] == "invalid_capability_source_drift_pending_recapture":
             self.assertFalse(
                 current["generator_binding_requirements"][
@@ -534,8 +541,9 @@ class CurrentStatusTests(unittest.TestCase):
             candidate["sha256"], hashlib.sha256(candidate_path.read_bytes()).hexdigest()
         )
         candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-        self.assertEqual(candidate["status"], "phase_b_candidate_evidence_pending_phase_c")
-        self.assertTrue(candidate["runtime_ready_candidate_evidence"])
+        self.assertEqual(candidate["status"], "invalid_capability_source_drift_pending_recapture")
+        self.assertFalse(candidate["runtime_ready_candidate_evidence"])
+        self.assertIn("predates the lifecycle-attestation evidence", candidate["status_reason"])
         self.assertTrue(candidate["validation_receipt_bound"])
         self.assertTrue(candidate["duplicate_release_identity_parity"])
         self.assertEqual(candidate_payload["status"], "pass")

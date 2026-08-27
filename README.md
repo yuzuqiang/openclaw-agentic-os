@@ -18,7 +18,7 @@ not evidence of production OpenClaw authority.
 - Design: [`docs/agentic-os-production-adaptation.md`](docs/agentic-os-production-adaptation.md)
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `10d38e6e14e6b8ccc44c05098d2de2ef4c45db2d2a051f20f71bc5a87a7aa143`
+- Current corrected design artifact SHA-256: `eb76b890358cbfa5dd9b75296149df515bf44e36cdbc03b6b0e3cf4b760ce64c`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -520,7 +520,7 @@ The current Issue #44 candidate proof for the downstream runtime surface is the
 isolated real-Gateway probe. It refuses dirty candidate worktrees, binds
 downstream OpenClaw head `602cc113bc65877c501c304ef7bbb86d0313eeb6`, adapts to
 the candidate's `scripts/agentic-os-persistent-lifecycle-runner.mts` harness
-when the legacy E2E file is absent, starts the candidate's token-authenticated
+when that harness is present, starts the candidate's token-authenticated
 Gateway with isolated runner and Gateway state, and writes hash-only evidence:
 
 ```bash
@@ -542,29 +542,23 @@ explicit lowercase 64-hex validation-anchor value remains supported for
 controlled reproducibility and is rejected if weak, malformed, or reused as
 the attestation key.
 
-The current round-3 JSON at that path is Phase B candidate evidence only. It
-binds Agentic OS head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9`, downstream
-runner SHA-256
-`afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6`,
-authenticated validation, Gateway-token-bound attestation, duplicate acquire
-and spawn identity parity, primary/duplicate release response parity, release
-Gateway lease identity parity, release owner metadata parity, release
-idempotency-key parity, candidate port closure, production config stability,
-provider-secret isolation, and DB-authority isolation. The runtime-signed RPC
-transcript is limited to `tools.catalog` and `subagents.allowLease.status`;
-lifecycle observations are bound separately as a non-RPC receipt attestation
-signed by the independent validator. `runtime_ready` remains `false`: the
-evidence is blocked from promotion until a different-agent exact-head Phase C
-pass. The 2026-08-24 JSON is retained byte-for-byte as historical invalidated
-evidence under
-`invalid_fail_closed_review_findings`.
+The round-3 JSON at that path is retained byte-for-byte as historical output,
+but it is no longer current Phase B candidate evidence. It binds Agentic OS
+head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9`, records generator hashes that
+do not match this reviewed tree, and predates the lifecycle-attestation
+evidence now required by the corrected validator. The forward evidence index
+therefore marks it `invalid_capability_source_drift_pending_recapture` with
+`runtime_ready_candidate_evidence=false`; a clean exact-head recapture plus
+different-agent Phase C is required before any downstream runtime evidence can
+be promoted. The 2026-08-24 JSON is also retained byte-for-byte as historical
+invalidated evidence.
 
 The legacy probe path still exercises the runtime-discovered `tools.catalog`
 RPC methods, principal-bound allowLease acquire/duplicate/status/release,
 concurrent spawn deduplication, canonical session reads, canonical child
 lifecycle transitions, fail-closed authorization, and the real
 `spawnSubagentDirect` child runner when the downstream candidate provides the
-legacy E2E harness.
+legacy E2E harness without the persistent lifecycle runner.
 `agentic_adapter_*` release proofs are explicitly disabled future-contract
 proofs in this repository state: the cross-process adapter release entry point
 rejects unsigned input and is not injected into the candidate E2E until a

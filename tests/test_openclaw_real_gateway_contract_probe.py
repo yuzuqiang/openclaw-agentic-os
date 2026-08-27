@@ -591,7 +591,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
                 MODULE._assert_agentic_sources_still_bound(initial)
 
-    def test_runner_does_not_advertise_disabled_adapter_probe_to_candidate(self) -> None:
+    def test_legacy_runner_uses_scrubbed_allowlisted_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "evidence.json"
             original_run = MODULE._run
@@ -609,6 +609,11 @@ class RealGatewayProbeTests(unittest.TestCase):
             def fake_run(command, *, cwd, env=None, timeout=240):
                 self.assertIsNotNone(env)
                 self.assertNotIn("AGENTIC_OS_REAL_ADAPTER_PROBE_SCRIPT", env)
+                self.assertNotIn("OPENAI_API_KEY", env)
+                self.assertNotIn("ANTHROPIC_API_KEY", env)
+                self.assertNotIn("GITHUB_TOKEN", env)
+                self.assertNotIn("NODE_OPTIONS", env)
+                self.assertEqual(env["AGENTIC_OS_EXPECTED_OPENCLAW_HEAD"], "openclaw-head")
                 temp_path = Path(env["AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE"])
                 payload = {
                     "status": "pass",
@@ -652,7 +657,17 @@ class RealGatewayProbeTests(unittest.TestCase):
                 }
                 MODULE._validate_sources = lambda value, *, root, label: None
                 MODULE._git = lambda root, *args: "agentic-head"
-                payload = MODULE.run_probe(Path(directory), output, timeout=1)
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "OPENAI_API_KEY": "sk-live-secret",
+                        "ANTHROPIC_API_KEY": "anthropic-secret",
+                        "GITHUB_TOKEN": "github-secret",
+                        "NODE_OPTIONS": "--require malicious-preload",
+                    },
+                    clear=False,
+                ):
+                    payload = MODULE.run_probe(Path(directory), output, timeout=1)
                 self.assertEqual(payload["status"], "pass")
                 self.assertEqual(payload["agentic_os_head_sha"], "agentic-head")
             finally:
@@ -736,6 +751,18 @@ class RealGatewayProbeTests(unittest.TestCase):
             runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
             runner.parent.mkdir(parents=True, exist_ok=True)
             runner.write_text("// runner\n", encoding="utf-8")
+
+            self.assertEqual(MODULE._candidate_probe_mode(root), "persistent_lifecycle_runner")
+
+    def test_candidate_probe_mode_prefers_persistent_runner_over_legacy_e2e(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            legacy = root / MODULE.E2E_TEST
+            legacy.parent.mkdir(parents=True, exist_ok=True)
+            legacy.write_text("// legacy\n", encoding="utf-8")
 
             self.assertEqual(MODULE._candidate_probe_mode(root), "persistent_lifecycle_runner")
 
