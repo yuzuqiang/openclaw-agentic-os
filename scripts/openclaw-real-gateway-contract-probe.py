@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
@@ -322,6 +323,246 @@ def _decode_process_stream(value: str | bytes | None) -> str:
     return value
 
 
+def _linux_process_table() -> dict[int, dict[str, Any]] | None:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return None
+    records: dict[int, dict[str, Any]] = {}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            stat_text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            status_text = (entry / "status").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            continue
+        try:
+            suffix = stat_text.rsplit(")", 1)[1].strip().split()
+            if len(suffix) < 20:
+                continue
+            uid = None
+            for line in status_text.splitlines():
+                if line.startswith("Uid:"):
+                    uid = int(line.split()[1])
+                    break
+            if uid is None:
+                continue
+            records[pid] = {
+                "pid": pid,
+                "ppid": int(suffix[1]),
+                "pgid": int(suffix[2]),
+                "uid": uid,
+                "start_id": f"linux-proc-start:{suffix[19]}",
+            }
+        except (IndexError, ValueError):
+            continue
+    return records
+
+
+def _ps_process_table() -> dict[int, dict[str, Any]]:
+    proc = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,pgid=,uid=,lstart="],
+        check=False,
+        close_fds=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=2,
+    )
+    if proc.returncode != 0:
+        raise ProbeError("process table scan is unavailable")
+    records: dict[int, dict[str, Any]] = {}
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+        try:
+            pid, ppid, pgid, uid = (int(item) for item in parts[:4])
+        except ValueError:
+            continue
+        records[pid] = {
+            "pid": pid,
+            "ppid": ppid,
+            "pgid": pgid,
+            "uid": uid,
+            "start_id": "ps-lstart:" + " ".join(parts[4:9]),
+        }
+    return records
+
+
+def _process_table() -> dict[int, dict[str, Any]]:
+    records = _linux_process_table()
+    if records is not None:
+        return records
+    return _ps_process_table()
+
+
+def _process_identity(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "pid": record.get("pid"),
+        "uid": record.get("uid"),
+        "start_id": record.get("start_id"),
+    }
+
+
+def _identity_matches(record: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    return (
+        record.get("pid") == identity.get("pid")
+        and record.get("uid") == identity.get("uid")
+        and record.get("start_id") == identity.get("start_id")
+    )
+
+
+def _process_identity_alive(identity: Mapping[str, Any]) -> bool:
+    pid = identity.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    record = _process_table().get(pid)
+    return isinstance(record, Mapping) and _identity_matches(record, identity)
+
+
+class _ProcessCleanupTracker:
+    def __init__(self, root_pid: int) -> None:
+        self.root_pid = root_pid
+        self.uid = os.getuid()
+        self.root_identity: dict[str, Any] | None = None
+        self.descendants: dict[int, dict[str, Any]] = {}
+        self.unavailable_error: str | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        try:
+            self._poll_once()
+        except ProbeError as exc:
+            self.unavailable_error = str(exc)
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.05):
+            try:
+                self._poll_once()
+            except ProbeError as exc:
+                with self._lock:
+                    self.unavailable_error = str(exc)
+
+    def _poll_once(self) -> None:
+        try:
+            records = _process_table()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProbeError("process table scan is unavailable") from exc
+        root = records.get(self.root_pid)
+        with self._lock:
+            if root is not None and root.get("uid") == self.uid:
+                self.root_identity = _process_identity(root)
+            if self.root_identity is None:
+                raise ProbeError("candidate process identity is unavailable")
+            tracked_pids = {self.root_pid, *self.descendants}
+            changed = True
+            while changed:
+                changed = False
+                for pid, record in records.items():
+                    if pid == self.root_pid or record.get("uid") != self.uid:
+                        continue
+                    if record.get("ppid") in tracked_pids or record.get("pgid") == self.root_pid:
+                        if pid not in self.descendants:
+                            self.descendants[pid] = _process_identity(record)
+                            tracked_pids.add(pid)
+                            changed = True
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "root_pid": self.root_pid,
+                "root_identity": dict(self.root_identity)
+                if self.root_identity is not None
+                else None,
+                "descendant_identities": [
+                    dict(identity) for identity in self.descendants.values()
+                ],
+                "tracking_status": (
+                    "available" if self.unavailable_error is None else "unavailable"
+                ),
+                "tracking_error": self.unavailable_error,
+            }
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        try:
+            self._poll_once()
+        except ProbeError as exc:
+            with self._lock:
+                self.unavailable_error = str(exc)
+        return self.snapshot()
+
+
+def _tracked_cleanup_from_process(proc: subprocess.CompletedProcess[str]) -> dict[str, Any] | None:
+    value = getattr(proc, "_agentic_os_process_cleanup", None)
+    return value if isinstance(value, dict) else None
+
+
+def _terminate_tracked_process_identities(cleanup: Mapping[str, Any] | None) -> bool:
+    if cleanup is None:
+        return False
+    if cleanup.get("tracking_status") != "available":
+        return False
+    attempted = False
+    descendants = cleanup.get("descendant_identities")
+    if not isinstance(descendants, list):
+        return False
+    for identity in descendants:
+        if not isinstance(identity, Mapping):
+            continue
+        try:
+            if not _process_identity_alive(identity):
+                continue
+            pid = identity.get("pid")
+            if not isinstance(pid, int) or pid <= 0:
+                continue
+            os.kill(pid, signal.SIGKILL)
+            attempted = True
+        except ProcessLookupError:
+            continue
+        except ProbeError:
+            return attempted
+        except OSError:
+            continue
+    return attempted
+
+
+def _wait_for_tracked_processes_reaped(
+    cleanup: Mapping[str, Any] | None, *, timeout_seconds: float = 5.0
+) -> bool:
+    if cleanup is None:
+        return True
+    if cleanup.get("tracking_status") != "available":
+        return False
+    descendants = cleanup.get("descendant_identities")
+    if not isinstance(descendants, list):
+        return False
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            alive = [
+                identity
+                for identity in descendants
+                if isinstance(identity, Mapping) and _process_identity_alive(identity)
+            ]
+        except ProbeError:
+            return False
+        if not alive:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def _run(
     command: list[str],
     *,
@@ -344,6 +585,7 @@ def _run(
         close_fds=True,
         pass_fds=pass_fds,
     )
+    cleanup_tracker = _ProcessCleanupTracker(proc.pid) if start_new_session else None
     try:
         stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -352,19 +594,30 @@ def _run(
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        else:
+        elif proc.poll() is None:
             proc.kill()
-        stdout_raw, stderr_raw = proc.communicate()
+        cleanup_snapshot = cleanup_tracker.stop() if cleanup_tracker is not None else None
+        _terminate_tracked_process_identities(cleanup_snapshot)
+        try:
+            stdout_raw, stderr_raw = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout_raw = exc.stdout
+            stderr_raw = exc.stderr
         stdout = _decode_process_stream(stdout_raw)
         stderr = _decode_process_stream(stderr_raw)
         exc.pid = proc.pid  # type: ignore[attr-defined]
         exc.stdout = stdout
         exc.stderr = stderr
+        if cleanup_snapshot is not None:
+            exc._agentic_os_process_cleanup = cleanup_snapshot  # type: ignore[attr-defined]
         raise
+    cleanup_snapshot = cleanup_tracker.stop() if cleanup_tracker is not None else None
     stdout = _decode_process_stream(stdout_raw)
     stderr = _decode_process_stream(stderr_raw)
     completed = subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
     completed.pid = proc.pid  # type: ignore[attr-defined]
+    if cleanup_snapshot is not None:
+        completed._agentic_os_process_cleanup = cleanup_snapshot  # type: ignore[attr-defined]
     return completed
 
 
@@ -1693,7 +1946,13 @@ def _terminate_and_verify_process_group(
     proc: subprocess.CompletedProcess[str],
 ) -> tuple[bool, bool]:
     attempted = _terminate_process_group(proc)
-    return attempted, _wait_for_process_group_reaped(proc)
+    cleanup = _tracked_cleanup_from_process(proc)
+    descendant_cleanup_attempted = _terminate_tracked_process_identities(cleanup)
+    return (
+        attempted or descendant_cleanup_attempted,
+        _wait_for_process_group_reaped(proc)
+        and _wait_for_tracked_processes_reaped(cleanup),
+    )
 
 
 def _prepare_private_directory(directory: Path) -> Path:
@@ -2096,9 +2355,10 @@ def _validate_allow_lease_status_response(response: Mapping[str, Any]) -> None:
     leases = response.get("leases")
     if not isinstance(leases, list):
         raise ProbeError("persistent attestation allowLease status leases are malformed")
-    for lease in leases:
-        if not isinstance(lease, dict):
-            raise ProbeError("persistent attestation allowLease status lease is malformed")
+    if leases != []:
+        raise ProbeError(
+            "persistent attestation allowLease status leases must be empty before lifecycle"
+        )
 
 
 def _validate_persistent_attestation_evidence(

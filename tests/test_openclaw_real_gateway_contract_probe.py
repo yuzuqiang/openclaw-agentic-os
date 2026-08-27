@@ -1138,6 +1138,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             {"leases": []},
             {"status": "error", "leases": []},
             {"status": "ok", "leases": "none"},
+            {"status": "ok", "leases": [{}]},
+            {"status": "ok", "leases": [{"metadata": {}}]},
+            {"status": "ok", "leases": [{"gateway_lease_id": "lease-1"}]},
         ):
             with self.subTest(response=response):
                 with tempfile.TemporaryDirectory() as directory:
@@ -2767,6 +2770,147 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE, "_wait_for_loopback_port_closed", return_value=True
             ), mock.patch.object(
                 MODULE, "_terminate_and_verify_process_group", return_value=(True, False)
+            ), mock.patch.object(
+                MODULE, "_run_independent_validator", side_effect=unexpected_validator
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "process group alive before validator"
+                ):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+
+            self.assertFalse(validator_called)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "pre_validator_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "fail")
+            self.assertFalse(cleanup["process_group_reaped"])
+
+    def test_process_group_cleanup_rejects_tracked_detached_descendant_survival(
+        self,
+    ) -> None:
+        class Proc:
+            pid = 123456
+
+        proc = Proc()
+        proc._agentic_os_process_cleanup = {
+            "tracking_status": "available",
+            "descendant_identities": [
+                {
+                    "pid": 234567,
+                    "uid": os.getuid(),
+                    "start_id": "detached-start",
+                }
+            ],
+        }
+
+        with mock.patch.object(
+            MODULE, "_terminate_process_group", return_value=True
+        ), mock.patch.object(
+            MODULE, "_wait_for_process_group_reaped", return_value=True
+        ), mock.patch.object(
+            MODULE, "_terminate_tracked_process_identities", return_value=True
+        ), mock.patch.object(
+            MODULE, "_wait_for_tracked_processes_reaped", return_value=False
+        ):
+            attempted, reaped = MODULE._terminate_and_verify_process_group(proc)
+
+        self.assertTrue(attempted)
+        self.assertFalse(reaped)
+
+    def test_tracked_descendant_cleanup_skips_reused_pid_identity(self) -> None:
+        pid = 234567
+        old_identity = {
+            "pid": pid,
+            "uid": os.getuid(),
+            "start_id": "old-process-start",
+        }
+        cleanup = {
+            "tracking_status": "available",
+            "descendant_identities": [old_identity],
+        }
+        reused_pid_table = {
+            pid: {
+                "pid": pid,
+                "ppid": 1,
+                "pgid": pid,
+                "uid": os.getuid(),
+                "start_id": "new-process-start",
+            }
+        }
+
+        with mock.patch.object(
+            MODULE, "_process_table", return_value=reused_pid_table
+        ), mock.patch.object(MODULE.os, "kill") as kill:
+            self.assertFalse(MODULE._process_identity_alive(old_identity))
+            self.assertFalse(MODULE._terminate_tracked_process_identities(cleanup))
+            self.assertTrue(
+                MODULE._wait_for_tracked_processes_reaped(
+                    cleanup, timeout_seconds=0.0
+                )
+            )
+
+        kill.assert_not_called()
+
+    def test_persistent_runner_success_blocks_validator_on_tracked_detached_descendant(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            run_root = root / "run"
+            output = root / "evidence.json"
+            validator_called = False
+
+            class Proc:
+                pid = 123456
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+                _agentic_os_process_cleanup = {
+                    "tracking_status": "available",
+                    "descendant_identities": [
+                        {
+                            "pid": 234567,
+                            "uid": os.getuid(),
+                            "start_id": "detached-start",
+                        }
+                    ],
+                }
+
+            def unexpected_validator(**_kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
+                MODULE, "_git", return_value="agentic-head"
+            ), mock.patch.object(
+                MODULE, "validate_candidate_root", return_value="openclaw-head"
+            ), mock.patch.object(
+                MODULE, "_wait_for_loopback_port_closed", return_value=True
+            ), mock.patch.object(
+                MODULE, "_terminate_process_group", return_value=True
+            ), mock.patch.object(
+                MODULE, "_wait_for_process_group_reaped", return_value=True
+            ), mock.patch.object(
+                MODULE, "_terminate_tracked_process_identities", return_value=True
+            ), mock.patch.object(
+                MODULE, "_wait_for_tracked_processes_reaped", return_value=False
             ), mock.patch.object(
                 MODULE, "_run_independent_validator", side_effect=unexpected_validator
             ):
