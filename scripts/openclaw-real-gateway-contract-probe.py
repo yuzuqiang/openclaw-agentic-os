@@ -71,6 +71,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
 )
+PROCESS_CLEANUP_MARKER_ENV = "AGENTIC_OS_PROCESS_CLEANUP_MARKER"
 PERSISTENT_REQUIRED_TOOL_NAMES = (
     "agenticOs.runtime.attest",
     "subagents.allowLease.acquire",
@@ -424,10 +425,45 @@ def _process_identity_alive(identity: Mapping[str, Any]) -> bool:
     return isinstance(record, Mapping) and _identity_matches(record, identity)
 
 
+def _process_environ_bytes(pid: int) -> bytes | None:
+    if pid <= 0:
+        return None
+    environ_path = Path("/proc") / str(pid) / "environ"
+    try:
+        if environ_path.is_file():
+            return environ_path.read_bytes()
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            ["ps", "eww", "-p", str(pid), "-o", "command="],
+            check=False,
+            close_fds=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _process_has_cleanup_marker(pid: int, marker: str) -> bool | None:
+    environ = _process_environ_bytes(pid)
+    if environ is None:
+        return None
+    return f"{PROCESS_CLEANUP_MARKER_ENV}={marker}".encode() in environ
+
+
 class _ProcessCleanupTracker:
-    def __init__(self, root_pid: int) -> None:
+    def __init__(self, root_pid: int, cleanup_marker: str | None = None) -> None:
         self.root_pid = root_pid
         self.uid = os.getuid()
+        self.cleanup_marker = cleanup_marker
+        self.cleanup_marker_verified = cleanup_marker is None
         self.root_identity: dict[str, Any] | None = None
         self.descendants: dict[int, dict[str, Any]] = {}
         self.unavailable_error: str | None = None
@@ -459,6 +495,20 @@ class _ProcessCleanupTracker:
         with self._lock:
             if root is not None and root.get("uid") == self.uid:
                 self.root_identity = _process_identity(root)
+                if self.cleanup_marker is not None and not self.cleanup_marker_verified:
+                    root_has_marker = _process_has_cleanup_marker(
+                        self.root_pid, self.cleanup_marker
+                    )
+                    if root_has_marker is True:
+                        self.cleanup_marker_verified = True
+                    elif root_has_marker is False:
+                        self.unavailable_error = (
+                            "candidate cleanup marker is missing from candidate root"
+                        )
+                    else:
+                        self.unavailable_error = (
+                            "candidate cleanup marker scan is unavailable"
+                        )
             if self.root_identity is None:
                 raise ProbeError("candidate process identity is unavailable")
             tracked_pids = {self.root_pid, *self.descendants}
@@ -468,7 +518,22 @@ class _ProcessCleanupTracker:
                 for pid, record in records.items():
                     if pid == self.root_pid or record.get("uid") != self.uid:
                         continue
-                    if record.get("ppid") in tracked_pids or record.get("pgid") == self.root_pid:
+                    marker_matched = False
+                    if (
+                        self.cleanup_marker is not None
+                        and self.cleanup_marker_verified
+                        and pid not in self.descendants
+                        and record.get("ppid") not in tracked_pids
+                        and record.get("pgid") != self.root_pid
+                    ):
+                        marker_matched = (
+                            _process_has_cleanup_marker(pid, self.cleanup_marker) is True
+                        )
+                    if (
+                        record.get("ppid") in tracked_pids
+                        or record.get("pgid") == self.root_pid
+                        or marker_matched
+                    ):
                         if pid not in self.descendants:
                             self.descendants[pid] = _process_identity(record)
                             tracked_pids.add(pid)
@@ -481,6 +546,12 @@ class _ProcessCleanupTracker:
                 "root_identity": dict(self.root_identity)
                 if self.root_identity is not None
                 else None,
+                "cleanup_marker_sha256": (
+                    _text_sha256(self.cleanup_marker)
+                    if self.cleanup_marker is not None
+                    else None
+                ),
+                "cleanup_marker_verified": self.cleanup_marker_verified,
                 "descendant_identities": [
                     dict(identity) for identity in self.descendants.values()
                 ],
@@ -505,6 +576,12 @@ class _ProcessCleanupTracker:
 def _tracked_cleanup_from_process(proc: subprocess.CompletedProcess[str]) -> dict[str, Any] | None:
     value = getattr(proc, "_agentic_os_process_cleanup", None)
     return value if isinstance(value, dict) else None
+
+
+def _copy_tracked_cleanup(source: Any, target: Any) -> None:
+    value = getattr(source, "_agentic_os_process_cleanup", None)
+    if isinstance(value, dict):
+        target._agentic_os_process_cleanup = value  # type: ignore[attr-defined]
 
 
 def _terminate_tracked_process_identities(cleanup: Mapping[str, Any] | None) -> bool:
@@ -573,10 +650,15 @@ def _run(
     pass_fds: tuple[int, ...] = (),
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    cleanup_marker = secrets.token_hex(32) if start_new_session else None
+    popen_env = env
+    if cleanup_marker is not None:
+        popen_env = dict(os.environ if env is None else env)
+        popen_env[PROCESS_CLEANUP_MARKER_ENV] = cleanup_marker
     proc = subprocess.Popen(
         command,
         cwd=cwd,
-        env=env,
+        env=popen_env,
         text=input_bytes is None,
         stdin=subprocess.PIPE if input_bytes is not None else None,
         stdout=subprocess.PIPE,
@@ -585,7 +667,9 @@ def _run(
         close_fds=True,
         pass_fds=pass_fds,
     )
-    cleanup_tracker = _ProcessCleanupTracker(proc.pid) if start_new_session else None
+    cleanup_tracker = (
+        _ProcessCleanupTracker(proc.pid, cleanup_marker) if start_new_session else None
+    )
     try:
         stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -2722,6 +2806,7 @@ def _run_legacy_e2e_probe(
             pid = getattr(exc, "pid", None)
             if isinstance(pid, int):
                 proc.pid = pid  # type: ignore[attr-defined]
+            _copy_tracked_cleanup(exc, proc)
             cleanup_attempted, process_group_reaped = _terminate_and_verify_process_group(proc)
             if not process_group_reaped:
                 raise ProbeError(
@@ -3411,6 +3496,7 @@ def _run_persistent_lifecycle_probe_once(
         pid = getattr(exc, "pid", None)
         if isinstance(pid, int):
             proc.pid = pid  # type: ignore[attr-defined]
+        _copy_tracked_cleanup(exc, proc)
         process_group_cleanup_attempted, process_group_reaped = (
             _terminate_and_verify_process_group(proc)
         )

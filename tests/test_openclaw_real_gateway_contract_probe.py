@@ -750,15 +750,33 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_terminate_and_verify_process_group = (
                 MODULE._terminate_and_verify_process_group
             )
+            cleanup = {
+                "tracking_status": "available",
+                "descendant_identities": [
+                    {
+                        "pid": 234567,
+                        "uid": os.getuid(),
+                        "start_id": "detached-start",
+                    }
+                ],
+            }
+            captured = {}
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 self.assertIs(start_new_session, True)
-                raise MODULE.subprocess.TimeoutExpired(
+                exc = MODULE.subprocess.TimeoutExpired(
                     command,
                     timeout,
                     output="runner stdout",
                     stderr="runner stderr",
                 )
+                exc.pid = 123456
+                exc._agentic_os_process_cleanup = cleanup
+                raise exc
+
+            def fake_terminate_and_verify(proc):
+                captured["cleanup"] = MODULE._tracked_cleanup_from_process(proc)
+                return True, False
 
             try:
                 MODULE._run = fake_run
@@ -768,9 +786,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "path": relative,
                     "sha256": "0" * 64,
                 }
-                MODULE._terminate_and_verify_process_group = lambda proc: (True, False)
+                MODULE._terminate_and_verify_process_group = fake_terminate_and_verify
                 with self.assertRaisesRegex(MODULE.ProbeError, "process group remained alive"):
                     MODULE.run_probe(Path(directory), output, timeout=1)
+                self.assertEqual(captured["cleanup"], cleanup)
             finally:
                 MODULE._run = original_run
                 MODULE.validate_candidate_root = original_validate_candidate_root
@@ -2572,6 +2591,19 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_run = MODULE._run
             original_git = MODULE._git
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
+            cleanup = {
+                "tracking_status": "available",
+                "descendant_identities": [
+                    {
+                        "pid": 234567,
+                        "uid": os.getuid(),
+                        "start_id": "detached-start",
+                    }
+                ],
+            }
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 captured["start_new_session"] = start_new_session
@@ -2580,17 +2612,25 @@ class RealGatewayProbeTests(unittest.TestCase):
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
-                raise MODULE.subprocess.TimeoutExpired(
+                exc = MODULE.subprocess.TimeoutExpired(
                     command,
                     timeout,
                     output="runner stdout",
                     stderr="runner stderr",
                 )
+                exc.pid = 123456
+                exc._agentic_os_process_cleanup = cleanup
+                raise exc
+
+            def fake_terminate_and_verify(proc):
+                captured["cleanup"] = MODULE._tracked_cleanup_from_process(proc)
+                return True, True
 
             try:
                 MODULE._run = fake_run
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE._wait_for_loopback_port_closed = lambda port: True
+                MODULE._terminate_and_verify_process_group = fake_terminate_and_verify
                 with self.assertRaisesRegex(MODULE.ProbeError, "timed out"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -2608,9 +2648,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run = original_run
                 MODULE._git = original_git
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertIs(captured["start_new_session"], True)
+            self.assertEqual(captured["cleanup"], cleanup)
             self.assertEqual(payload["status"], "fail_closed")
             self.assertIs(
                 payload["isolated_non_production_gateway"]["candidate_port_closed"],
@@ -2798,6 +2842,82 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(cleanup["status"], "fail")
             self.assertFalse(cleanup["process_group_reaped"])
+
+    def test_cleanup_tracker_marks_marker_matched_detached_same_uid_child(self) -> None:
+        root_pid = 123456
+        escaped_pid = 234567
+        marker = "unit-cleanup-marker"
+        tracker = MODULE._ProcessCleanupTracker.__new__(MODULE._ProcessCleanupTracker)
+        tracker.root_pid = root_pid
+        tracker.uid = os.getuid()
+        tracker.cleanup_marker = marker
+        tracker.cleanup_marker_verified = False
+        tracker.root_identity = None
+        tracker.descendants = {}
+        tracker.unavailable_error = None
+        tracker._lock = MODULE.threading.Lock()
+        records = {
+            root_pid: {
+                "pid": root_pid,
+                "ppid": 1,
+                "pgid": root_pid,
+                "uid": os.getuid(),
+                "start_id": "root-start",
+            },
+            escaped_pid: {
+                "pid": escaped_pid,
+                "ppid": 1,
+                "pgid": escaped_pid,
+                "uid": os.getuid(),
+                "start_id": "escaped-start",
+            },
+        }
+
+        def has_marker(pid, observed_marker):
+            self.assertEqual(observed_marker, marker)
+            return pid in {root_pid, escaped_pid}
+
+        with mock.patch.object(MODULE, "_process_table", return_value=records), mock.patch.object(
+            MODULE, "_process_has_cleanup_marker", side_effect=has_marker
+        ):
+            tracker._poll_once()
+
+        self.assertTrue(tracker.cleanup_marker_verified)
+        self.assertIn(escaped_pid, tracker.descendants)
+        self.assertEqual(tracker.descendants[escaped_pid]["start_id"], "escaped-start")
+
+    def test_cleanup_tracker_fails_closed_when_root_marker_scan_is_unavailable(
+        self,
+    ) -> None:
+        root_pid = 123456
+        marker = "unit-cleanup-marker"
+        tracker = MODULE._ProcessCleanupTracker.__new__(MODULE._ProcessCleanupTracker)
+        tracker.root_pid = root_pid
+        tracker.uid = os.getuid()
+        tracker.cleanup_marker = marker
+        tracker.cleanup_marker_verified = False
+        tracker.root_identity = None
+        tracker.descendants = {}
+        tracker.unavailable_error = None
+        tracker._lock = MODULE.threading.Lock()
+        records = {
+            root_pid: {
+                "pid": root_pid,
+                "ppid": 1,
+                "pgid": root_pid,
+                "uid": os.getuid(),
+                "start_id": "root-start",
+            }
+        }
+
+        with mock.patch.object(MODULE, "_process_table", return_value=records), mock.patch.object(
+            MODULE, "_process_has_cleanup_marker", return_value=None
+        ):
+            tracker._poll_once()
+
+        snapshot = tracker.snapshot()
+        self.assertFalse(snapshot["cleanup_marker_verified"])
+        self.assertEqual(snapshot["tracking_status"], "unavailable")
 
     def test_process_group_cleanup_rejects_tracked_detached_descendant_survival(
         self,
