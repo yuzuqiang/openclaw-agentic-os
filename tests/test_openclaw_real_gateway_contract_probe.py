@@ -2730,9 +2730,11 @@ class RealGatewayProbeTests(unittest.TestCase):
                 timeout=240,
                 start_new_session=False,
                 pass_fds=(),
+                input_bytes=None,
             ):
                 captured["command"] = list(command)
                 captured["pass_fds"] = pass_fds
+                captured["input_bytes"] = input_bytes
                 captured["copy_path_exists_during_launch"] = (
                     run_root / "keys" / "bound-independent-validator.py"
                 ).exists()
@@ -2772,12 +2774,24 @@ class RealGatewayProbeTests(unittest.TestCase):
                 pinned.close()
 
             pinned_fds = pinned.validator_fds()
-            self.assertEqual(captured["pass_fds"][: len(pinned_fds)], pinned_fds)
+            self.assertEqual(captured["pass_fds"], pinned_fds)
             command = captured["command"]
-            validator_fd = captured["pass_fds"][-1]
             self.assertEqual(command[1], "-c")
-            self.assertEqual(command[2], MODULE.FD_VALIDATOR_BOOTSTRAP)
-            self.assertEqual(command[3], str(MODULE._descriptor_path(validator_fd)))
+            self.assertEqual(command[2], MODULE.STDIN_VALIDATOR_BOOTSTRAP)
+            self.assertEqual(
+                command[3],
+                str(
+                    (
+                        MODULE.ROOT
+                        / "scripts/openclaw-real-gateway-contract-probe.py"
+                    ).resolve()
+                ),
+            )
+            self.assertEqual(
+                MODULE._sha256_bytes(captured["input_bytes"]),
+                command[4],
+            )
+            self.assertEqual(command[5], "__persistent-validator")
             self.assertNotIn("bound-independent-validator.py", command[3])
             self.assertFalse(captured["copy_path_exists_during_launch"])
             for name in ("root", *MODULE.PINNED_RUN_SUBDIRECTORIES):
@@ -2785,7 +2799,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 self.assertIn(f"--{name}-device", command)
                 self.assertIn(f"--{name}-inode", command)
 
-    def test_validator_fd_launch_ignores_post_verification_replacement(self) -> None:
+    def test_validator_stdin_launch_ignores_post_verification_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"
             receipt_file, validation_file = self._write_persistent_receipts(
@@ -2842,6 +2856,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 timeout=240,
                 start_new_session=False,
                 pass_fds=(),
+                input_bytes=None,
             ):
                 tampered_script.write_text(malicious_source, encoding="utf-8")
                 os.chmod(tampered_script, 0o700)
@@ -2852,6 +2867,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     timeout=timeout,
                     start_new_session=start_new_session,
                     pass_fds=pass_fds,
+                    input_bytes=input_bytes,
                 )
 
             try:
@@ -2874,6 +2890,133 @@ class RealGatewayProbeTests(unittest.TestCase):
                 pinned.close()
 
             self.assertTrue(tampered_script.exists())
+            self.assertFalse(tampered_marker.exists())
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            self.assertEqual(validation["status"], "pass")
+            serialized = validation_file.read_text(encoding="utf-8")
+            self.assertNotIn(ATTESTATION_HMAC_SECRET_HEX, serialized)
+            self.assertNotIn(VALIDATION_ANCHOR_HMAC_SECRET_HEX, serialized)
+
+    def test_validator_stdin_launch_ignores_retained_writable_copy_fd_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            receipt_file, validation_file = self._write_persistent_receipts(
+                run_root, self._valid_persistent_receipt()
+            )
+            os.chmod(run_root, 0o700)
+            validation_file.unlink()
+            key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
+            key_path.parent.mkdir(exist_ok=True, mode=0o700)
+            os.chmod(key_path.parent, 0o700)
+            key_path.write_bytes(ATTESTATION_HMAC_SECRET)
+            os.chmod(key_path, 0o600)
+            pinned = MODULE._pin_prepared_run_root(run_root.resolve())
+            source_binding = [
+                {
+                    "path": "scripts/openclaw-real-gateway-contract-probe.py",
+                    "sha256": MODULE._sha256_bytes(
+                        (
+                            MODULE.ROOT
+                            / "scripts/openclaw-real-gateway-contract-probe.py"
+                        ).read_bytes()
+                    ),
+                }
+            ]
+            original_bound_source = MODULE._bound_validator_script_source
+            original_run = MODULE._run
+            retained_fd = -1
+            tampered_marker = run_root / "receipts" / "retained-fd-tampered-ran.json"
+            malicious_source = "\n".join(
+                (
+                    "import json, os",
+                    f"marker = {str(tampered_marker)!r}",
+                    "visible_fds = []",
+                    "for fd in range(3, 64):",
+                    "    try:",
+                    "        os.fstat(fd)",
+                    "    except OSError:",
+                    "        continue",
+                    "    visible_fds.append(fd)",
+                    "payload = {",
+                    f"    'attestation_key': os.environ.get({MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV!r}),",
+                    f"    'validation_key': os.environ.get({MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV!r}),",
+                    "    'visible_fds': visible_fds,",
+                    "}",
+                    "with open(marker, 'w', encoding='utf-8') as handle:",
+                    "    json.dump(payload, handle, sort_keys=True)",
+                )
+            ).encode()
+
+            def bind_then_retain_writable_copy_fd(**kwargs):
+                nonlocal retained_fd
+                source_bytes, digest, path = original_bound_source(**kwargs)
+                retained_fd = os.open(
+                    "bound-independent-validator.py",
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=pinned.keys.fd,
+                )
+                offset = 0
+                while offset < len(source_bytes):
+                    offset += os.write(retained_fd, source_bytes[offset:])
+                os.fsync(retained_fd)
+                self.assertEqual(MODULE._sha256_bytes(source_bytes), digest)
+                return source_bytes, digest, path
+
+            def mutate_retained_fd_then_run(
+                command,
+                *,
+                cwd,
+                env=None,
+                timeout=240,
+                start_new_session=False,
+                pass_fds=(),
+                input_bytes=None,
+            ):
+                self.assertGreaterEqual(retained_fd, 0)
+                os.lseek(retained_fd, 0, os.SEEK_SET)
+                os.ftruncate(retained_fd, 0)
+                offset = 0
+                while offset < len(malicious_source):
+                    offset += os.write(retained_fd, malicious_source[offset:])
+                os.fsync(retained_fd)
+                return original_run(
+                    command,
+                    cwd=cwd,
+                    env=env,
+                    timeout=timeout,
+                    start_new_session=start_new_session,
+                    pass_fds=pass_fds,
+                    input_bytes=input_bytes,
+                )
+
+            try:
+                with mock.patch.object(
+                    MODULE,
+                    "_bound_validator_script_source",
+                    side_effect=bind_then_retain_writable_copy_fd,
+                ), mock.patch.object(
+                    MODULE,
+                    "_run",
+                    side_effect=mutate_retained_fd_then_run,
+                ), mock.patch.object(
+                    MODULE,
+                    "_source_bindings",
+                    return_value=source_binding,
+                ):
+                    MODULE._run_independent_validator(
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        pinned_run_root=pinned,
+                        agentic_sources=source_binding,
+                        timeout=5,
+                    )
+            finally:
+                if retained_fd >= 0:
+                    os.close(retained_fd)
+                pinned.close()
+
             self.assertFalse(tampered_marker.exists())
             validation = json.loads(validation_file.read_text(encoding="utf-8"))
             self.assertEqual(validation["status"], "pass")
