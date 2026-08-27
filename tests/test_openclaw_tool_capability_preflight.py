@@ -1178,6 +1178,57 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertIn("subagents.allowLease.status live reachability is unproven", payload["error"])
         self.assertFalse(payload["runtime_ready"])
 
+    def test_installed_negative_baseline_can_skip_status_rpc_for_no_mutation_boundary(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        captured = {}
+
+        def fake_baseline_catalog(*, skip_status_rpc=False):
+            captured["skip_status_rpc"] = skip_status_rpc
+            raise module.RuntimeEvidenceError(
+                "subagents.allowLease.status live reachability is unproven",
+                catalog={
+                    "gateway_rpc_catalog": {
+                        "status_corroboration": {
+                            "status": "skipped_no_production_lease_mutation",
+                            "live_reachability": (
+                                "skipped_no_production_lease_mutation"
+                            ),
+                        },
+                    },
+                },
+            )
+
+        output = io.StringIO()
+        with mock.patch.object(
+            module,
+            "installed_negative_baseline_catalog",
+            side_effect=fake_baseline_catalog,
+        ), contextlib.redirect_stdout(output):
+            status = module.main(
+                [
+                    "--installed-openclaw-negative-baseline",
+                    "--skip-live-status-rpc",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertIs(captured["skip_status_rpc"], True)
+        payload = json.loads(output.getvalue())
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertIn("subagents.allowLease.status live reachability is unproven", payload["error"])
+        self.assertFalse(payload["runtime_ready"])
+
     def test_live_status_validates_each_returned_lease_item(self) -> None:
         status_payload = {
             "ok": True,

@@ -22,7 +22,9 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(
+    os.environ.get("AGENTIC_OS_PROBE_ROOT", Path(__file__).resolve().parents[1])
+).resolve()
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
 PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
@@ -46,6 +48,9 @@ PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH = Path("keys/agentic-os-attestation.key
 PERSISTENT_VALIDATION_SCHEMA_VERSION = "agentic-os.persistent-lifecycle-independent-validation.v1"
 PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION = (
     "agentic-os.persistent-attestation-verification.v1"
+)
+PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION = (
+    "agentic-os.persistent-lifecycle-observations.v1"
 )
 PERSISTENT_RUNTIME_SOURCE_PATHS = (
     "package.json",
@@ -327,6 +332,76 @@ def _source_binding(root: Path, relative: str) -> dict[str, str]:
 
 def _source_bindings(root: Path, relatives: tuple[str, ...]) -> list[dict[str, str]]:
     return [_source_binding(root, relative) for relative in relatives]
+
+
+def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -> None:
+    current_sources = _source_bindings(ROOT, AGENTIC_SOURCE_PATHS)
+    expected = {
+        (source.get("path"), source.get("sha256"))
+        for source in agentic_sources
+        if isinstance(source, dict)
+    }
+    current = {
+        (source.get("path"), source.get("sha256"))
+        for source in current_sources
+        if isinstance(source, dict)
+    }
+    if expected != current:
+        raise ProbeError(
+            "Agentic OS validator source binding changed after candidate runner exit"
+        )
+
+
+def _bound_validator_script_path(
+    *,
+    agentic_sources: list[dict[str, str]],
+    pinned_run_root: _PinnedRunRoot,
+) -> Path:
+    _assert_agentic_sources_still_bound(agentic_sources)
+    validator_path = (ROOT / "scripts/openclaw-real-gateway-contract-probe.py").resolve()
+    try:
+        source_bytes = validator_path.read_bytes()
+    except OSError as exc:
+        raise ProbeError("persistent lifecycle validator executable is unavailable") from exc
+    expected_digest = next(
+        (
+            str(source.get("sha256"))
+            for source in agentic_sources
+            if source.get("path") == "scripts/openclaw-real-gateway-contract-probe.py"
+        ),
+        None,
+    )
+    if _sha256_bytes(source_bytes) != expected_digest:
+        raise ProbeError("persistent lifecycle validator executable digest changed")
+    _assert_pinned_run_root_identity(pinned_run_root)
+    copy_name = "bound-independent-validator.py"
+    copy_fd = -1
+    try:
+        copy_fd = os.open(
+            copy_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=pinned_run_root.keys.fd,
+        )
+        offset = 0
+        while offset < len(source_bytes):
+            offset += os.write(copy_fd, source_bytes[offset:])
+        os.fchmod(copy_fd, 0o600)
+        os.fsync(copy_fd)
+        os.close(copy_fd)
+        copy_fd = -1
+        copy_path = pinned_run_root.original_path / "keys" / copy_name
+        if _sha256_bytes(copy_path.read_bytes()) != expected_digest:
+            raise ProbeError("persistent lifecycle validator copy digest mismatch")
+        _assert_agentic_sources_still_bound(agentic_sources)
+        return copy_path
+    except FileExistsError as exc:
+        raise ProbeError("persistent lifecycle validator executable copy already exists") from exc
+    except OSError as exc:
+        raise ProbeError("persistent lifecycle validator executable copy failed") from exc
+    finally:
+        if copy_fd >= 0:
+            os.close(copy_fd)
 
 
 def _runtime_file_binding(path: Path, label: str) -> dict[str, str]:
@@ -700,12 +775,62 @@ def _validate_runtime_catalog_response(response: Mapping[str, Any]) -> None:
         )
 
 
+LIFECYCLE_OBSERVATION_FIELDS = (
+    "status",
+    "run_id",
+    "transition_id",
+    "duplicate_acquire_same_lease",
+    "first_spawn_status",
+    "duplicate_spawn_same_session",
+    "post_release_lease_count",
+    "gateway_lease_id_sha256",
+    "session_key_sha256",
+    "child_run_id_sha256",
+    "session_status_sha256",
+    "sessions_history_sha256",
+    "release_status",
+    "duplicate_release_status",
+    "primary_release_sha256",
+    "duplicate_release_sha256",
+    "release_gateway_lease_id_sha256",
+    "duplicate_release_gateway_lease_id_sha256",
+    "release_owner_metadata_sha256",
+    "duplicate_release_owner_metadata_sha256",
+    "release_idempotency_key_sha256",
+    "duplicate_release_idempotency_key_sha256",
+    "sessions_list_count",
+    "matching_session_count",
+)
+
+
+def _lifecycle_observation_snapshot(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: lifecycle.get(key) for key in LIFECYCLE_OBSERVATION_FIELDS}
+
+
+def _validate_lifecycle_observations_response(
+    response: Mapping[str, Any],
+    *,
+    lifecycle: Mapping[str, Any],
+) -> None:
+    if response.get("schema_version") != PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION:
+        raise ProbeError("persistent lifecycle observations schema is invalid")
+    observations = _record(
+        response.get("observations"), "persistent lifecycle observations"
+    )
+    expected_observations = _lifecycle_observation_snapshot(lifecycle)
+    if observations != expected_observations:
+        raise ProbeError("persistent lifecycle observations do not match receipt lifecycle")
+    if response.get("lifecycle_sha256") != _canonical_sha256(expected_observations):
+        raise ProbeError("persistent lifecycle observations digest mismatch")
+
+
 def _validate_independent_validation(
     validation: Mapping[str, Any],
     *,
     receipt_sha256: str,
     attestation_response_sha256: str,
     tools_catalog_response_sha256: str,
+    lifecycle_observations_response_sha256: str,
     validation_anchor_key: bytes,
 ) -> None:
     if validation.get("schema_version") != PERSISTENT_VALIDATION_SCHEMA_VERSION:
@@ -716,6 +841,13 @@ def _validate_independent_validation(
         raise ProbeError("persistent lifecycle validation is not bound to the attestation response")
     if validation.get("tools_catalog_response_sha256") != tools_catalog_response_sha256:
         raise ProbeError("persistent lifecycle validation is not bound to the tools catalog")
+    if (
+        validation.get("lifecycle_observations_response_sha256")
+        != lifecycle_observations_response_sha256
+    ):
+        raise ProbeError(
+            "persistent lifecycle validation is not bound to lifecycle observations"
+        )
     if validation.get("attestation_signature_verified") is not True:
         raise ProbeError("persistent lifecycle validation did not authenticate attestation signature")
     authority = _require_non_empty_string(validation, "validator_authority", "validation")
@@ -830,6 +962,7 @@ def _build_independent_validation_record(
         label="persistent lifecycle receipt",
     )
     preflight = _record(receipt.get("preflight"), "preflight")
+    lifecycle = _record(receipt.get("lifecycle"), "lifecycle")
     evidence, _ = _read_run_json_artifact(
         run_root=run_root,
         pinned_run_root=pinned_run_root,
@@ -866,12 +999,41 @@ def _build_independent_validation_record(
         tools_catalog.get("response"), "persistent attestation tools_catalog response"
     )
     _validate_runtime_catalog_response(tools_catalog_response)
+    lifecycle_observations = _record(
+        rpc_evidence.get("lifecycle_observations"),
+        "persistent attestation RPC evidence lifecycle_observations",
+    )
+    if lifecycle_observations.get("method") != "agenticOs.lifecycle.observations":
+        raise ProbeError(
+            "persistent attestation lifecycle observations method mismatch"
+        )
+    if _record(
+        lifecycle_observations.get("request_params"),
+        "persistent attestation lifecycle observations request",
+    ):
+        raise ProbeError("persistent attestation lifecycle observations request is not empty")
+    lifecycle_observations_response = _record(
+        lifecycle_observations.get("response"),
+        "persistent attestation lifecycle observations response",
+    )
+    raw_lifecycle_observations_digest = _require_sha256_field(
+        lifecycle_observations,
+        "raw_response_sha256",
+        "persistent attestation RPC evidence lifecycle_observations",
+    )
+    if _canonical_sha256(lifecycle_observations_response) != raw_lifecycle_observations_digest:
+        raise ProbeError("persistent attestation lifecycle observations response mismatch")
+    _validate_lifecycle_observations_response(
+        lifecycle_observations_response,
+        lifecycle=lifecycle,
+    )
     validation: dict[str, Any] = {
         "schema_version": PERSISTENT_VALIDATION_SCHEMA_VERSION,
         "status": "pass",
         "receipt_sha256": _sha256_bytes(receipt_bytes),
         "attestation_response_sha256": _canonical_sha256(response),
         "tools_catalog_response_sha256": _canonical_sha256(tools_catalog_response),
+        "lifecycle_observations_response_sha256": raw_lifecycle_observations_digest,
         "attestation_signature_verified": True,
         "attestation_verification": {
             "schema_version": PERSISTENT_ATTESTATION_VERIFICATION_SCHEMA_VERSION,
@@ -1054,12 +1216,18 @@ def _run_independent_validator(
     *,
     pinned_run_root: _PinnedRunRoot,
     validation_anchor_key: bytes,
+    agentic_sources: list[dict[str, str]],
     timeout: int = 30,
 ) -> None:
+    validator_path = _bound_validator_script_path(
+        agentic_sources=agentic_sources,
+        pinned_run_root=pinned_run_root,
+    )
     validator_env = _validator_env(
         run_root=pinned_run_root,
         validation_anchor_key=validation_anchor_key,
     )
+    validator_env["AGENTIC_OS_PROBE_ROOT"] = str(ROOT.resolve())
     _assert_pinned_run_root_identity(pinned_run_root)
     validation_name = "independent-validation.json"
     try:
@@ -1076,7 +1244,7 @@ def _run_independent_validator(
         os.unlink(validation_name, dir_fd=pinned_run_root.receipts.fd)
     command = [
         sys.executable,
-        str(Path(__file__).resolve()),
+        str(validator_path),
         "__persistent-validator",
         "--run-root-path",
         str(pinned_run_root.original_path),
@@ -1113,6 +1281,18 @@ def _run_independent_validator(
             f"stdout_sha256={_sha256_bytes(proc.stdout.encode())} "
             f"stderr_sha256={_sha256_bytes(proc.stderr.encode())}"
         )
+    try:
+        validation_info = os.stat(
+            validation_name,
+            dir_fd=pinned_run_root.receipts.fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError as exc:
+        raise ProbeError(
+            "persistent lifecycle independent validator produced no validation file"
+        ) from exc
+    if not stat.S_ISREG(validation_info.st_mode):
+        raise ProbeError("persistent lifecycle validation output path is unsafe")
 
 
 def _validate_attestation_signature_binding(
@@ -1548,6 +1728,7 @@ def _validate_persistent_attestation_evidence(
     run_root: Path,
     preflight: Mapping[str, Any],
     attestation: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
     validation: Mapping[str, Any],
     immutable_inputs: Mapping[str, Any],
     runtime_sources: list[dict[str, str]],
@@ -1657,9 +1838,17 @@ def _validate_persistent_attestation_evidence(
     if _canonical_sha256(rpc_evidence) != rpc_evidence_digest:
         raise ProbeError("persistent attestation RPC evidence digest mismatch")
     transcript_records: list[dict[str, Any]] = []
-    for key, method in (
-        ("tools_catalog", "tools.catalog"),
-        ("allow_lease_status", "subagents.allowLease.status"),
+    for key, method, response_validator in (
+        ("tools_catalog", "tools.catalog", _validate_runtime_catalog_response),
+        ("allow_lease_status", "subagents.allowLease.status", None),
+        (
+            "lifecycle_observations",
+            "agenticOs.lifecycle.observations",
+            lambda response: _validate_lifecycle_observations_response(
+                response,
+                lifecycle=lifecycle,
+            ),
+        ),
     ):
         record = _record(rpc_evidence.get(key), f"persistent attestation RPC evidence {key}")
         if record.get("method") != method:
@@ -1675,8 +1864,8 @@ def _validate_persistent_attestation_evidence(
         )
         if _canonical_sha256(response_record) != raw_response_digest:
             raise ProbeError(f"persistent attestation RPC evidence {key} response mismatch")
-        if key == "tools_catalog":
-            _validate_runtime_catalog_response(response_record)
+        if response_validator is not None:
+            response_validator(response_record)
         transcript_records.append(
             {
                 "key": key,
@@ -2128,6 +2317,7 @@ def _persistent_lifecycle_summary(
         run_root=run_root,
         preflight=preflight,
         attestation=attestation,
+        lifecycle=lifecycle,
         validation=validation,
         immutable_inputs=immutable_inputs,
         runtime_sources=runtime_sources,
@@ -2155,11 +2345,22 @@ def _persistent_lifecycle_summary(
     tools_catalog_response = _record(
         tools_catalog.get("response"), "persistent attestation tools_catalog response"
     )
+    lifecycle_observations = _record(
+        rpc_evidence.get("lifecycle_observations"),
+        "persistent attestation RPC evidence lifecycle_observations",
+    )
+    lifecycle_observations_response = _record(
+        lifecycle_observations.get("response"),
+        "persistent attestation lifecycle observations response",
+    )
     _validate_independent_validation(
         validation,
         receipt_sha256=receipt_sha256,
         attestation_response_sha256=_canonical_sha256(response),
         tools_catalog_response_sha256=_canonical_sha256(tools_catalog_response),
+        lifecycle_observations_response_sha256=_canonical_sha256(
+            lifecycle_observations_response
+        ),
         validation_anchor_key=validation_anchor_key,
     )
     soak = _optional_record(receipt.get("soak"))
@@ -2588,6 +2789,7 @@ def _run_persistent_lifecycle_probe_once(
         _run_independent_validator(
             validation_anchor_key=validation_anchor_key,
             pinned_run_root=pinned_run_root,
+            agentic_sources=agentic_sources,
         )
         _assert_pinned_run_root_identity(pinned_run_root)
         payload = _persistent_lifecycle_summary(

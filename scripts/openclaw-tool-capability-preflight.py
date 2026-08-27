@@ -2923,11 +2923,12 @@ def isolated_candidate_openclaw_catalog() -> dict[str, Any]:
     )
 
 
-def installed_negative_baseline_catalog() -> dict[str, Any]:
+def installed_negative_baseline_catalog(*, skip_status_rpc: bool = False) -> dict[str, Any]:
     return live_installed_openclaw_catalog(
         runtime_target="installed_openclaw_negative_baseline",
         include_env_override=False,
         scrub_env_override=True,
+        skip_status_rpc=skip_status_rpc,
     )
 
 
@@ -3597,7 +3598,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.isolated_candidate_openclaw:
                 catalog = isolated_candidate_openclaw_catalog()
             elif args.installed_openclaw_negative_baseline:
-                catalog = installed_negative_baseline_catalog()
+                catalog = installed_negative_baseline_catalog(
+                    skip_status_rpc=args.skip_live_status_rpc
+                )
             else:
                 catalog = live_installed_openclaw_catalog(
                     skip_status_rpc=args.skip_live_status_rpc
