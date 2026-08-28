@@ -113,7 +113,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             "attestation": {
                 "status": "pass",
                 "gateway_endpoint": "ws://127.0.0.1:20189",
-                "gateway_build_id": "06e6e3f",
+                "gateway_build_id": VALID_RUNTIME_HEAD,
                 "executable_content_sha256": "7" * 64,
                 "catalog_sha256": "8" * 64,
                 "contract_vector_sha256": contract_vector_sha256,
@@ -258,7 +258,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "gateway": {
                     "endpoint": f"ws://127.0.0.1:{MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT}",
                     "version": "0.0.0-test",
-                    "build_id": "06e6e3f",
+                    "build_id": receipt["attestation"].get(
+                        "gateway_build_id", VALID_RUNTIME_HEAD
+                    ),
                     "process_identity": "gateway-process:test",
                 },
                 "transport": {
@@ -1481,6 +1483,25 @@ class RealGatewayProbeTests(unittest.TestCase):
                     persistent_evidence_transform=stale_build_id,
                 )
 
+    def test_persistent_summary_rejects_gateway_build_id_short_head_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["attestation"]["gateway_build_id"] = VALID_RUNTIME_HEAD[:7]
+
+            def short_build_id(evidence):
+                response = evidence["attestation"]["response"]
+                response["signed_payload"]["binding"]["gateway"]["build_id"] = (
+                    VALID_RUNTIME_HEAD[:7]
+                )
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtime-head bound"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=short_build_id,
+                )
+
     def test_persistent_summary_rejects_requested_identity_mismatch(self) -> None:
         cases = (
             ("immutable_inputs", "run_id"),
@@ -2116,6 +2137,14 @@ class RealGatewayProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 MODULE, "_source_bindings", return_value=[]
             ), mock.patch.object(
+                MODULE,
+                "_collect_process_containment_boundary_proof",
+                return_value={
+                    "kind": "external-container",
+                    "proof": "host-observed-container-boundary",
+                    "evidence": "unit-test",
+                },
+            ), mock.patch.object(
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
                 MODULE, "_run", side_effect=fake_run
@@ -2223,6 +2252,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                         MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
                     },
                     clear=False,
+                ), mock.patch.object(
+                    MODULE,
+                    "_collect_process_containment_boundary_proof",
+                    return_value={
+                        "kind": "external-container",
+                        "proof": "host-observed-container-boundary",
+                        "evidence": "unit-test",
+                    },
                 ):
                     MODULE.run_probe(root, evidence_file, timeout=1)
                     MODULE.run_probe(root, evidence_file, timeout=1)
@@ -2270,6 +2307,64 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
             self.assertFalse(launched)
+
+    def test_persistent_runner_rejects_self_attested_external_container_boundary(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
+            clear=True,
+        ), mock.patch.object(MODULE.Path, "is_file", return_value=False), mock.patch.object(
+            MODULE,
+            "_read_optional_text",
+            return_value="0::/\n",
+        ):
+            with self.assertRaisesRegex(MODULE.ProbeError, "host-observable"):
+                MODULE._require_process_containment_boundary()
+
+    def test_persistent_runner_accepts_host_observed_external_container_boundary(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
+            clear=True,
+        ), mock.patch.object(MODULE.Path, "is_file", return_value=False), mock.patch.object(
+            MODULE,
+            "_read_optional_text",
+            side_effect=lambda path: (
+                "0::/docker/unit-test\n"
+                if str(path) == "/proc/self/cgroup"
+                else ""
+            ),
+        ):
+            proof = MODULE._require_process_containment_boundary()
+
+        self.assertEqual(proof["kind"], "external-container")
+        self.assertEqual(proof["proof"], "host-observed-container-boundary")
+        self.assertEqual(proof["evidence"], "self_cgroup")
+
+    def test_persistent_runner_rejects_root_cgroup_v2_boundary(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "dedicated-cgroup-v2"},
+            clear=True,
+        ), mock.patch.object(MODULE, "_read_optional_text", return_value="0::/\n"):
+            with self.assertRaisesRegex(MODULE.ProbeError, "not dedicated"):
+                MODULE._require_process_containment_boundary()
+
+    def test_persistent_runner_accepts_host_observed_dedicated_cgroup_v2_boundary(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "dedicated-cgroup-v2"},
+            clear=True,
+        ), mock.patch.object(
+            MODULE,
+            "_read_optional_text",
+            return_value="0::/sys/fs/cgroup/agentic-os-pr45\n",
+        ):
+            proof = MODULE._require_process_containment_boundary()
+
+        self.assertEqual(proof["kind"], "dedicated-cgroup-v2")
+        self.assertEqual(proof["proof"], "host-observed-dedicated-cgroup-v2")
+        self.assertRegex(proof["cgroup_sha256"], r"^[0-9a-f]{64}$")
 
     def test_independent_validator_writes_fresh_authenticated_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

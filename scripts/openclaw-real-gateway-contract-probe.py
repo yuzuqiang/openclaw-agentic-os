@@ -81,6 +81,13 @@ PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
 PROCESS_CONTAINMENT_BOUNDARY_VALUES = frozenset(
     {"dedicated-cgroup-v2", "external-container"}
 )
+PROCESS_CONTAINMENT_CONTAINER_MARKERS = (
+    "docker",
+    "kubepods",
+    "containerd",
+    "libpod",
+    "podman",
+)
 PERSISTENT_REQUIRED_TOOL_NAMES = (
     "agenticOs.runtime.attest",
     "subagents.allowLease.acquire",
@@ -1190,12 +1197,6 @@ def _validate_gateway_build_id(build_id: Any, *, runtime_head: str) -> str:
         raise ProbeError("persistent attestation Gateway build ID is missing")
     if build_id == runtime_head:
         return build_id
-    if (
-        7 <= len(build_id) <= 40
-        and all(character in "0123456789abcdef" for character in build_id)
-        and runtime_head.startswith(build_id)
-    ):
-        return build_id
     raise ProbeError("persistent attestation Gateway build ID is not runtime-head bound")
 
 
@@ -1217,6 +1218,64 @@ def _expected_runtime_source_map(runtime_sources: list[dict[str, str]]) -> dict[
     return expected
 
 
+def _read_optional_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _collect_process_containment_boundary_proof(boundary: str) -> dict[str, str]:
+    proc_self_cgroup = _read_optional_text(Path("/proc/self/cgroup"))
+    proc_one_cgroup = _read_optional_text(Path("/proc/1/cgroup"))
+    mountinfo = _read_optional_text(Path("/proc/self/mountinfo"))
+
+    if boundary == "external-container":
+        marker_evidence: list[str] = []
+        if Path("/.dockerenv").is_file():
+            marker_evidence.append("dockerenv")
+        for label, value in (
+            ("self_cgroup", proc_self_cgroup),
+            ("init_cgroup", proc_one_cgroup),
+            ("mountinfo", mountinfo),
+        ):
+            if value and any(marker in value for marker in PROCESS_CONTAINMENT_CONTAINER_MARKERS):
+                marker_evidence.append(label)
+        if marker_evidence:
+            return {
+                "kind": boundary,
+                "proof": "host-observed-container-boundary",
+                "evidence": ",".join(sorted(set(marker_evidence))),
+            }
+        raise ProbeError("external-container containment boundary is not host-observable")
+
+    if boundary == "dedicated-cgroup-v2":
+        if proc_self_cgroup is None:
+            raise ProbeError("dedicated-cgroup-v2 containment boundary is not host-observable")
+        cgroup_lines = [line.strip() for line in proc_self_cgroup.splitlines() if line.strip()]
+        unified_paths = [
+            line.split("::", 1)[1]
+            for line in cgroup_lines
+            if line.startswith("0::") and "::" in line
+        ]
+        if not unified_paths:
+            raise ProbeError("dedicated-cgroup-v2 containment boundary is not cgroup-v2")
+        accepted_paths = [
+            path
+            for path in unified_paths
+            if path not in {"", "/"} and "agentic-os" in path.lower()
+        ]
+        if accepted_paths:
+            return {
+                "kind": boundary,
+                "proof": "host-observed-dedicated-cgroup-v2",
+                "cgroup_sha256": _sha256_bytes("\n".join(sorted(accepted_paths)).encode()),
+            }
+        raise ProbeError("dedicated-cgroup-v2 containment boundary is not dedicated")
+
+    raise ProbeError("unsupported containment boundary")
+
+
 def _require_process_containment_boundary() -> dict[str, str]:
     boundary = os.environ.get(PROCESS_CONTAINMENT_BOUNDARY_ENV)
     if boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES:
@@ -1224,7 +1283,7 @@ def _require_process_containment_boundary() -> dict[str, str]:
             "persistent lifecycle candidate execution requires an OS process "
             f"containment boundary via {PROCESS_CONTAINMENT_BOUNDARY_ENV}"
         )
-    return {"kind": boundary}
+    return _collect_process_containment_boundary_proof(boundary)
 
 
 def _expected_method_bindings_payload() -> dict[str, dict[str, Any]]:
