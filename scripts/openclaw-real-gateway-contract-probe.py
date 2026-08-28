@@ -632,10 +632,8 @@ def _copy_tracked_cleanup(source: Any, target: Any) -> None:
 
 def _cleanup_process_identities(cleanup: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     identities: list[Mapping[str, Any]] = []
-    for field in ("descendant_identities", "unattributed_process_identities"):
-        value = cleanup.get(field)
-        if not isinstance(value, list):
-            continue
+    value = cleanup.get("descendant_identities")
+    if isinstance(value, list):
         identities.extend(identity for identity in value if isinstance(identity, Mapping))
     return identities
 

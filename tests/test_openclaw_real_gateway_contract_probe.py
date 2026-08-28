@@ -3071,7 +3071,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertTrue(attempted)
         self.assertFalse(reaped)
 
-    def test_unattributed_candidate_era_process_is_killed_but_fails_closed(
+    def test_unattributed_candidate_era_process_is_diagnostic_only(
         self,
     ) -> None:
         pid = 234567
@@ -3089,7 +3089,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 }
             ],
         }
-        process_table_before = {
+        live_unattributed_process = {
             pid: {
                 "pid": pid,
                 "ppid": 1,
@@ -3100,16 +3100,63 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
 
         with mock.patch.object(
-            MODULE, "_process_table", side_effect=[process_table_before, {}]
+            MODULE, "_process_table", return_value=live_unattributed_process
         ), mock.patch.object(MODULE.os, "kill") as kill:
-            self.assertTrue(MODULE._terminate_tracked_process_identities(cleanup))
+            self.assertFalse(MODULE._terminate_tracked_process_identities(cleanup))
             self.assertFalse(
                 MODULE._wait_for_tracked_processes_reaped(
                     cleanup, timeout_seconds=0.0
                 )
             )
 
-        kill.assert_called_once_with(pid, MODULE.signal.SIGKILL)
+        kill.assert_not_called()
+
+    def test_cleanup_signals_only_proven_descendant_not_unattributed_sentinel(
+        self,
+    ) -> None:
+        descendant_pid = 234567
+        sentinel_pid = 345678
+        descendant_identity = {
+            "pid": descendant_pid,
+            "uid": os.getuid(),
+            "start_id": "detached-start",
+        }
+        sentinel_identity = {
+            "pid": sentinel_pid,
+            "uid": os.getuid(),
+            "start_id": "unrelated-sentinel-start",
+        }
+        cleanup = {
+            "tracking_status": "unavailable",
+            "tracking_error": (
+                "unattributed same-UID process appeared without candidate cleanup marker"
+            ),
+            "descendant_identities": [descendant_identity],
+            "unattributed_process_identities": [sentinel_identity],
+        }
+        live_processes = {
+            descendant_pid: {
+                "pid": descendant_pid,
+                "ppid": 1,
+                "pgid": descendant_pid,
+                "uid": os.getuid(),
+                "start_id": "detached-start",
+            },
+            sentinel_pid: {
+                "pid": sentinel_pid,
+                "ppid": 1,
+                "pgid": sentinel_pid,
+                "uid": os.getuid(),
+                "start_id": "unrelated-sentinel-start",
+            },
+        }
+
+        with mock.patch.object(
+            MODULE, "_process_table", return_value=live_processes
+        ), mock.patch.object(MODULE.os, "kill") as kill:
+            self.assertTrue(MODULE._terminate_tracked_process_identities(cleanup))
+
+        kill.assert_called_once_with(descendant_pid, MODULE.signal.SIGKILL)
 
     def test_tracked_descendant_cleanup_skips_reused_pid_identity(self) -> None:
         pid = 234567
@@ -3211,6 +3258,83 @@ class RealGatewayProbeTests(unittest.TestCase):
                     )
 
             self.assertFalse(validator_called)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "pre_validator_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "fail")
+            self.assertFalse(cleanup["process_group_reaped"])
+
+    def test_persistent_runner_blocks_validator_on_unattributed_process_without_kill(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            run_root = root / "run"
+            output = root / "evidence.json"
+            validator_called = False
+            unattributed_pid = 234567
+
+            class Proc:
+                pid = 123456
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+                _agentic_os_process_cleanup = {
+                    "tracking_status": "unavailable",
+                    "tracking_error": "candidate process identity is unavailable",
+                    "descendant_identities": [],
+                    "unattributed_process_identities": [
+                        {
+                            "pid": unattributed_pid,
+                            "uid": os.getuid(),
+                            "start_id": "unrelated-sentinel-start",
+                        }
+                    ],
+                }
+
+            def unexpected_validator(**_kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
+                MODULE, "_git", return_value="agentic-head"
+            ), mock.patch.object(
+                MODULE, "validate_candidate_root", return_value="openclaw-head"
+            ), mock.patch.object(
+                MODULE, "_wait_for_loopback_port_closed", return_value=True
+            ), mock.patch.object(
+                MODULE, "_terminate_process_group", return_value=True
+            ), mock.patch.object(
+                MODULE, "_wait_for_process_group_reaped", return_value=True
+            ), mock.patch.object(
+                MODULE.os, "kill"
+            ) as kill, mock.patch.object(
+                MODULE, "_run_independent_validator", side_effect=unexpected_validator
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "process group alive before validator"
+                ):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head="openclaw-head",
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+
+            self.assertFalse(validator_called)
+            kill.assert_not_called()
             payload = json.loads(output.read_text(encoding="utf-8"))
             cleanup = next(
                 item
