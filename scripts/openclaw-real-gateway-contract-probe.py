@@ -459,14 +459,26 @@ def _process_has_cleanup_marker(pid: int, marker: str) -> bool | None:
 
 
 class _ProcessCleanupTracker:
-    def __init__(self, root_pid: int, cleanup_marker: str | None = None) -> None:
+    def __init__(
+        self,
+        root_pid: int,
+        cleanup_marker: str | None = None,
+        baseline_identities: Mapping[int, Mapping[str, Any]] | None = None,
+        initial_unavailable_error: str | None = None,
+    ) -> None:
         self.root_pid = root_pid
         self.uid = os.getuid()
         self.cleanup_marker = cleanup_marker
         self.cleanup_marker_verified = cleanup_marker is None
+        self.baseline_identities = {
+            pid: dict(identity)
+            for pid, identity in (baseline_identities or {}).items()
+            if isinstance(pid, int) and isinstance(identity, Mapping)
+        }
         self.root_identity: dict[str, Any] | None = None
         self.descendants: dict[int, dict[str, Any]] = {}
-        self.unavailable_error: str | None = None
+        self.unattributed_identities: dict[int, dict[str, Any]] = {}
+        self.unavailable_error = initial_unavailable_error
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -486,6 +498,15 @@ class _ProcessCleanupTracker:
                 with self._lock:
                     self.unavailable_error = str(exc)
 
+    def _is_baseline_process(self, pid: int, record: Mapping[str, Any]) -> bool:
+        baseline_identities = getattr(self, "baseline_identities", {})
+        identity = baseline_identities.get(pid)
+        return isinstance(identity, Mapping) and _identity_matches(record, identity)
+
+    def _mark_unavailable(self, message: str) -> None:
+        if self.unavailable_error is None:
+            self.unavailable_error = message
+
     def _poll_once(self) -> None:
         try:
             records = _process_table()
@@ -493,24 +514,24 @@ class _ProcessCleanupTracker:
             raise ProbeError("process table scan is unavailable") from exc
         root = records.get(self.root_pid)
         with self._lock:
+            if not hasattr(self, "unattributed_identities"):
+                self.unattributed_identities = {}
             if root is not None and root.get("uid") == self.uid:
                 self.root_identity = _process_identity(root)
-                if self.cleanup_marker is not None and not self.cleanup_marker_verified:
+                if self.cleanup_marker is not None:
                     root_has_marker = _process_has_cleanup_marker(
                         self.root_pid, self.cleanup_marker
                     )
                     if root_has_marker is True:
                         self.cleanup_marker_verified = True
                     elif root_has_marker is False:
-                        self.unavailable_error = (
+                        self._mark_unavailable(
                             "candidate cleanup marker is missing from candidate root"
                         )
                     else:
-                        self.unavailable_error = (
-                            "candidate cleanup marker scan is unavailable"
-                        )
+                        self._mark_unavailable("candidate cleanup marker scan is unavailable")
             if self.root_identity is None:
-                raise ProbeError("candidate process identity is unavailable")
+                self._mark_unavailable("candidate process identity is unavailable")
             tracked_pids = {self.root_pid, *self.descendants}
             changed = True
             while changed:
@@ -518,26 +539,45 @@ class _ProcessCleanupTracker:
                 for pid, record in records.items():
                     if pid == self.root_pid or record.get("uid") != self.uid:
                         continue
+                    if pid in self.descendants:
+                        continue
                     marker_matched = False
+                    marker_state = None
                     if (
                         self.cleanup_marker is not None
-                        and self.cleanup_marker_verified
-                        and pid not in self.descendants
                         and record.get("ppid") not in tracked_pids
                         and record.get("pgid") != self.root_pid
                     ):
-                        marker_matched = (
-                            _process_has_cleanup_marker(pid, self.cleanup_marker) is True
+                        marker_state = _process_has_cleanup_marker(
+                            pid, self.cleanup_marker
                         )
+                        marker_matched = marker_state is True
                     if (
                         record.get("ppid") in tracked_pids
                         or record.get("pgid") == self.root_pid
                         or marker_matched
                     ):
-                        if pid not in self.descendants:
+                        self.descendants[pid] = _process_identity(record)
+                        tracked_pids.add(pid)
+                        changed = True
+                    elif (
+                        self.cleanup_marker is not None
+                        and not self._is_baseline_process(pid, record)
+                    ):
+                        if marker_state is None:
+                            marker_state = _process_has_cleanup_marker(
+                                pid, self.cleanup_marker
+                            )
+                        if marker_state is True:
                             self.descendants[pid] = _process_identity(record)
                             tracked_pids.add(pid)
                             changed = True
+                        else:
+                            self.unattributed_identities[pid] = _process_identity(record)
+                            self._mark_unavailable(
+                                "unattributed same-UID process appeared without "
+                                "candidate cleanup marker"
+                            )
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -554,6 +594,12 @@ class _ProcessCleanupTracker:
                 "cleanup_marker_verified": self.cleanup_marker_verified,
                 "descendant_identities": [
                     dict(identity) for identity in self.descendants.values()
+                ],
+                "unattributed_process_identities": [
+                    dict(identity)
+                    for identity in getattr(
+                        self, "unattributed_identities", {}
+                    ).values()
                 ],
                 "tracking_status": (
                     "available" if self.unavailable_error is None else "unavailable"
@@ -584,18 +630,26 @@ def _copy_tracked_cleanup(source: Any, target: Any) -> None:
         target._agentic_os_process_cleanup = value  # type: ignore[attr-defined]
 
 
+def _cleanup_process_identities(cleanup: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    identities: list[Mapping[str, Any]] = []
+    for field in ("descendant_identities", "unattributed_process_identities"):
+        value = cleanup.get(field)
+        if not isinstance(value, list):
+            continue
+        identities.extend(identity for identity in value if isinstance(identity, Mapping))
+    return identities
+
+
 def _terminate_tracked_process_identities(cleanup: Mapping[str, Any] | None) -> bool:
     if cleanup is None:
         return False
-    if cleanup.get("tracking_status") != "available":
+    identities = _cleanup_process_identities(cleanup)
+    if cleanup.get("tracking_status") != "available" and not identities:
         return False
     attempted = False
-    descendants = cleanup.get("descendant_identities")
-    if not isinstance(descendants, list):
+    if not identities:
         return False
-    for identity in descendants:
-        if not isinstance(identity, Mapping):
-            continue
+    for identity in identities:
         try:
             if not _process_identity_alive(identity):
                 continue
@@ -618,23 +672,24 @@ def _wait_for_tracked_processes_reaped(
 ) -> bool:
     if cleanup is None:
         return True
-    if cleanup.get("tracking_status") != "available":
+    identities = _cleanup_process_identities(cleanup)
+    if cleanup.get("tracking_status") != "available" and not identities:
         return False
-    descendants = cleanup.get("descendant_identities")
-    if not isinstance(descendants, list):
-        return False
+    if not identities:
+        return cleanup.get("tracking_status") == "available"
+    expected_status = cleanup.get("tracking_status") == "available"
     deadline = time.monotonic() + timeout_seconds
     while True:
         try:
             alive = [
                 identity
-                for identity in descendants
-                if isinstance(identity, Mapping) and _process_identity_alive(identity)
+                for identity in identities
+                if _process_identity_alive(identity)
             ]
         except ProbeError:
             return False
         if not alive:
-            return True
+            return expected_status
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
@@ -651,6 +706,19 @@ def _run(
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cleanup_marker = secrets.token_hex(32) if start_new_session else None
+    baseline_identities = None
+    initial_tracking_error = None
+    if start_new_session:
+        try:
+            baseline_identities = {
+                pid: _process_identity(record)
+                for pid, record in _process_table().items()
+                if record.get("uid") == os.getuid()
+            }
+        except (OSError, subprocess.SubprocessError, ProbeError):
+            initial_tracking_error = (
+                "process table scan is unavailable before candidate launch"
+            )
     popen_env = env
     if cleanup_marker is not None:
         popen_env = dict(os.environ if env is None else env)
@@ -668,7 +736,14 @@ def _run(
         pass_fds=pass_fds,
     )
     cleanup_tracker = (
-        _ProcessCleanupTracker(proc.pid, cleanup_marker) if start_new_session else None
+        _ProcessCleanupTracker(
+            proc.pid,
+            cleanup_marker,
+            baseline_identities,
+            initial_tracking_error,
+        )
+        if start_new_session
+        else None
     )
     try:
         stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=timeout)

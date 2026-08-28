@@ -2886,6 +2886,126 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn(escaped_pid, tracker.descendants)
         self.assertEqual(tracker.descendants[escaped_pid]["start_id"], "escaped-start")
 
+    def test_cleanup_tracker_fails_closed_on_unmarked_candidate_era_process(
+        self,
+    ) -> None:
+        root_pid = 123456
+        escaped_pid = 234567
+        baseline_pid = 345678
+        marker = "unit-cleanup-marker"
+        tracker = MODULE._ProcessCleanupTracker.__new__(MODULE._ProcessCleanupTracker)
+        tracker.root_pid = root_pid
+        tracker.uid = os.getuid()
+        tracker.cleanup_marker = marker
+        tracker.cleanup_marker_verified = False
+        tracker.baseline_identities = {
+            baseline_pid: {
+                "pid": baseline_pid,
+                "uid": os.getuid(),
+                "start_id": "baseline-start",
+            }
+        }
+        tracker.root_identity = None
+        tracker.descendants = {}
+        tracker.unattributed_identities = {}
+        tracker.unavailable_error = None
+        tracker._lock = MODULE.threading.Lock()
+        records = {
+            root_pid: {
+                "pid": root_pid,
+                "ppid": 1,
+                "pgid": root_pid,
+                "uid": os.getuid(),
+                "start_id": "root-start",
+            },
+            escaped_pid: {
+                "pid": escaped_pid,
+                "ppid": 1,
+                "pgid": escaped_pid,
+                "uid": os.getuid(),
+                "start_id": "escaped-start",
+            },
+            baseline_pid: {
+                "pid": baseline_pid,
+                "ppid": 1,
+                "pgid": baseline_pid,
+                "uid": os.getuid(),
+                "start_id": "baseline-start",
+            },
+        }
+
+        def has_marker(pid, observed_marker):
+            self.assertEqual(observed_marker, marker)
+            return pid == root_pid
+
+        with mock.patch.object(MODULE, "_process_table", return_value=records), mock.patch.object(
+            MODULE, "_process_has_cleanup_marker", side_effect=has_marker
+        ):
+            tracker._poll_once()
+
+        snapshot = tracker.snapshot()
+        self.assertTrue(snapshot["cleanup_marker_verified"])
+        self.assertEqual(snapshot["tracking_status"], "unavailable")
+        self.assertIn("without candidate cleanup marker", snapshot["tracking_error"])
+        self.assertNotIn(escaped_pid, tracker.descendants)
+        self.assertEqual(
+            snapshot["unattributed_process_identities"],
+            [
+                {
+                    "pid": escaped_pid,
+                    "uid": os.getuid(),
+                    "start_id": "escaped-start",
+                }
+            ],
+        )
+
+    def test_cleanup_tracker_records_unmarked_process_when_root_exits_first(
+        self,
+    ) -> None:
+        root_pid = 123456
+        escaped_pid = 234567
+        marker = "unit-cleanup-marker"
+        tracker = MODULE._ProcessCleanupTracker.__new__(MODULE._ProcessCleanupTracker)
+        tracker.root_pid = root_pid
+        tracker.uid = os.getuid()
+        tracker.cleanup_marker = marker
+        tracker.cleanup_marker_verified = False
+        tracker.baseline_identities = {}
+        tracker.root_identity = None
+        tracker.descendants = {}
+        tracker.unattributed_identities = {}
+        tracker.unavailable_error = None
+        tracker._lock = MODULE.threading.Lock()
+        records = {
+            escaped_pid: {
+                "pid": escaped_pid,
+                "ppid": 1,
+                "pgid": escaped_pid,
+                "uid": os.getuid(),
+                "start_id": "escaped-start",
+            }
+        }
+
+        with mock.patch.object(MODULE, "_process_table", return_value=records), mock.patch.object(
+            MODULE, "_process_has_cleanup_marker", return_value=False
+        ):
+            tracker._poll_once()
+
+        snapshot = tracker.snapshot()
+        self.assertIsNone(snapshot["root_identity"])
+        self.assertEqual(snapshot["tracking_status"], "unavailable")
+        self.assertIn("candidate process identity", snapshot["tracking_error"])
+        self.assertEqual(
+            snapshot["unattributed_process_identities"],
+            [
+                {
+                    "pid": escaped_pid,
+                    "uid": os.getuid(),
+                    "start_id": "escaped-start",
+                }
+            ],
+        )
+
     def test_cleanup_tracker_fails_closed_when_root_marker_scan_is_unavailable(
         self,
     ) -> None:
@@ -2950,6 +3070,46 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertTrue(attempted)
         self.assertFalse(reaped)
+
+    def test_unattributed_candidate_era_process_is_killed_but_fails_closed(
+        self,
+    ) -> None:
+        pid = 234567
+        cleanup = {
+            "tracking_status": "unavailable",
+            "tracking_error": (
+                "unattributed same-UID process appeared without candidate cleanup marker"
+            ),
+            "descendant_identities": [],
+            "unattributed_process_identities": [
+                {
+                    "pid": pid,
+                    "uid": os.getuid(),
+                    "start_id": "escaped-start",
+                }
+            ],
+        }
+        process_table_before = {
+            pid: {
+                "pid": pid,
+                "ppid": 1,
+                "pgid": pid,
+                "uid": os.getuid(),
+                "start_id": "escaped-start",
+            }
+        }
+
+        with mock.patch.object(
+            MODULE, "_process_table", side_effect=[process_table_before, {}]
+        ), mock.patch.object(MODULE.os, "kill") as kill:
+            self.assertTrue(MODULE._terminate_tracked_process_identities(cleanup))
+            self.assertFalse(
+                MODULE._wait_for_tracked_processes_reaped(
+                    cleanup, timeout_seconds=0.0
+                )
+            )
+
+        kill.assert_called_once_with(pid, MODULE.signal.SIGKILL)
 
     def test_tracked_descendant_cleanup_skips_reused_pid_identity(self) -> None:
         pid = 234567
