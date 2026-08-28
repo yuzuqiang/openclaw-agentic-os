@@ -1144,6 +1144,21 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     unavailable_subject,
                 )
 
+            unavailable_reviewed_head = copy.deepcopy(validation)
+            unavailable_reviewed_head["implementation_subject"] = {
+                **subject,
+                "reviewed_head": "e" * 40,
+            }
+            unavailable_reviewed_head["invocation"]["reviewed_head"] = "e" * 40
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed head is unavailable",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    unavailable_reviewed_head,
+                )
+
             invocation_mismatch = copy.deepcopy(validation)
             invocation_mismatch["invocation"]["reviewed_head"] = "e" * 40
             with self.assertRaisesRegex(

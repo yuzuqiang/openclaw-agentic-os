@@ -1522,9 +1522,21 @@ def _validate_independent_validation_implementation_subject(
     target = _independent_validation_implementation_head(config)
     if not _git_check(repo_root, ["cat-file", "-e", f"{synthetic_commit}^{{commit}}"]):
         raise MonitorError("independent validation reviewed synthetic commit is unavailable")
+    if not _git_check(repo_root, ["cat-file", "-e", f"{reviewed_head}^{{commit}}"]):
+        raise MonitorError("independent validation reviewed head is unavailable")
+    if not _git_check(repo_root, ["merge-base", "--is-ancestor", reviewed_head, target]):
+        raise MonitorError(
+            "independent validation reviewed head is not an ancestor of the target"
+        )
     if not _git_check(repo_root, ["merge-base", "--is-ancestor", synthetic_commit, target]):
         raise MonitorError(
             "independent validation reviewed synthetic commit is not an ancestor of the target"
+        )
+    if reviewed_head != synthetic_commit and not _git_check(
+        repo_root, ["merge-base", "--is-ancestor", reviewed_head, synthetic_commit]
+    ):
+        raise MonitorError(
+            "independent validation reviewed head is not related to the synthetic commit"
         )
     reviewed = _git_tracked_tree_subject_sha256(
         repo_root,
@@ -1533,6 +1545,13 @@ def _validate_independent_validation_implementation_subject(
     )
     if not hmac.compare_digest(str(tree_sha), reviewed):
         raise MonitorError("independent validation reviewed implementation subject mismatch")
+    reviewed_head_subject = _git_tracked_tree_subject_sha256(
+        repo_root,
+        expected_exclusions,
+        ref=str(reviewed_head),
+    )
+    if not hmac.compare_digest(str(tree_sha), reviewed_head_subject):
+        raise MonitorError("independent validation reviewed head implementation subject mismatch")
     current = _git_tracked_tree_subject_sha256(repo_root, expected_exclusions, ref=target)
     if not hmac.compare_digest(str(tree_sha), current):
         raise MonitorError("independent validation implementation subject mismatch")

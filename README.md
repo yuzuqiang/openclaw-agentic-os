@@ -521,13 +521,22 @@ isolated real-Gateway probe. It refuses dirty candidate worktrees, binds
 downstream OpenClaw head `602cc113bc65877c501c304ef7bbb86d0313eeb6`, adapts to
 the candidate's `scripts/agentic-os-persistent-lifecycle-runner.mts` harness
 when that harness is present, starts the candidate's token-authenticated
-Gateway with isolated runner and Gateway state, and writes hash-only evidence:
+Gateway with isolated runner and Gateway state, requires an external OS
+process-containment boundary for persistent lifecycle execution, and writes
+hash-only evidence:
 
 ```bash
+AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY=external-container \
 python3 scripts/openclaw-real-gateway-contract-probe.py \
   --openclaw-root /path/to/openclaw-candidate \
   --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json
 ```
+
+The containment boundary declaration is intentionally parent-only: without it,
+the persistent lifecycle probe fails before launching candidate code, because a
+same-UID process that detaches and clears cooperative cleanup markers cannot be
+safely killed without an OS-level sandbox such as a container or dedicated
+cgroup. The legacy E2E fallback is unchanged.
 
 No validation-key environment setup is required for this command. The trusted
 probe parent generates an ephemeral 32-byte validation-anchor key when

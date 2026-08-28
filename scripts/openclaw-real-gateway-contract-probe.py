@@ -23,9 +23,14 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 
-ROOT = Path(
-    os.environ.get("AGENTIC_OS_PROBE_ROOT", Path(__file__).resolve().parents[1])
-).resolve()
+PROBE_ROOT_ENV = "AGENTIC_OS_PROBE_ROOT"
+_SCRIPT_ROOT = Path(__file__).resolve().parents[1].resolve()
+_PROBE_ROOT_OVERRIDE = os.environ.get(PROBE_ROOT_ENV)
+if _PROBE_ROOT_OVERRIDE is not None and Path(_PROBE_ROOT_OVERRIDE).resolve() != _SCRIPT_ROOT:
+    raise RuntimeError(
+        f"{PROBE_ROOT_ENV} must match the executing probe script checkout"
+    )
+ROOT = _SCRIPT_ROOT
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
 PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
@@ -72,6 +77,10 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-preload-package:tsx",
 )
 PROCESS_CLEANUP_MARKER_ENV = "AGENTIC_OS_PROCESS_CLEANUP_MARKER"
+PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
+PROCESS_CONTAINMENT_BOUNDARY_VALUES = frozenset(
+    {"dedicated-cgroup-v2", "external-container"}
+)
 PERSISTENT_REQUIRED_TOOL_NAMES = (
     "agenticOs.runtime.attest",
     "subagents.allowLease.acquire",
@@ -1170,6 +1179,54 @@ def _validate_gateway_endpoint(endpoint: Any, *, port: int) -> None:
         raise ProbeError("persistent lifecycle attestation gateway endpoint is not the requested loopback listener")
 
 
+def _validate_gateway_build_id(build_id: Any, *, runtime_head: str) -> str:
+    if (
+        not isinstance(runtime_head, str)
+        or len(runtime_head) != 40
+        or any(character not in "0123456789abcdef" for character in runtime_head)
+    ):
+        raise ProbeError("persistent attestation runtime head is not a full git SHA")
+    if not isinstance(build_id, str) or not build_id:
+        raise ProbeError("persistent attestation Gateway build ID is missing")
+    if build_id == runtime_head:
+        return build_id
+    if (
+        7 <= len(build_id) <= 40
+        and all(character in "0123456789abcdef" for character in build_id)
+        and runtime_head.startswith(build_id)
+    ):
+        return build_id
+    raise ProbeError("persistent attestation Gateway build ID is not runtime-head bound")
+
+
+def _expected_runtime_source_map(runtime_sources: list[dict[str, str]]) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for source in runtime_sources:
+        source_record = _record(source, "source-bound runtime source")
+        source_path = _require_non_empty_string(
+            source_record, "path", "source-bound runtime source"
+        )
+        source_sha256 = _require_sha256_field(
+            source_record, "sha256", "source-bound runtime source"
+        )
+        if source_path in expected:
+            raise ProbeError("source-bound runtime source paths are not unique")
+        expected[source_path] = source_sha256
+    if set(expected) != set(PERSISTENT_RUNTIME_SOURCE_PATHS):
+        raise ProbeError("source-bound runtime sources do not match required candidate paths")
+    return expected
+
+
+def _require_process_containment_boundary() -> dict[str, str]:
+    boundary = os.environ.get(PROCESS_CONTAINMENT_BOUNDARY_ENV)
+    if boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES:
+        raise ProbeError(
+            "persistent lifecycle candidate execution requires an OS process "
+            f"containment boundary via {PROCESS_CONTAINMENT_BOUNDARY_ENV}"
+        )
+    return {"kind": boundary}
+
+
 def _expected_method_bindings_payload() -> dict[str, dict[str, Any]]:
     return {
         logical_name: {
@@ -1204,8 +1261,10 @@ def _validate_signed_attestation_contract(
     *,
     signed_payload: Mapping[str, Any],
     request_params: Mapping[str, Any],
+    runtime_sources: list[dict[str, str]],
     endpoint: str,
     build_id: str,
+    runtime_head: str,
     contract_vector_sha256: str,
     now_epoch_ms: int,
     issued_at_epoch_ms: int,
@@ -1295,6 +1354,7 @@ def _validate_signed_attestation_contract(
     if not isinstance(sources, list) or not sources:
         raise ProbeError("persistent attestation runtime sources must be a non-empty list")
     seen_source_paths: set[str] = set()
+    attested_source_map: dict[str, str] = {}
     for source in sources:
         source_record = _record(source, "persistent attestation runtime source")
         _require_exact_keys(
@@ -1308,7 +1368,11 @@ def _validate_signed_attestation_contract(
         if source_path in seen_source_paths:
             raise ProbeError("persistent attestation runtime source paths are not unique")
         seen_source_paths.add(source_path)
-        _require_sha256_field(source_record, "sha256", "persistent attestation runtime source")
+        attested_source_map[source_path] = _require_sha256_field(
+            source_record, "sha256", "persistent attestation runtime source"
+        )
+    if attested_source_map != _expected_runtime_source_map(runtime_sources):
+        raise ProbeError("persistent attestation runtime sources are not source-bound")
     if binding.get("sources_sha256") != _canonical_sha256(sources):
         raise ProbeError("persistent attestation runtime sources digest mismatch")
 
@@ -1335,6 +1399,7 @@ def _validate_signed_attestation_contract(
     _require_non_empty_string(gateway, "version", "persistent attestation gateway binding")
     if gateway.get("build_id") != build_id:
         raise ProbeError("persistent attestation Gateway build is not signed-payload bound")
+    _validate_gateway_build_id(build_id, runtime_head=runtime_head)
     _require_non_empty_string(
         gateway, "process_identity", "persistent attestation gateway binding"
     )
@@ -2625,8 +2690,10 @@ def _validate_persistent_attestation_evidence(
     _validate_signed_attestation_contract(
         signed_payload=signed_payload,
         request_params=request_params,
+        runtime_sources=runtime_sources,
         endpoint=endpoint,
         build_id=build_id,
+        runtime_head=runtime_head,
         contract_vector_sha256=contract_vector_digest,
         now_epoch_ms=now_epoch_ms,
         issued_at_epoch_ms=issued_at_epoch_ms,
@@ -3867,6 +3934,7 @@ def run_probe(
             head=head,
             agentic_sources=agentic_sources,
         )
+    _require_process_containment_boundary()
     runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
     return _run_persistent_lifecycle_probe(

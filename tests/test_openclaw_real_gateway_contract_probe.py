@@ -5,6 +5,7 @@ import hmac
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -28,6 +29,7 @@ VALIDATION_ANCHOR_HMAC_SECRET = hashlib.sha256(
     b"validation-anchor-domain-for-pr45-review-tests"
 ).digest()
 VALIDATION_ANCHOR_HMAC_SECRET_HEX = VALIDATION_ANCHOR_HMAC_SECRET.hex()
+VALID_RUNTIME_HEAD = "06e6e3f" + "a" * 33
 
 
 class RealGatewayProbeTests(unittest.TestCase):
@@ -76,7 +78,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         return {
             "status": "pass",
             "immutable_inputs": {
-                "runtime_head": "openclaw-head",
+                "runtime_head": VALID_RUNTIME_HEAD,
                 "agentic_os_head": "agentic-head",
                 "contract_vector_sha256": contract_vector_sha256,
                 "run_id": "run-id",
@@ -172,6 +174,17 @@ class RealGatewayProbeTests(unittest.TestCase):
             },
         }
 
+    def _valid_runtime_sources(self) -> list[dict[str, str]]:
+        return [
+            {
+                "path": relative,
+                "sha256": "7" * 64
+                if relative == "openclaw.mjs"
+                else format(index + 8, "x") * 64,
+            }
+            for index, relative in enumerate(MODULE.PERSISTENT_RUNTIME_SOURCE_PATHS)
+        ]
+
     def _valid_runtime_launch_sources(self) -> list[dict[str, str]]:
         return [
             {
@@ -202,7 +215,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
         now_ms = int(time.time() * 1000)
-        source_records = [{"path": "openclaw.mjs", "sha256": "7" * 64}]
+        source_records = self._valid_runtime_sources()
         request_params = {
             "challenge": "challenge-1",
             "client_process_id": "persistent-runner:unit-test",
@@ -312,7 +325,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
         persistent_evidence = {
             "schema_version": MODULE.PERSISTENT_ATTESTATION_SCHEMA_VERSION,
-            "expected_runtime_head": "openclaw-head",
+            "expected_runtime_head": VALID_RUNTIME_HEAD,
             "expected_agentic_os_head": "agentic-head",
             "runtime": {
                 "executable_sha256": "7" * 64,
@@ -454,9 +467,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 run_root=run_root,
                 receipt_file=receipt_file,
                 validation_file=validation_file,
-                head="openclaw-head",
+                head=VALID_RUNTIME_HEAD,
                 agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                runtime_sources=self._valid_runtime_sources(),
                 runtime_launch_sources=self._valid_runtime_launch_sources(),
                 command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                 proc=Proc(),
@@ -498,6 +511,32 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/__init__.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertFalse(hasattr(MODULE, "ADAPTER_PROBE"))
+
+    def test_parent_probe_rejects_external_probe_root_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ)
+            env[MODULE.PROBE_ROOT_ENV] = directory
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import importlib.util, pathlib; "
+                        f"path = pathlib.Path({str(SCRIPT)!r}); "
+                        "spec = importlib.util.spec_from_file_location('probe', path); "
+                        "module = importlib.util.module_from_spec(spec); "
+                        "spec.loader.exec_module(module)"
+                    ),
+                ],
+                cwd=SCRIPT.parents[1],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(MODULE.PROBE_ROOT_ENV, proc.stderr + proc.stdout)
 
     def test_rejects_raw_session_identity(self) -> None:
         with self.assertRaisesRegex(MODULE.ProbeError, "forbidden raw field"):
@@ -1042,9 +1081,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         run_root=run_root,
                         receipt_file=receipt_file,
                         validation_file=validation_file,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
                         runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type(
@@ -1096,9 +1135,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         run_root=run_root,
                         receipt_file=receipt_file,
                         validation_file=validation_file,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
                         runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type(
@@ -1404,6 +1443,44 @@ class RealGatewayProbeTests(unittest.TestCase):
                     with self.assertRaisesRegex(MODULE.ProbeError, "provider secrets"):
                         self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_incomplete_attested_runtime_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            def strip_sources(evidence):
+                response = evidence["attestation"]["response"]
+                signed_payload = response["signed_payload"]
+                sources = [{"path": "openclaw.mjs", "sha256": "7" * 64}]
+                signed_payload["binding"]["sources"] = sources
+                signed_payload["binding"]["sources_sha256"] = MODULE._canonical_sha256(
+                    sources
+                )
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtime sources"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=strip_sources,
+                )
+
+    def test_persistent_summary_rejects_gateway_build_id_not_bound_to_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["attestation"]["gateway_build_id"] = "deadbee"
+
+            def stale_build_id(evidence):
+                response = evidence["attestation"]["response"]
+                response["signed_payload"]["binding"]["gateway"]["build_id"] = "deadbee"
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtime-head bound"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=stale_build_id,
+                )
+
     def test_persistent_summary_rejects_requested_identity_mismatch(self) -> None:
         cases = (
             ("immutable_inputs", "run_id"),
@@ -1517,9 +1594,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         run_root=run_root,
                         receipt_file=receipt_file,
                         validation_file=validation_file,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
                         runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
@@ -1562,9 +1639,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         run_root=run_root,
                         receipt_file=receipt_file,
                         validation_file=validation_file,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
                         runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
@@ -1663,9 +1740,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         run_root=run_root,
                         receipt_file=receipt_file,
                         validation_file=validation_file,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
                         runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
@@ -1776,9 +1853,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         run_root=run_root,
                         receipt_file=receipt_file,
                         validation_file=validation_file,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                        runtime_sources=[{"path": "openclaw.mjs", "sha256": "7" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
                         runtime_launch_sources=self._valid_runtime_launch_sources(),
                         command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                         proc=type("Proc", (), {"stdout": "", "stderr": "", "returncode": 0})(),
@@ -1878,7 +1955,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = fake_run
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: {
                     "status": "pass",
                     "openclaw_head_sha": "openclaw-head",
@@ -1900,7 +1977,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     root,
                     output,
                     timeout=1,
-                    head="openclaw-head",
+                    head=VALID_RUNTIME_HEAD,
                     agentic_sources=[],
                     runtime_sources=[],
                     run_root=run_root,
@@ -2024,12 +2101,16 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "isolated_non_production_gateway": {},
                 }
 
-            with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            with mock.patch.dict(
+                os.environ,
+                {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
+                clear=True,
+            ), mock.patch.object(
                 MODULE.secrets,
                 "token_bytes",
                 return_value=VALIDATION_ANCHOR_HMAC_SECRET,
             ), mock.patch.object(
-                MODULE, "validate_candidate_root", return_value="openclaw-head"
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
             ), mock.patch.object(
                 MODULE, "_candidate_probe_mode", return_value="persistent_lifecycle"
             ), mock.patch.object(
@@ -2132,12 +2213,19 @@ class RealGatewayProbeTests(unittest.TestCase):
                 }
 
             try:
-                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
                 MODULE._source_bindings = lambda *args, **kwargs: []
                 MODULE._run_persistent_lifecycle_probe = fake_run_persistent
-                MODULE.run_probe(root, evidence_file, timeout=1)
-                MODULE.run_probe(root, evidence_file, timeout=1)
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
+                    },
+                    clear=False,
+                ):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+                    MODULE.run_probe(root, evidence_file, timeout=1)
             finally:
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._candidate_probe_mode = original_candidate_probe_mode
@@ -2151,6 +2239,37 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertNotIn("runtime-evidence", run_root.parts)
             self.assertFalse(str(run_root).startswith(str(root.resolve())))
             self.assertEqual(run_root.stat().st_mode & 0o777, 0o700)
+
+    def test_persistent_runner_requires_process_containment_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_source_bindings = MODULE._source_bindings
+            original_run_persistent = MODULE._run_persistent_lifecycle_probe
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            try:
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
+                MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
+                MODULE._source_bindings = lambda *args, **kwargs: []
+                MODULE._run_persistent_lifecycle_probe = fake_run_persistent
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaisesRegex(MODULE.ProbeError, "containment boundary"):
+                        MODULE.run_probe(root, evidence_file, timeout=1)
+            finally:
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._source_bindings = original_source_bindings
+                MODULE._run_persistent_lifecycle_probe = original_run_persistent
+
+            self.assertFalse(launched)
 
     def test_independent_validator_writes_fresh_authenticated_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2565,7 +2684,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                             root,
                             root / "evidence.json",
                             timeout=1,
-                            head="openclaw-head",
+                            head=VALID_RUNTIME_HEAD,
                             agentic_sources=[],
                             runtime_sources=[],
                             run_root=run_root,
@@ -2636,7 +2755,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -2704,7 +2823,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -2773,7 +2892,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -2809,7 +2928,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
-                MODULE, "validate_candidate_root", return_value="openclaw-head"
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
             ), mock.patch.object(
                 MODULE, "_wait_for_loopback_port_closed", return_value=True
             ), mock.patch.object(
@@ -2824,7 +2943,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -3227,7 +3346,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
-                MODULE, "validate_candidate_root", return_value="openclaw-head"
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
             ), mock.patch.object(
                 MODULE, "_wait_for_loopback_port_closed", return_value=True
             ), mock.patch.object(
@@ -3248,7 +3367,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -3305,7 +3424,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
-                MODULE, "validate_candidate_root", return_value="openclaw-head"
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
             ), mock.patch.object(
                 MODULE, "_wait_for_loopback_port_closed", return_value=True
             ), mock.patch.object(
@@ -3324,7 +3443,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -3392,7 +3511,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         root / "evidence.json",
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=run_root,
@@ -3463,7 +3582,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                             root,
                             root / "evidence.json",
                             timeout=1,
-                            head="openclaw-head",
+                            head=VALID_RUNTIME_HEAD,
                             agentic_sources=[],
                             runtime_sources=[],
                             run_root=run_root,
@@ -3995,7 +4114,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         Path(directory),
                         Path(directory) / "evidence.json",
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=Path(directory) / "run",
@@ -4035,7 +4154,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=root / "run",
@@ -4087,7 +4206,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = lambda *args, **kwargs: Proc()
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: {
                     "status": "pass",
@@ -4105,7 +4224,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=root / "run",
@@ -4180,7 +4299,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
                     MODULE, "_git", return_value="agentic-head"
                 ), mock.patch.object(
-                    MODULE, "validate_candidate_root", return_value="openclaw-head"
+                    MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
                 ), mock.patch.object(
                     MODULE, "_runtime_launch_bindings", side_effect=bindings
                 ), mock.patch.object(
@@ -4198,7 +4317,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                             root,
                             output,
                             timeout=1,
-                            head="openclaw-head",
+                            head=VALID_RUNTIME_HEAD,
                             agentic_sources=[],
                             runtime_sources=[],
                             run_root=root / "run",
@@ -4246,7 +4365,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = lambda *args, **kwargs: Proc()
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: {
                     "status": "pass",
@@ -4266,7 +4385,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=root / "run",
@@ -4333,7 +4452,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = fake_run
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
                     MODULE.ProbeError("contradictory receipt")
@@ -4346,7 +4465,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=root / "run",
@@ -4406,7 +4525,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE._run = lambda *args, **kwargs: Proc()
                 MODULE._git = lambda git_root, *args: "agentic-head"
-                MODULE.validate_candidate_root = lambda candidate_root: "openclaw-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None
                 MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
                     MODULE.ProbeError("contradictory receipt")
@@ -4419,7 +4538,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         root,
                         output,
                         timeout=1,
-                        head="openclaw-head",
+                        head=VALID_RUNTIME_HEAD,
                         agentic_sources=[],
                         runtime_sources=[],
                         run_root=root / "run",
