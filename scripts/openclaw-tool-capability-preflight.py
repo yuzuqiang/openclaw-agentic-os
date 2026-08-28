@@ -18,9 +18,11 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import agentic_os
+import agentic_os_runtime_source_contract as runtime_source_contract
 from agentic_os.metadata import (
     MetadataContractError,
     validate_accepted_lease_identity,
@@ -380,16 +382,23 @@ def _source_record_from_snapshot(
     return {"path": relative, "sha256": source_digest_snapshot[relative]}
 
 
-def _runtime_source_digest_snapshot(root: Path) -> dict[str, str]:
-    snapshot: dict[str, str] = {}
-    for pattern in RUNTIME_SOURCE_PATTERNS:
-        for path in sorted((root / "dist").glob(pattern)):
-            snapshot[_relative_source_path(root, path)] = _file_digest(path)
-    for relative in RUNTIME_SOURCE_FILES:
-        path = root / relative
-        if path.exists():
-            snapshot[_relative_source_path(root, path)] = _file_digest(path)
-    return snapshot
+def _runtime_source_digest_snapshot(
+    root: Path, *, persistent_contract: bool = False
+) -> dict[str, str]:
+    if not persistent_contract:
+        snapshot: dict[str, str] = {}
+        for pattern in RUNTIME_SOURCE_PATTERNS:
+            for path in sorted((root / "dist").glob(pattern)):
+                snapshot[_relative_source_path(root, path)] = _file_digest(path)
+        for relative in RUNTIME_SOURCE_FILES:
+            path = root / relative
+            if path.exists():
+                snapshot[_relative_source_path(root, path)] = _file_digest(path)
+        return snapshot
+    try:
+        return runtime_source_contract.runtime_source_digest_snapshot(root)
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise OSError(str(exc)) from exc
 
 
 def _source_records_from_snapshot(snapshot: Mapping[str, str]) -> list[dict[str, str]]:
@@ -1642,9 +1651,12 @@ def _require_runtime_sources_unchanged_after_scan(
     active_catalog_sha256: str | None,
     source_digest_snapshot: Mapping[str, str],
     root: Path,
+    persistent_contract: bool = False,
 ) -> None:
     try:
-        observed_sources = _runtime_source_digest_snapshot(root)
+        observed_sources = _runtime_source_digest_snapshot(
+            root, persistent_contract=persistent_contract
+        )
     except OSError as exc:
         catalog = _runtime_source_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -2971,7 +2983,9 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
         raise RuntimeEvidenceError("persistent runtime expected catalog digest mismatch")
 
     try:
-        source_digest_snapshot = _runtime_source_digest_snapshot(root)
+        source_digest_snapshot = _runtime_source_digest_snapshot(
+            root, persistent_contract=True
+        )
     except OSError as exc:
         raise RuntimeEvidenceError(
             "persistent runtime sources could not be snapshotted"
@@ -3032,6 +3046,7 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
         active_catalog_sha256=active_catalog_sha256,
         source_digest_snapshot=source_digest_snapshot,
         root=root,
+        persistent_contract=True,
     )
     source_bound_rpc_names = _source_bound_gateway_rpc_names(
         gateway_params=gateway_params,
@@ -3186,10 +3201,7 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
             "status_response_sha256": gateway_status["raw_response_sha256"],
             "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         },
-        "sources": [
-            _source_record_from_snapshot(root, path, source_digest_snapshot)
-            for path in source_paths
-        ],
+        "sources": _source_records_from_snapshot(source_digest_snapshot),
         "tools": tools,
     }
 

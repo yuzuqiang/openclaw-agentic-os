@@ -23,6 +23,9 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agentic_os_runtime_source_contract as runtime_source_contract
+
 
 PROBE_ROOT_ENV = "AGENTIC_OS_PROBE_ROOT"
 _SCRIPT_ROOT = Path(__file__).resolve().parents[1].resolve()
@@ -64,15 +67,11 @@ PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION = (
     "agentic-os.persistent-lifecycle-observations.v1"
 )
 PERSISTENT_RUNTIME_SOURCE_PATHS = (
-    "package.json",
-    "openclaw.mjs",
-    PERSISTENT_LIFECYCLE_RUNNER,
-    "src/gateway/agentic-os-runtime-attestation.ts",
-    "src/gateway/agentic-os-runtime-contract-descriptors.ts",
-    "src/gateway/client.ts",
-    "src/utils/message-channel.ts",
+    *runtime_source_contract.PERSISTENT_RUNTIME_SOURCE_PATHS,
 )
-PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS = PERSISTENT_RUNTIME_SOURCE_PATHS
+PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS = (
+    *runtime_source_contract.PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS,
+)
 PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
@@ -1041,57 +1040,25 @@ def _strip_runtime_source_comments(source_text: str) -> str:
 
 
 def _persistent_runtime_source_paths(root: Path) -> tuple[str, ...]:
-    root = root.resolve()
-    queue: list[Path] = []
-    for relative in PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS:
-        path = (root / relative).resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise ProbeError("persistent runtime source entrypoint escapes root") from exc
-        if not path.is_file():
-            raise ProbeError(
-                f"persistent runtime source entrypoint is missing: {relative}"
-            )
-        queue.append(path)
-
-    seen: set[str] = set()
-    while queue:
-        source_path = queue.pop(0).resolve()
-        relative = _runtime_source_relative_path(root, source_path)
-        if relative in seen:
-            continue
-        seen.add(relative)
-        if source_path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
-            continue
-        try:
-            source_text = source_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise ProbeError(f"runtime source is unavailable: {relative}") from exc
-        except UnicodeDecodeError as exc:
-            raise ProbeError(f"runtime source is not UTF-8: {relative}") from exc
-        for specifier, required in _runtime_source_import_specifiers(source_text):
-            imported = _resolve_runtime_source_import(
-                root=root,
-                importer=source_path,
-                specifier=specifier,
-                required=required,
-            )
-            if imported is None:
-                continue
-            imported_relative = _runtime_source_relative_path(root, imported)
-            if imported_relative not in seen:
-                queue.append(imported)
-    if not seen:
-        raise ProbeError("persistent runtime source closure is empty")
-    return tuple(sorted(seen))
+    try:
+        return runtime_source_contract.runtime_source_paths(root)
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise ProbeError(str(exc)) from exc
 
 
 def _persistent_runtime_source_bindings(root: Path) -> list[dict[str, str]]:
     root = root.resolve()
-    relatives = _persistent_runtime_source_paths(root)
+    try:
+        snapshot = runtime_source_contract.runtime_source_digest_snapshot(root)
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise ProbeError(str(exc)) from exc
+    relatives = tuple(sorted(snapshot))
     tracked = set(_git(root, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
-    missing = sorted(set(relatives) - tracked)
+    missing = sorted(
+        relative
+        for relative in relatives
+        if not relative.startswith("node_modules/") and relative not in tracked
+    )
     if missing:
         raise ProbeError(
             "persistent runtime source closure is not fully committed: " + missing[0]
@@ -1101,16 +1068,7 @@ def _persistent_runtime_source_bindings(root: Path) -> list[dict[str, str]]:
         raise ProbeError(
             "candidate worktree is dirty; persistent runtime source closure is not exact-head"
         )
-    bindings: list[dict[str, str]] = []
-    for relative in relatives:
-        source_path = (root / relative).resolve()
-        bindings.append(
-            {
-                "path": relative,
-                "sha256": _sha256_bytes(source_path.read_bytes()),
-            }
-        )
-    return bindings
+    return runtime_source_contract.source_records_from_snapshot(snapshot)
 
 
 def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -> None:
@@ -1460,6 +1418,16 @@ def _expected_runtime_source_map(runtime_sources: list[dict[str, str]]) -> dict[
     return expected
 
 
+def _expected_install_binding(root: Path) -> dict[str, str]:
+    package_json = root.resolve() / "package.json"
+    if not package_json.is_file():
+        raise ProbeError("persistent attestation candidate package.json is missing")
+    return {
+        "root_sha256": runtime_source_contract.path_sha256(root),
+        "package_json_sha256": _sha256_bytes(package_json.read_bytes()),
+    }
+
+
 def _require_process_containment_boundary_request() -> str:
     boundary = os.environ.get(PROCESS_CONTAINMENT_BOUNDARY_ENV)
     if boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES:
@@ -1492,6 +1460,26 @@ def _process_containment_boundary_receipt(
         )
     if cleanup.get("cleanup_marker_verified") is not True:
         raise ProbeError("process containment cleanup marker was not launcher-verified")
+    launcher_boundary = _record(
+        cleanup.get("launcher_owned_boundary"),
+        "process containment launcher-owned boundary",
+    )
+    _require_exact_keys(
+        launcher_boundary,
+        ("boundary_type", "boundary_id_sha256", "teardown_status", "authority"),
+        "process containment launcher-owned boundary",
+    )
+    if launcher_boundary.get("boundary_type") != requested_boundary:
+        raise ProbeError("process containment boundary type is not launcher-bound")
+    if launcher_boundary.get("authority") != "agentic-os-probe-launcher":
+        raise ProbeError("process containment boundary authority is not launcher-owned")
+    _require_sha256_field(
+        launcher_boundary,
+        "boundary_id_sha256",
+        "process containment launcher-owned boundary",
+    )
+    if launcher_boundary.get("teardown_status") != "confirmed":
+        raise ProbeError("process containment boundary teardown was not confirmed")
     if not process_group_reaped or not port_closed:
         raise ProbeError("process containment cleanup did not prove candidate reaping")
     receipt = {
@@ -1514,6 +1502,7 @@ def _process_containment_boundary_receipt(
         ),
         "unattributed_process_identity_count": 0,
         "cleanup_receipt_sha256": _canonical_sha256(cleanup),
+        "launcher_owned_boundary": dict(launcher_boundary),
     }
     return receipt
 
@@ -1552,6 +1541,7 @@ def _validate_signed_attestation_contract(
     *,
     signed_payload: Mapping[str, Any],
     request_params: Mapping[str, Any],
+    runtime_root: Path,
     runtime_sources: list[dict[str, str]],
     endpoint: str,
     build_id: str,
@@ -1638,6 +1628,11 @@ def _validate_signed_attestation_contract(
     _require_sha256_field(
         install, "package_json_sha256", "persistent attestation install binding"
     )
+    expected_install = _expected_install_binding(runtime_root)
+    if install.get("root_sha256") != expected_install["root_sha256"]:
+        raise ProbeError("persistent attestation install root digest is not candidate-bound")
+    if install.get("package_json_sha256") != expected_install["package_json_sha256"]:
+        raise ProbeError("persistent attestation package.json digest is not candidate-bound")
     _require_non_empty_string(install, "package_name", "persistent attestation install binding")
     _require_non_empty_string(install, "version", "persistent attestation install binding")
 
@@ -2876,6 +2871,7 @@ def _validate_allow_lease_status_response(response: Mapping[str, Any]) -> None:
 
 def _validate_persistent_attestation_evidence(
     *,
+    openclaw_root: Path,
     run_root: Path,
     preflight: Mapping[str, Any],
     attestation: Mapping[str, Any],
@@ -2981,6 +2977,7 @@ def _validate_persistent_attestation_evidence(
     _validate_signed_attestation_contract(
         signed_payload=signed_payload,
         request_params=request_params,
+        runtime_root=openclaw_root,
         runtime_sources=runtime_sources,
         endpoint=endpoint,
         build_id=build_id,
@@ -3518,6 +3515,7 @@ def _persistent_lifecycle_summary(
         pinned_run_root=pinned_run_root,
     )
     _validate_persistent_attestation_evidence(
+        openclaw_root=openclaw_root,
         run_root=run_root,
         preflight=preflight,
         attestation=attestation,

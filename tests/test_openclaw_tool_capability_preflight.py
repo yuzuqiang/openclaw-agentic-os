@@ -247,6 +247,53 @@ def write_persistent_runtime_fixture(root):
     with open(launcher, "w", encoding="utf-8") as handle:
         handle.write("#!/usr/bin/env node\nconsole.log('fixture launcher');\n")
     os.chmod(launcher, 0o755)
+    runtime_sources = {
+        "src/gateway/agentic-os-runtime-attestation.ts": (
+            "import { resolveCommitHash } from '../infra/git-commit.js';\n"
+            "import { resolveOpenClawPackageRootSync } from '../infra/openclaw-root.js';\n"
+            "import { VERSION } from '../version.js';\n"
+            "import { canonicalJson } from './agentic-os-canonical-json.js';\n"
+            "export const attestation = [resolveCommitHash, resolveOpenClawPackageRootSync, VERSION, canonicalJson];\n"
+        ),
+        "src/gateway/agentic-os-runtime-contract-descriptors.ts": (
+            "export const descriptors = [];\n"
+        ),
+        "src/gateway/client.ts": (
+            "import { GatewayClient as BaseGatewayClient } "
+            "from '../../packages/gateway-client/src/index.js';\n"
+            "import { packageRuntime } from 'fixture-runtime';\n"
+            "export const GatewayClient = BaseGatewayClient;\n"
+            "export const runtimePackage = packageRuntime;\n"
+        ),
+        "src/utils/message-channel.ts": (
+            "export { normalizeMessageChannel } from './message-channel-normalize.js';\n"
+        ),
+        "src/gateway/agentic-os-canonical-json.ts": (
+            "export function canonicalJson(v: unknown) { return JSON.stringify(v); }\n"
+        ),
+        "src/infra/git-commit.ts": (
+            "export function resolveCommitHash() { return 'fixture-head'; }\n"
+        ),
+        "src/infra/openclaw-root.ts": (
+            "export function resolveOpenClawPackageRootSync() { return null; }\n"
+        ),
+        "src/version.ts": "export const VERSION = '2026.candidate';\n",
+        "packages/gateway-client/src/index.ts": "export class GatewayClient {}\n",
+        "src/utils/message-channel-normalize.ts": (
+            "export function normalizeMessageChannel() { return 'internal'; }\n"
+        ),
+        "node_modules/fixture-runtime/package.json": (
+            '{"name":"fixture-runtime","main":"index.js"}\n'
+        ),
+        "node_modules/fixture-runtime/index.js": (
+            "export function packageRuntime() { return true; }\n"
+        ),
+    }
+    for relative, content in runtime_sources.items():
+        path = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
     executable = os.path.join(bin_dir, "openclaw")
     with open(executable, "w", encoding="utf-8") as handle:
         handle.write("#!/usr/bin/env sh\nexit 97\n")
@@ -328,7 +375,9 @@ def build_persistent_evidence(
     launcher_sha = file_sha256(fixture["launcher"])
     sources = [
         {"path": path, "sha256": digest}
-        for path, digest in sorted(module._runtime_source_digest_snapshot(Path(root)).items())
+        for path, digest in sorted(
+            module._runtime_source_digest_snapshot(Path(root), persistent_contract=True).items()
+        )
     ]
     signed_payload = {
         "schema_version": "agentic-os.openclaw-attestation.v1",

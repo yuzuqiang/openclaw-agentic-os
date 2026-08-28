@@ -79,6 +79,12 @@ class RealGatewayProbeTests(unittest.TestCase):
             "cleanup_marker_verified": True,
             "descendant_identities": [],
             "unattributed_process_identities": [],
+            "launcher_owned_boundary": {
+                "boundary_type": "external-container",
+                "boundary_id_sha256": "b" * 64,
+                "teardown_status": "confirmed",
+                "authority": "agentic-os-probe-launcher",
+            },
         }
         return proc
 
@@ -230,6 +236,13 @@ class RealGatewayProbeTests(unittest.TestCase):
     ) -> tuple[Path, Path]:
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
+        candidate_root = run_root.parent
+        package_json = candidate_root / "package.json"
+        if not package_json.exists():
+            package_json.write_text(
+                '{"name":"openclaw","version":"0.0.0-test"}\n',
+                encoding="utf-8",
+            )
         now_ms = int(time.time() * 1000)
         source_records = runtime_sources or self._valid_runtime_sources()
         request_params = {
@@ -256,8 +269,12 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "content_sha256": "7" * 64,
                 },
                 "install": {
-                    "root_sha256": "5" * 64,
-                    "package_json_sha256": "4" * 64,
+                    "root_sha256": MODULE.runtime_source_contract.path_sha256(
+                        candidate_root
+                    ),
+                    "package_json_sha256": MODULE._sha256_bytes(
+                        package_json.read_bytes()
+                    ),
                     "package_name": "openclaw",
                     "version": "0.0.0-test",
                 },
@@ -982,6 +999,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "src/gateway/client.ts": (
                     "import { GatewayClient as BaseGatewayClient } "
                     "from '../../packages/gateway-client/src/index.js';\n"
+                    "import { packageRuntime } from 'fixture-runtime';\n"
                 ),
                 "src/utils/message-channel.ts": (
                     "export { normalizeMessageChannel } "
@@ -993,6 +1011,12 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "src/version.ts": "export const VERSION = '0.0.0-test';\n",
                 "packages/gateway-client/src/index.ts": "export class GatewayClient {}\n",
                 "src/utils/message-channel-normalize.ts": "export function normalizeMessageChannel() { return 'internal'; }\n",
+                "node_modules/fixture-runtime/package.json": (
+                    '{"name":"fixture-runtime","main":"index.js"}\n'
+                ),
+                "node_modules/fixture-runtime/index.js": (
+                    "export function packageRuntime() { return true; }\n"
+                ),
             }
             for relative, content in files.items():
                 path = root / relative
@@ -1023,6 +1047,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "src/version.ts",
                 "packages/gateway-client/src/index.ts",
                 "src/utils/message-channel-normalize.ts",
+                "node_modules/fixture-runtime/package.json",
+                "node_modules/fixture-runtime/index.js",
             }
             self.assertTrue(expected_transitive.issubset(set(paths)))
             self.assertNotIn("node:fs", paths)
@@ -1037,6 +1063,28 @@ class RealGatewayProbeTests(unittest.TestCase):
             transitive_source.write_text("export const evil = true;\n", encoding="utf-8")
             with self.assertRaisesRegex(MODULE.ProbeError, "source closure"):
                 MODULE._persistent_runtime_source_bindings(root)
+
+    def test_persistent_runtime_source_closure_fails_on_unbound_package_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "import 'missing-runtime-package';\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: "export const runner = true;\n",
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "package import"):
+                MODULE._persistent_runtime_source_paths(root)
 
     def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1601,6 +1649,24 @@ class RealGatewayProbeTests(unittest.TestCase):
                     receipt,
                     persistent_evidence_transform=strip_transitive_source,
                     runtime_sources=runtime_sources,
+                )
+
+    def test_persistent_summary_rejects_fabricated_install_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            def fabricate_install_digests(evidence):
+                response = evidence["attestation"]["response"]
+                install = response["signed_payload"]["binding"]["install"]
+                install["root_sha256"] = "5" * 64
+                install["package_json_sha256"] = "4" * 64
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "candidate-bound"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=fabricate_install_digests,
                 )
 
     def test_persistent_summary_rejects_gateway_build_id_not_bound_to_head(self) -> None:
@@ -2500,6 +2566,25 @@ class RealGatewayProbeTests(unittest.TestCase):
                 port_closed=True,
             )
 
+    def test_process_containment_receipt_rejects_env_only_external_boundary(self) -> None:
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": {"pid": 1234, "uid": os.getuid(), "start_id": "root"},
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "launcher-owned boundary"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=cleanup,
+                process_group_cleanup_attempted=True,
+                process_group_reaped=True,
+                port_closed=True,
+            )
+
     def test_process_containment_receipt_binds_launcher_cleanup_evidence(self) -> None:
         cleanup = {
             "tracking_status": "available",
@@ -2511,6 +2596,12 @@ class RealGatewayProbeTests(unittest.TestCase):
                 {"pid": 2345, "uid": os.getuid(), "start_id": "child"}
             ],
             "unattributed_process_identities": [],
+            "launcher_owned_boundary": {
+                "boundary_type": "external-container",
+                "boundary_id_sha256": "b" * 64,
+                "teardown_status": "confirmed",
+                "authority": "agentic-os-probe-launcher",
+            },
         }
         receipt = MODULE._process_containment_boundary_receipt(
             requested_boundary="external-container",
@@ -2528,6 +2619,9 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertEqual(receipt["requested_boundary"], "external-container")
         self.assertEqual(receipt["root_pid"], 1234)
         self.assertEqual(receipt["descendant_identity_count"], 1)
+        self.assertEqual(
+            receipt["launcher_owned_boundary"]["boundary_id_sha256"], "b" * 64
+        )
         self.assertEqual(receipt["cleanup_receipt_sha256"], MODULE._canonical_sha256(cleanup))
 
     def test_independent_validator_writes_fresh_authenticated_validation(self) -> None:
