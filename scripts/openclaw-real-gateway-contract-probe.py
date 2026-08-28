@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import signal
 import shutil
@@ -71,6 +72,7 @@ PERSISTENT_RUNTIME_SOURCE_PATHS = (
     "src/gateway/client.ts",
     "src/utils/message-channel.ts",
 )
+PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS = PERSISTENT_RUNTIME_SOURCE_PATHS
 PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
@@ -80,6 +82,40 @@ PROCESS_CLEANUP_MARKER_ENV = "AGENTIC_OS_PROCESS_CLEANUP_MARKER"
 PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
 PROCESS_CONTAINMENT_BOUNDARY_VALUES = frozenset(
     {"dedicated-cgroup-v2", "external-container"}
+)
+PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES = frozenset(
+    (".cjs", ".cts", ".js", ".mjs", ".mts", ".ts", ".tsx")
+)
+PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES = (
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".d.ts",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".json",
+)
+PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES = {
+    ".js": (".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js"),
+    ".mjs": (".mts", ".mjs"),
+    ".cjs": (".cts", ".cjs"),
+}
+STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
+    r"""
+    \b(?:import|export)\s+(?:type\s+)?
+    (?:
+        [^;"']*?\s+from\s*
+      |
+    )
+    ["'](?P<specifier>[^"']+)["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+DYNAMIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
+    r"""\bimport\s*\(\s*["'](?P<specifier>[^"']+)["']\s*\)""",
+    re.VERBOSE,
 )
 PERSISTENT_REQUIRED_TOOL_NAMES = (
     "agenticOs.runtime.attest",
@@ -866,6 +902,217 @@ def _source_bindings(root: Path, relatives: tuple[str, ...]) -> list[dict[str, s
     return [_source_binding(root, relative) for relative in relatives]
 
 
+def _runtime_source_relative_path(root: Path, source_path: Path) -> str:
+    root = root.resolve()
+    source_path = source_path.resolve()
+    try:
+        return source_path.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ProbeError("runtime source import escapes the OpenClaw candidate root") from exc
+
+
+def _runtime_source_import_candidates(base: Path) -> list[Path]:
+    candidates: list[Path] = []
+    if base.suffix:
+        candidates.append(base)
+        for suffix in PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES.get(
+            base.suffix, (base.suffix,)
+        ):
+            candidates.append(base.with_suffix(suffix))
+    else:
+        candidates.append(base)
+        candidates.extend(
+            Path(f"{base}{suffix}") for suffix in PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES
+        )
+        candidates.extend(
+            base / f"index{suffix}" for suffix in PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES
+        )
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
+
+
+def _resolve_runtime_source_import(
+    *,
+    root: Path,
+    importer: Path,
+    specifier: str,
+    required: bool,
+) -> Path | None:
+    normalized = specifier.split("?", 1)[0].split("#", 1)[0]
+    if not normalized.startswith("."):
+        return None
+    root = root.resolve()
+    base = (importer.parent / normalized).resolve()
+    try:
+        base.relative_to(root)
+    except ValueError as exc:
+        raise ProbeError("runtime source import escapes the OpenClaw candidate root") from exc
+    for candidate in _runtime_source_import_candidates(base):
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ProbeError(
+                "runtime source import escapes the OpenClaw candidate root"
+            ) from exc
+        if resolved.is_file():
+            return resolved
+    if required:
+        importer_relative = _runtime_source_relative_path(root, importer)
+        raise ProbeError(
+            "runtime source import could not be resolved: "
+            f"{importer_relative} imports {specifier}"
+        )
+    return None
+
+
+def _runtime_source_import_specifiers(source_text: str) -> list[tuple[str, bool]]:
+    source_text = _strip_runtime_source_comments(source_text)
+    specifiers: list[tuple[str, bool]] = []
+    specifiers.extend(
+        (match.group("specifier"), True)
+        for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
+    )
+    specifiers.extend(
+        (match.group("specifier"), False)
+        for match in DYNAMIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
+    )
+    return specifiers
+
+
+def _strip_runtime_source_comments(source_text: str) -> str:
+    output: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                output.append(character)
+                state = "code"
+            else:
+                output.append(" ")
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                output.extend((" ", " "))
+                index += 2
+                state = "code"
+            else:
+                output.append("\n" if character == "\n" else " ")
+                index += 1
+            continue
+        if state == "string":
+            output.append(character)
+            if character == "\\" and index + 1 < len(source_text):
+                output.append(source_text[index + 1])
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            output.extend((" ", " "))
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            output.extend((" ", " "))
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
+def _persistent_runtime_source_paths(root: Path) -> tuple[str, ...]:
+    root = root.resolve()
+    queue: list[Path] = []
+    for relative in PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS:
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ProbeError("persistent runtime source entrypoint escapes root") from exc
+        if not path.is_file():
+            raise ProbeError(
+                f"persistent runtime source entrypoint is missing: {relative}"
+            )
+        queue.append(path)
+
+    seen: set[str] = set()
+    while queue:
+        source_path = queue.pop(0).resolve()
+        relative = _runtime_source_relative_path(root, source_path)
+        if relative in seen:
+            continue
+        seen.add(relative)
+        if source_path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
+            continue
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ProbeError(f"runtime source is unavailable: {relative}") from exc
+        except UnicodeDecodeError as exc:
+            raise ProbeError(f"runtime source is not UTF-8: {relative}") from exc
+        for specifier, required in _runtime_source_import_specifiers(source_text):
+            imported = _resolve_runtime_source_import(
+                root=root,
+                importer=source_path,
+                specifier=specifier,
+                required=required,
+            )
+            if imported is None:
+                continue
+            imported_relative = _runtime_source_relative_path(root, imported)
+            if imported_relative not in seen:
+                queue.append(imported)
+    if not seen:
+        raise ProbeError("persistent runtime source closure is empty")
+    return tuple(sorted(seen))
+
+
+def _persistent_runtime_source_bindings(root: Path) -> list[dict[str, str]]:
+    root = root.resolve()
+    relatives = _persistent_runtime_source_paths(root)
+    tracked = set(_git(root, "ls-tree", "-r", "--name-only", "HEAD").splitlines())
+    missing = sorted(set(relatives) - tracked)
+    if missing:
+        raise ProbeError(
+            "persistent runtime source closure is not fully committed: " + missing[0]
+        )
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=normal")
+    if dirty:
+        raise ProbeError(
+            "candidate worktree is dirty; persistent runtime source closure is not exact-head"
+        )
+    bindings: list[dict[str, str]] = []
+    for relative in relatives:
+        source_path = (root / relative).resolve()
+        bindings.append(
+            {
+                "path": relative,
+                "sha256": _sha256_bytes(source_path.read_bytes()),
+            }
+        )
+    return bindings
+
+
 def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -> None:
     current_sources = _source_bindings(ROOT, AGENTIC_SOURCE_PATHS)
     expected = {
@@ -1200,14 +1447,16 @@ def _expected_runtime_source_map(runtime_sources: list[dict[str, str]]) -> dict[
         source_path = _require_non_empty_string(
             source_record, "path", "source-bound runtime source"
         )
+        if source_path.startswith("/") or ".." in Path(source_path).parts:
+            raise ProbeError("source-bound runtime source path is invalid")
         source_sha256 = _require_sha256_field(
             source_record, "sha256", "source-bound runtime source"
         )
         if source_path in expected:
             raise ProbeError("source-bound runtime source paths are not unique")
         expected[source_path] = source_sha256
-    if set(expected) != set(PERSISTENT_RUNTIME_SOURCE_PATHS):
-        raise ProbeError("source-bound runtime sources do not match required candidate paths")
+    if not expected:
+        raise ProbeError("source-bound runtime sources must be a non-empty closure")
     return expected
 
 
@@ -3998,7 +4247,7 @@ def run_probe(
             agentic_sources=agentic_sources,
         )
     requested_process_boundary = _require_process_containment_boundary_request()
-    runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
+    runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
     return _run_persistent_lifecycle_probe(
         openclaw_root,

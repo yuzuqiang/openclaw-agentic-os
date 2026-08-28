@@ -186,15 +186,18 @@ class RealGatewayProbeTests(unittest.TestCase):
             },
         }
 
-    def _valid_runtime_sources(self) -> list[dict[str, str]]:
+    def _valid_runtime_sources(
+        self, relatives: tuple[str, ...] | None = None
+    ) -> list[dict[str, str]]:
+        selected = relatives or MODULE.PERSISTENT_RUNTIME_SOURCE_PATHS
         return [
             {
                 "path": relative,
                 "sha256": "7" * 64
                 if relative == "openclaw.mjs"
-                else format(index + 8, "x") * 64,
+                else hashlib.sha256(relative.encode()).hexdigest(),
             }
-            for index, relative in enumerate(MODULE.PERSISTENT_RUNTIME_SOURCE_PATHS)
+            for relative in selected
         ]
 
     def _valid_runtime_launch_sources(self) -> list[dict[str, str]]:
@@ -223,11 +226,12 @@ class RealGatewayProbeTests(unittest.TestCase):
         tools_catalog_response: dict | None = None,
         persistent_evidence_transform=None,
         preflight_evidence_transform=None,
+        runtime_sources: list[dict[str, str]] | None = None,
     ) -> tuple[Path, Path]:
         receipts = run_root / "receipts"
         receipts.mkdir(parents=True)
         now_ms = int(time.time() * 1000)
-        source_records = self._valid_runtime_sources()
+        source_records = runtime_sources or self._valid_runtime_sources()
         request_params = {
             "challenge": "challenge-1",
             "client_process_id": "persistent-runner:unit-test",
@@ -453,8 +457,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         tools_catalog_response: dict | None = None,
         persistent_evidence_transform=None,
         preflight_evidence_transform=None,
+        runtime_sources: list[dict[str, str]] | None = None,
     ):
         run_root = root / "run"
+        runtime_sources = runtime_sources or self._valid_runtime_sources()
         receipt_file, validation_file = self._write_persistent_receipts(
             run_root,
             receipt,
@@ -462,6 +468,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             tools_catalog_response=tools_catalog_response,
             persistent_evidence_transform=persistent_evidence_transform,
             preflight_evidence_transform=preflight_evidence_transform,
+            runtime_sources=runtime_sources,
         )
         original_git = MODULE._git
 
@@ -483,7 +490,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 validation_file=validation_file,
                 head=VALID_RUNTIME_HEAD,
                 agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
-                runtime_sources=self._valid_runtime_sources(),
+                runtime_sources=runtime_sources,
                 runtime_launch_sources=self._valid_runtime_launch_sources(),
                 command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
                 proc=Proc(),
@@ -944,6 +951,92 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(MODULE.ProbeError, "neither"):
                 MODULE._candidate_probe_mode(Path(directory))
+
+    def test_persistent_runtime_source_closure_binds_transitive_local_imports(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "import 'node:fs';\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: "\n".join(
+                    (
+                        "import { canonicalJson } from '../src/gateway/agentic-os-canonical-json.js';",
+                        "import { GatewayClient } from '../src/gateway/client.js';",
+                        "import { GATEWAY_CLIENT_MODES } from '../src/utils/message-channel.js';",
+                    )
+                )
+                + "\n",
+                "src/gateway/agentic-os-runtime-attestation.ts": "\n".join(
+                    (
+                        "import { resolveCommitHash } from '../infra/git-commit.js';",
+                        "import { resolveOpenClawPackageRootSync } from '../infra/openclaw-root.js';",
+                        "import { VERSION } from '../version.js';",
+                        "import { canonicalJson } from './agentic-os-canonical-json.js';",
+                        "import { agenticOsRuntimeContractVector } from './agentic-os-runtime-contract-descriptors.js';",
+                    )
+                )
+                + "\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const methods = [];\n",
+                "src/gateway/client.ts": (
+                    "import { GatewayClient as BaseGatewayClient } "
+                    "from '../../packages/gateway-client/src/index.js';\n"
+                ),
+                "src/utils/message-channel.ts": (
+                    "export { normalizeMessageChannel } "
+                    "from './message-channel-normalize.js';\n"
+                ),
+                "src/gateway/agentic-os-canonical-json.ts": "export function canonicalJson(v: unknown) { return JSON.stringify(v); }\n",
+                "src/infra/git-commit.ts": "export function resolveCommitHash() { return 'head'; }\n",
+                "src/infra/openclaw-root.ts": "export function resolveOpenClawPackageRootSync() { return null; }\n",
+                "src/version.ts": "export const VERSION = '0.0.0-test';\n",
+                "packages/gateway-client/src/index.ts": "export class GatewayClient {}\n",
+                "src/utils/message-channel-normalize.ts": "export function normalizeMessageChannel() { return 'internal'; }\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Agentic OS Test",
+                "GIT_AUTHOR_EMAIL": "agentic-os-test@example.invalid",
+                "GIT_COMMITTER_NAME": "Agentic OS Test",
+                "GIT_COMMITTER_EMAIL": "agentic-os-test@example.invalid",
+            }
+            subprocess.run(["git", "init"], cwd=root, env=env, check=True, stdout=subprocess.PIPE)
+            subprocess.run(["git", "add", "."], cwd=root, env=env, check=True, stdout=subprocess.PIPE)
+            subprocess.run(
+                ["git", "commit", "-m", "runtime source closure fixture"],
+                cwd=root,
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+            expected_transitive = {
+                "src/gateway/agentic-os-canonical-json.ts",
+                "src/infra/git-commit.ts",
+                "src/infra/openclaw-root.ts",
+                "src/version.ts",
+                "packages/gateway-client/src/index.ts",
+                "src/utils/message-channel-normalize.ts",
+            }
+            self.assertTrue(expected_transitive.issubset(set(paths)))
+            self.assertNotIn("node:fs", paths)
+            bindings = MODULE._persistent_runtime_source_bindings(root)
+            by_path = {item["path"]: item["sha256"] for item in bindings}
+            transitive_source = root / "src/gateway/agentic-os-canonical-json.ts"
+            self.assertEqual(
+                by_path["src/gateway/agentic-os-canonical-json.ts"],
+                MODULE._sha256_bytes(transitive_source.read_bytes()),
+            )
+
+            transitive_source.write_text("export const evil = true;\n", encoding="utf-8")
+            with self.assertRaisesRegex(MODULE.ProbeError, "source closure"):
+                MODULE._persistent_runtime_source_bindings(root)
 
     def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1476,6 +1569,38 @@ class RealGatewayProbeTests(unittest.TestCase):
                     Path(directory),
                     receipt,
                     persistent_evidence_transform=strip_sources,
+                )
+
+    def test_persistent_summary_rejects_attestation_missing_transitive_runtime_source(
+        self,
+    ) -> None:
+        transitive_path = "src/gateway/agentic-os-canonical-json.ts"
+        runtime_sources = self._valid_runtime_sources(
+            (*MODULE.PERSISTENT_RUNTIME_SOURCE_PATHS, transitive_path)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            def strip_transitive_source(evidence):
+                response = evidence["attestation"]["response"]
+                signed_payload = response["signed_payload"]
+                sources = [
+                    source
+                    for source in signed_payload["binding"]["sources"]
+                    if source["path"] != transitive_path
+                ]
+                signed_payload["binding"]["sources"] = sources
+                signed_payload["binding"]["sources_sha256"] = MODULE._canonical_sha256(
+                    sources
+                )
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "source-bound"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=strip_transitive_source,
+                    runtime_sources=runtime_sources,
                 )
 
     def test_persistent_summary_rejects_gateway_build_id_not_bound_to_head(self) -> None:
@@ -2149,6 +2274,8 @@ class RealGatewayProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 MODULE, "_source_bindings", return_value=[]
             ), mock.patch.object(
+                MODULE, "_persistent_runtime_source_bindings", return_value=[]
+            ), mock.patch.object(
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
                 MODULE, "_run", side_effect=fake_run
@@ -2232,7 +2359,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             captured = {"run_roots": []}
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_candidate_probe_mode = MODULE._candidate_probe_mode
-            original_source_bindings = MODULE._source_bindings
+            original_persistent_runtime_source_bindings = (
+                MODULE._persistent_runtime_source_bindings
+            )
             original_run_persistent = MODULE._run_persistent_lifecycle_probe
 
             def fake_run_persistent(*args, **kwargs):
@@ -2248,7 +2377,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
-                MODULE._source_bindings = lambda *args, **kwargs: []
+                MODULE._persistent_runtime_source_bindings = lambda *args, **kwargs: []
                 MODULE._run_persistent_lifecycle_probe = fake_run_persistent
                 with mock.patch.dict(
                     os.environ,
@@ -2262,7 +2391,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._candidate_probe_mode = original_candidate_probe_mode
-                MODULE._source_bindings = original_source_bindings
+                MODULE._persistent_runtime_source_bindings = (
+                    original_persistent_runtime_source_bindings
+                )
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
         self.assertEqual(len(captured["run_roots"]), 2)
@@ -2279,7 +2410,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             evidence_file = root / "evidence.json"
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_candidate_probe_mode = MODULE._candidate_probe_mode
-            original_source_bindings = MODULE._source_bindings
+            original_persistent_runtime_source_bindings = (
+                MODULE._persistent_runtime_source_bindings
+            )
             original_run_persistent = MODULE._run_persistent_lifecycle_probe
             launched = False
 
@@ -2291,7 +2424,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             try:
                 MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
-                MODULE._source_bindings = lambda *args, **kwargs: []
+                MODULE._persistent_runtime_source_bindings = lambda *args, **kwargs: []
                 MODULE._run_persistent_lifecycle_probe = fake_run_persistent
                 with mock.patch.dict(os.environ, {}, clear=True):
                     with self.assertRaisesRegex(MODULE.ProbeError, "containment boundary"):
@@ -2299,7 +2432,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._candidate_probe_mode = original_candidate_probe_mode
-                MODULE._source_bindings = original_source_bindings
+                MODULE._persistent_runtime_source_bindings = (
+                    original_persistent_runtime_source_bindings
+                )
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
             self.assertFalse(launched)
