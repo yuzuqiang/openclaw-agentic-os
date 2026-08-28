@@ -70,6 +70,18 @@ class RealGatewayProbeTests(unittest.TestCase):
         finally:
             pinned.close()
 
+    def _attach_valid_process_cleanup(self, proc, *, pid: int = 1234):
+        proc._agentic_os_process_cleanup = {
+            "tracking_status": "available",
+            "root_pid": pid,
+            "root_identity": {"pid": pid, "uid": os.getuid(), "start_id": f"root-{pid}"},
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+        }
+        return proc
+
     def _valid_persistent_receipt(self) -> dict:
         now_ms = int(time.time() * 1000)
         production_health = {"reachable": False}
@@ -593,7 +605,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 temp_path = Path(env["AGENTIC_OS_REAL_GATEWAY_EVIDENCE_FILE"])
                 self.assertNotEqual(temp_path, output)
                 temp_path.write_text(json.dumps({"status": "pass"}), encoding="utf-8")
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             try:
                 MODULE._run = fake_run
@@ -744,7 +756,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "sources": [],
                 }
                 temp_path.write_text(json.dumps(payload), encoding="utf-8")
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             try:
                 MODULE._run = fake_run
@@ -956,7 +968,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 self.assertEqual(Path(command[0]), node.resolve())
                 self.assertEqual(cwd, root)
                 self.assertEqual(env["PATH"], str(bin_dir))
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             with mock.patch.object(
                 MODULE, "_runtime_launch_bindings", self._original_runtime_launch_bindings
@@ -1971,7 +1983,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 captured_command["command"] = list(command)
                 captured_env.update(env)
                 captured_env["candidate_pass_fds"] = pass_fds
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             try:
                 MODULE._run = fake_run
@@ -2099,7 +2111,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             def fake_validator(**kwargs):
                 captured["validator_calls"] = int(captured.get("validator_calls", 0)) + 1
@@ -2136,14 +2148,6 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE, "_candidate_probe_mode", return_value="persistent_lifecycle"
             ), mock.patch.object(
                 MODULE, "_source_bindings", return_value=[]
-            ), mock.patch.object(
-                MODULE,
-                "_collect_process_containment_boundary_proof",
-                return_value={
-                    "kind": "external-container",
-                    "proof": "host-observed-container-boundary",
-                    "evidence": "unit-test",
-                },
             ), mock.patch.object(
                 MODULE, "_git", return_value="agentic-head"
             ), mock.patch.object(
@@ -2252,14 +2256,6 @@ class RealGatewayProbeTests(unittest.TestCase):
                         MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
                     },
                     clear=False,
-                ), mock.patch.object(
-                    MODULE,
-                    "_collect_process_containment_boundary_proof",
-                    return_value={
-                        "kind": "external-container",
-                        "proof": "host-observed-container-boundary",
-                        "evidence": "unit-test",
-                    },
                 ):
                     MODULE.run_probe(root, evidence_file, timeout=1)
                     MODULE.run_probe(root, evidence_file, timeout=1)
@@ -2308,63 +2304,96 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             self.assertFalse(launched)
 
-    def test_persistent_runner_rejects_self_attested_external_container_boundary(self) -> None:
+    def test_persistent_runner_accepts_boundary_env_only_as_launch_request(self) -> None:
         with mock.patch.dict(
             os.environ,
             {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
             clear=True,
-        ), mock.patch.object(MODULE.Path, "is_file", return_value=False), mock.patch.object(
-            MODULE,
-            "_read_optional_text",
-            return_value="0::/\n",
         ):
-            with self.assertRaisesRegex(MODULE.ProbeError, "host-observable"):
-                MODULE._require_process_containment_boundary()
+            self.assertEqual(
+                MODULE._require_process_containment_boundary_request(),
+                "external-container",
+            )
 
-    def test_persistent_runner_accepts_host_observed_external_container_boundary(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
-            clear=True,
-        ), mock.patch.object(MODULE.Path, "is_file", return_value=False), mock.patch.object(
-            MODULE,
-            "_read_optional_text",
-            side_effect=lambda path: (
-                "0::/docker/unit-test\n"
-                if str(path) == "/proc/self/cgroup"
-                else ""
-            ),
-        ):
-            proof = MODULE._require_process_containment_boundary()
+    def test_process_containment_receipt_rejects_caller_only_boundary_without_cleanup(self) -> None:
+        with self.assertRaisesRegex(MODULE.ProbeError, "cleanup receipt"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=None,
+                process_group_cleanup_attempted=True,
+                process_group_reaped=True,
+                port_closed=True,
+            )
 
-        self.assertEqual(proof["kind"], "external-container")
-        self.assertEqual(proof["proof"], "host-observed-container-boundary")
-        self.assertEqual(proof["evidence"], "self_cgroup")
+    def test_process_containment_receipt_rejects_marker_cleared_unattributed_descendant(self) -> None:
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": {"pid": 1234, "uid": os.getuid(), "start_id": "root"},
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [],
+            "unattributed_process_identities": [
+                {"pid": 4321, "uid": os.getuid(), "start_id": "escaped"}
+            ],
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "marker-cleared detached"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=cleanup,
+                process_group_cleanup_attempted=True,
+                process_group_reaped=True,
+                port_closed=True,
+            )
 
-    def test_persistent_runner_rejects_root_cgroup_v2_boundary(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "dedicated-cgroup-v2"},
-            clear=True,
-        ), mock.patch.object(MODULE, "_read_optional_text", return_value="0::/\n"):
-            with self.assertRaisesRegex(MODULE.ProbeError, "not dedicated"):
-                MODULE._require_process_containment_boundary()
+    def test_process_containment_receipt_rejects_unverified_cleanup_marker(self) -> None:
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": {"pid": 1234, "uid": os.getuid(), "start_id": "root"},
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": False,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "marker"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=cleanup,
+                process_group_cleanup_attempted=True,
+                process_group_reaped=True,
+                port_closed=True,
+            )
 
-    def test_persistent_runner_accepts_host_observed_dedicated_cgroup_v2_boundary(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "dedicated-cgroup-v2"},
-            clear=True,
-        ), mock.patch.object(
-            MODULE,
-            "_read_optional_text",
-            return_value="0::/sys/fs/cgroup/agentic-os-pr45\n",
-        ):
-            proof = MODULE._require_process_containment_boundary()
+    def test_process_containment_receipt_binds_launcher_cleanup_evidence(self) -> None:
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": {"pid": 1234, "uid": os.getuid(), "start_id": "root"},
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [
+                {"pid": 2345, "uid": os.getuid(), "start_id": "child"}
+            ],
+            "unattributed_process_identities": [],
+        }
+        receipt = MODULE._process_containment_boundary_receipt(
+            requested_boundary="external-container",
+            cleanup=cleanup,
+            process_group_cleanup_attempted=True,
+            process_group_reaped=True,
+            port_closed=True,
+        )
 
-        self.assertEqual(proof["kind"], "dedicated-cgroup-v2")
-        self.assertEqual(proof["proof"], "host-observed-dedicated-cgroup-v2")
-        self.assertRegex(proof["cgroup_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            receipt["schema_version"],
+            "agentic-os.process-containment-boundary-receipt.v1",
+        )
+        self.assertEqual(receipt["receipt_authority"], "agentic-os-probe-launcher")
+        self.assertEqual(receipt["requested_boundary"], "external-container")
+        self.assertEqual(receipt["root_pid"], 1234)
+        self.assertEqual(receipt["descendant_identity_count"], 1)
+        self.assertEqual(receipt["cleanup_receipt_sha256"], MODULE._canonical_sha256(cleanup))
 
     def test_independent_validator_writes_fresh_authenticated_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2906,7 +2935,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             try:
                 MODULE._run = fake_run
@@ -2965,7 +2994,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 os.chmod(key_path.parent, 0o700)
                 key_path.write_bytes(ATTESTATION_HMAC_SECRET)
                 os.chmod(key_path, 0o600)
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             def unexpected_validator(**kwargs):
                 nonlocal validator_called
@@ -3588,7 +3617,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 )
                 replacement_key_path.write_bytes(replacement_key)
                 os.chmod(replacement_key_path, 0o600)
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             def unexpected_validator(**kwargs):
                 nonlocal validator_called
@@ -3656,7 +3685,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         )
                         replacement_key_path.write_bytes(b"replacement key")
                         os.chmod(replacement_key_path, 0o600)
-                    return Proc()
+                    return self._attach_valid_process_cleanup(Proc())
 
                 def unexpected_validator(**kwargs):
                     nonlocal validator_called
@@ -3878,7 +3907,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     json.dumps({"status": "pass"}),
                     encoding="utf-8",
                 )
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             try:
                 source_binding = [
@@ -4239,7 +4268,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 stderr = "runner stderr"
 
             try:
-                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._run = lambda *args, **kwargs: self._attach_valid_process_cleanup(Proc())
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE._wait_for_loopback_port_closed = lambda port: False
                 MODULE._terminate_process_group = lambda proc: True
@@ -4299,7 +4328,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 stderr = "runner stderr"
 
             try:
-                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._run = lambda *args, **kwargs: self._attach_valid_process_cleanup(Proc())
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None
@@ -4391,7 +4420,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 validator_called = True
 
             try:
-                with mock.patch.object(MODULE, "_run", return_value=Proc()), mock.patch.object(
+                with mock.patch.object(MODULE, "_run", return_value=self._attach_valid_process_cleanup(Proc())), mock.patch.object(
                     MODULE, "_git", return_value="agentic-head"
                 ), mock.patch.object(
                     MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
@@ -4458,7 +4487,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 stderr = "runner stderr"
 
             try:
-                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._run = lambda *args, **kwargs: self._attach_valid_process_cleanup(Proc())
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None
@@ -4538,7 +4567,7 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
                 captured["start_new_session"] = start_new_session
-                return Proc()
+                return self._attach_valid_process_cleanup(Proc())
 
             def fake_terminate(proc):
                 captured["cleanup_attempted"] = True
@@ -4618,7 +4647,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 stderr = "runner stderr"
 
             try:
-                MODULE._run = lambda *args, **kwargs: Proc()
+                MODULE._run = lambda *args, **kwargs: self._attach_valid_process_cleanup(Proc())
                 MODULE._git = lambda git_root, *args: "agentic-head"
                 MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._run_independent_validator = lambda **kwargs: None

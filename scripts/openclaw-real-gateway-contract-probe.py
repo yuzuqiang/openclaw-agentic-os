@@ -81,13 +81,6 @@ PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
 PROCESS_CONTAINMENT_BOUNDARY_VALUES = frozenset(
     {"dedicated-cgroup-v2", "external-container"}
 )
-PROCESS_CONTAINMENT_CONTAINER_MARKERS = (
-    "docker",
-    "kubepods",
-    "containerd",
-    "libpod",
-    "podman",
-)
 PERSISTENT_REQUIRED_TOOL_NAMES = (
     "agenticOs.runtime.attest",
     "subagents.allowLease.acquire",
@@ -1218,72 +1211,62 @@ def _expected_runtime_source_map(runtime_sources: list[dict[str, str]]) -> dict[
     return expected
 
 
-def _read_optional_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-
-def _collect_process_containment_boundary_proof(boundary: str) -> dict[str, str]:
-    proc_self_cgroup = _read_optional_text(Path("/proc/self/cgroup"))
-    proc_one_cgroup = _read_optional_text(Path("/proc/1/cgroup"))
-    mountinfo = _read_optional_text(Path("/proc/self/mountinfo"))
-
-    if boundary == "external-container":
-        marker_evidence: list[str] = []
-        if Path("/.dockerenv").is_file():
-            marker_evidence.append("dockerenv")
-        for label, value in (
-            ("self_cgroup", proc_self_cgroup),
-            ("init_cgroup", proc_one_cgroup),
-            ("mountinfo", mountinfo),
-        ):
-            if value and any(marker in value for marker in PROCESS_CONTAINMENT_CONTAINER_MARKERS):
-                marker_evidence.append(label)
-        if marker_evidence:
-            return {
-                "kind": boundary,
-                "proof": "host-observed-container-boundary",
-                "evidence": ",".join(sorted(set(marker_evidence))),
-            }
-        raise ProbeError("external-container containment boundary is not host-observable")
-
-    if boundary == "dedicated-cgroup-v2":
-        if proc_self_cgroup is None:
-            raise ProbeError("dedicated-cgroup-v2 containment boundary is not host-observable")
-        cgroup_lines = [line.strip() for line in proc_self_cgroup.splitlines() if line.strip()]
-        unified_paths = [
-            line.split("::", 1)[1]
-            for line in cgroup_lines
-            if line.startswith("0::") and "::" in line
-        ]
-        if not unified_paths:
-            raise ProbeError("dedicated-cgroup-v2 containment boundary is not cgroup-v2")
-        accepted_paths = [
-            path
-            for path in unified_paths
-            if path not in {"", "/"} and "agentic-os" in path.lower()
-        ]
-        if accepted_paths:
-            return {
-                "kind": boundary,
-                "proof": "host-observed-dedicated-cgroup-v2",
-                "cgroup_sha256": _sha256_bytes("\n".join(sorted(accepted_paths)).encode()),
-            }
-        raise ProbeError("dedicated-cgroup-v2 containment boundary is not dedicated")
-
-    raise ProbeError("unsupported containment boundary")
-
-
-def _require_process_containment_boundary() -> dict[str, str]:
+def _require_process_containment_boundary_request() -> str:
     boundary = os.environ.get(PROCESS_CONTAINMENT_BOUNDARY_ENV)
     if boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES:
         raise ProbeError(
             "persistent lifecycle candidate execution requires an OS process "
             f"containment boundary via {PROCESS_CONTAINMENT_BOUNDARY_ENV}"
         )
-    return _collect_process_containment_boundary_proof(boundary)
+    return boundary
+
+
+def _process_containment_boundary_receipt(
+    *,
+    requested_boundary: str,
+    cleanup: Mapping[str, Any] | None,
+    process_group_cleanup_attempted: bool,
+    process_group_reaped: bool,
+    port_closed: bool,
+) -> dict[str, Any]:
+    if requested_boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES:
+        raise ProbeError("unsupported containment boundary")
+    if cleanup is None:
+        raise ProbeError("process containment cleanup receipt is unavailable")
+    if cleanup.get("tracking_status") != "available":
+        raise ProbeError("process containment cleanup tracking is unavailable")
+    unattributed = cleanup.get("unattributed_process_identities")
+    if isinstance(unattributed, list) and unattributed:
+        raise ProbeError(
+            "marker-cleared detached candidate descendants require a non-forgeable "
+            "launcher-owned kill-and-escape boundary"
+        )
+    if cleanup.get("cleanup_marker_verified") is not True:
+        raise ProbeError("process containment cleanup marker was not launcher-verified")
+    if not process_group_reaped or not port_closed:
+        raise ProbeError("process containment cleanup did not prove candidate reaping")
+    receipt = {
+        "schema_version": "agentic-os.process-containment-boundary-receipt.v1",
+        "requested_boundary": requested_boundary,
+        "receipt_authority": "agentic-os-probe-launcher",
+        "evidence_authority": "host-process-table-and-loopback-port-observation",
+        "cleanup_method": "process-group-sigkill-plus-tracked-descendant-identity-sigkill",
+        "process_group_cleanup_attempted": process_group_cleanup_attempted,
+        "process_group_reaped": process_group_reaped,
+        "candidate_port_closed": port_closed,
+        "root_pid": cleanup.get("root_pid"),
+        "root_identity": cleanup.get("root_identity"),
+        "cleanup_marker_sha256": cleanup.get("cleanup_marker_sha256"),
+        "cleanup_marker_verified": cleanup.get("cleanup_marker_verified"),
+        "descendant_identity_count": len(
+            cleanup.get("descendant_identities")
+            if isinstance(cleanup.get("descendant_identities"), list)
+            else []
+        ),
+        "unattributed_process_identity_count": 0,
+        "cleanup_receipt_sha256": _canonical_sha256(cleanup),
+    }
+    return receipt
 
 
 def _expected_method_bindings_payload() -> dict[str, dict[str, Any]]:
@@ -3629,6 +3612,7 @@ def _run_persistent_lifecycle_probe_once(
     port: int,
     run_id: str,
     transition_id: str,
+    requested_process_boundary: str,
     validation_anchor_key: bytes,
     pinned_run_root: _PinnedRunRoot,
 ) -> dict[str, Any]:
@@ -3803,6 +3787,10 @@ def _run_persistent_lifecycle_probe_once(
                 port=port,
                 pinned_run_root=pinned_run_root,
             )
+            payload["process_containment_boundary"] = {
+                "requested_boundary": requested_process_boundary,
+                "status": "fail",
+            }
             payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
             payload["fail_closed_matrix"].append(
                 {
@@ -3846,7 +3834,8 @@ def _run_persistent_lifecycle_probe_once(
             validation_anchor_key=validation_anchor_key,
             pinned_run_root=pinned_run_root,
         )
-        if not _wait_for_loopback_port_closed(port):
+        port_closed_after_success = _wait_for_loopback_port_closed(port)
+        if not port_closed_after_success:
             process_group_cleanup_attempted = _terminate_process_group(proc)
             port_closed = _wait_for_loopback_port_closed(port)
             payload = _persistent_failure_summary(
@@ -3861,6 +3850,10 @@ def _run_persistent_lifecycle_probe_once(
                 port=port,
                 pinned_run_root=pinned_run_root,
             )
+            payload["process_containment_boundary"] = {
+                "requested_boundary": requested_process_boundary,
+                "status": "fail",
+            }
             payload["isolated_non_production_gateway"]["candidate_port_closed"] = port_closed
             payload["fail_closed_matrix"].append(
                 {
@@ -3874,7 +3867,16 @@ def _run_persistent_lifecycle_probe_once(
             raise CandidatePortOpenError(
                 "persistent lifecycle runner succeeded but candidate port remained open before cleanup"
             )
+        process_containment_boundary = _process_containment_boundary_receipt(
+            requested_boundary=requested_process_boundary,
+            cleanup=_tracked_cleanup_from_process(proc),
+            process_group_cleanup_attempted=process_group_cleanup_attempted,
+            process_group_reaped=process_group_reaped,
+            port_closed=port_closed_after_success,
+        )
+        payload["process_containment_boundary"] = process_containment_boundary
         payload["isolated_non_production_gateway"]["candidate_port_closed"] = True
+        payload["process_containment_boundary"]["candidate_port_closed"] = True
         _assert_pinned_run_root_identity(pinned_run_root)
         _write_validated_payload(evidence_file, payload)
         return payload
@@ -3928,6 +3930,7 @@ def _run_persistent_lifecycle_probe(
     port: int,
     run_id: str,
     transition_id: str,
+    requested_process_boundary: str = "external-container",
 ) -> dict[str, Any]:
     validation_anchor_key = _select_validation_anchor_key()
     prepared_run_root = _prepare_private_run_root(run_root)
@@ -3946,6 +3949,7 @@ def _run_persistent_lifecycle_probe(
             port=port,
             run_id=run_id,
             transition_id=transition_id,
+            requested_process_boundary=requested_process_boundary,
             validation_anchor_key=validation_anchor_key,
             pinned_run_root=pinned_run_root,
         )
@@ -3993,7 +3997,7 @@ def run_probe(
             head=head,
             agentic_sources=agentic_sources,
         )
-    _require_process_containment_boundary()
+    requested_process_boundary = _require_process_containment_boundary_request()
     runtime_sources = _source_bindings(openclaw_root, PERSISTENT_RUNTIME_SOURCE_PATHS)
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
     return _run_persistent_lifecycle_probe(
@@ -4007,6 +4011,7 @@ def run_probe(
         port=port or PERSISTENT_LIFECYCLE_DEFAULT_PORT,
         run_id=run_id or "agentic-os-real-gateway-contract-probe",
         transition_id=transition_id or "persistent-lifecycle-runtime-readiness",
+        requested_process_boundary=requested_process_boundary,
     )
 
 
