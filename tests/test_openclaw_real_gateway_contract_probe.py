@@ -1278,6 +1278,62 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_binds_commonjs_callable_variants(
+        self,
+    ) -> None:
+        variants = (
+            "require?.('./runner-impl.cjs');\n",
+            "require['resolve']('./runner-impl.cjs');\n",
+            "(require)('./runner-impl.cjs');\n",
+            "`${require('./runner-impl.cjs')}`;\n",
+        )
+        for runner_source in variants:
+            with self.subTest(runner_source=runner_source):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    files = {
+                        "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                        "openclaw.mjs": "export const openclaw = true;\n",
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: runner_source,
+                        "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                        "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                        "src/gateway/client.ts": "export const c = 1;\n",
+                        "src/utils/message-channel.ts": "export const m = 1;\n",
+                        "scripts/runner-impl.cjs": "module.exports = {};\n",
+                    }
+                    for relative, content in files.items():
+                        path = root / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(content, encoding="utf-8")
+
+                    paths = MODULE._persistent_runtime_source_paths(root)
+                    self.assertIn("scripts/runner-impl.cjs", paths)
+
+    def test_persistent_runtime_source_closure_detects_template_import_expression(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                    "`${await import('./runner-impl.mjs')}`;\n"
+                ),
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+                "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+            self.assertIn("scripts/runner-impl.mjs", paths)
+
     def test_persistent_runtime_source_closure_rejects_unresolved_literal_dynamic_import(
         self,
     ) -> None:

@@ -251,9 +251,46 @@ def _commonjs_require_resolve_call_index(
     return call_index
 
 
-def _commonjs_require_specifiers(source_text: str) -> list[str]:
-    specifiers: list[str] = []
-    index = 0
+def _bracketed_require_resolve_call_index(source_text: str, index: int) -> int | None:
+    bracket_index = _skip_js_trivia(source_text, index)
+    if bracket_index >= len(source_text) or source_text[bracket_index] != "[":
+        return None
+    member_index = _skip_js_trivia(source_text, bracket_index + 1)
+    parsed = _parse_quoted_specifier(source_text, member_index)
+    if parsed is None:
+        return None
+    member, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if (
+        member != COMMONJS_REQUIRE_RESOLVE_MEMBER
+        or close_index >= len(source_text)
+        or source_text[close_index] != "]"
+    ):
+        return None
+    return close_index + 1
+
+
+def _optional_require_call_index(source_text: str, index: int) -> int | None:
+    optional_index = _skip_js_trivia(source_text, index)
+    if source_text.startswith("?.", optional_index):
+        return optional_index + 2
+    return None
+
+
+def _parse_commonjs_require_call_index(source_text: str, index: int) -> int:
+    for parser in (
+        _commonjs_require_resolve_call_index,
+        _bracketed_require_resolve_call_index,
+        _optional_require_call_index,
+    ):
+        call_index = parser(source_text, index)
+        if call_index is not None:
+            return call_index
+    return _skip_js_trivia(source_text, index)
+
+
+def _template_expression_end(source_text: str, index: int) -> int:
+    depth = 1
     state = "code"
     quote = ""
     while index < len(source_text):
@@ -293,40 +330,154 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
             quote = character
             index += 1
             continue
-        if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
-            before = source_text[index - 1] if index > 0 else ""
-            after_index = index + len(COMMONJS_REQUIRE_TOKEN)
-            after = source_text[after_index] if after_index < len(source_text) else ""
-            if before and (_is_identifier_character(before) or before == "."):
-                index += 1
-                continue
-            if after and _is_identifier_character(after):
-                index += 1
-                continue
-            call_index = _commonjs_require_resolve_call_index(
-                source_text, after_index
-            )
-            if call_index is None:
-                call_index = _skip_js_trivia(source_text, after_index)
-            call_index = _skip_js_trivia(source_text, call_index)
-            if call_index >= len(source_text) or source_text[call_index] != "(":
-                index += 1
-                continue
-            argument_index = _skip_js_trivia(source_text, call_index + 1)
-            parsed = _parse_quoted_specifier(source_text, argument_index)
-            if parsed is None:
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported dynamic CommonJS require"
-                )
-            specifier, end_index = parsed
-            close_index = _skip_js_trivia(source_text, end_index)
-            if close_index >= len(source_text) or source_text[close_index] != ")":
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported CommonJS require signature"
-                )
-            specifiers.append(specifier)
-            index = close_index + 1
+        if character == "{":
+            depth += 1
+            index += 1
             continue
+        if character == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+            index += 1
+            continue
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unterminated JavaScript template expression"
+    )
+
+
+def _template_expression_chunks(source_text: str, index: int) -> tuple[list[str], int]:
+    chunks: list[str] = []
+    index += 1
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if character == "\\" and index + 1 < len(source_text):
+            index += 2
+            continue
+        if character == "`":
+            return chunks, index + 1
+        if character == "$" and next_character == "{":
+            expression_start = index + 2
+            expression_end = _template_expression_end(source_text, expression_start)
+            chunks.append(source_text[expression_start:expression_end])
+            index = expression_end + 1
+            continue
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unterminated JavaScript template literal"
+    )
+
+
+def _parse_require_invocation(
+    source_text: str, require_index: int
+) -> tuple[str, int] | None:
+    after_index = require_index + len(COMMONJS_REQUIRE_TOKEN)
+    before = source_text[require_index - 1] if require_index > 0 else ""
+    after = source_text[after_index] if after_index < len(source_text) else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    if after and _is_identifier_character(after):
+        return None
+    call_index = _skip_js_trivia(
+        source_text, _parse_commonjs_require_call_index(source_text, after_index)
+    )
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, call_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic CommonJS require"
+        )
+    specifier, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS require signature"
+        )
+    return specifier, close_index + 1
+
+
+def _commonjs_require_specifiers(source_text: str) -> list[str]:
+    specifiers: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                specifiers.extend(_commonjs_require_specifiers(chunk))
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
+            parsed = _parse_require_invocation(source_text, index)
+            if parsed is not None:
+                specifier, index = parsed
+                specifiers.append(specifier)
+                continue
+        if character == "(":
+            require_index = _skip_js_trivia(source_text, index + 1)
+            if source_text.startswith(COMMONJS_REQUIRE_TOKEN, require_index):
+                require_end = require_index + len(COMMONJS_REQUIRE_TOKEN)
+                close_index = _skip_js_trivia(source_text, require_end)
+                if close_index < len(source_text) and source_text[close_index] == ")":
+                    call_index = _skip_js_trivia(source_text, close_index + 1)
+                    if call_index < len(source_text) and source_text[call_index] == "(":
+                        argument_index = _skip_js_trivia(source_text, call_index + 1)
+                        parsed = _parse_quoted_specifier(source_text, argument_index)
+                        if parsed is None:
+                            raise RuntimeSourceContractError(
+                                "runtime source contains an unsupported dynamic CommonJS require"
+                            )
+                        specifier, end_index = parsed
+                        invocation_end = _skip_js_trivia(source_text, end_index)
+                        if (
+                            invocation_end >= len(source_text)
+                            or source_text[invocation_end] != ")"
+                        ):
+                            raise RuntimeSourceContractError(
+                                "runtime source contains an unsupported CommonJS require signature"
+                            )
+                        specifiers.append(specifier)
+                        index = invocation_end + 1
+                        continue
         index += 1
     return specifiers
 
@@ -368,7 +519,12 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
             index += 2
             state = "block_comment"
             continue
-        if character in {"'", '"', "`"}:
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                specifiers.extend(_dynamic_import_specifiers(chunk))
+            continue
+        if character in {"'", '"'}:
             state = "string"
             quote = character
             index += 1
