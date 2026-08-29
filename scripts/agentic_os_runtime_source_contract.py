@@ -75,12 +75,9 @@ STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
-DYNAMIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
-    r"""\bimport\s*\(\s*["'](?P<specifier>[^"']+)["']\s*\)""",
-    re.VERBOSE,
-)
 COMMONJS_REQUIRE_TOKEN = "require"
 COMMONJS_REQUIRE_RESOLVE_SUFFIX = ".resolve"
+DYNAMIC_IMPORT_TOKEN = "import"
 
 
 class RuntimeSourceContractError(RuntimeError):
@@ -301,18 +298,91 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
     return specifiers
 
 
+def _dynamic_import_specifiers(source_text: str) -> list[str]:
+    specifiers: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if source_text.startswith(DYNAMIC_IMPORT_TOKEN, index):
+            before = source_text[index - 1] if index > 0 else ""
+            after_index = index + len(DYNAMIC_IMPORT_TOKEN)
+            after = source_text[after_index] if after_index < len(source_text) else ""
+            if before and (_is_identifier_character(before) or before == "."):
+                index += 1
+                continue
+            if after and _is_identifier_character(after):
+                index += 1
+                continue
+            call_index = _skip_whitespace(source_text, after_index)
+            if call_index >= len(source_text) or source_text[call_index] != "(":
+                index += 1
+                continue
+            argument_index = _skip_whitespace(source_text, call_index + 1)
+            parsed = _parse_quoted_specifier(source_text, argument_index)
+            if parsed is None:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic import"
+                )
+            specifier, end_index = parsed
+            close_index = _skip_whitespace(source_text, end_index)
+            if close_index >= len(source_text) or source_text[close_index] != ")":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic import signature"
+                )
+            specifiers.append(specifier)
+            index = close_index + 1
+            continue
+        index += 1
+    return specifiers
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool]]:
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
+    dynamic_specifiers = _dynamic_import_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool]] = []
     specifiers.extend(
         (match.group("specifier"), True)
         for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
     )
-    specifiers.extend(
-        (match.group("specifier"), False)
-        for match in DYNAMIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
-    )
+    specifiers.extend((specifier, False) for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True) for specifier in commonjs_specifiers)
     return specifiers
 

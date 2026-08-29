@@ -39,8 +39,10 @@ E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
 PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
 PERSISTENT_ATTESTATION_SCHEMA_VERSION = "agentic-os.persistent-attested-preflight-evidence.v1"
+RUNTIME_SOURCE_CONTRACT_HELPER = "scripts/agentic_os_runtime_source_contract.py"
 AGENTIC_SOURCE_PATHS = (
     "scripts/openclaw-real-gateway-contract-probe.py",
+    RUNTIME_SOURCE_CONTRACT_HELPER,
     "scripts/openclaw-live-accepted-session-probe.py",
     "scripts/openclaw-tool-capability-preflight.py",
     "src/agentic_os/__init__.py",
@@ -227,13 +229,40 @@ PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
 }
 STDIN_VALIDATOR_BOOTSTRAP = "\n".join(
     (
-        "import hashlib, sys",
+        "import hashlib, json, sys, types",
         "path = sys.argv[1]",
-        "expected_digest = sys.argv[2]",
-        "source = sys.stdin.buffer.read()",
-        "actual_digest = hashlib.sha256(source).hexdigest()",
-        "if actual_digest != expected_digest:",
+        "expected_bundle_digest = sys.argv[2]",
+        "bundle_bytes = sys.stdin.buffer.read()",
+        "actual_bundle_digest = hashlib.sha256(bundle_bytes).hexdigest()",
+        "if actual_bundle_digest != expected_bundle_digest:",
+        "    raise SystemExit('validator source bundle digest mismatch')",
+        "try:",
+        "    bundle = json.loads(bundle_bytes.decode('utf-8'))",
+        "except Exception as exc:",
+        "    raise SystemExit(f'validator source bundle is invalid: {exc}')",
+        "validator = bundle.get('validator') if isinstance(bundle, dict) else None",
+        "modules = bundle.get('modules') if isinstance(bundle, dict) else None",
+        "helper = modules.get('agentic_os_runtime_source_contract') if isinstance(modules, dict) else None",
+        "if not isinstance(validator, dict) or not isinstance(helper, dict):",
+        "    raise SystemExit('validator source bundle is incomplete')",
+        "source_text = validator.get('source')",
+        "helper_source_text = helper.get('source')",
+        "if validator.get('path') != path or not isinstance(source_text, str):",
+        "    raise SystemExit('validator source bundle path mismatch')",
+        "if not isinstance(helper_source_text, str):",
+        "    raise SystemExit('validator helper source is invalid')",
+        "source = source_text.encode('utf-8')",
+        "helper_source = helper_source_text.encode('utf-8')",
+        "if hashlib.sha256(source).hexdigest() != validator.get('sha256'):",
         "    raise SystemExit('validator source digest mismatch')",
+        "if hashlib.sha256(helper_source).hexdigest() != helper.get('sha256'):",
+        "    raise SystemExit('validator helper source digest mismatch')",
+        "helper_module = types.ModuleType('agentic_os_runtime_source_contract')",
+        "helper_module.__file__ = helper.get('path')",
+        "helper_module.__package__ = ''",
+        "helper_module.__cached__ = None",
+        "sys.modules['agentic_os_runtime_source_contract'] = helper_module",
+        "exec(compile(helper_source, helper_module.__file__, 'exec'), helper_module.__dict__)",
         "sys.argv = [path, *sys.argv[3:]]",
         "globals_dict = {",
         "    '__name__': '__main__',",
@@ -1230,6 +1259,30 @@ def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -
         )
 
 
+def _bound_agentic_source(
+    *,
+    agentic_sources: list[dict[str, str]],
+    relative: str,
+    label: str,
+) -> tuple[bytes, str, str]:
+    source_path = (ROOT / relative).resolve()
+    try:
+        source_bytes = source_path.read_bytes()
+    except OSError as exc:
+        raise ProbeError(f"{label} is unavailable") from exc
+    expected_digest = next(
+        (
+            str(source.get("sha256"))
+            for source in agentic_sources
+            if source.get("path") == relative
+        ),
+        None,
+    )
+    if _sha256_bytes(source_bytes) != expected_digest:
+        raise ProbeError(f"{label} digest changed")
+    return source_bytes, str(expected_digest), str(source_path)
+
+
 def _bound_validator_script_source(
     *,
     agentic_sources: list[dict[str, str]],
@@ -1237,24 +1290,43 @@ def _bound_validator_script_source(
 ) -> tuple[bytes, str, str]:
     _assert_agentic_sources_still_bound(agentic_sources)
     validator_relative = "scripts/openclaw-real-gateway-contract-probe.py"
-    validator_path = (ROOT / validator_relative).resolve()
-    try:
-        source_bytes = validator_path.read_bytes()
-    except OSError as exc:
-        raise ProbeError("persistent lifecycle validator executable is unavailable") from exc
-    expected_digest = next(
-        (
-            str(source.get("sha256"))
-            for source in agentic_sources
-            if source.get("path") == validator_relative
-        ),
-        None,
+    source_bytes, expected_digest, validator_path = _bound_agentic_source(
+        agentic_sources=agentic_sources,
+        relative=validator_relative,
+        label="persistent lifecycle validator executable",
     )
-    if _sha256_bytes(source_bytes) != expected_digest:
-        raise ProbeError("persistent lifecycle validator executable digest changed")
     _assert_pinned_run_root_identity(pinned_run_root)
     _assert_agentic_sources_still_bound(agentic_sources)
-    return source_bytes, expected_digest, str(validator_path)
+    return source_bytes, expected_digest, validator_path
+
+
+def _validator_source_bundle(
+    *,
+    validator_source: bytes,
+    validator_digest: str,
+    validator_path: str,
+    helper_source: bytes,
+    helper_digest: str,
+    helper_path: str,
+) -> bytes:
+    payload = {
+        "schema_version": "agentic-os.persistent-validator-source-bundle.v1",
+        "validator": {
+            "path": validator_path,
+            "sha256": validator_digest,
+            "source": validator_source.decode("utf-8"),
+        },
+        "modules": {
+            "agentic_os_runtime_source_contract": {
+                "path": helper_path,
+                "sha256": helper_digest,
+                "source": helper_source.decode("utf-8"),
+            }
+        },
+    }
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
 
 
 def _runtime_file_binding(path: Path, label: str) -> dict[str, str]:
@@ -2476,6 +2548,19 @@ def _run_independent_validator(
         agentic_sources=agentic_sources,
         pinned_run_root=pinned_run_root,
     )
+    helper_source, helper_digest, helper_path = _bound_agentic_source(
+        agentic_sources=agentic_sources,
+        relative=RUNTIME_SOURCE_CONTRACT_HELPER,
+        label="persistent lifecycle runtime source contract helper",
+    )
+    validator_input = _validator_source_bundle(
+        validator_source=validator_source,
+        validator_digest=validator_digest,
+        validator_path=validator_path,
+        helper_source=helper_source,
+        helper_digest=helper_digest,
+        helper_path=helper_path,
+    )
     validator_env = _validator_env(
         run_root=pinned_run_root,
         validation_anchor_key=validation_anchor_key,
@@ -2502,7 +2587,7 @@ def _run_independent_validator(
         "-c",
         STDIN_VALIDATOR_BOOTSTRAP,
         validator_path,
-        validator_digest,
+        _sha256_bytes(validator_input),
         "__persistent-validator",
         "--run-root-path",
         str(pinned_run_root.original_path),
@@ -2531,7 +2616,7 @@ def _run_independent_validator(
         env=validator_env,
         timeout=timeout,
         pass_fds=pass_fds,
-        input_bytes=validator_source,
+        input_bytes=validator_input,
     )
     _assert_pinned_run_root_identity(pinned_run_root)
     if proc.returncode != 0:

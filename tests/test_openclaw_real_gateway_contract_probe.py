@@ -70,6 +70,20 @@ class RealGatewayProbeTests(unittest.TestCase):
         finally:
             pinned.close()
 
+    def _agentic_source_bindings(self, *relatives: str) -> list[dict[str, str]]:
+        if not relatives:
+            relatives = (
+                "scripts/openclaw-real-gateway-contract-probe.py",
+                MODULE.RUNTIME_SOURCE_CONTRACT_HELPER,
+            )
+        return [
+            {
+                "path": relative,
+                "sha256": MODULE._sha256_bytes((MODULE.ROOT / relative).read_bytes()),
+            }
+            for relative in relatives
+        ]
+
     def _launcher_boundary(
         self,
         *,
@@ -588,6 +602,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         )
 
     def test_binds_current_gateway_and_adapter_sources_without_disabled_probe(self) -> None:
+        self.assertIn(
+            "scripts/agentic_os_runtime_source_contract.py",
+            MODULE.AGENTIC_SOURCE_PATHS,
+        )
         self.assertIn("src/agentic_os/openclaw_adapter.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/runtime_attestation.py", MODULE.AGENTIC_SOURCE_PATHS)
         self.assertIn("src/agentic_os/metadata.py", MODULE.AGENTIC_SOURCE_PATHS)
@@ -762,6 +780,21 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "sha256": "1" * 64,
             }
         ]
+        with mock.patch.object(MODULE, "_source_bindings", return_value=current):
+            with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
+                MODULE._assert_agentic_sources_still_bound(initial)
+
+    def test_post_runner_validator_rebind_rejects_runtime_source_contract_drift(
+        self,
+    ) -> None:
+        initial = self._agentic_source_bindings()
+        current = [
+            dict(source)
+            for source in initial
+        ]
+        for source in current:
+            if source["path"] == MODULE.RUNTIME_SOURCE_CONTRACT_HELPER:
+                source["sha256"] = "1" * 64
         with mock.patch.object(MODULE, "_source_bindings", return_value=current):
             with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
                 MODULE._assert_agentic_sources_still_bound(initial)
@@ -1168,6 +1201,56 @@ class RealGatewayProbeTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
 
             with self.assertRaisesRegex(MODULE.ProbeError, "dynamic CommonJS require"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_computed_dynamic_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                    "const name = './runner-impl.mjs';\nawait import(name);\n"
+                ),
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+                "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_template_dynamic_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                    "const name = 'runner-impl';\nawait import(`./${name}.mjs`);\n"
+                ),
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+                "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
                 MODULE._persistent_runtime_source_paths(root)
 
     def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:
@@ -2852,19 +2935,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
             os.chmod(key_path, 0o600)
             pinned = MODULE._pin_prepared_run_root(run_root.resolve())
-            source_binding = [
-                {
-                    "path": "scripts/openclaw-real-gateway-contract-probe.py",
-                    "sha256": MODULE._sha256_bytes(MODULE.SCRIPT.read_bytes())
-                    if hasattr(MODULE, "SCRIPT")
-                    else MODULE._sha256_bytes(
-                        (
-                            MODULE.ROOT
-                            / "scripts/openclaw-real-gateway-contract-probe.py"
-                        ).read_bytes()
-                    ),
-                }
-            ]
+            source_binding = self._agentic_source_bindings()
             try:
                 with mock.patch.object(
                     MODULE,
@@ -4291,17 +4362,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 return self._attach_valid_process_cleanup(Proc())
 
             try:
-                source_binding = [
-                    {
-                        "path": "scripts/openclaw-real-gateway-contract-probe.py",
-                        "sha256": MODULE._sha256_bytes(
-                            (
-                                MODULE.ROOT
-                                / "scripts/openclaw-real-gateway-contract-probe.py"
-                            ).read_bytes()
-                        ),
-                    }
-                ]
+                source_binding = self._agentic_source_bindings()
                 with mock.patch.object(
                     MODULE,
                     "_run",
@@ -4338,6 +4399,11 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._sha256_bytes(captured["input_bytes"]),
                 command[6],
             )
+            bundle = json.loads(captured["input_bytes"].decode("utf-8"))
+            self.assertEqual(
+                bundle["modules"]["agentic_os_runtime_source_contract"]["path"],
+                str((MODULE.ROOT / MODULE.RUNTIME_SOURCE_CONTRACT_HELPER).resolve()),
+            )
             self.assertEqual(command[7], "__persistent-validator")
             self.assertNotIn("bound-independent-validator.py", command[5])
             self.assertFalse(captured["copy_path_exists_during_launch"])
@@ -4345,6 +4411,53 @@ class RealGatewayProbeTests(unittest.TestCase):
                 self.assertIn(f"--{name}-fd", command)
                 self.assertIn(f"--{name}-device", command)
                 self.assertIn(f"--{name}-inode", command)
+
+    def test_validator_stdin_bootstrap_uses_bundled_source_contract_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts_dir = root / "scripts"
+            scripts_dir.mkdir()
+            helper_path = scripts_dir / "agentic_os_runtime_source_contract.py"
+            marker = root / "helper-marker.txt"
+            helper_path.write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('disk', encoding='utf-8')\nVALUE = 'disk'\n",
+                encoding="utf-8",
+            )
+            validator_path = scripts_dir / "openclaw-real-gateway-contract-probe.py"
+            validator_source = (
+                "import sys\n"
+                "from pathlib import Path\n"
+                f"sys.path.insert(0, {str(scripts_dir)!r})\n"
+                "import agentic_os_runtime_source_contract as helper\n"
+                f"Path({str(marker)!r}).write_text(helper.VALUE, encoding='utf-8')\n"
+            ).encode("utf-8")
+            helper_source = b"VALUE = 'bundled'\n"
+            bundle = MODULE._validator_source_bundle(
+                validator_source=validator_source,
+                validator_digest=MODULE._sha256_bytes(validator_source),
+                validator_path=str(validator_path),
+                helper_source=helper_source,
+                helper_digest=MODULE._sha256_bytes(helper_source),
+                helper_path=str(helper_path),
+            )
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    MODULE.STDIN_VALIDATOR_BOOTSTRAP,
+                    str(validator_path),
+                    MODULE._sha256_bytes(bundle),
+                    "__persistent-validator",
+                ],
+                input=bundle,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
+            self.assertEqual(marker.read_text(encoding="utf-8"), "bundled")
 
     def test_validator_stdin_launch_ignores_post_verification_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4360,17 +4473,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
             os.chmod(key_path, 0o600)
             pinned = MODULE._pin_prepared_run_root(run_root.resolve())
-            source_binding = [
-                {
-                    "path": "scripts/openclaw-real-gateway-contract-probe.py",
-                    "sha256": MODULE._sha256_bytes(
-                        (
-                            MODULE.ROOT
-                            / "scripts/openclaw-real-gateway-contract-probe.py"
-                        ).read_bytes()
-                    ),
-                }
-            ]
+            source_binding = self._agentic_source_bindings()
             original_run = MODULE._run
             tampered_script = run_root / "keys" / "bound-independent-validator.py"
             tampered_marker = run_root / "receipts" / "tampered-validator-ran.json"
@@ -4460,17 +4563,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
             os.chmod(key_path, 0o600)
             pinned = MODULE._pin_prepared_run_root(run_root.resolve())
-            source_binding = [
-                {
-                    "path": "scripts/openclaw-real-gateway-contract-probe.py",
-                    "sha256": MODULE._sha256_bytes(
-                        (
-                            MODULE.ROOT
-                            / "scripts/openclaw-real-gateway-contract-probe.py"
-                        ).read_bytes()
-                    ),
-                }
-            ]
+            source_binding = self._agentic_source_bindings()
             original_bound_source = MODULE._bound_validator_script_source
             original_run = MODULE._run
             retained_fd = -1
