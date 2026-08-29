@@ -76,7 +76,7 @@ STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 COMMONJS_REQUIRE_TOKEN = "require"
-COMMONJS_REQUIRE_RESOLVE_SUFFIX = ".resolve"
+COMMONJS_REQUIRE_RESOLVE_MEMBER = "resolve"
 DYNAMIC_IMPORT_TOKEN = "import"
 
 
@@ -235,6 +235,22 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
     )
 
 
+def _commonjs_require_resolve_call_index(
+    source_text: str, index: int
+) -> int | None:
+    dot_index = _skip_js_trivia(source_text, index)
+    if dot_index >= len(source_text) or source_text[dot_index] != ".":
+        return None
+    resolve_index = _skip_js_trivia(source_text, dot_index + 1)
+    if not source_text.startswith(COMMONJS_REQUIRE_RESOLVE_MEMBER, resolve_index):
+        return None
+    call_index = resolve_index + len(COMMONJS_REQUIRE_RESOLVE_MEMBER)
+    after_resolve = source_text[call_index] if call_index < len(source_text) else ""
+    if after_resolve and _is_identifier_character(after_resolve):
+        return None
+    return call_index
+
+
 def _commonjs_require_specifiers(source_text: str) -> list[str]:
     specifiers: list[str] = []
     index = 0
@@ -287,15 +303,11 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
             if after and _is_identifier_character(after):
                 index += 1
                 continue
-            call_index = _skip_js_trivia(source_text, after_index)
-            if source_text.startswith(COMMONJS_REQUIRE_RESOLVE_SUFFIX, call_index):
-                call_index += len(COMMONJS_REQUIRE_RESOLVE_SUFFIX)
-                after_resolve = (
-                    source_text[call_index] if call_index < len(source_text) else ""
-                )
-                if after_resolve and _is_identifier_character(after_resolve):
-                    index += 1
-                    continue
+            call_index = _commonjs_require_resolve_call_index(
+                source_text, after_index
+            )
+            if call_index is None:
+                call_index = _skip_js_trivia(source_text, after_index)
             call_index = _skip_js_trivia(source_text, call_index)
             if call_index >= len(source_text) or source_text[call_index] != "(":
                 index += 1

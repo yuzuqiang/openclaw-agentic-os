@@ -1092,10 +1092,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                     '{"name":"fixture-runtime","main":"index.cjs"}\n'
                 ),
                 "node_modules/fixture-runtime/index.cjs": (
-                    "const implPath = require /* bound */ .resolve /* target */ ('./impl.cjs');\n"
-                    "const impl = require /* bound */ ('./impl.cjs');\n"
+                    "const implPath = require /* bound */ . /* hidden */ resolve /* target */ ('./impl.cjs');\n"
                     "const dep = require('fixture-runtime-dep');\n"
-                    "module.exports = { packageRuntime() { return impl.packageRuntime() && dep.ok; } };\n"
+                    "module.exports = { packageRuntime() { return Boolean(implPath) && dep.ok; } };\n"
                 ),
                 "node_modules/fixture-runtime/impl.cjs": (
                     "module.exports = { packageRuntime() { return true; } };\n"
@@ -1188,6 +1187,32 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "openclaw.mjs": "export const openclaw = true;\n",
                 MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                     "const name = './runner-impl.cjs';\nrequire /* hidden */ (name);\n"
+                ),
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+                "scripts/runner-impl.cjs": "module.exports = {};\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic CommonJS require"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_require_resolve_with_trivia(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                    "const name = './runner-impl.cjs';\n"
+                    "require . /* hidden */ resolve(name);\n"
                 ),
                 "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
                 "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
