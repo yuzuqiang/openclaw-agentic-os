@@ -1092,8 +1092,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                     '{"name":"fixture-runtime","main":"index.cjs"}\n'
                 ),
                 "node_modules/fixture-runtime/index.cjs": (
-                    "const implPath = require.resolve('./impl.cjs');\n"
-                    "const impl = require('./impl.cjs');\n"
+                    "const implPath = require /* bound */ .resolve /* target */ ('./impl.cjs');\n"
+                    "const impl = require /* bound */ ('./impl.cjs');\n"
                     "const dep = require('fixture-runtime-dep');\n"
                     "module.exports = { packageRuntime() { return impl.packageRuntime() && dep.ok; } };\n"
                 ),
@@ -1187,7 +1187,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
                 "openclaw.mjs": "export const openclaw = true;\n",
                 MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                    "const name = './runner-impl.cjs';\nrequire(name);\n"
+                    "const name = './runner-impl.cjs';\nrequire /* hidden */ (name);\n"
                 ),
                 "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
                 "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
@@ -1212,7 +1212,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
                 "openclaw.mjs": "export const openclaw = true;\n",
                 MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                    "const name = './runner-impl.mjs';\nawait import(name);\n"
+                    "const name = './runner-impl.mjs';\nawait import /* hidden */ (name);\n"
                 ),
                 "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
                 "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
@@ -1237,7 +1237,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
                 "openclaw.mjs": "export const openclaw = true;\n",
                 MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                    "const name = 'runner-impl';\nawait import(`./${name}.mjs`);\n"
+                    "const name = 'runner-impl';\nawait import /* hidden */ (`./${name}.mjs`);\n"
                 ),
                 "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
                 "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
@@ -1251,6 +1251,30 @@ class RealGatewayProbeTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
 
             with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_unresolved_literal_dynamic_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                    "await import /* source closure */ ('./runner-impl.mjs');\n"
+                ),
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "could not be resolved"):
                 MODULE._persistent_runtime_source_paths(root)
 
     def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:

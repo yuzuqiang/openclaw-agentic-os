@@ -193,6 +193,27 @@ def _skip_whitespace(source_text: str, index: int) -> int:
     return index
 
 
+def _skip_js_trivia(source_text: str, index: int) -> int:
+    while index < len(source_text):
+        index = _skip_whitespace(source_text, index)
+        if source_text.startswith("//", index):
+            newline_index = source_text.find("\n", index + 2)
+            if newline_index == -1:
+                return len(source_text)
+            index = newline_index + 1
+            continue
+        if source_text.startswith("/*", index):
+            close_index = source_text.find("*/", index + 2)
+            if close_index == -1:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unterminated JavaScript comment"
+                )
+            index = close_index + 2
+            continue
+        return index
+    return index
+
+
 def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | None:
     if index >= len(source_text) or source_text[index] not in {"'", '"'}:
         return None
@@ -266,7 +287,7 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
             if after and _is_identifier_character(after):
                 index += 1
                 continue
-            call_index = after_index
+            call_index = _skip_js_trivia(source_text, after_index)
             if source_text.startswith(COMMONJS_REQUIRE_RESOLVE_SUFFIX, call_index):
                 call_index += len(COMMONJS_REQUIRE_RESOLVE_SUFFIX)
                 after_resolve = (
@@ -275,18 +296,18 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
                 if after_resolve and _is_identifier_character(after_resolve):
                     index += 1
                     continue
-            call_index = _skip_whitespace(source_text, call_index)
+            call_index = _skip_js_trivia(source_text, call_index)
             if call_index >= len(source_text) or source_text[call_index] != "(":
                 index += 1
                 continue
-            argument_index = _skip_whitespace(source_text, call_index + 1)
+            argument_index = _skip_js_trivia(source_text, call_index + 1)
             parsed = _parse_quoted_specifier(source_text, argument_index)
             if parsed is None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported dynamic CommonJS require"
                 )
             specifier, end_index = parsed
-            close_index = _skip_whitespace(source_text, end_index)
+            close_index = _skip_js_trivia(source_text, end_index)
             if close_index >= len(source_text) or source_text[close_index] != ")":
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported CommonJS require signature"
@@ -350,18 +371,18 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
             if after and _is_identifier_character(after):
                 index += 1
                 continue
-            call_index = _skip_whitespace(source_text, after_index)
+            call_index = _skip_js_trivia(source_text, after_index)
             if call_index >= len(source_text) or source_text[call_index] != "(":
                 index += 1
                 continue
-            argument_index = _skip_whitespace(source_text, call_index + 1)
+            argument_index = _skip_js_trivia(source_text, call_index + 1)
             parsed = _parse_quoted_specifier(source_text, argument_index)
             if parsed is None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported dynamic import"
                 )
             specifier, end_index = parsed
-            close_index = _skip_whitespace(source_text, end_index)
+            close_index = _skip_js_trivia(source_text, end_index)
             if close_index >= len(source_text) or source_text[close_index] != ")":
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported dynamic import signature"
@@ -382,7 +403,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool]]:
         (match.group("specifier"), True)
         for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
     )
-    specifiers.extend((specifier, False) for specifier in dynamic_specifiers)
+    specifiers.extend((specifier, True) for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True) for specifier in commonjs_specifiers)
     return specifiers
 

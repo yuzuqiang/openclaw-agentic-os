@@ -635,8 +635,8 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     '{"name":"fixture-runtime","main":"index.cjs"}\n'
                 ),
                 "node_modules/fixture-runtime/index.cjs": (
-                    "require.resolve('./impl.cjs');\n"
-                    "const impl = require('./impl.cjs');\n"
+                    "require /* bound */ .resolve /* target */ ('./impl.cjs');\n"
+                    "const impl = require /* bound */ ('./impl.cjs');\n"
                     "const dep = require('fixture-runtime-dep');\n"
                     "module.exports = { runtime: impl.runtime && dep.ok };\n"
                 ),
@@ -672,9 +672,23 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self._write_minimal_persistent_runtime(
                 root,
-                "const name = './impl.cjs';\nrequire(name);\n",
+                "const name = './impl.cjs';\nrequire/*hidden*/(name);\n",
             )
             with self.assertRaisesRegex(OSError, "dynamic CommonJS require"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
+
+    def test_persistent_contract_snapshot_rejects_unresolved_literal_dynamic_import(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "await import /* source closure */ ('./impl.mjs');\n",
+            )
+            with self.assertRaisesRegex(OSError, "could not be resolved"):
                 module._runtime_source_digest_snapshot(
                     Path(root), persistent_contract=True
                 )
