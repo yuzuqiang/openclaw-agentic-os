@@ -79,8 +79,40 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
 )
 PROCESS_CLEANUP_MARKER_ENV = "AGENTIC_OS_PROCESS_CLEANUP_MARKER"
 PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
+INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV = (
+    "AGENTIC_OS_INTERNAL_PROCESS_CONTAINMENT_BOUNDARY"
+)
 PROCESS_CONTAINMENT_BOUNDARY_VALUES = frozenset(
     {"dedicated-cgroup-v2", "external-container"}
+)
+LAUNCHER_BOUNDARY_SCHEMA_VERSION = "agentic-os.launcher-owned-process-boundary.v1"
+LAUNCHER_BOUNDARY_AUTHORITY = "agentic-os-probe-launcher"
+LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY = (
+    "host-process-table-and-posix-session-observation"
+)
+LAUNCHER_BOUNDARY_OS_TYPE = "posix-session-process-group"
+LAUNCHER_BOUNDARY_KEYS = (
+    "schema_version",
+    "boundary_type",
+    "boundary_id_sha256",
+    "boundary_nonce_sha256",
+    "teardown_status",
+    "authority",
+    "evidence_authority",
+    "os_boundary_type",
+    "root_pid",
+    "root_identity",
+    "root_process_group_id",
+    "root_session_id",
+    "cleanup_marker_sha256",
+    "command_sha256",
+    "cwd_sha256",
+    "launcher_pid",
+    "launcher_uid",
+    "launcher_parent_pid",
+    "host_os",
+    "host_platform",
+    "created_at_epoch_ms",
 )
 PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES = frozenset(
     (".cjs", ".cts", ".js", ".mjs", ".mts", ".ts", ".tsx")
@@ -453,6 +485,60 @@ def _process_identity(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _process_session_id(pid: int) -> int | None:
+    if not hasattr(os, "getsid"):
+        return None
+    try:
+        return os.getsid(pid)
+    except OSError:
+        return None
+
+
+def _launcher_owned_boundary_record(
+    *,
+    boundary_type: str,
+    root_pid: int,
+    root_record: Mapping[str, Any],
+    root_identity: Mapping[str, Any],
+    cleanup_marker: str,
+    command: list[str],
+    cwd: Path,
+    boundary_nonce: str,
+) -> dict[str, Any]:
+    root_process_group_id = root_record.get("pgid")
+    if not isinstance(root_process_group_id, int):
+        root_process_group_id = None
+    record = {
+        "schema_version": LAUNCHER_BOUNDARY_SCHEMA_VERSION,
+        "boundary_type": boundary_type,
+        "boundary_nonce_sha256": _text_sha256(boundary_nonce),
+        "teardown_status": "pending",
+        "authority": LAUNCHER_BOUNDARY_AUTHORITY,
+        "evidence_authority": LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY,
+        "os_boundary_type": LAUNCHER_BOUNDARY_OS_TYPE,
+        "root_pid": root_pid,
+        "root_identity": dict(root_identity),
+        "root_process_group_id": root_process_group_id,
+        "root_session_id": _process_session_id(root_pid),
+        "cleanup_marker_sha256": _text_sha256(cleanup_marker),
+        "command_sha256": _canonical_sha256({"argv": [str(item) for item in command]}),
+        "cwd_sha256": _text_sha256(cwd.resolve().as_posix()),
+        "launcher_pid": os.getpid(),
+        "launcher_uid": os.getuid(),
+        "launcher_parent_pid": os.getppid(),
+        "host_os": os.name,
+        "host_platform": sys.platform,
+        "created_at_epoch_ms": int(time.time() * 1000),
+    }
+    boundary_identity = {
+        key: value
+        for key, value in record.items()
+        if key not in {"boundary_id_sha256", "teardown_status"}
+    }
+    record["boundary_id_sha256"] = _canonical_sha256(boundary_identity)
+    return record
+
+
 def _identity_matches(record: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
     return (
         record.get("pid") == identity.get("pid")
@@ -509,11 +595,19 @@ class _ProcessCleanupTracker:
         cleanup_marker: str | None = None,
         baseline_identities: Mapping[int, Mapping[str, Any]] | None = None,
         initial_unavailable_error: str | None = None,
+        launcher_boundary_type: str | None = None,
+        command: list[str] | None = None,
+        cwd: Path | None = None,
     ) -> None:
         self.root_pid = root_pid
         self.uid = os.getuid()
         self.cleanup_marker = cleanup_marker
         self.cleanup_marker_verified = cleanup_marker is None
+        self.launcher_boundary_type = launcher_boundary_type
+        self.command = list(command or [])
+        self.cwd = cwd
+        self.boundary_nonce = secrets.token_hex(32)
+        self.launcher_owned_boundary: dict[str, Any] | None = None
         self.baseline_identities = {
             pid: dict(identity)
             for pid, identity in (baseline_identities or {}).items()
@@ -551,6 +645,26 @@ class _ProcessCleanupTracker:
         if self.unavailable_error is None:
             self.unavailable_error = message
 
+    def _capture_launcher_boundary(self, root_record: Mapping[str, Any]) -> None:
+        if (
+            getattr(self, "launcher_owned_boundary", None) is not None
+            or getattr(self, "launcher_boundary_type", None) is None
+            or self.cleanup_marker is None
+            or self.root_identity is None
+            or getattr(self, "cwd", None) is None
+        ):
+            return
+        self.launcher_owned_boundary = _launcher_owned_boundary_record(
+            boundary_type=self.launcher_boundary_type,
+            root_pid=self.root_pid,
+            root_record=root_record,
+            root_identity=self.root_identity,
+            cleanup_marker=self.cleanup_marker,
+            command=getattr(self, "command", []),
+            cwd=self.cwd,
+            boundary_nonce=getattr(self, "boundary_nonce", ""),
+        )
+
     def _poll_once(self) -> None:
         try:
             records = _process_table()
@@ -574,6 +688,7 @@ class _ProcessCleanupTracker:
                         )
                     else:
                         self._mark_unavailable("candidate cleanup marker scan is unavailable")
+                self._capture_launcher_boundary(root)
             if self.root_identity is None:
                 self._mark_unavailable("candidate process identity is unavailable")
             tracked_pids = {self.root_pid, *self.descendants}
@@ -649,6 +764,11 @@ class _ProcessCleanupTracker:
                     "available" if self.unavailable_error is None else "unavailable"
                 ),
                 "tracking_error": self.unavailable_error,
+                **(
+                    {"launcher_owned_boundary": dict(self.launcher_owned_boundary)}
+                    if getattr(self, "launcher_owned_boundary", None) is not None
+                    else {}
+                ),
             }
 
     def stop(self) -> dict[str, Any]:
@@ -737,6 +857,14 @@ def _wait_for_tracked_processes_reaped(
         time.sleep(0.05)
 
 
+def _confirm_launcher_boundary_teardown(cleanup: Mapping[str, Any] | None) -> None:
+    if not isinstance(cleanup, dict):
+        return
+    boundary = cleanup.get("launcher_owned_boundary")
+    if isinstance(boundary, dict):
+        boundary["teardown_status"] = "confirmed"
+
+
 def _run(
     command: list[str],
     *,
@@ -748,6 +876,14 @@ def _run(
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cleanup_marker = secrets.token_hex(32) if start_new_session else None
+    requested_process_boundary = None
+    if env is not None:
+        requested_process_boundary = env.get(INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV)
+        if (
+            requested_process_boundary is not None
+            and requested_process_boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES
+        ):
+            raise ProbeError("unsupported containment boundary")
     baseline_identities = None
     initial_tracking_error = None
     if start_new_session:
@@ -761,9 +897,11 @@ def _run(
             initial_tracking_error = (
                 "process table scan is unavailable before candidate launch"
             )
-    popen_env = env
+    popen_env = dict(env) if env is not None else None
+    if popen_env is not None:
+        popen_env.pop(INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV, None)
     if cleanup_marker is not None:
-        popen_env = dict(os.environ if env is None else env)
+        popen_env = dict(os.environ if popen_env is None else popen_env)
         popen_env[PROCESS_CLEANUP_MARKER_ENV] = cleanup_marker
     proc = subprocess.Popen(
         command,
@@ -783,6 +921,9 @@ def _run(
             cleanup_marker,
             baseline_identities,
             initial_tracking_error,
+            requested_process_boundary,
+            command,
+            cwd,
         )
         if start_new_session
         else None
@@ -1466,18 +1607,62 @@ def _process_containment_boundary_receipt(
     )
     _require_exact_keys(
         launcher_boundary,
-        ("boundary_type", "boundary_id_sha256", "teardown_status", "authority"),
+        LAUNCHER_BOUNDARY_KEYS,
         "process containment launcher-owned boundary",
     )
+    if launcher_boundary.get("schema_version") != LAUNCHER_BOUNDARY_SCHEMA_VERSION:
+        raise ProbeError("process containment boundary schema is not launcher-bound")
     if launcher_boundary.get("boundary_type") != requested_boundary:
         raise ProbeError("process containment boundary type is not launcher-bound")
-    if launcher_boundary.get("authority") != "agentic-os-probe-launcher":
+    if launcher_boundary.get("authority") != LAUNCHER_BOUNDARY_AUTHORITY:
         raise ProbeError("process containment boundary authority is not launcher-owned")
+    if launcher_boundary.get("evidence_authority") != LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY:
+        raise ProbeError("process containment boundary evidence is not launcher-owned")
+    if launcher_boundary.get("os_boundary_type") != LAUNCHER_BOUNDARY_OS_TYPE:
+        raise ProbeError("process containment OS boundary type is not launcher-owned")
     _require_sha256_field(
         launcher_boundary,
         "boundary_id_sha256",
         "process containment launcher-owned boundary",
     )
+    for key in (
+        "boundary_nonce_sha256",
+        "cleanup_marker_sha256",
+        "command_sha256",
+        "cwd_sha256",
+    ):
+        _require_sha256_field(
+            launcher_boundary,
+            key,
+            "process containment launcher-owned boundary",
+        )
+    if launcher_boundary.get("root_pid") != cleanup.get("root_pid"):
+        raise ProbeError("process containment boundary root PID is not cleanup-bound")
+    if launcher_boundary.get("root_process_group_id") != cleanup.get("root_pid"):
+        raise ProbeError("process containment boundary process group is not root-bound")
+    if launcher_boundary.get("root_session_id") != cleanup.get("root_pid"):
+        raise ProbeError("process containment boundary session is not root-bound")
+    if launcher_boundary.get("root_identity") != cleanup.get("root_identity"):
+        raise ProbeError("process containment boundary root identity is not cleanup-bound")
+    if launcher_boundary.get("cleanup_marker_sha256") != cleanup.get(
+        "cleanup_marker_sha256"
+    ):
+        raise ProbeError("process containment boundary marker is not cleanup-bound")
+    if launcher_boundary.get("launcher_uid") != os.getuid():
+        raise ProbeError("process containment boundary launcher UID is not local-owner-bound")
+    if not isinstance(launcher_boundary.get("created_at_epoch_ms"), int):
+        raise ProbeError("process containment boundary creation time is invalid")
+    expected_boundary_id = _canonical_sha256(
+        {
+            key: value
+            for key, value in launcher_boundary.items()
+            if key not in {"boundary_id_sha256", "teardown_status"}
+        }
+    )
+    if not hmac.compare_digest(
+        str(launcher_boundary.get("boundary_id_sha256")), expected_boundary_id
+    ):
+        raise ProbeError("process containment boundary identity digest mismatch")
     if launcher_boundary.get("teardown_status") != "confirmed":
         raise ProbeError("process containment boundary teardown was not confirmed")
     if not process_group_reaped or not port_closed:
@@ -1485,7 +1670,7 @@ def _process_containment_boundary_receipt(
     receipt = {
         "schema_version": "agentic-os.process-containment-boundary-receipt.v1",
         "requested_boundary": requested_boundary,
-        "receipt_authority": "agentic-os-probe-launcher",
+        "receipt_authority": LAUNCHER_BOUNDARY_AUTHORITY,
         "evidence_authority": "host-process-table-and-loopback-port-observation",
         "cleanup_method": "process-group-sigkill-plus-tracked-descendant-identity-sigkill",
         "process_group_cleanup_attempted": process_group_cleanup_attempted,
@@ -2456,11 +2641,12 @@ def _terminate_and_verify_process_group(
     attempted = _terminate_process_group(proc)
     cleanup = _tracked_cleanup_from_process(proc)
     descendant_cleanup_attempted = _terminate_tracked_process_identities(cleanup)
-    return (
-        attempted or descendant_cleanup_attempted,
-        _wait_for_process_group_reaped(proc)
-        and _wait_for_tracked_processes_reaped(cleanup),
+    reaped = _wait_for_process_group_reaped(proc) and _wait_for_tracked_processes_reaped(
+        cleanup
     )
+    if reaped:
+        _confirm_launcher_boundary_teardown(cleanup)
+    return (attempted or descendant_cleanup_attempted, reaped)
 
 
 def _prepare_private_directory(directory: Path) -> Path:
@@ -3874,6 +4060,7 @@ def _run_persistent_lifecycle_probe_once(
     runner_env = _runner_base_env()
     runner_env.update(
         {
+            INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV: requested_process_boundary,
             "HOME": str(runner_home),
             "TMPDIR": str(runner_tmp),
             "OPENCLAW_HOME": str(runner_home),

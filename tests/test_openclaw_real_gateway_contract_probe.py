@@ -70,21 +70,65 @@ class RealGatewayProbeTests(unittest.TestCase):
         finally:
             pinned.close()
 
+    def _launcher_boundary(
+        self,
+        *,
+        pid: int = 1234,
+        root_identity: dict | None = None,
+        cleanup_marker_sha256: str = "a" * 64,
+        teardown_status: str = "confirmed",
+    ) -> dict:
+        root_identity = root_identity or {
+            "pid": pid,
+            "uid": os.getuid(),
+            "start_id": f"root-{pid}",
+        }
+        boundary = {
+            "schema_version": MODULE.LAUNCHER_BOUNDARY_SCHEMA_VERSION,
+            "boundary_type": "external-container",
+            "boundary_nonce_sha256": "c" * 64,
+            "teardown_status": teardown_status,
+            "authority": MODULE.LAUNCHER_BOUNDARY_AUTHORITY,
+            "evidence_authority": MODULE.LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY,
+            "os_boundary_type": MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
+            "root_pid": pid,
+            "root_identity": dict(root_identity),
+            "root_process_group_id": pid,
+            "root_session_id": pid,
+            "cleanup_marker_sha256": cleanup_marker_sha256,
+            "command_sha256": "d" * 64,
+            "cwd_sha256": "e" * 64,
+            "launcher_pid": os.getpid(),
+            "launcher_uid": os.getuid(),
+            "launcher_parent_pid": os.getppid(),
+            "host_os": os.name,
+            "host_platform": sys.platform,
+            "created_at_epoch_ms": int(time.time() * 1000),
+        }
+        boundary["boundary_id_sha256"] = MODULE._canonical_sha256(
+            {
+                key: value
+                for key, value in boundary.items()
+                if key not in {"boundary_id_sha256", "teardown_status"}
+            }
+        )
+        self.assertEqual(sorted(boundary), sorted(MODULE.LAUNCHER_BOUNDARY_KEYS))
+        return boundary
+
     def _attach_valid_process_cleanup(self, proc, *, pid: int = 1234):
+        root_identity = {"pid": pid, "uid": os.getuid(), "start_id": f"root-{pid}"}
         proc._agentic_os_process_cleanup = {
             "tracking_status": "available",
             "root_pid": pid,
-            "root_identity": {"pid": pid, "uid": os.getuid(), "start_id": f"root-{pid}"},
+            "root_identity": root_identity,
             "cleanup_marker_sha256": "a" * 64,
             "cleanup_marker_verified": True,
             "descendant_identities": [],
             "unattributed_process_identities": [],
-            "launcher_owned_boundary": {
-                "boundary_type": "external-container",
-                "boundary_id_sha256": "b" * 64,
-                "teardown_status": "confirmed",
-                "authority": "agentic-os-probe-launcher",
-            },
+            "launcher_owned_boundary": self._launcher_boundary(
+                pid=pid,
+                root_identity=root_identity,
+            ),
         }
         return proc
 
@@ -1012,10 +1056,22 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "packages/gateway-client/src/index.ts": "export class GatewayClient {}\n",
                 "src/utils/message-channel-normalize.ts": "export function normalizeMessageChannel() { return 'internal'; }\n",
                 "node_modules/fixture-runtime/package.json": (
-                    '{"name":"fixture-runtime","main":"index.js"}\n'
+                    '{"name":"fixture-runtime","main":"index.cjs"}\n'
                 ),
-                "node_modules/fixture-runtime/index.js": (
-                    "export function packageRuntime() { return true; }\n"
+                "node_modules/fixture-runtime/index.cjs": (
+                    "const implPath = require.resolve('./impl.cjs');\n"
+                    "const impl = require('./impl.cjs');\n"
+                    "const dep = require('fixture-runtime-dep');\n"
+                    "module.exports = { packageRuntime() { return impl.packageRuntime() && dep.ok; } };\n"
+                ),
+                "node_modules/fixture-runtime/impl.cjs": (
+                    "module.exports = { packageRuntime() { return true; } };\n"
+                ),
+                "node_modules/fixture-runtime-dep/package.json": (
+                    '{"name":"fixture-runtime-dep","main":"index.js"}\n'
+                ),
+                "node_modules/fixture-runtime-dep/index.js": (
+                    "module.exports = { ok: true };\n"
                 ),
             }
             for relative, content in files.items():
@@ -1048,7 +1104,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "packages/gateway-client/src/index.ts",
                 "src/utils/message-channel-normalize.ts",
                 "node_modules/fixture-runtime/package.json",
-                "node_modules/fixture-runtime/index.js",
+                "node_modules/fixture-runtime/index.cjs",
+                "node_modules/fixture-runtime/impl.cjs",
+                "node_modules/fixture-runtime-dep/package.json",
+                "node_modules/fixture-runtime-dep/index.js",
             }
             self.assertTrue(expected_transitive.issubset(set(paths)))
             self.assertNotIn("node:fs", paths)
@@ -1084,6 +1143,31 @@ class RealGatewayProbeTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
 
             with self.assertRaisesRegex(MODULE.ProbeError, "package import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_commonjs_require(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                    "const name = './runner-impl.cjs';\nrequire(name);\n"
+                ),
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": "export const c = 1;\n",
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+                "scripts/runner-impl.cjs": "module.exports = {};\n",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic CommonJS require"):
                 MODULE._persistent_runtime_source_paths(root)
 
     def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:
@@ -2585,23 +2669,66 @@ class RealGatewayProbeTests(unittest.TestCase):
                 port_closed=True,
             )
 
+    def test_real_run_emits_launcher_owned_boundary_cleanup_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = {
+                MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
+            }
+            proc = MODULE._run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, time; "
+                    f"print(os.environ.get({MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV!r}, ''), end=''); "
+                    "time.sleep(0.25)",
+                ],
+                cwd=Path(directory),
+                env=env,
+                timeout=5,
+                start_new_session=True,
+            )
+            attempted, reaped = MODULE._terminate_and_verify_process_group(proc)
+            cleanup = MODULE._tracked_cleanup_from_process(proc)
+
+        self.assertEqual(proc.returncode, 0)
+        self.assertTrue(reaped)
+        self.assertFalse(attempted)
+        self.assertIsNotNone(cleanup)
+        assert cleanup is not None
+        self.assertEqual(cleanup["tracking_status"], "available")
+        boundary = cleanup["launcher_owned_boundary"]
+        self.assertEqual(boundary["schema_version"], MODULE.LAUNCHER_BOUNDARY_SCHEMA_VERSION)
+        self.assertEqual(boundary["authority"], MODULE.LAUNCHER_BOUNDARY_AUTHORITY)
+        self.assertEqual(boundary["boundary_type"], "external-container")
+        self.assertEqual(boundary["teardown_status"], "confirmed")
+        self.assertEqual(boundary["root_pid"], cleanup["root_pid"])
+        self.assertEqual(boundary["root_identity"], cleanup["root_identity"])
+        self.assertEqual(
+            boundary["cleanup_marker_sha256"],
+            cleanup["cleanup_marker_sha256"],
+        )
+        self.assertRegex(boundary["boundary_id_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(boundary["command_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn(
+            MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV,
+            proc.stdout + proc.stderr,
+        )
+
     def test_process_containment_receipt_binds_launcher_cleanup_evidence(self) -> None:
+        root_identity = {"pid": 1234, "uid": os.getuid(), "start_id": "root"}
         cleanup = {
             "tracking_status": "available",
             "root_pid": 1234,
-            "root_identity": {"pid": 1234, "uid": os.getuid(), "start_id": "root"},
+            "root_identity": root_identity,
             "cleanup_marker_sha256": "a" * 64,
             "cleanup_marker_verified": True,
             "descendant_identities": [
                 {"pid": 2345, "uid": os.getuid(), "start_id": "child"}
             ],
             "unattributed_process_identities": [],
-            "launcher_owned_boundary": {
-                "boundary_type": "external-container",
-                "boundary_id_sha256": "b" * 64,
-                "teardown_status": "confirmed",
-                "authority": "agentic-os-probe-launcher",
-            },
+            "launcher_owned_boundary": self._launcher_boundary(
+                root_identity=root_identity,
+            ),
         }
         receipt = MODULE._process_containment_boundary_receipt(
             requested_boundary="external-container",
@@ -2620,9 +2747,34 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertEqual(receipt["root_pid"], 1234)
         self.assertEqual(receipt["descendant_identity_count"], 1)
         self.assertEqual(
-            receipt["launcher_owned_boundary"]["boundary_id_sha256"], "b" * 64
+            receipt["launcher_owned_boundary"]["boundary_id_sha256"],
+            cleanup["launcher_owned_boundary"]["boundary_id_sha256"],
         )
         self.assertEqual(receipt["cleanup_receipt_sha256"], MODULE._canonical_sha256(cleanup))
+
+    def test_process_containment_receipt_rejects_replayed_launcher_boundary(self) -> None:
+        root_identity = {"pid": 1234, "uid": os.getuid(), "start_id": "root"}
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": root_identity,
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+            "launcher_owned_boundary": self._launcher_boundary(
+                root_identity=root_identity,
+                cleanup_marker_sha256="f" * 64,
+            ),
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "marker"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=cleanup,
+                process_group_cleanup_attempted=True,
+                process_group_reaped=True,
+                port_closed=True,
+            )
 
     def test_independent_validator_writes_fresh_authenticated_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -602,8 +602,82 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
 
 
 class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
+    def _write_minimal_persistent_runtime(self, root: str, runner_source: str) -> None:
+        module = load_preflight_module()
+        files = {
+            "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+            "openclaw.mjs": "export const openclaw = true;\n",
+            module.runtime_source_contract.PERSISTENT_LIFECYCLE_RUNNER: runner_source,
+            "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+            "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+            "src/gateway/client.ts": "export const c = 1;\n",
+            "src/utils/message-channel.ts": "export const m = 1;\n",
+        }
+        for relative, content in files.items():
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
+
+    def test_persistent_contract_snapshot_binds_commonjs_require_closure(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "const runtime = require('fixture-runtime');\n"
+                "module.exports = runtime;\n",
+            )
+            files = {
+                "node_modules/fixture-runtime/package.json": (
+                    '{"name":"fixture-runtime","main":"index.cjs"}\n'
+                ),
+                "node_modules/fixture-runtime/index.cjs": (
+                    "require.resolve('./impl.cjs');\n"
+                    "const impl = require('./impl.cjs');\n"
+                    "const dep = require('fixture-runtime-dep');\n"
+                    "module.exports = { runtime: impl.runtime && dep.ok };\n"
+                ),
+                "node_modules/fixture-runtime/impl.cjs": (
+                    "module.exports = { runtime: true };\n"
+                ),
+                "node_modules/fixture-runtime-dep/package.json": (
+                    '{"name":"fixture-runtime-dep","main":"index.js"}\n'
+                ),
+                "node_modules/fixture-runtime-dep/index.js": (
+                    "module.exports = { ok: true };\n"
+                ),
+            }
+            for relative, content in files.items():
+                path = os.path.join(root, relative)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+
+            snapshot = module._runtime_source_digest_snapshot(
+                Path(root), persistent_contract=True
+            )
+
+        self.assertIn("node_modules/fixture-runtime/index.cjs", snapshot)
+        self.assertIn("node_modules/fixture-runtime/impl.cjs", snapshot)
+        self.assertIn("node_modules/fixture-runtime-dep/package.json", snapshot)
+        self.assertIn("node_modules/fixture-runtime-dep/index.js", snapshot)
+
+    def test_persistent_contract_snapshot_rejects_dynamic_commonjs_require(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "const name = './impl.cjs';\nrequire(name);\n",
+            )
+            with self.assertRaisesRegex(OSError, "dynamic CommonJS require"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
 
     def test_preflight_accepts_required_session_tool_catalog(self) -> None:
         result = subprocess.run(

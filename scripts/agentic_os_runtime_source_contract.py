@@ -79,6 +79,8 @@ DYNAMIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     r"""\bimport\s*\(\s*["'](?P<specifier>[^"']+)["']\s*\)""",
     re.VERBOSE,
 )
+COMMONJS_REQUIRE_TOKEN = "require"
+COMMONJS_REQUIRE_RESOLVE_SUFFIX = ".resolve"
 
 
 class RuntimeSourceContractError(RuntimeError):
@@ -184,7 +186,123 @@ def strip_source_comments(source_text: str) -> str:
     return "".join(output)
 
 
+def _is_identifier_character(character: str) -> bool:
+    return character.isalnum() or character in {"_", "$"}
+
+
+def _skip_whitespace(source_text: str, index: int) -> int:
+    while index < len(source_text) and source_text[index].isspace():
+        index += 1
+    return index
+
+
+def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | None:
+    if index >= len(source_text) or source_text[index] not in {"'", '"'}:
+        return None
+    quote = source_text[index]
+    index += 1
+    specifier: list[str] = []
+    while index < len(source_text):
+        character = source_text[index]
+        if character == "\\" and index + 1 < len(source_text):
+            specifier.append(source_text[index + 1])
+            index += 2
+            continue
+        if character == quote:
+            return "".join(specifier), index + 1
+        specifier.append(character)
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unterminated CommonJS require specifier"
+    )
+
+
+def _commonjs_require_specifiers(source_text: str) -> list[str]:
+    specifiers: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
+            before = source_text[index - 1] if index > 0 else ""
+            after_index = index + len(COMMONJS_REQUIRE_TOKEN)
+            after = source_text[after_index] if after_index < len(source_text) else ""
+            if before and (_is_identifier_character(before) or before == "."):
+                index += 1
+                continue
+            if after and _is_identifier_character(after):
+                index += 1
+                continue
+            call_index = after_index
+            if source_text.startswith(COMMONJS_REQUIRE_RESOLVE_SUFFIX, call_index):
+                call_index += len(COMMONJS_REQUIRE_RESOLVE_SUFFIX)
+                after_resolve = (
+                    source_text[call_index] if call_index < len(source_text) else ""
+                )
+                if after_resolve and _is_identifier_character(after_resolve):
+                    index += 1
+                    continue
+            call_index = _skip_whitespace(source_text, call_index)
+            if call_index >= len(source_text) or source_text[call_index] != "(":
+                index += 1
+                continue
+            argument_index = _skip_whitespace(source_text, call_index + 1)
+            parsed = _parse_quoted_specifier(source_text, argument_index)
+            if parsed is None:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic CommonJS require"
+                )
+            specifier, end_index = parsed
+            close_index = _skip_whitespace(source_text, end_index)
+            if close_index >= len(source_text) or source_text[close_index] != ")":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS require signature"
+                )
+            specifiers.append(specifier)
+            index = close_index + 1
+            continue
+        index += 1
+    return specifiers
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool]]:
+    commonjs_specifiers = _commonjs_require_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool]] = []
     specifiers.extend(
@@ -195,6 +313,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool]]:
         (match.group("specifier"), False)
         for match in DYNAMIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
     )
+    specifiers.extend((specifier, True) for specifier in commonjs_specifiers)
     return specifiers
 
 
