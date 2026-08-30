@@ -235,24 +235,38 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
     )
 
 
+def _optional_call_tail_index(source_text: str, index: int) -> int:
+    optional_index = _skip_js_trivia(source_text, index)
+    if source_text.startswith("?.", optional_index):
+        call_index = _skip_js_trivia(source_text, optional_index + 2)
+        if call_index < len(source_text) and source_text[call_index] == "(":
+            return call_index
+    return index
+
+
 def _commonjs_require_resolve_call_index(
     source_text: str, index: int
 ) -> int | None:
     dot_index = _skip_js_trivia(source_text, index)
-    if dot_index >= len(source_text) or source_text[dot_index] != ".":
-        return None
-    resolve_index = _skip_js_trivia(source_text, dot_index + 1)
+    if source_text.startswith("?.", dot_index):
+        resolve_index = _skip_js_trivia(source_text, dot_index + 2)
+    else:
+        if dot_index >= len(source_text) or source_text[dot_index] != ".":
+            return None
+        resolve_index = _skip_js_trivia(source_text, dot_index + 1)
     if not source_text.startswith(COMMONJS_REQUIRE_RESOLVE_MEMBER, resolve_index):
         return None
     call_index = resolve_index + len(COMMONJS_REQUIRE_RESOLVE_MEMBER)
     after_resolve = source_text[call_index] if call_index < len(source_text) else ""
     if after_resolve and _is_identifier_character(after_resolve):
         return None
-    return call_index
+    return _optional_call_tail_index(source_text, call_index)
 
 
 def _bracketed_require_resolve_call_index(source_text: str, index: int) -> int | None:
     bracket_index = _skip_js_trivia(source_text, index)
+    if source_text.startswith("?.", bracket_index):
+        bracket_index = _skip_js_trivia(source_text, bracket_index + 2)
     if bracket_index >= len(source_text) or source_text[bracket_index] != "[":
         return None
     member_index = _skip_js_trivia(source_text, bracket_index + 1)
@@ -267,7 +281,7 @@ def _bracketed_require_resolve_call_index(source_text: str, index: int) -> int |
         or source_text[close_index] != "]"
     ):
         return None
-    return close_index + 1
+    return _optional_call_tail_index(source_text, close_index + 1)
 
 
 def _optional_require_call_index(source_text: str, index: int) -> int | None:
@@ -287,6 +301,43 @@ def _parse_commonjs_require_call_index(source_text: str, index: int) -> int:
         if call_index is not None:
             return call_index
     return _skip_js_trivia(source_text, index)
+
+
+def _parse_parenthesized_require_invocation(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    require_index = _skip_js_trivia(source_text, index + 1)
+    if not source_text.startswith(COMMONJS_REQUIRE_TOKEN, require_index):
+        return None
+    after_index = require_index + len(COMMONJS_REQUIRE_TOKEN)
+    before = source_text[require_index - 1] if require_index > 0 else ""
+    after = source_text[after_index] if after_index < len(source_text) else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    if after and _is_identifier_character(after):
+        return None
+    callee_end = _parse_commonjs_require_call_index(source_text, after_index)
+    close_index = _skip_js_trivia(source_text, callee_end)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        return None
+    call_index = _skip_js_trivia(source_text, close_index + 1)
+    if source_text.startswith("?.", call_index):
+        call_index = _skip_js_trivia(source_text, call_index + 2)
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, call_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic CommonJS require"
+        )
+    specifier, end_index = parsed
+    invocation_end = _skip_js_trivia(source_text, end_index)
+    if invocation_end >= len(source_text) or source_text[invocation_end] != ")":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS require signature"
+        )
+    return specifier, invocation_end + 1
 
 
 def _template_expression_end(source_text: str, index: int) -> int:
@@ -453,31 +504,11 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
                 specifiers.append(specifier)
                 continue
         if character == "(":
-            require_index = _skip_js_trivia(source_text, index + 1)
-            if source_text.startswith(COMMONJS_REQUIRE_TOKEN, require_index):
-                require_end = require_index + len(COMMONJS_REQUIRE_TOKEN)
-                close_index = _skip_js_trivia(source_text, require_end)
-                if close_index < len(source_text) and source_text[close_index] == ")":
-                    call_index = _skip_js_trivia(source_text, close_index + 1)
-                    if call_index < len(source_text) and source_text[call_index] == "(":
-                        argument_index = _skip_js_trivia(source_text, call_index + 1)
-                        parsed = _parse_quoted_specifier(source_text, argument_index)
-                        if parsed is None:
-                            raise RuntimeSourceContractError(
-                                "runtime source contains an unsupported dynamic CommonJS require"
-                            )
-                        specifier, end_index = parsed
-                        invocation_end = _skip_js_trivia(source_text, end_index)
-                        if (
-                            invocation_end >= len(source_text)
-                            or source_text[invocation_end] != ")"
-                        ):
-                            raise RuntimeSourceContractError(
-                                "runtime source contains an unsupported CommonJS require signature"
-                            )
-                        specifiers.append(specifier)
-                        index = invocation_end + 1
-                        continue
+            parsed = _parse_parenthesized_require_invocation(source_text, index)
+            if parsed is not None:
+                specifier, index = parsed
+                specifiers.append(specifier)
+                continue
         index += 1
     return specifiers
 
