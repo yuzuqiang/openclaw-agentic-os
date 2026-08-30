@@ -1641,6 +1641,10 @@ def _expected_install_binding(root: Path) -> dict[str, str]:
     }
 
 
+def _expected_executable_path_sha256(root: Path) -> str:
+    return runtime_source_contract.path_sha256(root.resolve() / "openclaw.mjs")
+
+
 def _require_process_containment_boundary_request() -> str:
     boundary = os.environ.get(PROCESS_CONTAINMENT_BOUNDARY_ENV)
     if boundary not in PROCESS_CONTAINMENT_BOUNDARY_VALUES:
@@ -1872,7 +1876,13 @@ def _validate_signed_attestation_contract(
     _require_exact_keys(
         executable, ("path_sha256", "content_sha256"), "persistent attestation executable binding"
     )
-    _require_sha256_field(executable, "path_sha256", "persistent attestation executable binding")
+    executable_path_sha256 = _require_sha256_field(
+        executable, "path_sha256", "persistent attestation executable binding"
+    )
+    if executable_path_sha256 != _expected_executable_path_sha256(runtime_root):
+        raise ProbeError(
+            "persistent attestation executable path digest is not candidate-bound"
+        )
     _require_sha256_field(executable, "content_sha256", "persistent attestation executable binding")
 
     install = _record(binding.get("install"), "persistent attestation install binding")

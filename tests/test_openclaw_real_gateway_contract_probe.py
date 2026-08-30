@@ -323,7 +323,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             "rpc_transcript_sha256": "a" * 64,
             "binding": {
                 "executable": {
-                    "path_sha256": "6" * 64,
+                    "path_sha256": MODULE.runtime_source_contract.path_sha256(
+                        candidate_root / "openclaw.mjs"
+                    ),
                     "content_sha256": "7" * 64,
                 },
                 "install": {
@@ -1288,6 +1290,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             "require?.['resolve']('./runner-impl.cjs');\n",
             "require['resolve']('./runner-impl.cjs');\n",
             "require['resolve']?.('./runner-impl.cjs');\n",
+            "module.require('./runner-impl.cjs');\n",
             "(require)('./runner-impl.cjs');\n",
             "(require.resolve)('./runner-impl.cjs');\n",
             "`${require('./runner-impl.cjs')}`;\n",
@@ -1313,6 +1316,64 @@ class RealGatewayProbeTests(unittest.TestCase):
 
                     paths = MODULE._persistent_runtime_source_paths(root)
                     self.assertIn("scripts/runner-impl.cjs", paths)
+
+    def test_persistent_runtime_source_closure_resolves_node_export_entry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+                "openclaw.mjs": "export const openclaw = true;\n",
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER: "export const runner = true;\n",
+                "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+                "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+                "src/gateway/client.ts": (
+                    "import { packageRuntime } from 'fixture-runtime';\n"
+                ),
+                "src/utils/message-channel.ts": "export const m = 1;\n",
+                "node_modules/fixture-runtime/package.json": json.dumps(
+                    {
+                        "name": "fixture-runtime",
+                        "main": "legacy-main.cjs",
+                        "module": "bundler-entry.mjs",
+                        "types": "index.d.ts",
+                        "exports": {
+                            ".": {
+                                "types": "./index.d.ts",
+                                "import": "./runtime-entry.js",
+                                "require": "./runtime-entry.cjs",
+                                "default": "./default-entry.js",
+                            }
+                        },
+                    }
+                )
+                + "\n",
+                "node_modules/fixture-runtime/legacy-main.cjs": (
+                    "module.exports = { legacy: true };\n"
+                ),
+                "node_modules/fixture-runtime/bundler-entry.mjs": (
+                    "export const bundler = true;\n"
+                ),
+                "node_modules/fixture-runtime/index.d.ts": (
+                    "export declare const onlyTypes: boolean;\n"
+                ),
+                "node_modules/fixture-runtime/runtime-entry.js": (
+                    "export const packageRuntime = true;\n"
+                ),
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/package.json", paths)
+        self.assertIn("node_modules/fixture-runtime/runtime-entry.js", paths)
+        self.assertNotIn("node_modules/fixture-runtime/legacy-main.cjs", paths)
+        self.assertNotIn("node_modules/fixture-runtime/bundler-entry.mjs", paths)
+        self.assertNotIn("node_modules/fixture-runtime/index.d.ts", paths)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_commonjs_callable_variants(
         self,
@@ -1978,6 +2039,23 @@ class RealGatewayProbeTests(unittest.TestCase):
                     Path(directory),
                     receipt,
                     persistent_evidence_transform=fabricate_install_digests,
+                )
+
+    def test_persistent_summary_rejects_fabricated_executable_path_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            def fabricate_executable_path_digest(evidence):
+                response = evidence["attestation"]["response"]
+                executable = response["signed_payload"]["binding"]["executable"]
+                executable["path_sha256"] = "6" * 64
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "executable path digest"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=fabricate_executable_path_digest,
                 )
 
     def test_persistent_summary_rejects_gateway_build_id_not_bound_to_head(self) -> None:

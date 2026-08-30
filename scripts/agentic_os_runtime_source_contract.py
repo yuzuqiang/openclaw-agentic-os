@@ -78,6 +78,10 @@ STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
 COMMONJS_REQUIRE_TOKEN = "require"
 COMMONJS_REQUIRE_RESOLVE_MEMBER = "resolve"
 DYNAMIC_IMPORT_TOKEN = "import"
+RUNTIME_PACKAGE_CONDITIONS = {
+    "import": frozenset(("import", "node", "default")),
+    "require": frozenset(("require", "node", "default")),
+}
 
 
 class RuntimeSourceContractError(RuntimeError):
@@ -450,6 +454,42 @@ def _parse_require_invocation(
     return specifier, close_index + 1
 
 
+def _parse_property_require_invocation(
+    source_text: str, require_index: int
+) -> tuple[str, int] | None:
+    if require_index == 0 or source_text[require_index - 1] != ".":
+        return None
+    object_end = require_index - 1
+    object_start = object_end
+    while object_start > 0 and _is_identifier_character(source_text[object_start - 1]):
+        object_start -= 1
+    object_name = source_text[object_start:object_end]
+    if object_name != "module":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported property CommonJS require"
+        )
+    after_index = require_index + len(COMMONJS_REQUIRE_TOKEN)
+    after = source_text[after_index] if after_index < len(source_text) else ""
+    if after and _is_identifier_character(after):
+        return None
+    call_index = _skip_js_trivia(source_text, after_index)
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, call_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic CommonJS require"
+        )
+    specifier, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS require signature"
+        )
+    return specifier, close_index + 1
+
+
 def _commonjs_require_specifiers(source_text: str) -> list[str]:
     specifiers: list[str] = []
     index = 0
@@ -498,6 +538,11 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
             index += 1
             continue
         if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
+            parsed = _parse_property_require_invocation(source_text, index)
+            if parsed is not None:
+                specifier, index = parsed
+                specifiers.append(specifier)
+                continue
             parsed = _parse_require_invocation(source_text, index)
             if parsed is not None:
                 specifier, index = parsed
@@ -593,17 +638,17 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
     return specifiers
 
 
-def import_specifiers(source_text: str) -> list[tuple[str, bool]]:
+def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
     source_text = strip_source_comments(source_text)
-    specifiers: list[tuple[str, bool]] = []
+    specifiers: list[tuple[str, bool, str]] = []
     specifiers.extend(
-        (match.group("specifier"), True)
+        (match.group("specifier"), True, "import")
         for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
     )
-    specifiers.extend((specifier, True) for specifier in dynamic_specifiers)
-    specifiers.extend((specifier, True) for specifier in commonjs_specifiers)
+    specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
+    specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)
     return specifiers
 
 
@@ -644,26 +689,60 @@ def _load_package_json(package_json: Path, package_name: str) -> dict[str, Any]:
     return payload
 
 
-def _package_entry_bases(package_root: Path, package_json: dict[str, Any]) -> list[Path]:
-    bases: list[Path] = []
-    for field in ("module", "main", "browser", "types", "typings"):
-        value = package_json.get(field)
-        if isinstance(value, str) and value:
-            bases.append((package_root / value).resolve())
+def _export_condition_targets(
+    target: Any, conditions: frozenset[str]
+) -> list[str]:
+    if isinstance(target, str) and target:
+        return [target]
+    if isinstance(target, list):
+        targets: list[str] = []
+        for item in target:
+            targets.extend(_export_condition_targets(item, conditions))
+        return targets
+    if isinstance(target, dict):
+        for condition, value in target.items():
+            if condition in conditions:
+                selected = _export_condition_targets(value, conditions)
+                if selected:
+                    return selected
+        return []
+    return []
+
+
+def _exports_map_target(exports: Any, subpath: str) -> Any:
+    export_key = "." if not subpath else f"./{subpath}"
+    if isinstance(exports, str) or isinstance(exports, list):
+        return exports if export_key == "." else None
+    if not isinstance(exports, dict):
+        return None
+    if any(isinstance(key, str) and key.startswith(".") for key in exports):
+        return exports.get(export_key)
+    return exports if export_key == "." else None
+
+
+def _package_entry_bases(
+    package_root: Path,
+    package_json: dict[str, Any],
+    *,
+    subpath: str,
+    import_kind: str,
+) -> tuple[list[Path], bool]:
+    conditions = RUNTIME_PACKAGE_CONDITIONS.get(
+        import_kind, RUNTIME_PACKAGE_CONDITIONS["import"]
+    )
     exports = package_json.get("exports")
-    if isinstance(exports, str) and exports:
-        bases.append((package_root / exports).resolve())
-    elif isinstance(exports, dict):
-        dot_export = exports.get(".")
-        if isinstance(dot_export, str) and dot_export:
-            bases.append((package_root / dot_export).resolve())
-        elif isinstance(dot_export, dict):
-            for field in ("import", "require", "default", "types"):
-                value = dot_export.get(field)
-                if isinstance(value, str) and value:
-                    bases.append((package_root / value).resolve())
+    if exports is not None:
+        export_target = _exports_map_target(exports, subpath)
+        targets = _export_condition_targets(export_target, conditions)
+        return [(package_root / target).resolve() for target in targets], True
+    if subpath:
+        return [(package_root / subpath).resolve()], False
+    bases: list[Path] = []
+    main = package_json.get("main")
+    if isinstance(main, str) and main:
+        bases.append((package_root / main).resolve())
     bases.append(package_root / "index")
-    return bases
+    return bases, False
 
 
 def _resolve_existing_candidate(root: Path, base: Path) -> Path | None:
@@ -686,6 +765,7 @@ def resolve_import(
     importer: Path,
     specifier: str,
     required: bool,
+    import_kind: str = "import",
 ) -> tuple[Path, ...]:
     normalized = specifier.split("?", 1)[0].split("#", 1)[0]
     if _is_node_builtin(normalized):
@@ -729,16 +809,17 @@ def resolve_import(
         return ()
     package_payload = _load_package_json(package_json, package_name)
     subpath = _package_subpath(normalized, package_name)
-    entry_bases = (
-        [(package_root / subpath).resolve()]
-        if subpath
-        else _package_entry_bases(package_root, package_payload)
+    entry_bases, export_restricted = _package_entry_bases(
+        package_root,
+        package_payload,
+        subpath=subpath,
+        import_kind=import_kind,
     )
     for base in entry_bases:
         resolved = _resolve_existing_candidate(root, base)
         if resolved is not None:
             return (package_json.resolve(), resolved)
-    if required:
+    if required or export_restricted:
         importer_relative = source_relative_path(root, importer)
         raise RuntimeSourceContractError(
             "runtime package import could not be resolved: "
@@ -783,12 +864,13 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
             raise RuntimeSourceContractError(
                 f"runtime source is not UTF-8: {relative}"
             ) from exc
-        for specifier, required in import_specifiers(source_text):
+        for specifier, required, import_kind in import_specifiers(source_text):
             for imported in resolve_import(
                 root=root,
                 importer=source_path,
                 specifier=specifier,
                 required=required,
+                import_kind=import_kind,
             ):
                 imported_relative = source_relative_path(root, imported)
                 if imported_relative not in seen:
