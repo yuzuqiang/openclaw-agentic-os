@@ -1404,6 +1404,66 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn("node_modules/fixture-runtime/bundler-entry.mjs", paths)
         self.assertNotIn("node_modules/fixture-runtime/index.d.ts", paths)
 
+    def test_persistent_runtime_source_closure_prefers_node_addons_export_condition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "src/gateway/client.ts": "import addon from 'fixture-runtime';\n",
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {
+                            "name": "fixture-runtime",
+                            "exports": {
+                                ".": {
+                                    "node-addons": "./addon-entry.js",
+                                    "node": "./node-entry.js",
+                                    "default": "./default-entry.js",
+                                }
+                            },
+                        }
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/addon-entry.js": (
+                        "export default 'node-addons';\n"
+                    ),
+                    "node_modules/fixture-runtime/node-entry.js": (
+                        "export default 'node';\n"
+                    ),
+                    "node_modules/fixture-runtime/default-entry.js": (
+                        "export default 'default';\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/addon-entry.js", paths)
+        self.assertNotIn("node_modules/fixture-runtime/node-entry.js", paths)
+        self.assertNotIn("node_modules/fixture-runtime/default-entry.js", paths)
+
+    def test_persistent_runtime_source_closure_binds_quoted_static_import_clause(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "src/gateway/client.ts": (
+                        'import { "a;b" as value } from "./quoted-dep.mjs";\n'
+                        "export const c = value;\n"
+                    ),
+                    "src/gateway/quoted-dep.mjs": 'export const "a;b" = true;\n',
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("src/gateway/quoted-dep.mjs", paths)
+
     def test_persistent_runtime_source_closure_resolves_nested_importer_dependency(
         self,
     ) -> None:
@@ -1592,6 +1652,47 @@ class RealGatewayProbeTests(unittest.TestCase):
                 path.write_text(content, encoding="utf-8")
 
             with self.assertRaisesRegex(MODULE.ProbeError, "could not be resolved"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_binds_worker_and_fork_entrypoints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        'new Worker(new URL("./runner-worker.mjs", import.meta.url));\n'
+                        'child_process.fork("./runner-child.cjs");\n'
+                    ),
+                    "scripts/runner-worker.mjs": "export const worker = true;\n",
+                    "scripts/runner-child.cjs": "module.exports = { child: true };\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-worker.mjs", paths)
+        self.assertIn("scripts/runner-child.cjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_worker_entrypoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const workerUrl = new URL('./runner-worker.mjs', import.meta.url);\n"
+                        "new Worker(workerUrl);\n"
+                    ),
+                    "scripts/runner-worker.mjs": "export const worker = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "Worker entrypoint"):
                 MODULE._persistent_runtime_source_paths(root)
 
     def test_runtime_launch_bindings_resolve_node_and_tsx_preload(self) -> None:

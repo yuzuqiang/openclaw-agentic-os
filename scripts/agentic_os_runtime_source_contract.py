@@ -75,23 +75,48 @@ NODE_BUILTIN_SUBPATHS = frozenset(
     }
 )
 
+STATIC_IMPORT_CLAUSE_FRAGMENT = r"""
+    (?:
+        "(?:\\.|[^"\\])*"
+      | '(?:\\.|[^'\\])*'
+      | [^;"'`]
+    )*?
+"""
 STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     r"""
     \b(?:import|export)\s+(?:type\s+)?
     (?:
-        [^;"']*?\s+from\s*
+        __STATIC_IMPORT_CLAUSE_FRAGMENT__\s+from\s*
       |
     )
     ["'](?P<specifier>[^"']+)["']
-    """,
+    """.replace("__STATIC_IMPORT_CLAUSE_FRAGMENT__", STATIC_IMPORT_CLAUSE_FRAGMENT),
     re.VERBOSE | re.DOTALL,
 )
 COMMONJS_REQUIRE_TOKEN = "require"
 COMMONJS_REQUIRE_RESOLVE_MEMBER = "resolve"
 DYNAMIC_IMPORT_TOKEN = "import"
+WORKER_ENTRYPOINT_SPECIFIER = re.compile(
+    r"""
+    \bnew\s+Worker\s*\(\s*
+    new\s+URL\s*\(\s*
+    ["'](?P<specifier>[^"']+)["']\s*,\s*
+    import\.meta\.url\s*
+    \)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+FORK_ENTRYPOINT_SPECIFIER = re.compile(
+    r"""
+    (?<![\w$])
+    (?:fork|child_process\.fork)\s*\(\s*
+    ["'](?P<specifier>[^"']+)["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 RUNTIME_PACKAGE_CONDITIONS = {
-    "import": frozenset(("import", "node", "default")),
-    "require": frozenset(("require", "node", "default")),
+    "import": frozenset(("import", "node-addons", "node", "default")),
+    "require": frozenset(("require", "node-addons", "node", "default")),
 }
 
 
@@ -655,9 +680,48 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
     return specifiers
 
 
+def _runtime_execution_entrypoint_specifiers(
+    source_text: str,
+) -> list[tuple[str, str]]:
+    source_text = strip_source_comments(source_text)
+    specifiers: list[tuple[str, str]] = []
+    accepted_spans: list[tuple[int, int]] = []
+    for match in WORKER_ENTRYPOINT_SPECIFIER.finditer(source_text):
+        specifier = match.group("specifier")
+        if "\\" in specifier:
+            raise RuntimeSourceContractError(
+                "runtime source worker entrypoint contains an unsupported JavaScript escape"
+            )
+        specifiers.append((specifier, "import"))
+        accepted_spans.append(match.span())
+    for match in FORK_ENTRYPOINT_SPECIFIER.finditer(source_text):
+        specifier = match.group("specifier")
+        if "\\" in specifier:
+            raise RuntimeSourceContractError(
+                "runtime source fork entrypoint contains an unsupported JavaScript escape"
+            )
+        specifiers.append((specifier, "require"))
+        accepted_spans.append(match.span())
+
+    for match in re.finditer(r"\bnew\s+Worker\s*\(", source_text):
+        if not any(start <= match.start() < end for start, end in accepted_spans):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported Worker entrypoint"
+            )
+    for match in re.finditer(
+        r"(?<![\w$])(?:fork|child_process\.fork)\s*\(", source_text
+    ):
+        if not any(start <= match.start() < end for start, end in accepted_spans):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported fork entrypoint"
+            )
+    return specifiers
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
+    execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
     for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text):
@@ -669,6 +733,10 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         specifiers.append((specifier, True, "import"))
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)
+    specifiers.extend(
+        (specifier, True, import_kind)
+        for specifier, import_kind in execution_entrypoints
+    )
     return specifiers
 
 
