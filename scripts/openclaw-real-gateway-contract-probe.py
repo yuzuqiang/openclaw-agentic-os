@@ -645,6 +645,7 @@ class _ProcessCleanupTracker:
         self.root_identity: dict[str, Any] | None = None
         self.descendants: dict[int, dict[str, Any]] = {}
         self.unattributed_identities: dict[int, dict[str, Any]] = {}
+        self._pending_unattributed_identities: dict[int, dict[str, Any]] = {}
         self.unavailable_error = initial_unavailable_error
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -703,6 +704,8 @@ class _ProcessCleanupTracker:
         with self._lock:
             if not hasattr(self, "unattributed_identities"):
                 self.unattributed_identities = {}
+            if not hasattr(self, "_pending_unattributed_identities"):
+                self._pending_unattributed_identities = {}
             if root is not None and root.get("uid") == self.uid:
                 self.root_identity = _process_identity(root)
                 if self.cleanup_marker is not None:
@@ -761,11 +764,20 @@ class _ProcessCleanupTracker:
                             tracked_pids.add(pid)
                             changed = True
                         else:
-                            self.unattributed_identities[pid] = _process_identity(record)
-                            self._mark_unavailable(
-                                "unattributed same-UID process appeared without "
-                                "candidate cleanup marker"
-                            )
+                            identity = _process_identity(record)
+                            pending = self._pending_unattributed_identities.get(pid)
+                            if self.root_identity is None or (
+                                isinstance(pending, Mapping)
+                                and pending.get("uid") == identity.get("uid")
+                                and pending.get("start_id") == identity.get("start_id")
+                            ):
+                                self.unattributed_identities[pid] = identity
+                                self._mark_unavailable(
+                                    "unattributed same-UID process appeared without "
+                                    "candidate cleanup marker"
+                                )
+                            else:
+                                self._pending_unattributed_identities[pid] = identity
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

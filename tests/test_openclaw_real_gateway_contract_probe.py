@@ -3859,6 +3859,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             MODULE, "_process_has_cleanup_marker", side_effect=has_marker
         ):
             tracker._poll_once()
+            tracker._poll_once()
 
         snapshot = tracker.snapshot()
         self.assertTrue(snapshot["cleanup_marker_verified"])
@@ -3875,6 +3876,56 @@ class RealGatewayProbeTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_cleanup_tracker_keeps_single_unattributed_sample_diagnostic(
+        self,
+    ) -> None:
+        root_pid = 123456
+        unrelated_pid = 234567
+        marker = "unit-cleanup-marker"
+        tracker = MODULE._ProcessCleanupTracker.__new__(MODULE._ProcessCleanupTracker)
+        tracker.root_pid = root_pid
+        tracker.uid = os.getuid()
+        tracker.cleanup_marker = marker
+        tracker.cleanup_marker_verified = False
+        tracker.baseline_identities = {}
+        tracker.root_identity = None
+        tracker.descendants = {}
+        tracker.unattributed_identities = {}
+        tracker._pending_unattributed_identities = {}
+        tracker.unavailable_error = None
+        tracker._lock = MODULE.threading.Lock()
+        records = {
+            root_pid: {
+                "pid": root_pid,
+                "ppid": 1,
+                "pgid": root_pid,
+                "uid": os.getuid(),
+                "start_id": "root-start",
+            },
+            unrelated_pid: {
+                "pid": unrelated_pid,
+                "ppid": 1,
+                "pgid": unrelated_pid,
+                "uid": os.getuid(),
+                "start_id": "unrelated-start",
+            },
+        }
+
+        def has_marker(pid, observed_marker):
+            self.assertEqual(observed_marker, marker)
+            return pid == root_pid
+
+        with mock.patch.object(MODULE, "_process_table", return_value=records), mock.patch.object(
+            MODULE, "_process_has_cleanup_marker", side_effect=has_marker
+        ):
+            tracker._poll_once()
+
+        snapshot = tracker.snapshot()
+        self.assertTrue(snapshot["cleanup_marker_verified"])
+        self.assertEqual(snapshot["tracking_status"], "available")
+        self.assertEqual(snapshot["unattributed_process_identities"], [])
+        self.assertNotIn(unrelated_pid, tracker.descendants)
 
     def test_cleanup_tracker_records_unmarked_process_when_root_exits_first(
         self,
