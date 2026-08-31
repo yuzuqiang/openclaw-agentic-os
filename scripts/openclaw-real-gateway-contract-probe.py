@@ -969,9 +969,8 @@ def _run(
         if start_new_session
         else None
     )
-    try:
-        stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+
+    def cleanup_after_communicate_failure(exc: BaseException) -> tuple[str, str]:
         if start_new_session:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -983,16 +982,28 @@ def _run(
         _terminate_tracked_process_identities(cleanup_snapshot)
         try:
             stdout_raw, stderr_raw = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            stdout_raw = exc.stdout
-            stderr_raw = exc.stderr
+        except subprocess.TimeoutExpired as timeout_exc:
+            stdout_raw = getattr(exc, "stdout", None) or timeout_exc.stdout
+            stderr_raw = getattr(exc, "stderr", None) or timeout_exc.stderr
         stdout = _decode_process_stream(stdout_raw)
         stderr = _decode_process_stream(stderr_raw)
-        exc.pid = proc.pid  # type: ignore[attr-defined]
-        exc.stdout = stdout
-        exc.stderr = stderr
-        if cleanup_snapshot is not None:
-            exc._agentic_os_process_cleanup = cleanup_snapshot  # type: ignore[attr-defined]
+        try:
+            setattr(exc, "pid", proc.pid)
+            setattr(exc, "stdout", stdout)
+            setattr(exc, "stderr", stderr)
+            if cleanup_snapshot is not None:
+                setattr(exc, "_agentic_os_process_cleanup", cleanup_snapshot)
+        except Exception:
+            pass
+        return stdout, stderr
+
+    try:
+        stdout_raw, stderr_raw = proc.communicate(input=input_bytes, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        cleanup_after_communicate_failure(exc)
+        raise
+    except BaseException as exc:
+        cleanup_after_communicate_failure(exc)
         raise
     cleanup_snapshot = cleanup_tracker.stop() if cleanup_tracker is not None else None
     stdout = _decode_process_stream(stdout_raw)
@@ -1251,6 +1262,17 @@ def _persistent_runtime_source_bindings(root: Path) -> list[dict[str, str]]:
             "candidate worktree is dirty; persistent runtime source closure is not exact-head"
         )
     return runtime_source_contract.source_records_from_snapshot(snapshot)
+
+
+def _assert_runtime_sources_still_bound(
+    openclaw_root: Path,
+    expected_sources: list[dict[str, str]],
+) -> None:
+    if not expected_sources:
+        return
+    current_sources = _persistent_runtime_source_bindings(openclaw_root)
+    if current_sources != expected_sources:
+        raise ProbeError("persistent runtime source closure changed after candidate runner exit")
 
 
 def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -> None:
@@ -1989,6 +2011,15 @@ def _runner_base_env() -> dict[str, str]:
     }
 
 
+def _sanitize_parent_environment_before_candidate_launch() -> None:
+    for key in list(os.environ):
+        if key in {
+            PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV,
+            PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+        } or _is_provider_secret_env_name(key):
+            os.environ.pop(key, None)
+
+
 def _validate_hmac_key_material(value: bytes, label: str) -> bytes:
     if len(value) != 32 or len(set(value)) < 16:
         raise ProbeError(f"{label} key is unavailable or too weak")
@@ -2012,10 +2043,12 @@ def _hmac_secret_from_env(env_name: str, label: str) -> bytes:
 
 def _select_validation_anchor_key() -> bytes:
     if PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV in os.environ:
-        return _hmac_secret_from_env(
+        key = _hmac_secret_from_env(
             PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
             "persistent lifecycle validation anchor",
         )
+        os.environ.pop(PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, None)
+        return key
     return _validate_hmac_key_material(
         secrets.token_bytes(32),
         "persistent lifecycle validation anchor",
@@ -4346,6 +4379,7 @@ def _run_persistent_lifecycle_probe_once(
             raise CandidateProcessGroupOpenError(
                 "persistent lifecycle runner left candidate process group alive before validator"
             )
+        _assert_runtime_sources_still_bound(openclaw_root, runtime_sources)
         receipt_file = _descriptor_path(pinned_run_root.receipts.fd) / (
             "lifecycle-receipt.json"
         )
@@ -4474,6 +4508,7 @@ def _run_persistent_lifecycle_probe(
     requested_process_boundary: str = "external-container",
 ) -> dict[str, Any]:
     validation_anchor_key = _select_validation_anchor_key()
+    _sanitize_parent_environment_before_candidate_launch()
     prepared_run_root = _prepare_private_run_root(run_root)
     pinned_run_root = _pin_prepared_run_root(prepared_run_root)
     result: dict[str, Any] | None = None

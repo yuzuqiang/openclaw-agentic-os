@@ -684,9 +684,11 @@ class CurrentStatusTests(unittest.TestCase):
         bound_head = binding["agentic_os_head_sha"]
         self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
         self.assertIsNone(current["reviewed_head_sha"])
-        subprocess.run(
+        ancestry_check = subprocess.run(
             ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
-            check=True,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         bound_tree = subprocess.run(
             ["git", "-C", str(root), "rev-parse", f"{bound_head}^{{tree}}"],
@@ -709,10 +711,6 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(script_blob).hexdigest(),
             binding["preflight_script_sha256"],
-        )
-        subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
-            check=True,
         )
         drift_check = subprocess.run(
             [
@@ -737,6 +735,7 @@ class CurrentStatusTests(unittest.TestCase):
                 ]
             )
         else:
+            self.assertEqual(ancestry_check.returncode, 0)
             self.assertEqual(drift_check.returncode, 0)
 
 

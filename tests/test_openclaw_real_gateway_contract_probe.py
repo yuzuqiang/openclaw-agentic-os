@@ -287,6 +287,22 @@ class RealGatewayProbeTests(unittest.TestCase):
             for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
         ]
 
+    def _write_runtime_source_fixture(self, root: Path, files: dict[str, str]) -> None:
+        base_files = {
+            "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+            "openclaw.mjs": "export const openclaw = true;\n",
+            MODULE.PERSISTENT_LIFECYCLE_RUNNER: "export const runner = true;\n",
+            "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+            "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+            "src/gateway/client.ts": "export const c = 1;\n",
+            "src/utils/message-channel.ts": "export const m = 1;\n",
+        }
+        base_files.update(files)
+        for relative, content in base_files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
     def _resign_attestation_response(self, response: dict) -> None:
         signed_payload = response["signed_payload"]
         response["signature"] = hmac.new(
@@ -1388,6 +1404,113 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn("node_modules/fixture-runtime/bundler-entry.mjs", paths)
         self.assertNotIn("node_modules/fixture-runtime/index.d.ts", paths)
 
+    def test_persistent_runtime_source_closure_resolves_nested_importer_dependency(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "src/gateway/client.ts": "import { packageRuntime } from 'fixture-runtime';\n",
+                    "node_modules/fixture-runtime/package.json": (
+                        '{"name":"fixture-runtime","main":"index.cjs"}\n'
+                    ),
+                    "node_modules/fixture-runtime/index.cjs": (
+                        "const dep = require('fixture-runtime-dep');\n"
+                        "module.exports = { packageRuntime() { return dep.source; } };\n"
+                    ),
+                    "node_modules/fixture-runtime/node_modules/fixture-runtime-dep/package.json": (
+                        '{"name":"fixture-runtime-dep","main":"index.js"}\n'
+                    ),
+                    "node_modules/fixture-runtime/node_modules/fixture-runtime-dep/index.js": (
+                        "module.exports = { source: 'nested' };\n"
+                    ),
+                    "node_modules/fixture-runtime-dep/package.json": (
+                        '{"name":"fixture-runtime-dep","main":"index.js"}\n'
+                    ),
+                    "node_modules/fixture-runtime-dep/index.js": (
+                        "module.exports = { source: 'root' };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn(
+            "node_modules/fixture-runtime/node_modules/fixture-runtime-dep/index.js",
+            paths,
+        )
+        self.assertNotIn("node_modules/fixture-runtime-dep/index.js", paths)
+
+    def test_persistent_runtime_source_closure_resolves_wildcard_package_exports(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "src/gateway/client.ts": (
+                        "import { feature } from 'fixture-runtime/feature/x';\n"
+                    ),
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {
+                            "name": "fixture-runtime",
+                            "exports": {"./feature/*": "./dist/feature/*.js"},
+                        }
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/dist/feature/x.js": (
+                        "export const feature = true;\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/dist/feature/x.js", paths)
+
+    def test_persistent_runtime_source_closure_treats_core_subpath_overlap_as_package(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "openclaw.mjs": "import extra from 'fs/extra';\n",
+                    "node_modules/fs/package.json": (
+                        '{"name":"fs","exports":{"./extra":"./extra.js"}}\n'
+                    ),
+                    "node_modules/fs/extra.js": "export default true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fs/package.json", paths)
+        self.assertIn("node_modules/fs/extra.js", paths)
+
+    def test_persistent_runtime_source_closure_rejects_escaped_specifiers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        'require("./f\\\\u006fo.js");\n'
+                    ),
+                    "scripts/foo.js": "module.exports = { real: true };\n",
+                    "scripts/fu006fo.js": "module.exports = { decoy: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "JavaScript escape"):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_dynamic_commonjs_callable_variants(
         self,
     ) -> None:
@@ -1563,6 +1686,22 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "file:///bound/node_modules/tsx/dist/loader.mjs"
                     ),
                     expected_sources=self._valid_runtime_launch_sources(),
+                )
+
+    def test_runtime_source_revalidation_rejects_changed_post_run_closure(self) -> None:
+        expected_sources = self._valid_runtime_sources()
+        changed_sources = [dict(item) for item in expected_sources]
+        changed_sources[0]["sha256"] = "0" * 64
+
+        with mock.patch.object(
+            MODULE,
+            "_persistent_runtime_source_bindings",
+            return_value=changed_sources,
+        ):
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtime source closure changed"):
+                MODULE._assert_runtime_sources_still_bound(
+                    Path("/unused"),
+                    expected_sources,
                 )
 
     def test_runtime_evidence_json_rejects_duplicate_keys(self) -> None:
@@ -3355,6 +3494,35 @@ class RealGatewayProbeTests(unittest.TestCase):
                 VALIDATION_ANCHOR_HMAC_SECRET,
             )
             token_bytes.assert_not_called()
+            self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, os.environ)
+
+    def test_parent_environment_is_sanitized_before_candidate_launch(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PATH": "/usr/bin",
+                "OPENAI_API_KEY": "sk-secret",
+                "CUSTOM_TOKEN": "secret",
+                MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV: (
+                    VALIDATION_ANCHOR_HMAC_SECRET_HEX
+                ),
+                MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV: (
+                    ATTESTATION_HMAC_SECRET_HEX
+                ),
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                MODULE._select_validation_anchor_key(),
+                VALIDATION_ANCHOR_HMAC_SECRET,
+            )
+            MODULE._sanitize_parent_environment_before_candidate_launch()
+
+            self.assertEqual(os.environ["PATH"], "/usr/bin")
+            self.assertNotIn("OPENAI_API_KEY", os.environ)
+            self.assertNotIn("CUSTOM_TOKEN", os.environ)
+            self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, os.environ)
+            self.assertNotIn(MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, os.environ)
 
     def test_validator_env_consumes_private_attestation_key_and_separates_domains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -5041,6 +5209,38 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(json.loads(proc.stdout), [])
 
+    def test_run_reaps_child_when_communicate_is_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            class FakePopen:
+                pid = 4321
+                returncode = None
+
+                def __init__(self) -> None:
+                    self.calls = 0
+                    self.killed = False
+
+                def communicate(self, *args, **kwargs):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise KeyboardInterrupt("operator interruption")
+                    return "cleanup stdout", "cleanup stderr"
+
+                def poll(self):
+                    return None if not self.killed else -9
+
+                def kill(self) -> None:
+                    self.killed = True
+                    self.returncode = -9
+
+            fake_proc = FakePopen()
+            with mock.patch.object(MODULE.subprocess, "Popen", return_value=fake_proc):
+                with self.assertRaises(KeyboardInterrupt) as captured:
+                    MODULE._run(["candidate"], cwd=Path(directory), timeout=5)
+
+            self.assertTrue(fake_proc.killed)
+            self.assertEqual(fake_proc.calls, 2)
+            self.assertEqual(getattr(captured.exception, "pid"), 4321)
+
     def test_attestation_key_cleanup_failure_retains_primary_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             primary = MODULE.ProbeError("primary runner timeout marker")
@@ -5251,6 +5451,78 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE, "_run_independent_validator", side_effect=unexpected_validator
                 ), mock.patch.object(
                     MODULE, "_wait_for_loopback_port_closed", return_value=True
+                ), mock.patch.object(
+                    MODULE, "_terminate_and_verify_process_group", return_value=(True, True)
+                ), mock.patch.object(
+                    MODULE, "_terminate_process_group", return_value=True
+                ):
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError,
+                        "evidence was rejected after successful runner exit",
+                    ):
+                        MODULE._run_persistent_lifecycle_probe(
+                            root,
+                            output,
+                            timeout=1,
+                            head=VALID_RUNTIME_HEAD,
+                            agentic_sources=[],
+                            runtime_sources=[],
+                            run_root=root / "run",
+                            port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                            run_id="run-id",
+                            transition_id="transition-id",
+                        )
+            finally:
+                self.assertFalse(validator_called)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "fail_closed")
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_validation_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "pass")
+
+    def test_persistent_runner_success_revalidates_runtime_sources_before_validator(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            validator_called = False
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            def unexpected_validator(**_kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            try:
+                with mock.patch.object(
+                    MODULE,
+                    "_run",
+                    return_value=self._attach_valid_process_cleanup(Proc()),
+                ), mock.patch.object(
+                    MODULE, "_git", return_value="agentic-head"
+                ), mock.patch.object(
+                    MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
+                ), mock.patch.object(
+                    MODULE,
+                    "_assert_runtime_sources_still_bound",
+                    side_effect=MODULE.ProbeError("runtime source closure changed"),
+                ), mock.patch.object(
+                    MODULE, "_run_independent_validator", side_effect=unexpected_validator
+                ), mock.patch.object(
+                    MODULE, "_wait_for_loopback_port_closed", return_value=True
+                ), mock.patch.object(
+                    MODULE, "_terminate_and_verify_process_group", return_value=(True, True)
                 ), mock.patch.object(
                     MODULE, "_terminate_process_group", return_value=True
                 ):

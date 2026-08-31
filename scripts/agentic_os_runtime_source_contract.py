@@ -63,6 +63,17 @@ NODE_BUILTIN_MODULES = frozenset(
         "worker_threads",
     }
 )
+NODE_BUILTIN_SUBPATHS = frozenset(
+    {
+        "assert/strict",
+        "fs/promises",
+        "stream/consumers",
+        "stream/promises",
+        "stream/web",
+        "timers/promises",
+        "util/types",
+    }
+)
 
 STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     r"""
@@ -224,13 +235,19 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
     quote = source_text[index]
     index += 1
     specifier: list[str] = []
+    saw_escape = False
     while index < len(source_text):
         character = source_text[index]
         if character == "\\" and index + 1 < len(source_text):
-            specifier.append(source_text[index + 1])
+            saw_escape = True
+            specifier.append(source_text[index : index + 2])
             index += 2
             continue
         if character == quote:
+            if saw_escape:
+                raise RuntimeSourceContractError(
+                    "runtime source import specifier contains an unsupported JavaScript escape"
+                )
             return "".join(specifier), index + 1
         specifier.append(character)
         index += 1
@@ -643,10 +660,13 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
-    specifiers.extend(
-        (match.group("specifier"), True, "import")
-        for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text)
-    )
+    for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text):
+        specifier = match.group("specifier")
+        if "\\" in specifier:
+            raise RuntimeSourceContractError(
+                "runtime source import specifier contains an unsupported JavaScript escape"
+            )
+        specifiers.append((specifier, True, "import"))
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)
     return specifiers
@@ -672,7 +692,7 @@ def _package_subpath(specifier: str, package_name: str) -> str:
 
 def _is_node_builtin(specifier: str) -> bool:
     name = specifier[5:] if specifier.startswith("node:") else specifier
-    return name.split("/", 1)[0] in NODE_BUILTIN_MODULES
+    return name in NODE_BUILTIN_MODULES or name in NODE_BUILTIN_SUBPATHS
 
 
 def _load_package_json(package_json: Path, package_name: str) -> dict[str, Any]:
@@ -709,6 +729,37 @@ def _export_condition_targets(
     return []
 
 
+def _substitute_export_target(target: Any, replacement: str) -> Any:
+    if isinstance(target, str):
+        return target.replace("*", replacement)
+    if isinstance(target, list):
+        return [_substitute_export_target(item, replacement) for item in target]
+    if isinstance(target, dict):
+        return {
+            key: _substitute_export_target(value, replacement)
+            for key, value in target.items()
+        }
+    return target
+
+
+def _exports_pattern_target(exports: dict[str, Any], export_key: str) -> Any:
+    matches: list[tuple[int, str, Any]] = []
+    for key, target in exports.items():
+        if not isinstance(key, str) or "*" not in key or not key.startswith("."):
+            continue
+        prefix, suffix = key.split("*", 1)
+        if not export_key.startswith(prefix) or not export_key.endswith(suffix):
+            continue
+        replacement = export_key[len(prefix) : len(export_key) - len(suffix)]
+        if not replacement:
+            continue
+        matches.append((len(prefix) + len(suffix), replacement, target))
+    if not matches:
+        return None
+    _, replacement, target = max(matches, key=lambda item: item[0])
+    return _substitute_export_target(target, replacement)
+
+
 def _exports_map_target(exports: Any, subpath: str) -> Any:
     export_key = "." if not subpath else f"./{subpath}"
     if isinstance(exports, str) or isinstance(exports, list):
@@ -716,7 +767,9 @@ def _exports_map_target(exports: Any, subpath: str) -> Any:
     if not isinstance(exports, dict):
         return None
     if any(isinstance(key, str) and key.startswith(".") for key in exports):
-        return exports.get(export_key)
+        if export_key in exports:
+            return exports.get(export_key)
+        return _exports_pattern_target(exports, export_key)
     return exports if export_key == "." else None
 
 
@@ -743,6 +796,29 @@ def _package_entry_bases(
         bases.append((package_root / main).resolve())
     bases.append(package_root / "index")
     return bases, False
+
+
+def _package_root_candidates(root: Path, importer: Path, package_name: str) -> list[Path]:
+    root = root.resolve()
+    current = importer.resolve().parent
+    candidates: list[Path] = []
+    while True:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            break
+        candidates.append((current / "node_modules" / package_name).resolve())
+        if current == root:
+            break
+        current = current.parent
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        deduped.append(candidate)
+    return deduped
 
 
 def _resolve_existing_candidate(root: Path, base: Path) -> Path | None:
@@ -791,41 +867,39 @@ def resolve_import(
         return ()
 
     package_name = _package_name(normalized)
-    package_root = (root / "node_modules" / package_name).resolve()
-    try:
-        package_root.relative_to(root)
-    except ValueError as exc:
-        raise RuntimeSourceContractError(
-            "runtime package import escapes the OpenClaw candidate root"
-        ) from exc
-    package_json = package_root / "package.json"
-    if not package_json.is_file():
-        if required:
-            importer_relative = source_relative_path(root, importer)
-            raise RuntimeSourceContractError(
-                "runtime package import could not be resolved: "
-                f"{importer_relative} imports {specifier}"
-            )
-        return ()
-    package_payload = _load_package_json(package_json, package_name)
     subpath = _package_subpath(normalized, package_name)
-    entry_bases, export_restricted = _package_entry_bases(
-        package_root,
-        package_payload,
-        subpath=subpath,
-        import_kind=import_kind,
-    )
-    for base in entry_bases:
-        resolved = _resolve_existing_candidate(root, base)
-        if resolved is not None:
-            return (package_json.resolve(), resolved)
-    if required or export_restricted:
+    found_package_json: Path | None = None
+    for package_root in _package_root_candidates(root, importer, package_name):
+        try:
+            package_root.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeSourceContractError(
+                "runtime package import escapes the OpenClaw candidate root"
+            ) from exc
+        package_json = package_root / "package.json"
+        if not package_json.is_file():
+            continue
+        found_package_json = package_json
+        package_payload = _load_package_json(package_json, package_name)
+        entry_bases, export_restricted = _package_entry_bases(
+            package_root,
+            package_payload,
+            subpath=subpath,
+            import_kind=import_kind,
+        )
+        for base in entry_bases:
+            resolved = _resolve_existing_candidate(root, base)
+            if resolved is not None:
+                return (package_json.resolve(), resolved)
+        if export_restricted:
+            break
+    if required or found_package_json is None:
         importer_relative = source_relative_path(root, importer)
         raise RuntimeSourceContractError(
             "runtime package import could not be resolved: "
             f"{importer_relative} imports {specifier}"
         )
-    return (package_json.resolve(),)
+    return (found_package_json.resolve(),)
 
 
 def runtime_source_paths(root: Path) -> tuple[str, ...]:
