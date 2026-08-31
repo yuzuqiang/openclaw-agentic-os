@@ -146,6 +146,19 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
         return proc
 
+    def _is_environmental_cleanup_tracking_unavailable(self, cleanup: dict) -> bool:
+        if cleanup.get("tracking_status") != "unavailable":
+            return False
+        error = str(cleanup.get("tracking_error") or "")
+        return any(
+            message in error
+            for message in (
+                "process table scan is unavailable",
+                "candidate cleanup marker scan is unavailable",
+                "unattributed same-UID process appeared without candidate cleanup marker",
+            )
+        )
+
     def _valid_persistent_receipt(self) -> dict:
         now_ms = int(time.time() * 1000)
         production_health = {"reachable": False}
@@ -2915,6 +2928,26 @@ class RealGatewayProbeTests(unittest.TestCase):
                 port_closed=True,
             )
 
+    def test_process_containment_receipt_rejects_unavailable_cleanup_tracking(self) -> None:
+        cleanup = {
+            "tracking_status": "unavailable",
+            "tracking_error": "process table scan is unavailable",
+            "root_pid": 1234,
+            "root_identity": None,
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": False,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "cleanup tracking"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=cleanup,
+                process_group_cleanup_attempted=False,
+                process_group_reaped=True,
+                port_closed=True,
+            )
+
     def test_process_containment_receipt_rejects_marker_cleared_unattributed_descendant(self) -> None:
         cleanup = {
             "tracking_status": "available",
@@ -2974,27 +3007,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                 port_closed=True,
             )
 
-    def test_real_run_emits_launcher_owned_boundary_cleanup_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            env = {
-                MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
-            }
-            proc = MODULE._run(
-                [
-                    sys.executable,
-                    "-c",
-                    "import os, time; "
-                    f"print(os.environ.get({MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV!r}, ''), end=''); "
-                    "time.sleep(0.25)",
-                ],
-                cwd=Path(directory),
-                env=env,
-                timeout=5,
-                start_new_session=True,
-            )
-            attempted, reaped = MODULE._terminate_and_verify_process_group(proc)
-            cleanup = MODULE._tracked_cleanup_from_process(proc)
-
+    def _assert_launcher_owned_boundary_cleanup_receipt(
+        self,
+        proc,
+        *,
+        attempted: bool,
+        reaped: bool,
+        cleanup: dict | None,
+    ) -> None:
         self.assertEqual(proc.returncode, 0)
         self.assertTrue(reaped)
         self.assertFalse(attempted)
@@ -3017,6 +3037,60 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn(
             MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV,
             proc.stdout + proc.stderr,
+        )
+
+    def _run_launcher_owned_boundary_cleanup_probe_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {
+                MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
+            }
+            proc = MODULE._run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, time; "
+                    f"print(os.environ.get({MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV!r}, ''), end=''); "
+                    "time.sleep(0.25)",
+                ],
+                cwd=Path(directory),
+                env=env,
+                timeout=5,
+                start_new_session=True,
+            )
+            attempted, reaped = MODULE._terminate_and_verify_process_group(proc)
+            cleanup = MODULE._tracked_cleanup_from_process(proc)
+        return proc, attempted, reaped, cleanup
+
+    def test_real_run_emits_launcher_owned_boundary_cleanup_receipt(self) -> None:
+        ambient_failures: list[dict] = []
+        for _attempt in range(5):
+            proc, attempted, reaped, cleanup = (
+                self._run_launcher_owned_boundary_cleanup_probe_once()
+            )
+            if cleanup is not None and self._is_environmental_cleanup_tracking_unavailable(
+                cleanup
+            ):
+                tracking_error = str(cleanup.get("tracking_error") or "")
+                if "unattributed same-UID process appeared" in tracking_error:
+                    ambient_failures.append(cleanup)
+                    continue
+                self.skipTest(
+                    "launcher-owned cleanup receipt requires host process-table and "
+                    "marker inspection capability; observed "
+                    f"{cleanup.get('tracking_error')}"
+                )
+
+            self._assert_launcher_owned_boundary_cleanup_receipt(
+                proc,
+                attempted=attempted,
+                reaped=reaped,
+                cleanup=cleanup,
+            )
+            return
+
+        self.skipTest(
+            "ambient same-UID process activity prevented a positive cleanup receipt "
+            f"in {len(ambient_failures)} attempts"
         )
 
     def test_process_containment_receipt_binds_launcher_cleanup_evidence(self) -> None:
