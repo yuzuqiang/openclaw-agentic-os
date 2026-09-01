@@ -1763,6 +1763,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             "process['dlopen'](module, './runtime-addon.node');\n",
             "process?.['dlopen']?.(module, './runtime-addon.node');\n",
             "(process.dlopen)(module, './runtime-addon.node');\n",
+            "((process.dlopen))(module, './runtime-addon.node');\n",
+            "(process['dlopen'])(module, './runtime-addon.node');\n",
+            "globalThis.process.dlopen(module, './runtime-addon.node');\n",
+            "`${process.dlopen(module, './runtime-addon.node')}`;\n",
         )
         for source in variants:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
@@ -1791,6 +1795,28 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "const loadAddon = process.dlopen;\n"
                 "loadAddon(module, './runtime-addon.node');\n"
             ),
+            "process-alias": (
+                "const p = process;\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "process-alias-asi": (
+                "const p = (process)\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "destructured": (
+                "const { dlopen } = process;\n"
+                "dlopen(module, './runtime-addon.node');\n"
+            ),
+            "dynamic-key": (
+                "const key = 'dlopen';\n"
+                "process[key](module, './runtime-addon.node');\n"
+            ),
+            "computed-key": (
+                "process['dlo' + 'pen'](module, './runtime-addon.node');\n"
+            ),
+            "concatenated-path": (
+                "process.dlopen(module, './runtime-addon' + '.node');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1805,6 +1831,27 @@ class RealGatewayProbeTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(MODULE.ProbeError, "native add-on"):
                     MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_ignores_native_addon_text_literals(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const quoted = \"process.dlopen(module, './runtime-addon.node')\";\n"
+                        "const raw = `process.dlopen(module, './runtime-addon.node')`;\n"
+                        "const pattern = /process\\.dlopen\\(module/;\n"
+                        "export { quoted, raw, pattern };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertNotIn("scripts/runtime-addon.node", paths)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_child_process_node_entrypoint(
         self,
