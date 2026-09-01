@@ -1870,6 +1870,23 @@ class RealGatewayProbeTests(unittest.TestCase):
             "non-strict-this-process": (
                 "this.process.dlopen(module, './runtime-addon.node');\n"
             ),
+            "computed-this-process": (
+                "(function () { return this['pro' + 'cess']; })().dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "template-this-process": (
+                "(function () { return this[`process`]; })().dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "computed-module-constructor-load": (
+                "module.constructor['_load']('node:' + 'pro' + 'cess').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "reflect-computed-this-process": (
+                "(function () { return Reflect.get("
+                "this, 'pro' + 'cess'); })().dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1901,6 +1918,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "const version = globalThis['process'].version;\n"
                         "const legacyVersion = global.process.version;\n"
                         "const labels = { process: 'runtime' };\n"
+                        "const processLabel = 'process';\n"
                         "export { quoted, raw, pattern, env, version, legacyVersion, labels };\n"
                     ),
                 },

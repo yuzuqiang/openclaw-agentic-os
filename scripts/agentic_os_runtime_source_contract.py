@@ -541,6 +541,35 @@ def _parse_safe_process_member_access(source_text: str, index: int) -> int | Non
     return property_end
 
 
+def _capability_member_end_or_fail(source_text: str, index: int) -> int | None:
+    forbidden_by_base = {
+        "Module": {"_load", "constructor", "process"},
+        "Reflect": {"constructor", "get", "process"},
+        "module": {"_load", "constructor", "process"},
+        "this": {"constructor", "process"},
+    }
+    for base_name, forbidden_members in forbidden_by_base.items():
+        if not source_text.startswith(base_name, index):
+            continue
+        before = source_text[index - 1] if index > 0 else ""
+        base_end = index + len(base_name)
+        after = source_text[base_end] if base_end < len(source_text) else ""
+        if (before and (_is_identifier_character(before) or before == ".")) or (
+            after and _is_identifier_character(after)
+        ):
+            continue
+        member = _parse_process_member(source_text, base_end)
+        if member is None:
+            return None
+        member_name, member_end = member
+        if member_name in forbidden_members:
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported native add-on capability access"
+            )
+        return member_end
+    return None
+
+
 def _parse_process_dlopen_invocation(
     source_text: str, index: int
 ) -> tuple[str, int] | None:
@@ -609,11 +638,7 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
             parsed = _parse_quoted_specifier(source_text, index)
             if parsed is None:
                 raise AssertionError("quoted JavaScript literal did not parse")
-            literal_value, index = parsed
-            if literal_value in {"process", "node:process"}:
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported native add-on process acquisition"
-                )
+            _, index = parsed
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
@@ -628,6 +653,12 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
             (character.isalpha() or character in {"_", "$"})
             and (index == 0 or not _is_identifier_character(source_text[index - 1]))
         ):
+            capability_member_end = _capability_member_end_or_fail(
+                source_text, index
+            )
+            if capability_member_end is not None:
+                index = capability_member_end
+                continue
             parsed = _parse_process_dlopen_invocation(source_text, index)
             if parsed is not None:
                 specifier, index = parsed
