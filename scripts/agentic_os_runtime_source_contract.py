@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,8 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
 )
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
 EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS = frozenset(("WebAssembly",))
+COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
+COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
 EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
     (
         "compileFunction",
@@ -561,6 +564,27 @@ def _parse_process_member(
     if parsed_property is None:
         return None
     return parsed_property
+
+
+def _parse_named_runtime_base(
+    source_text: str, index: int, base_name: str
+) -> int | None:
+    parsed = _parse_js_identifier(source_text, index)
+    if parsed is None or parsed[0] != base_name:
+        return None
+    before = source_text[index - 1] if index > 0 else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    return parsed[1]
+
+
+def _parse_named_runtime_member(
+    source_text: str, index: int, base_name: str
+) -> tuple[str, int] | None:
+    base_end = _parse_named_runtime_base(source_text, index, base_name)
+    if base_end is None:
+        return None
+    return _parse_process_member(source_text, base_end)
 
 
 def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
@@ -1443,6 +1467,27 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported evaluated loader reference"
                 )
+        module_member = _parse_named_runtime_member(source_text, index, "module")
+        if module_member is not None:
+            member_name, member_end = module_member
+            if member_name in COMMONJS_COMPILE_MEMBER_NAMES:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS runtime compiler"
+                )
+            if member_name in COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported custom CommonJS extension loader"
+                )
+            index = max(index, member_end - 1)
+            continue
+        require_member = _parse_named_runtime_member(source_text, index, "require")
+        if (
+            require_member is not None
+            and require_member[0] in COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported custom CommonJS extension loader"
+            )
         parsed_identifier = _parse_js_identifier(source_text, index)
         if (
             parsed_identifier is not None
@@ -2047,6 +2092,35 @@ def _is_node_builtin(specifier: str) -> bool:
     return name in NODE_BUILTIN_MODULES or name in NODE_BUILTIN_SUBPATHS
 
 
+def _normalize_import_specifier_for_resolution(
+    specifier: str, *, import_kind: str
+) -> str:
+    if import_kind == "require":
+        return specifier
+    normalized = specifier.split("?", 1)[0].split("#", 1)[0]
+    if not normalized.startswith(".") or "%" not in normalized:
+        return normalized
+    if re.search(r"%(?![0-9A-Fa-f]{2})", normalized):
+        raise RuntimeSourceContractError(
+            f"runtime source import specifier contains an invalid file URL escape: {specifier}"
+        )
+    if re.search(r"%(?:2[fF]|5[cC])", normalized):
+        raise RuntimeSourceContractError(
+            f"runtime source import specifier contains an encoded path separator: {specifier}"
+        )
+    try:
+        decoded = urllib.parse.unquote(normalized, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeSourceContractError(
+            f"runtime source import specifier contains an invalid UTF-8 file URL escape: {specifier}"
+        ) from exc
+    if "\x00" in decoded:
+        raise RuntimeSourceContractError(
+            f"runtime source import specifier contains a NUL path segment: {specifier}"
+        )
+    return decoded
+
+
 def _load_package_json(package_json: Path, package_name: str) -> dict[str, Any]:
     try:
         payload = json.loads(package_json.read_text(encoding="utf-8"))
@@ -2378,10 +2452,8 @@ def resolve_import(
             required=required,
             import_kind=import_kind,
         )
-    normalized = (
-        specifier
-        if import_kind == "require"
-        else specifier.split("?", 1)[0].split("#", 1)[0]
+    normalized = _normalize_import_specifier_for_resolution(
+        specifier, import_kind=import_kind
     )
     if _is_node_builtin(normalized):
         return ()

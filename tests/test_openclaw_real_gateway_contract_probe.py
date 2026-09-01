@@ -2036,6 +2036,52 @@ class RealGatewayProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.ProbeError, "evaluated loader"):
                     MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_module_compile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "module._compile(\"require('./hidden.cjs')\", __filename);\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtime compiler"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_custom_commonjs_extensions(
+        self,
+    ) -> None:
+        cases = {
+            "require_extensions": (
+                "require.extensions['.foo'] = require.extensions['.js'];\n"
+                "require('./impl.foo');\n"
+            ),
+            "module_extensions": (
+                "module._extensions['.foo'] = module._extensions['.js'];\n"
+                "require('./impl.foo');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/impl.foo": "require('./hidden.cjs');\n",
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(MODULE.ProbeError, "CommonJS extension"):
+                    MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_webassembly_evaluation(
         self,
     ) -> None:
@@ -2408,6 +2454,47 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(MODULE.ProbeError, "JavaScript escape"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_decodes_esm_file_url_escapes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import './%68idden.mjs';\n"
+                    ),
+                    "scripts/hidden.mjs": "import './transitive.mjs';\n",
+                    "scripts/transitive.mjs": "export const real = true;\n",
+                    "scripts/%68idden.mjs": "export const decoy = true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/hidden.mjs", paths)
+        self.assertIn("scripts/transitive.mjs", paths)
+        self.assertNotIn("scripts/%68idden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_esm_encoded_separators(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import './safe%2fhidden.mjs';\n"
+                    ),
+                    "scripts/safe/hidden.mjs": "export const real = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "encoded path separator"):
                 MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_commonjs_callable_variants(
