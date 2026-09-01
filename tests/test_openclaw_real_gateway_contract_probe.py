@@ -2005,6 +2005,20 @@ class RealGatewayProbeTests(unittest.TestCase):
             "function_reference": (
                 'Reflect.construct(Function, ["return import(\\\'./runner-impl.mjs\\\')"])();\n'
             ),
+            "vm_run_in_this_context": (
+                "import vm from 'node:vm';\n"
+                "import fs from 'node:fs';\n"
+                "vm.runInThisContext(fs.readFileSync("
+                "new URL('./runner-impl.mjs', import.meta.url), 'utf8'));\n"
+            ),
+            "vm_bracket_run_in_this_context": (
+                "import vm from 'node:vm';\n"
+                "vm['runIn' + 'ThisContext']('require(\\'./runner-impl.cjs\\')');\n"
+            ),
+            "vm_script": (
+                "import { Script } from 'node:vm';\n"
+                "new Script('require(\\'./runner-impl.cjs\\')').runInThisContext();\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -2257,6 +2271,54 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("real.js", paths)
         self.assertNotIn("node_modules/demo/decoy.js", paths)
+
+    def test_persistent_runtime_source_closure_resolves_package_imports_map(
+        self,
+    ) -> None:
+        cases = {
+            "esm": (
+                "src/gateway/client.ts",
+                "import { impl } from '#impl';\nexport const c = impl;\n",
+                "impl.mjs",
+            ),
+            "commonjs": (
+                MODULE.PERSISTENT_LIFECYCLE_RUNNER,
+                "const impl = require('#impl');\n",
+                "impl.cjs",
+            ),
+        }
+        for name, (relative, source, expected) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        "package.json": json.dumps(
+                            {
+                                "name": "openclaw",
+                                "version": "0.0.0-test",
+                                "imports": {
+                                    "#impl": {
+                                        "import": "./impl.mjs",
+                                        "require": "./impl.cjs",
+                                    }
+                                },
+                            }
+                        )
+                        + "\n",
+                        relative: source,
+                        "impl.mjs": "export const impl = true;\n",
+                        "impl.cjs": "module.exports = { impl: true };\n",
+                        "node_modules/#impl/package.json": '{"name":"#impl"}\n',
+                        "node_modules/#impl/index.js": "export const decoy = true;\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn(expected, paths)
+            self.assertIn("package.json", paths)
+            self.assertNotIn("node_modules/#impl/index.js", paths)
 
     def test_persistent_runtime_source_closure_treats_core_subpath_overlap_as_package(
         self,
@@ -3885,8 +3947,9 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", captured_env)
         self.assertNotIn("NODE_OPTIONS", captured_env)
         self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, captured_env)
-        self.assertNotIn(
-            MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, captured_env
+        self.assertEqual(
+            captured_env[MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV],
+            ATTESTATION_HMAC_SECRET_HEX,
         )
         self.assertEqual(captured_env["candidate_pass_fds"], ())
         self.assertEqual(
@@ -4022,8 +4085,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             runner_env = captured["runner_env"]
             self.assertIsInstance(runner_env, dict)
             self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, runner_env)
-            self.assertNotIn(
-                MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, runner_env
+            self.assertEqual(
+                runner_env[MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV],
+                ATTESTATION_HMAC_SECRET_HEX,
             )
             runner_command = captured["runner_command"]
             self.assertIsInstance(runner_command, list)
@@ -6755,6 +6819,82 @@ class RealGatewayProbeTests(unittest.TestCase):
             finally:
                 self.assertFalse(validator_called)
 
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "fail_closed")
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_validation_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "pass")
+
+    def test_persistent_runner_success_revalidates_validator_python_runtime_before_validator(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            validator_called = False
+            expected_sources = [
+                {
+                    "path": "validator-runtime:python",
+                    "sha256": "a" * 64,
+                    "realpath_sha256": "b" * 64,
+                }
+            ]
+            changed_sources = [{**expected_sources[0], "sha256": "c" * 64}]
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            def unexpected_validator(**_kwargs):
+                nonlocal validator_called
+                validator_called = True
+
+            with mock.patch.object(
+                MODULE,
+                "_run",
+                return_value=self._attach_valid_process_cleanup(Proc()),
+            ), mock.patch.object(
+                MODULE, "_git", return_value="agentic-head"
+            ), mock.patch.object(
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
+            ), mock.patch.object(
+                MODULE,
+                "_validator_python_runtime_bindings",
+                side_effect=[expected_sources, changed_sources],
+            ), mock.patch.object(
+                MODULE, "_run_independent_validator", side_effect=unexpected_validator
+            ), mock.patch.object(
+                MODULE, "_wait_for_loopback_port_closed", return_value=True
+            ), mock.patch.object(
+                MODULE, "_terminate_and_verify_process_group", return_value=(True, True)
+            ), mock.patch.object(
+                MODULE, "_terminate_process_group", return_value=True
+            ):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "evidence was rejected after successful runner exit",
+                ):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head=VALID_RUNTIME_HEAD,
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=root / "run",
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+
+            self.assertFalse(validator_called)
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "fail_closed")
             cleanup = next(

@@ -177,6 +177,18 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
+EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
+    (
+        "compileFunction",
+        "createContext",
+        "runInContext",
+        "runInNewContext",
+        "runInThisContext",
+        "Script",
+        "SourceTextModule",
+        "SyntheticModule",
+    )
+)
 CREATE_REQUIRE_IMPORT = re.compile(
     rf"""
     \bimport\s*\{{(?P<body>.*?)\}}\s*
@@ -1409,11 +1421,28 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             quote = character
             index += 1
             continue
+        if character == "[":
+            computed_member = _static_computed_member_name(source_text, index)
+            if (
+                computed_member is not None
+                and computed_member[0] in EVALUATED_RUNTIME_VM_MEMBER_NAMES
+            ):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported evaluated loader reference"
+                )
         for token in EVALUATED_RUNTIME_LOADER_TOKENS:
             if _is_forbidden_runtime_loader_reference(source_text, index, token):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported evaluated loader reference"
                 )
+        parsed_identifier = _parse_js_identifier(source_text, index)
+        if (
+            parsed_identifier is not None
+            and parsed_identifier[0] in EVALUATED_RUNTIME_VM_MEMBER_NAMES
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported evaluated loader reference"
+            )
         index += 1
 
 
@@ -2068,6 +2097,24 @@ def _exports_pattern_target(exports: dict[str, Any], export_key: str) -> Any:
     return _substitute_export_target(target, replacement)
 
 
+def _imports_pattern_target(imports: dict[str, Any], specifier: str) -> Any:
+    matches: list[tuple[int, str, Any]] = []
+    for key, target in imports.items():
+        if not isinstance(key, str) or "*" not in key or not key.startswith("#"):
+            continue
+        prefix, suffix = key.split("*", 1)
+        if not specifier.startswith(prefix) or not specifier.endswith(suffix):
+            continue
+        replacement = specifier[len(prefix) : len(specifier) - len(suffix)]
+        if not replacement:
+            continue
+        matches.append((len(prefix) + len(suffix), replacement, target))
+    if not matches:
+        return None
+    _, replacement, target = max(matches, key=lambda item: item[0])
+    return _substitute_export_target(target, replacement)
+
+
 def _exports_map_target(exports: Any, subpath: str) -> Any:
     export_key = "." if not subpath else f"./{subpath}"
     if isinstance(exports, str) or isinstance(exports, list):
@@ -2079,6 +2126,18 @@ def _exports_map_target(exports: Any, subpath: str) -> Any:
             return exports.get(export_key)
         return _exports_pattern_target(exports, export_key)
     return exports if export_key == "." else None
+
+
+def _imports_map_target(imports: Any, specifier: str) -> Any:
+    if not isinstance(imports, dict):
+        return None
+    if not specifier.startswith("#") or specifier in {"#", "#/"}:
+        raise RuntimeSourceContractError(
+            f"runtime package import is invalid: {specifier}"
+        )
+    if specifier in imports:
+        return imports.get(specifier)
+    return _imports_pattern_target(imports, specifier)
 
 
 def _package_entry_bases(
@@ -2149,6 +2208,90 @@ def _nearest_package_self_reference(
         current = current.parent
 
 
+def _nearest_package_imports_scope(
+    root: Path, importer: Path
+) -> tuple[Path, dict[str, Any]] | None:
+    root = root.resolve()
+    current = importer.resolve().parent
+    while True:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            return None
+        package_json = current / "package.json"
+        if package_json.is_file():
+            payload = _load_package_json(package_json, "package imports")
+            if payload.get("imports") is not None:
+                return current, payload
+        if current == root:
+            return None
+        current = current.parent
+
+
+def _resolve_package_import(
+    *,
+    root: Path,
+    importer: Path,
+    specifier: str,
+    required: bool,
+    import_kind: str,
+) -> tuple[Path, ...]:
+    scope = _nearest_package_imports_scope(root, importer)
+    if scope is None:
+        if required:
+            importer_relative = source_relative_path(root, importer)
+            raise RuntimeSourceContractError(
+                "runtime package import could not be resolved: "
+                f"{importer_relative} imports {specifier}"
+            )
+        return ()
+    package_root, package_payload = scope
+    package_json = (package_root / "package.json").resolve()
+    imports_target = _imports_map_target(package_payload.get("imports"), specifier)
+    targets = _export_condition_targets(
+        imports_target,
+        RUNTIME_PACKAGE_CONDITIONS.get(
+            import_kind, RUNTIME_PACKAGE_CONDITIONS["import"]
+        ),
+    )
+    for target in targets:
+        if not target.startswith("./"):
+            raise RuntimeSourceContractError(
+                "runtime package import target is unsupported: "
+                f"{specifier}"
+            )
+        base = (package_root / target).resolve()
+        resolved = _resolve_existing_candidate(
+            root,
+            base,
+            include_directory_index=import_kind != "require",
+        )
+        if resolved is not None:
+            return (package_json, resolved)
+        if import_kind == "require":
+            resolved_package = _resolve_commonjs_directory_package(
+                root,
+                base,
+                package_name=specifier,
+            )
+            if len(resolved_package) > 1:
+                return (package_json, *resolved_package)
+            resolved = _resolve_existing_candidate(root, base)
+            if resolved is not None:
+                return (
+                    (package_json, *resolved_package, resolved)
+                    if resolved_package
+                    else (package_json, resolved)
+                )
+    if required:
+        importer_relative = source_relative_path(root, importer)
+        raise RuntimeSourceContractError(
+            "runtime package import could not be resolved: "
+            f"{importer_relative} imports {specifier}"
+        )
+    return (package_json,)
+
+
 def _resolve_existing_candidate(
     root: Path,
     base: Path,
@@ -2211,6 +2354,15 @@ def resolve_import(
     required: bool,
     import_kind: str = "import",
 ) -> tuple[Path, ...]:
+    root = root.resolve()
+    if specifier.startswith("#"):
+        return _resolve_package_import(
+            root=root,
+            importer=importer,
+            specifier=specifier,
+            required=required,
+            import_kind=import_kind,
+        )
     normalized = (
         specifier
         if import_kind == "require"
@@ -2218,7 +2370,6 @@ def resolve_import(
     )
     if _is_node_builtin(normalized):
         return ()
-    root = root.resolve()
     if normalized.startswith("."):
         base = (importer.parent / normalized).resolve()
         try:

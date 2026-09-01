@@ -7,6 +7,7 @@ import argparse
 import errno
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -79,6 +80,28 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+)
+VALIDATOR_PYTHON_RUNTIME_MODULES = (
+    "argparse",
+    "errno",
+    "hashlib",
+    "hmac",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "secrets",
+    "shutil",
+    "signal",
+    "socket",
+    "stat",
+    "subprocess",
+    "tempfile",
+    "threading",
+    "time",
+    "types",
+    "typing",
+    "urllib.parse",
 )
 PROCESS_CLEANUP_MARKER_ENV = "AGENTIC_OS_PROCESS_CLEANUP_MARKER"
 PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
@@ -1555,6 +1578,33 @@ def _assert_runtime_launch_sources_still_bound(
         expected_sources
     ):
         raise ProbeError("runtime launch source binding changed after candidate runner exit")
+
+
+def _validator_python_runtime_bindings() -> list[dict[str, str]]:
+    sources = [
+        _runtime_file_binding(Path(sys.executable), "validator-runtime:python")
+    ]
+    for module_name in VALIDATOR_PYTHON_RUNTIME_MODULES:
+        spec = importlib.util.find_spec(module_name)
+        origin = getattr(spec, "origin", None) if spec is not None else None
+        if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+            continue
+        sources.append(
+            _runtime_file_binding(
+                Path(origin),
+                f"validator-runtime:module:{module_name}",
+            )
+        )
+    return sources
+
+
+def _assert_validator_python_runtime_still_bound(
+    expected_sources: list[dict[str, str]],
+) -> None:
+    if _validator_python_runtime_bindings() != expected_sources:
+        raise ProbeError(
+            "validator Python runtime binding changed after candidate runner exit"
+        )
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -4632,8 +4682,13 @@ def _run_persistent_lifecycle_probe_once(
             "OPENCLAW_DISABLE_AUTO_UPDATE": "1",
         }
     )
+    runtime_launch_env = dict(runner_env)
     node_executable, tsx_preload_specifier, runtime_launch_sources = (
-        _runtime_launch_bindings(openclaw_root, runner_env)
+        _runtime_launch_bindings(openclaw_root, runtime_launch_env)
+    )
+    validator_python_runtime_sources = _validator_python_runtime_bindings()
+    runner_env[PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV] = (
+        attestation_verification_key.hex()
     )
     command = [
         str(node_executable),
@@ -4762,7 +4817,7 @@ def _run_persistent_lifecycle_probe_once(
             raise ProbeError("OpenClaw candidate changed while the persistent runner was running")
         _assert_runtime_launch_sources_still_bound(
             openclaw_root=openclaw_root,
-            runner_env=runner_env,
+            runner_env=runtime_launch_env,
             expected_node_executable=node_executable,
             expected_tsx_preload_specifier=tsx_preload_specifier,
             expected_sources=runtime_launch_sources,
@@ -4797,12 +4852,15 @@ def _run_persistent_lifecycle_probe_once(
                     "process_group_reaped": process_group_reaped,
                     "candidate_port_closed": port_closed,
                 }
-            )
+                )
             _write_validated_payload(evidence_file, payload)
             raise CandidateProcessGroupOpenError(
                 "persistent lifecycle runner left candidate process group alive before validator"
             )
         _assert_runtime_sources_still_bound(openclaw_root, runtime_sources)
+        _assert_validator_python_runtime_still_bound(
+            validator_python_runtime_sources
+        )
         receipt_file = _descriptor_path(pinned_run_root.receipts.fd) / (
             "lifecycle-receipt.json"
         )
