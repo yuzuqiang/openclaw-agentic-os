@@ -197,6 +197,13 @@ CREATE_REQUIRE_ASSIGNMENT = re.compile(
     """,
     re.VERBOSE,
 )
+COMMONJS_REQUIRE_ALIAS_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    \(?\s*require\s*\)?\s*(?:;|,|\n|$)
+    """,
+    re.VERBOSE,
+)
 RUNTIME_PACKAGE_CONDITIONS = {
     "import": frozenset(("import", "node-addons", "node", "default")),
     "require": frozenset(("require", "node-addons", "node", "default")),
@@ -231,6 +238,7 @@ def import_candidates(
     *,
     suffixes: tuple[str, ...] = PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES,
     suffix_aliases: dict[str, tuple[str, ...]] | None = PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES,
+    include_directory_index: bool = True,
 ) -> list[Path]:
     candidates: list[Path] = []
     suffix_aliases = suffix_aliases or {}
@@ -243,9 +251,10 @@ def import_candidates(
         candidates.extend(
             Path(f"{base}{suffix}") for suffix in suffixes
         )
-        candidates.extend(
-            base / f"index{suffix}" for suffix in suffixes
-        )
+        if include_directory_index:
+            candidates.extend(
+                base / f"index{suffix}" for suffix in suffixes
+            )
     deduped: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
@@ -654,10 +663,24 @@ def _create_require_loader_bindings(
     return loaders, declaration_spans
 
 
+def _commonjs_require_alias_bindings(
+    source_text: str,
+) -> tuple[set[str], set[tuple[int, int]]]:
+    aliases: set[str] = set()
+    declaration_spans: set[tuple[int, int]] = set()
+    stripped = strip_source_comments(source_text)
+    for match in COMMONJS_REQUIRE_ALIAS_ASSIGNMENT.finditer(stripped):
+        aliases.add(match.group("name"))
+        declaration_spans.add(match.span("name"))
+    return aliases, declaration_spans
+
+
 def _parse_named_loader_invocation(
     source_text: str,
     index: int,
     loader_name: str,
+    *,
+    loader_description: str = "createRequire loader",
 ) -> tuple[str, int] | None:
     if not source_text.startswith(loader_name, index):
         return None
@@ -675,13 +698,13 @@ def _parse_named_loader_invocation(
     parsed = _parse_quoted_specifier(source_text, argument_index)
     if parsed is None:
         raise RuntimeSourceContractError(
-            "runtime source contains an unsupported dynamic createRequire loader"
+            f"runtime source contains an unsupported dynamic {loader_description}"
         )
     specifier, end_index = parsed
     close_index = _skip_js_trivia(source_text, end_index)
     if close_index >= len(source_text) or source_text[close_index] != ")":
         raise RuntimeSourceContractError(
-            "runtime source contains an unsupported createRequire loader signature"
+            f"runtime source contains an unsupported {loader_description} signature"
         )
     return specifier, close_index + 1
 
@@ -770,6 +793,7 @@ def _create_require_specifiers(
 
 
 def _commonjs_require_specifiers(source_text: str) -> list[str]:
+    alias_names, declaration_spans = _commonjs_require_alias_bindings(source_text)
     specifiers: list[str] = []
     index = 0
     state = "code"
@@ -816,24 +840,54 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
             quote = character
             index += 1
             continue
-        if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
-            parsed = _parse_property_require_invocation(source_text, index)
-            if parsed is not None:
-                specifier, index = parsed
-                specifiers.append(specifier)
+        for alias_name in sorted(alias_names, key=len, reverse=True):
+            after_index = index + len(alias_name)
+            before = source_text[index - 1] if index > 0 else ""
+            after = source_text[after_index] if after_index < len(source_text) else ""
+            is_alias_identifier = (
+                source_text.startswith(alias_name, index)
+                and not (before and (_is_identifier_character(before) or before == "."))
+                and not (after and _is_identifier_character(after))
+            )
+            if not is_alias_identifier:
                 continue
-            parsed = _parse_require_invocation(source_text, index)
-            if parsed is not None:
-                specifier, index = parsed
-                specifiers.append(specifier)
-                continue
-        if character == "(":
-            parsed = _parse_parenthesized_require_invocation(source_text, index)
-            if parsed is not None:
-                specifier, index = parsed
-                specifiers.append(specifier)
-                continue
-        index += 1
+            if (index, after_index) in declaration_spans:
+                index = after_index
+                break
+            parsed = _parse_named_loader_invocation(
+                source_text,
+                index,
+                alias_name,
+                loader_description="CommonJS require alias",
+            )
+            if parsed is None:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS require alias usage"
+                )
+            specifier, index = parsed
+            specifiers.append(specifier)
+            break
+        else:
+            if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
+                parsed = _parse_property_require_invocation(source_text, index)
+                if parsed is not None:
+                    specifier, index = parsed
+                    specifiers.append(specifier)
+                    continue
+                parsed = _parse_require_invocation(source_text, index)
+                if parsed is not None:
+                    specifier, index = parsed
+                    specifiers.append(specifier)
+                    continue
+            if character == "(":
+                parsed = _parse_parenthesized_require_invocation(source_text, index)
+                if parsed is not None:
+                    specifier, index = parsed
+                    specifiers.append(specifier)
+                    continue
+            index += 1
+            continue
+        continue
     return specifiers
 
 
@@ -1152,8 +1206,14 @@ def _resolve_existing_candidate(
     *,
     suffixes: tuple[str, ...] = PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES,
     suffix_aliases: dict[str, tuple[str, ...]] | None = PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES,
+    include_directory_index: bool = True,
 ) -> Path | None:
-    for candidate in import_candidates(base, suffixes=suffixes, suffix_aliases=suffix_aliases):
+    for candidate in import_candidates(
+        base,
+        suffixes=suffixes,
+        suffix_aliases=suffix_aliases,
+        include_directory_index=include_directory_index,
+    ):
         resolved = candidate.resolve()
         try:
             resolved.relative_to(root)
@@ -1164,6 +1224,34 @@ def _resolve_existing_candidate(
         if resolved.is_file():
             return resolved
     return None
+
+
+def _resolve_commonjs_directory_package(
+    root: Path,
+    directory: Path,
+    *,
+    package_name: str,
+) -> tuple[Path, ...]:
+    package_json = directory / "package.json"
+    if not package_json.is_file():
+        return ()
+    package_payload = _load_package_json(package_json, package_name)
+    bases: list[Path] = []
+    main = package_payload.get("main")
+    if isinstance(main, str) and main:
+        bases.append((directory / main).resolve())
+    bases.append((directory / "index").resolve())
+    for base in bases:
+        resolved = _resolve_existing_candidate(
+            root,
+            base,
+            suffixes=NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES,
+            suffix_aliases={},
+            include_directory_index=True,
+        )
+        if resolved is not None:
+            return (package_json.resolve(), resolved)
+    return (package_json.resolve(),)
 
 
 def resolve_import(
@@ -1186,9 +1274,24 @@ def resolve_import(
             raise RuntimeSourceContractError(
                 "runtime source import escapes the OpenClaw candidate root"
             ) from exc
-        resolved = _resolve_existing_candidate(root, base)
+        resolved = _resolve_existing_candidate(
+            root,
+            base,
+            include_directory_index=import_kind != "require",
+        )
         if resolved is not None:
             return (resolved,)
+        if import_kind == "require":
+            resolved_package = _resolve_commonjs_directory_package(
+                root,
+                base,
+                package_name=specifier,
+            )
+            if len(resolved_package) > 1:
+                return resolved_package
+            resolved = _resolve_existing_candidate(root, base)
+            if resolved is not None:
+                return resolved_package + (resolved,) if resolved_package else (resolved,)
         if required:
             importer_relative = source_relative_path(root, importer)
             raise RuntimeSourceContractError(

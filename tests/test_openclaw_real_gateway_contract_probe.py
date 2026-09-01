@@ -1349,6 +1349,48 @@ class RealGatewayProbeTests(unittest.TestCase):
                     paths = MODULE._persistent_runtime_source_paths(root)
                     self.assertIn("scripts/runner-impl.cjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_commonjs_require_alias(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const load = require;\n"
+                        "load('./runner-impl.cjs');\n"
+                    ),
+                    "scripts/runner-impl.cjs": "module.exports = {};\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-impl.cjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_commonjs_require_alias_non_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const load = require;\n"
+                        "const later = load;\n"
+                        "later('./runner-impl.cjs');\n"
+                    ),
+                    "scripts/runner-impl.cjs": "module.exports = {};\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "unsupported CommonJS require alias usage"
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_create_require_loader(
         self,
     ) -> None:
@@ -1537,6 +1579,30 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("node_modules/fixture-runtime/index.js", paths)
         self.assertNotIn("node_modules/fixture-runtime/index.ts", paths)
+
+    def test_persistent_runtime_source_closure_uses_commonjs_directory_package_main(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "require('./lib');\n",
+                    "scripts/lib/package.json": json.dumps(
+                        {"name": "runner-lib", "main": "actual.cjs"}
+                    )
+                    + "\n",
+                    "scripts/lib/actual.cjs": "module.exports = { actual: true };\n",
+                    "scripts/lib/index.js": "module.exports = { decoy: true };\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/lib/package.json", paths)
+        self.assertIn("scripts/lib/actual.cjs", paths)
+        self.assertNotIn("scripts/lib/index.js", paths)
 
     def test_persistent_runtime_source_closure_binds_child_process_node_entrypoints(
         self,
