@@ -1756,40 +1756,55 @@ class RealGatewayProbeTests(unittest.TestCase):
     def test_persistent_runtime_source_closure_binds_native_addon_entrypoint(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._write_runtime_source_fixture(
-                root,
-                {
-                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                        "process.dlopen(module, './runtime-addon.node');\n"
-                    ),
-                    "scripts/runtime-addon.node": "native-addon-placeholder\n",
-                },
-            )
+        variants = (
+            "process.dlopen(module, './runtime-addon.node');\n",
+            "process.dlopen?.(module, './runtime-addon.node');\n",
+            "process?.dlopen(module, './runtime-addon.node');\n",
+            "process['dlopen'](module, './runtime-addon.node');\n",
+            "process?.['dlopen']?.(module, './runtime-addon.node');\n",
+            "(process.dlopen)(module, './runtime-addon.node');\n",
+        )
+        for source in variants:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/runtime-addon.node": "native-addon-placeholder\n",
+                    },
+                )
 
-            paths = MODULE._persistent_runtime_source_paths(root)
+                paths = MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/runtime-addon.node", paths)
+            self.assertIn("scripts/runtime-addon.node", paths)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_native_addon_entrypoint(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._write_runtime_source_fixture(
-                root,
-                {
-                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                        "const addon = './runtime-addon.node';\n"
-                        "process.dlopen(module, addon);\n"
-                    ),
-                    "scripts/runtime-addon.node": "native-addon-placeholder\n",
-                },
-            )
+        cases = {
+            "dynamic": (
+                "const addon = './runtime-addon.node';\n"
+                "process.dlopen(module, addon);\n"
+            ),
+            "transferred": (
+                "const loadAddon = process.dlopen;\n"
+                "loadAddon(module, './runtime-addon.node');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/runtime-addon.node": "native-addon-placeholder\n",
+                    },
+                )
 
-            with self.assertRaisesRegex(MODULE.ProbeError, "native add-on"):
-                MODULE._persistent_runtime_source_paths(root)
+                with self.assertRaisesRegex(MODULE.ProbeError, "native add-on"):
+                    MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_child_process_node_entrypoint(
         self,

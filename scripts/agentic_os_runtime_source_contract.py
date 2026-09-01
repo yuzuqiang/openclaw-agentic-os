@@ -176,13 +176,24 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+PROCESS_DLOPEN_TARGET_FRAGMENT = r"""
+    (?:
+        \(?\s*process\s*(?:\.|\?\.)\s*dlopen\s*\)?
+      | process\s*(?:\?\.)?\s*\[\s*["']dlopen["']\s*\]
+    )
+"""
 PROCESS_DLOPEN_ENTRYPOINT_SPECIFIER = re.compile(
-    r"""
+    rf"""
     (?<![\w$])
-    process\.dlopen\s*\(\s*
+    {PROCESS_DLOPEN_TARGET_FRAGMENT}
+    \s*(?:\?\.)?\s*\(\s*
     module\s*,\s*
     ["'](?P<specifier>[^"']+)["']
     """,
+    re.VERBOSE | re.DOTALL,
+)
+PROCESS_DLOPEN_REFERENCE = re.compile(
+    rf"(?<![\w$]){PROCESS_DLOPEN_TARGET_FRAGMENT}",
     re.VERBOSE | re.DOTALL,
 )
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
@@ -1346,7 +1357,7 @@ def _runtime_execution_entrypoint_specifiers(
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
             )
-    for match in re.finditer(r"(?<![\w$])process\.dlopen\s*\(", source_text):
+    for match in PROCESS_DLOPEN_REFERENCE.finditer(source_text):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported native add-on entrypoint"
