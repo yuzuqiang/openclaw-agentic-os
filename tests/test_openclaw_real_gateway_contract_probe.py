@@ -1919,6 +1919,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "const legacyVersion = global.process.version;\n"
                         "const labels = { process: 'runtime' };\n"
                         "const processLabel = 'process';\n"
+                        "const processLabels = ['process'];\n"
                         "export { quoted, raw, pattern, env, version, legacyVersion, labels };\n"
                     ),
                 },

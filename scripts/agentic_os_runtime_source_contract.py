@@ -541,6 +541,30 @@ def _parse_safe_process_member_access(source_text: str, index: int) -> int | Non
     return property_end
 
 
+def _parse_grouped_named_base(
+    source_text: str, index: int, base_name: str
+) -> int | None:
+    index = _skip_js_trivia(source_text, index)
+    if index < len(source_text) and source_text[index] == "(":
+        inner_end = _parse_grouped_named_base(source_text, index + 1, base_name)
+        if inner_end is None:
+            return None
+        close_index = _skip_js_trivia(source_text, inner_end)
+        if close_index >= len(source_text) or source_text[close_index] != ")":
+            return None
+        return close_index + 1
+    if not source_text.startswith(base_name, index):
+        return None
+    before = source_text[index - 1] if index > 0 else ""
+    end = index + len(base_name)
+    after = source_text[end] if end < len(source_text) else ""
+    if (before and (_is_identifier_character(before) or before == ".")) or (
+        after and _is_identifier_character(after)
+    ):
+        return None
+    return end
+
+
 def _capability_member_end_or_fail(source_text: str, index: int) -> int | None:
     forbidden_by_base = {
         "Module": {"_load", "constructor", "process"},
@@ -549,17 +573,18 @@ def _capability_member_end_or_fail(source_text: str, index: int) -> int | None:
         "this": {"constructor", "process"},
     }
     for base_name, forbidden_members in forbidden_by_base.items():
-        if not source_text.startswith(base_name, index):
-            continue
-        before = source_text[index - 1] if index > 0 else ""
-        base_end = index + len(base_name)
-        after = source_text[base_end] if base_end < len(source_text) else ""
-        if (before and (_is_identifier_character(before) or before == ".")) or (
-            after and _is_identifier_character(after)
-        ):
+        base_end = _parse_grouped_named_base(source_text, index, base_name)
+        if base_end is None:
             continue
         member = _parse_process_member(source_text, base_end)
         if member is None:
+            before_base = index - 1
+            while before_base >= 0 and source_text[before_base].isspace():
+                before_base -= 1
+            if before_base >= 0 and source_text[before_base] == "=":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on capability transfer"
+                )
             return None
         member_name, member_end = member
         if member_name in forbidden_members:
@@ -568,6 +593,30 @@ def _capability_member_end_or_fail(source_text: str, index: int) -> int | None:
             )
         return member_end
     return None
+
+
+def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bool:
+    bracket_index = quote_index - 1
+    while bracket_index >= 0 and source_text[bracket_index].isspace():
+        bracket_index -= 1
+    if bracket_index < 0 or source_text[bracket_index] != "[":
+        return False
+    before_bracket = bracket_index - 1
+    while before_bracket >= 0 and source_text[before_bracket].isspace():
+        before_bracket -= 1
+    if before_bracket < 0:
+        return False
+    character = source_text[before_bracket]
+    if character in {")", "]", "."}:
+        return True
+    if not _is_identifier_character(character):
+        return False
+    token_end = before_bracket + 1
+    token_start = before_bracket
+    while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
+        token_start -= 1
+    token = source_text[token_start:token_end]
+    return token not in {"await", "case", "return", "throw", "yield"}
 
 
 def _parse_process_dlopen_invocation(
@@ -635,10 +684,17 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
             continue
         character = source_text[index]
         if character in {"'", '"'}:
+            quote_index = index
             parsed = _parse_quoted_specifier(source_text, index)
             if parsed is None:
                 raise AssertionError("quoted JavaScript literal did not parse")
-            _, index = parsed
+            literal_value, index = parsed
+            if literal_value in {"_load", "constructor", "process"} and (
+                _quoted_literal_is_computed_member(source_text, quote_index)
+            ):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on capability access"
+                )
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
