@@ -41,37 +41,89 @@ PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES = {
     ".cjs": (".cts", ".cjs"),
 }
 
+JS_IDENTIFIER = r"[A-Za-z_$][0-9A-Za-z_$]*"
 NODE_BUILTIN_MODULES = frozenset(
     {
+        "_http_agent",
+        "_http_client",
+        "_http_common",
+        "_http_incoming",
+        "_http_outgoing",
+        "_http_server",
+        "_stream_duplex",
+        "_stream_passthrough",
+        "_stream_readable",
+        "_stream_transform",
+        "_stream_wrap",
+        "_stream_writable",
+        "_tls_common",
+        "_tls_wrap",
         "assert",
+        "async_hooks",
         "buffer",
         "child_process",
+        "cluster",
+        "console",
+        "constants",
         "crypto",
+        "dgram",
+        "diagnostics_channel",
+        "dns",
+        "domain",
         "events",
         "fs",
         "http",
+        "http2",
         "https",
+        "inspector",
         "module",
         "net",
         "os",
         "path",
+        "perf_hooks",
         "process",
+        "punycode",
+        "querystring",
+        "readline",
+        "repl",
         "stream",
+        "string_decoder",
+        "sys",
         "timers",
+        "tls",
+        "trace_events",
+        "tty",
         "url",
         "util",
+        "v8",
+        "vm",
+        "wasi",
         "worker_threads",
+        "zlib",
     }
 )
 NODE_BUILTIN_SUBPATHS = frozenset(
     {
         "assert/strict",
+        "dns/promises",
         "fs/promises",
+        "inspector/promises",
+        "path/posix",
+        "path/win32",
+        "readline/promises",
         "stream/consumers",
         "stream/promises",
         "stream/web",
         "timers/promises",
         "util/types",
+    }
+)
+NODE_BUILTIN_NODE_ONLY_SPECIFIERS = frozenset(
+    {
+        "node:sea",
+        "node:sqlite",
+        "node:test",
+        "node:test/reporters",
     }
 )
 
@@ -113,6 +165,27 @@ FORK_ENTRYPOINT_SPECIFIER = re.compile(
     ["'](?P<specifier>[^"']+)["']
     """,
     re.VERBOSE | re.DOTALL,
+)
+CREATE_REQUIRE_IMPORT = re.compile(
+    rf"""
+    \bimport\s*\{{(?P<body>.*?)\}}\s*
+    from\s*["'](?:node:)?module["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CREATE_REQUIRE_DESTRUCTURED_REQUIRE = re.compile(
+    rf"""
+    \b(?:const|let|var)\s*\{{(?P<body>.*?)\}}\s*=\s*
+    require\s*\(\s*["'](?:node:)?module["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CREATE_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    (?P<factory>{JS_IDENTIFIER})\s*\(
+    """,
+    re.VERBOSE,
 )
 RUNTIME_PACKAGE_CONDITIONS = {
     "import": frozenset(("import", "node-addons", "node", "default")),
@@ -532,6 +605,130 @@ def _parse_property_require_invocation(
     return specifier, close_index + 1
 
 
+def _create_require_factory_names(source_text: str) -> set[str]:
+    factories = {"createRequire"}
+    stripped = strip_source_comments(source_text)
+    for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
+        for match in pattern.finditer(stripped):
+            for part in match.group("body").split(","):
+                part = part.strip()
+                imported = re.fullmatch(
+                    rf"createRequire(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
+                    part,
+                )
+                if imported is None:
+                    continue
+                factories.add(
+                    imported.group("alias")
+                    or imported.group("prop_alias")
+                    or "createRequire"
+                )
+    return factories
+
+
+def _create_require_loader_names(source_text: str) -> set[str]:
+    factories = _create_require_factory_names(source_text)
+    loaders: set[str] = set()
+    stripped = strip_source_comments(source_text)
+    for match in CREATE_REQUIRE_ASSIGNMENT.finditer(stripped):
+        if match.group("factory") in factories:
+            loaders.add(match.group("name"))
+    return loaders
+
+
+def _parse_named_loader_invocation(
+    source_text: str,
+    index: int,
+    loader_name: str,
+) -> tuple[str, int] | None:
+    if not source_text.startswith(loader_name, index):
+        return None
+    after_index = index + len(loader_name)
+    before = source_text[index - 1] if index > 0 else ""
+    after = source_text[after_index] if after_index < len(source_text) else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    if after and _is_identifier_character(after):
+        return None
+    call_index = _skip_js_trivia(source_text, after_index)
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, call_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic createRequire loader"
+        )
+    specifier, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported createRequire loader signature"
+        )
+    return specifier, close_index + 1
+
+
+def _create_require_specifiers(source_text: str) -> list[str]:
+    loader_names = _create_require_loader_names(source_text)
+    if not loader_names:
+        return []
+    specifiers: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                specifiers.extend(_create_require_specifiers(chunk))
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        for loader_name in sorted(loader_names, key=len, reverse=True):
+            parsed = _parse_named_loader_invocation(source_text, index, loader_name)
+            if parsed is not None:
+                specifier, index = parsed
+                specifiers.append(specifier)
+                break
+        else:
+            index += 1
+    return specifiers
+
+
 def _commonjs_require_specifiers(source_text: str) -> list[str]:
     specifiers: list[str] = []
     index = 0
@@ -720,6 +917,7 @@ def _runtime_execution_entrypoint_specifiers(
 
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
+    create_require_specifiers = _create_require_specifiers(source_text)
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
     execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
     source_text = strip_source_comments(source_text)
@@ -733,6 +931,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         specifiers.append((specifier, True, "import"))
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)
+    specifiers.extend((specifier, True, "require") for specifier in create_require_specifiers)
     specifiers.extend(
         (specifier, True, import_kind)
         for specifier, import_kind in execution_entrypoints
@@ -759,6 +958,8 @@ def _package_subpath(specifier: str, package_name: str) -> str:
 
 
 def _is_node_builtin(specifier: str) -> bool:
+    if specifier in NODE_BUILTIN_NODE_ONLY_SPECIFIERS:
+        return True
     name = specifier[5:] if specifier.startswith("node:") else specifier
     return name in NODE_BUILTIN_MODULES or name in NODE_BUILTIN_SUBPATHS
 

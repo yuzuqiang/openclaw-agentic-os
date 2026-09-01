@@ -394,6 +394,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
         if tools_catalog_response is None:
             tools_catalog_response = {
+                "runtimeMethods": MODULE._expected_runtime_methods_catalog(),
                 "groups": [
                     {
                         "id": "agentic-os-runtime",
@@ -1346,6 +1347,27 @@ class RealGatewayProbeTests(unittest.TestCase):
                     paths = MODULE._persistent_runtime_source_paths(root)
                     self.assertIn("scripts/runner-impl.cjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_create_require_loader(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { createRequire } from 'node:module';\n"
+                        "const load = createRequire(import.meta.url);\n"
+                        "load('./runner-impl.cjs');\n"
+                    ),
+                    "scripts/runner-impl.cjs": "module.exports = {};\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-impl.cjs", paths)
+
     def test_persistent_runtime_source_closure_resolves_node_export_entry(
         self,
     ) -> None:
@@ -1551,6 +1573,28 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("node_modules/fs/package.json", paths)
         self.assertIn("node_modules/fs/extra.js", paths)
+
+    def test_persistent_runtime_source_closure_accepts_complete_node_builtins(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "openclaw.mjs": (
+                        "import 'node:async_hooks';\n"
+                        "import 'node:readline';\n"
+                        "import 'node:zlib';\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertNotIn("node:async_hooks", paths)
+        self.assertNotIn("node:readline", paths)
+        self.assertNotIn("node:zlib", paths)
 
     def test_persistent_runtime_source_closure_rejects_escaped_specifiers(
         self,
@@ -2196,6 +2240,13 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "loopback listener"):
                 self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_localhost_gateway_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["attestation"]["gateway_endpoint"] = "ws://localhost:20189"
+            with self.assertRaisesRegex(MODULE.ProbeError, "loopback listener"):
+                self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_summary_rejects_gateway_endpoint_credentials_or_query(self) -> None:
         for endpoint in (
             "ws://secret@127.0.0.1:20189",
@@ -2644,11 +2695,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 receipt,
                 tools_catalog_response={
                     "groups": [],
-                    "runtimeMethods": [
-                        {"name": name}
-                        for name in MODULE.PERSISTENT_REQUIRED_TOOL_NAMES
-                        if name != "agenticOs.runtime.attest"
-                    ],
+                    "runtimeMethods": MODULE._expected_runtime_methods_catalog(),
                 },
             )
             self.assertTrue(payload["runtime_catalog_discovered"])
@@ -2664,6 +2711,34 @@ class RealGatewayProbeTests(unittest.TestCase):
                 payload["lifecycle_attestation"]["signed_by"],
                 "independent_validation_hmac",
             )
+
+    def test_persistent_summary_rejects_runtime_method_parameter_mismatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            runtime_methods = MODULE._expected_runtime_methods_catalog()
+            runtime_methods[0] = {
+                "name": runtime_methods[0]["name"],
+                "parameters": ["wrong_parameter"],
+            }
+            with self.assertRaisesRegex(MODULE.ProbeError, "runtimeMethods"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    tools_catalog_response={
+                        "groups": [
+                            {
+                                "id": "agentic-os-runtime",
+                                "tools": [
+                                    {"name": name}
+                                    for name in MODULE.PERSISTENT_REQUIRED_TOOL_NAMES
+                                ],
+                            }
+                        ],
+                        "runtimeMethods": runtime_methods,
+                    },
+                )
 
     def test_persistent_summary_accepts_source_bound_preflight_catalog_without_legacy_hello(
         self,

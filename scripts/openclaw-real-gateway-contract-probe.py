@@ -1627,7 +1627,7 @@ def _validate_gateway_endpoint(endpoint: Any, *, port: int) -> None:
         raise ProbeError(
             "persistent lifecycle attestation gateway endpoint contains non-canonical credentials or path"
         )
-    if parsed.hostname not in {"127.0.0.1", "::1", "localhost"} or parsed.port != port:
+    if parsed.hostname not in {"127.0.0.1", "::1"} or parsed.port != port:
         raise ProbeError("persistent lifecycle attestation gateway endpoint is not the requested loopback listener")
 
 
@@ -2137,6 +2137,33 @@ def _validate_runtime_catalog_response(response: Mapping[str, Any]) -> None:
     if missing:
         raise ProbeError(
             "persistent lifecycle authenticated tools.catalog response is missing required tools"
+        )
+    runtime_methods = response.get("runtimeMethods")
+    if not isinstance(runtime_methods, list) or not runtime_methods:
+        raise ProbeError(
+            "persistent lifecycle authenticated tools.catalog response is missing runtimeMethods"
+        )
+    method_vector: list[dict[str, Any]] = []
+    seen_methods: set[str] = set()
+    for method in runtime_methods:
+        method_record = _record(method, "persistent tools.catalog runtime method")
+        name = _require_non_empty_string(
+            method_record, "name", "persistent tools.catalog runtime method"
+        )
+        parameters = method_record.get("parameters")
+        if not isinstance(parameters, list) or not all(
+            isinstance(parameter, str) for parameter in parameters
+        ):
+            raise ProbeError(
+                "persistent tools.catalog runtime method parameters are malformed"
+            )
+        if name in seen_methods:
+            raise ProbeError("persistent tools.catalog runtime methods are not unique")
+        seen_methods.add(name)
+        method_vector.append({"name": name, "parameters": list(parameters)})
+    if method_vector != _expected_runtime_methods_catalog():
+        raise ProbeError(
+            "persistent lifecycle authenticated tools.catalog runtimeMethods do not match the signed method vector"
         )
 
 
