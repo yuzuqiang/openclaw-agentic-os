@@ -103,6 +103,7 @@ VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "typing",
     "urllib.parse",
 )
+_VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES: tuple[str, ...] | None = None
 PROCESS_CLEANUP_MARKER_ENV = "AGENTIC_OS_PROCESS_CLEANUP_MARKER"
 PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
 INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV = (
@@ -1580,18 +1581,51 @@ def _assert_runtime_launch_sources_still_bound(
         raise ProbeError("runtime launch source binding changed after candidate runner exit")
 
 
+def _python_module_runtime_file(module: Any) -> Path | None:
+    origin = getattr(module, "__file__", None)
+    if not isinstance(origin, str):
+        spec = getattr(module, "__spec__", None)
+        origin = getattr(spec, "origin", None)
+    if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+        return None
+    path = Path(origin)
+    if path.suffix == ".pyc":
+        try:
+            source_path = Path(importlib.util.source_from_cache(str(path)))
+        except ValueError:
+            source_path = path
+        if source_path.exists():
+            path = source_path
+    if not path.exists() or not path.is_file():
+        return None
+    return path
+
+
 def _validator_python_runtime_bindings() -> list[dict[str, str]]:
+    global _VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES
+    if _VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES is None:
+        _VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES = tuple(
+            sorted(
+                module_name
+                for module_name, module in sys.modules.items()
+                if module_name and _python_module_runtime_file(module) is not None
+            )
+        )
     sources = [
         _runtime_file_binding(Path(sys.executable), "validator-runtime:python")
     ]
-    for module_name in VALIDATOR_PYTHON_RUNTIME_MODULES:
-        spec = importlib.util.find_spec(module_name)
-        origin = getattr(spec, "origin", None) if spec is not None else None
-        if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
+    for module_name in _VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            raise ProbeError(
+                f"validator Python runtime module disappeared: {module_name}"
+            )
+        source_path = _python_module_runtime_file(module)
+        if source_path is None:
             continue
         sources.append(
             _runtime_file_binding(
-                Path(origin),
+                source_path,
                 f"validator-runtime:module:{module_name}",
             )
         )

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from typing import get_type_hints
@@ -2033,6 +2034,33 @@ class RealGatewayProbeTests(unittest.TestCase):
                 )
 
                 with self.assertRaisesRegex(MODULE.ProbeError, "evaluated loader"):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_webassembly_evaluation(
+        self,
+    ) -> None:
+        cases = {
+            "instantiate_read_file": (
+                "import fs from 'node:fs';\n"
+                "WebAssembly.instantiate(fs.readFileSync('./impl.wasm'));\n"
+            ),
+            "compile_static_member": (
+                "const wasm = globalThis['Web' + 'Assembly'];\n"
+                "wasm.compile(new Uint8Array());\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/impl.wasm": "unbound binary payload",
+                    },
+                )
+
+                with self.assertRaisesRegex(MODULE.ProbeError, "WebAssembly"):
                     MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_binds_module_register_hooks(
@@ -6827,6 +6855,38 @@ class RealGatewayProbeTests(unittest.TestCase):
                 if item["check"] == "post_success_validation_process_group_cleanup"
             )
             self.assertEqual(cleanup["status"], "pass")
+
+    def test_validator_python_runtime_binds_loaded_module_file_closure(self) -> None:
+        previous_closure = MODULE._VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES
+        module_name = "validator_startup_closure_fixture"
+        previous_module = sys.modules.get(module_name)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                module_path = Path(directory) / "startup_dependency.py"
+                module_path.write_text("VALUE = 'before'\n", encoding="utf-8")
+                module = types.ModuleType(module_name)
+                module.__file__ = str(module_path)
+                sys.modules[module_name] = module
+                MODULE._VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES = None
+
+                before = MODULE._validator_python_runtime_bindings()
+                by_path = {item["path"]: item["sha256"] for item in before}
+                self.assertIn(f"validator-runtime:module:{module_name}", by_path)
+                self.assertIn("validator-runtime:module:encodings", by_path)
+
+                module_path.write_text("VALUE = 'after'\n", encoding="utf-8")
+                after = MODULE._validator_python_runtime_bindings()
+                after_by_path = {item["path"]: item["sha256"] for item in after}
+                self.assertNotEqual(
+                    by_path[f"validator-runtime:module:{module_name}"],
+                    after_by_path[f"validator-runtime:module:{module_name}"],
+                )
+        finally:
+            MODULE._VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES = previous_closure
+            if previous_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous_module
 
     def test_persistent_runner_success_revalidates_validator_python_runtime_before_validator(
         self,

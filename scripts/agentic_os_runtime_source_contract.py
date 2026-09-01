@@ -177,6 +177,7 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     re.VERBOSE | re.DOTALL,
 )
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
+EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS = frozenset(("WebAssembly",))
 EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
     (
         "compileFunction",
@@ -1430,6 +1431,13 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported evaluated loader reference"
                 )
+            if (
+                computed_member is not None
+                and computed_member[0] in EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS
+            ):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported WebAssembly evaluation reference"
+                )
         for token in EVALUATED_RUNTIME_LOADER_TOKENS:
             if _is_forbidden_runtime_loader_reference(source_text, index, token):
                 raise RuntimeSourceContractError(
@@ -1442,6 +1450,13 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
         ):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported evaluated loader reference"
+            )
+        if (
+            parsed_identifier is not None
+            and parsed_identifier[0] in EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported WebAssembly evaluation reference"
             )
         index += 1
 
