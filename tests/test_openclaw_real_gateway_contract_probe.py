@@ -1368,6 +1368,50 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("scripts/runner-impl.cjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_create_require_loader_in_template_expression(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { createRequire } from 'node:module';\n"
+                        "const load = createRequire(import.meta.url);\n"
+                        "const value = `${load('./runner-impl.cjs')}`;\n"
+                    ),
+                    "scripts/runner-impl.cjs": "module.exports = {};\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-impl.cjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_unsupported_create_require_loader_usage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { createRequire } from 'node:module';\n"
+                        "const load = createRequire(import.meta.url);\n"
+                        "const alias = load;\n"
+                        "alias('./runner-impl.cjs');\n"
+                    ),
+                    "scripts/runner-impl.cjs": "module.exports = {};\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "unsupported createRequire loader usage"
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_resolves_node_export_entry(
         self,
     ) -> None:

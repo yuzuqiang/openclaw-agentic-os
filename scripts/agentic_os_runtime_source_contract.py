@@ -626,14 +626,18 @@ def _create_require_factory_names(source_text: str) -> set[str]:
     return factories
 
 
-def _create_require_loader_names(source_text: str) -> set[str]:
+def _create_require_loader_bindings(
+    source_text: str,
+) -> tuple[set[str], set[tuple[int, int]]]:
     factories = _create_require_factory_names(source_text)
     loaders: set[str] = set()
+    declaration_spans: set[tuple[int, int]] = set()
     stripped = strip_source_comments(source_text)
     for match in CREATE_REQUIRE_ASSIGNMENT.finditer(stripped):
         if match.group("factory") in factories:
             loaders.add(match.group("name"))
-    return loaders
+            declaration_spans.add(match.span("name"))
+    return loaders, declaration_spans
 
 
 def _parse_named_loader_invocation(
@@ -668,8 +672,14 @@ def _parse_named_loader_invocation(
     return specifier, close_index + 1
 
 
-def _create_require_specifiers(source_text: str) -> list[str]:
-    loader_names = _create_require_loader_names(source_text)
+def _create_require_specifiers(
+    source_text: str,
+    inherited_loader_names: set[str] | None = None,
+) -> list[str]:
+    local_loader_names, declaration_spans = _create_require_loader_bindings(
+        source_text
+    )
+    loader_names = set(inherited_loader_names or ()) | local_loader_names
     if not loader_names:
         return []
     specifiers: list[str] = []
@@ -711,7 +721,7 @@ def _create_require_specifiers(source_text: str) -> list[str]:
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
             for chunk in chunks:
-                specifiers.extend(_create_require_specifiers(chunk))
+                specifiers.extend(_create_require_specifiers(chunk, loader_names))
             continue
         if character in {"'", '"'}:
             state = "string"
@@ -719,11 +729,27 @@ def _create_require_specifiers(source_text: str) -> list[str]:
             index += 1
             continue
         for loader_name in sorted(loader_names, key=len, reverse=True):
-            parsed = _parse_named_loader_invocation(source_text, index, loader_name)
-            if parsed is not None:
-                specifier, index = parsed
-                specifiers.append(specifier)
+            after_index = index + len(loader_name)
+            before = source_text[index - 1] if index > 0 else ""
+            after = source_text[after_index] if after_index < len(source_text) else ""
+            is_loader_identifier = (
+                source_text.startswith(loader_name, index)
+                and not (before and (_is_identifier_character(before) or before == "."))
+                and not (after and _is_identifier_character(after))
+            )
+            if not is_loader_identifier:
+                continue
+            if (index, after_index) in declaration_spans:
+                index = after_index
                 break
+            parsed = _parse_named_loader_invocation(source_text, index, loader_name)
+            if parsed is None:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported createRequire loader usage"
+                )
+            specifier, index = parsed
+            specifiers.append(specifier)
+            break
         else:
             index += 1
     return specifiers
