@@ -581,11 +581,17 @@ def _capability_member_end_or_fail(source_text: str, index: int) -> int | None:
             before_base = index - 1
             while before_base >= 0 and source_text[before_base].isspace():
                 before_base -= 1
-            if before_base >= 0 and source_text[before_base] == "=":
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported native add-on capability transfer"
-                )
-            return None
+            after_base = _skip_js_trivia(source_text, base_end)
+            if (
+                after_base < len(source_text)
+                and source_text[after_base] == ":"
+                and before_base >= 0
+                and source_text[before_base] in {"{", ","}
+            ):
+                return base_end
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported native add-on capability transfer"
+            )
         member_name, member_end = member
         if member_name in forbidden_members:
             raise RuntimeSourceContractError(
@@ -617,6 +623,69 @@ def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bo
         token_start -= 1
     token = source_text[token_start:token_end]
     return token not in {"await", "case", "return", "throw", "yield"}
+
+
+def _computed_member_bracket_has_target(source_text: str, bracket_index: int) -> bool:
+    before_bracket = bracket_index - 1
+    while before_bracket >= 0 and source_text[before_bracket].isspace():
+        before_bracket -= 1
+    if before_bracket < 0:
+        return False
+    character = source_text[before_bracket]
+    if character in {")", "]", "."}:
+        return True
+    if not _is_identifier_character(character):
+        return False
+    token_end = before_bracket + 1
+    token_start = before_bracket
+    while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
+        token_start -= 1
+    token = source_text[token_start:token_end]
+    return token not in {"await", "case", "return", "throw", "yield"}
+
+
+def _parse_static_template_member(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    if index >= len(source_text) or source_text[index] != "`":
+        return None
+    index += 1
+    value: list[str] = []
+    while index < len(source_text):
+        character = source_text[index]
+        if character == "\\" or source_text.startswith("${", index):
+            return None
+        if character == "`":
+            return "".join(value), index + 1
+        value.append(character)
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unterminated JavaScript template literal"
+    )
+
+
+def _static_computed_member_name(
+    source_text: str, bracket_index: int
+) -> tuple[str, int] | None:
+    if not _computed_member_bracket_has_target(source_text, bracket_index):
+        return None
+    index = _skip_js_trivia(source_text, bracket_index + 1)
+    pieces: list[str] = []
+    while index < len(source_text):
+        parsed = _parse_quoted_specifier(source_text, index)
+        if parsed is None:
+            parsed = _parse_static_template_member(source_text, index)
+        if parsed is None:
+            return None
+        piece, index = parsed
+        pieces.append(piece)
+        index = _skip_js_trivia(source_text, index)
+        if index < len(source_text) and source_text[index] == "]":
+            return "".join(pieces), index + 1
+        if index >= len(source_text) or source_text[index] != "+":
+            return None
+        index = _skip_js_trivia(source_text, index + 1)
+    return None
 
 
 def _parse_process_dlopen_invocation(
@@ -683,6 +752,16 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
             index = close + 2
             continue
         character = source_text[index]
+        if character == "[":
+            computed_member = _static_computed_member_name(source_text, index)
+            if computed_member is not None:
+                member_name, member_end = computed_member
+                if member_name in {"_load", "constructor", "dlopen", "process"}:
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported native add-on capability access"
+                    )
+                index = member_end
+                continue
         if character in {"'", '"'}:
             quote_index = index
             parsed = _parse_quoted_specifier(source_text, index)

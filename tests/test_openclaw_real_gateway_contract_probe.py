@@ -1887,6 +1887,29 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "this, 'pro' + 'cess'); })().dlopen("
                 "module, './runtime-addon.node');\n"
             ),
+            "sequence-this-container-computed-process": (
+                "const obj = (0, this);\n"
+                "obj['pro' + 'cess'].dlopen(module, './runtime-addon.node');\n"
+            ),
+            "sequence-this-container-template-process": (
+                "const obj = (0, this);\n"
+                "obj[`process`].dlopen(module, './runtime-addon.node');\n"
+            ),
+            "sequence-reflect-transfer": (
+                "const R = (0, Reflect);\n"
+                "R.get(this, 'pro' + 'cess').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "reflect-container-transfer": (
+                "const holder = { R: Reflect };\n"
+                "holder.R.get(this, 'pro' + 'cess').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "conditional-module-transfer": (
+                "const M = true ? module : null;\n"
+                "M.constructor['_lo' + 'ad']('node:' + 'pro' + 'cess').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
