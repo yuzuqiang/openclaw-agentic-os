@@ -1375,6 +1375,8 @@ class RealGatewayProbeTests(unittest.TestCase):
             "require['resolve']('./runner-impl.cjs');\n",
             "require['resolve']?.('./runner-impl.cjs');\n",
             "module.require('./runner-impl.cjs');\n",
+            "module['require']('./runner-impl.cjs');\n",
+            "module?.['require']?.('./runner-impl.cjs');\n",
             "(require)('./runner-impl.cjs');\n",
             "(require.resolve)('./runner-impl.cjs');\n",
             "`${require('./runner-impl.cjs')}`;\n",
@@ -1656,6 +1658,29 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("scripts/lib/actual.cjs", paths)
         self.assertNotIn("scripts/lib/index.js", paths)
 
+    def test_persistent_runtime_source_closure_preserves_commonjs_query_filename(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "require('./runner-impl?prod');\n"
+                    ),
+                    "scripts/runner-impl.js": "module.exports = { decoy: true };\n",
+                    "scripts/runner-impl?prod.js": (
+                        "module.exports = { actual: true };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-impl?prod.js", paths)
+        self.assertNotIn("scripts/runner-impl.js", paths)
+
     def test_persistent_runtime_source_closure_parses_commonjs_after_regex_literal(
         self,
     ) -> None:
@@ -1727,6 +1752,44 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("scripts/spawn-worker.mjs", paths)
         self.assertIn("scripts/exec-worker.mjs", paths)
+
+    def test_persistent_runtime_source_closure_binds_native_addon_entrypoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "process.dlopen(module, './runtime-addon.node');\n"
+                    ),
+                    "scripts/runtime-addon.node": "native-addon-placeholder\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runtime-addon.node", paths)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_native_addon_entrypoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const addon = './runtime-addon.node';\n"
+                        "process.dlopen(module, addon);\n"
+                    ),
+                    "scripts/runtime-addon.node": "native-addon-placeholder\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "native add-on"):
+                MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_child_process_node_entrypoint(
         self,

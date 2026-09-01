@@ -460,6 +460,15 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(index["classification"], "evidence_lineage_correction")
         self.assertIn("byte-for-byte immutable", index["mutation_policy"])
         historical = {item["path"]: item for item in index["historical_artifacts"]}
+        first_downstream = historical[
+            "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json"
+        ]
+        self.assertEqual(
+            first_downstream["status"],
+            "invalidated_historical_downstream_snapshot",
+        )
+        self.assertTrue(first_downstream["raw_runtime_ready_candidate_evidence"])
+        self.assertFalse(first_downstream["runtime_ready_candidate_evidence"])
         negative = historical[
             "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
         ]

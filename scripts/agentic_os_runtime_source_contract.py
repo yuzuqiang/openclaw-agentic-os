@@ -176,6 +176,15 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+PROCESS_DLOPEN_ENTRYPOINT_SPECIFIER = re.compile(
+    r"""
+    (?<![\w$])
+    process\.dlopen\s*\(\s*
+    module\s*,\s*
+    ["'](?P<specifier>[^"']+)["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
 CREATE_REQUIRE_IMPORT = re.compile(
     rf"""
@@ -612,6 +621,53 @@ def _parse_property_require_invocation(
     if after and _is_identifier_character(after):
         return None
     call_index = _skip_js_trivia(source_text, after_index)
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, call_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic CommonJS require"
+        )
+    specifier, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS require signature"
+        )
+    return specifier, close_index + 1
+
+
+def _parse_bracketed_module_require_invocation(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    if not source_text.startswith("module", index):
+        return None
+    after_module = index + len("module")
+    before = source_text[index - 1] if index > 0 else ""
+    after = source_text[after_module] if after_module < len(source_text) else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    if after and _is_identifier_character(after):
+        return None
+    bracket_index = _skip_js_trivia(source_text, after_module)
+    if source_text.startswith("?.", bracket_index):
+        bracket_index = _skip_js_trivia(source_text, bracket_index + 2)
+    if bracket_index >= len(source_text) or source_text[bracket_index] != "[":
+        return None
+    member_index = _skip_js_trivia(source_text, bracket_index + 1)
+    parsed_member = _parse_quoted_specifier(source_text, member_index)
+    if parsed_member is None:
+        return None
+    member, member_end = parsed_member
+    if member != COMMONJS_REQUIRE_TOKEN:
+        return None
+    close_member = _skip_js_trivia(source_text, member_end)
+    if close_member >= len(source_text) or source_text[close_member] != "]":
+        return None
+    call_index = _skip_js_trivia(source_text, close_member + 1)
+    if source_text.startswith("?.", call_index):
+        call_index = _skip_js_trivia(source_text, call_index + 2)
     if call_index >= len(source_text) or source_text[call_index] != "(":
         return None
     argument_index = _skip_js_trivia(source_text, call_index + 1)
@@ -1117,6 +1173,13 @@ def _commonjs_require_specifiers(
             specifiers.append(specifier)
             break
         else:
+            parsed_module_require = _parse_bracketed_module_require_invocation(
+                source_text, index
+            )
+            if parsed_module_require is not None:
+                specifier, index = parsed_module_require
+                specifiers.append(specifier)
+                continue
             if source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
                 parsed = _parse_property_require_invocation(source_text, index)
                 if parsed is not None:
@@ -1254,6 +1317,14 @@ def _runtime_execution_entrypoint_specifiers(
             )
         specifiers.append((specifier, "import"))
         accepted_spans.append(match.span())
+    for match in PROCESS_DLOPEN_ENTRYPOINT_SPECIFIER.finditer(source_text):
+        specifier = match.group("specifier")
+        if "\\" in specifier:
+            raise RuntimeSourceContractError(
+                "runtime source native add-on entrypoint contains an unsupported JavaScript escape"
+            )
+        specifiers.append((specifier, "require"))
+        accepted_spans.append(match.span())
 
     for match in re.finditer(r"\bnew\s+Worker\s*\(", source_text):
         if not any(start <= match.start() < end for start, end in accepted_spans):
@@ -1274,6 +1345,11 @@ def _runtime_execution_entrypoint_specifiers(
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
+            )
+    for match in re.finditer(r"(?<![\w$])process\.dlopen\s*\(", source_text):
+        if not any(start <= match.start() < end for start, end in accepted_spans):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported native add-on entrypoint"
             )
     return specifiers
 
@@ -1603,7 +1679,11 @@ def resolve_import(
     required: bool,
     import_kind: str = "import",
 ) -> tuple[Path, ...]:
-    normalized = specifier.split("?", 1)[0].split("#", 1)[0]
+    normalized = (
+        specifier
+        if import_kind == "require"
+        else specifier.split("?", 1)[0].split("#", 1)[0]
+    )
     if _is_node_builtin(normalized):
         return ()
     root = root.resolve()

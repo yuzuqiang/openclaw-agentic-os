@@ -54,6 +54,17 @@
   },
   "historical_artifacts": [
     {
+      "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
+      "immutable_historical_bytes": true,
+      "interpretation": "superseded downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
+      "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
+      "raw_runtime_ready_candidate_evidence": true,
+      "raw_status": "pass",
+      "runtime_ready_candidate_evidence": false,
+      "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
+      "status": "invalidated_historical_downstream_snapshot"
+    },
+    {
       "binding_assessment": {
         "actual_script_sha256_at_bound_head": "b975eafaa3b2769fd10b48a2dddabaec1b5129ba49792ad0a5a642b48fd5693a",
         "bound_head": "b850fd85c79c3310774355fd906766d1adca8533",
