@@ -1768,6 +1768,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             "(process).dlopen(module, './runtime-addon.node');\n",
             "globalThis.process.dlopen(module, './runtime-addon.node');\n",
             "globalThis['process'].dlopen(module, './runtime-addon.node');\n",
+            "(globalThis).process.dlopen(module, './runtime-addon.node');\n",
+            "globalThis?.process.dlopen(module, './runtime-addon.node');\n",
+            "globalThis?.['process'].dlopen(module, './runtime-addon.node');\n",
+            "global.process.dlopen(module, './runtime-addon.node');\n",
             "`${process.dlopen(module, './runtime-addon.node')}`;\n",
         )
         for source in variants:
@@ -1831,6 +1835,26 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "const holder = { p: process };\n"
                 "holder.p.dlopen(module, './runtime-addon.node');\n"
             ),
+            "global-destructuring": (
+                "const { process: p } = globalThis;\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "global-reflection": (
+                "Reflect.get(globalThis, 'process').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "process-module-require-direct": (
+                "require('node:process').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "process-module-require-alias": (
+                "const p = require('node:process');\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "process-module-import": (
+                "import p from 'node:process';\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1859,8 +1883,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "const raw = `process.dlopen(module, './runtime-addon.node')`;\n"
                         "const pattern = /process\\.dlopen\\(module/;\n"
                         "const env = process.env;\n"
+                        "const version = globalThis['process'].version;\n"
+                        "const legacyVersion = global.process.version;\n"
                         "const labels = { process: 'runtime' };\n"
-                        "export { quoted, raw, pattern, env, labels };\n"
+                        "export { quoted, raw, pattern, env, version, legacyVersion, labels };\n"
                     ),
                 },
             )

@@ -378,33 +378,54 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
     )
 
 
-def _parse_process_base(source_text: str, index: int) -> int | None:
+def _parse_global_base(source_text: str, index: int) -> int | None:
     index = _skip_js_trivia(source_text, index)
     if index < len(source_text) and source_text[index] == "(":
-        inner_end = _parse_process_base(source_text, index + 1)
+        inner_end = _parse_global_base(source_text, index + 1)
         if inner_end is None:
             return None
         close_index = _skip_js_trivia(source_text, inner_end)
         if close_index >= len(source_text) or source_text[close_index] != ")":
             return None
         return close_index + 1
+    for global_name in ("globalThis", "global"):
+        if not source_text.startswith(global_name, index):
+            continue
+        before = source_text[index - 1] if index > 0 else ""
+        end = index + len(global_name)
+        after = source_text[end] if end < len(source_text) else ""
+        if (before and (_is_identifier_character(before) or before == ".")) or (
+            after and _is_identifier_character(after)
+        ):
+            continue
+        return end
+    return None
+
+
+def _parse_process_base(source_text: str, index: int) -> int | None:
+    index = _skip_js_trivia(source_text, index)
+    if index < len(source_text) and source_text[index] == "(":
+        inner_end = _parse_process_base(source_text, index + 1)
+        if inner_end is not None:
+            close_index = _skip_js_trivia(source_text, inner_end)
+            if close_index < len(source_text) and source_text[close_index] == ")":
+                return close_index + 1
 
     process_start = index
-    if source_text.startswith("globalThis", index):
-        after_global = index + len("globalThis")
-        if after_global < len(source_text) and _is_identifier_character(
-            source_text[after_global]
-        ):
-            return None
-        member_index = _skip_js_trivia(source_text, after_global)
-        if member_index < len(source_text) and source_text[member_index] == ".":
-            index = _skip_js_trivia(source_text, member_index + 1)
-            if not source_text.startswith("process", index):
-                return None
-            process_end = index + len("process")
-        elif member_index < len(source_text) and source_text[member_index] == "[":
+    global_end = _parse_global_base(source_text, index)
+    if global_end is not None:
+        member_index = _skip_js_trivia(source_text, global_end)
+        if source_text.startswith("?.", member_index):
+            property_index = _skip_js_trivia(source_text, member_index + 2)
+        elif member_index < len(source_text) and source_text[member_index] == ".":
             property_index = _skip_js_trivia(source_text, member_index + 1)
-            parsed = _parse_quoted_specifier(source_text, property_index)
+        elif member_index < len(source_text) and source_text[member_index] == "[":
+            property_index = member_index
+        else:
+            return None
+        if property_index < len(source_text) and source_text[property_index] == "[":
+            value_index = _skip_js_trivia(source_text, property_index + 1)
+            parsed = _parse_quoted_specifier(source_text, value_index)
             if parsed is None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported dynamic native add-on global property access"
@@ -418,6 +439,9 @@ def _parse_process_base(source_text: str, index: int) -> int | None:
             if property_name != "process":
                 return None
             return bracket_end + 1
+        if source_text.startswith("process", property_index):
+            index = property_index
+            process_end = index + len("process")
         else:
             return None
         after = source_text[process_end] if process_end < len(source_text) else ""
@@ -619,6 +643,11 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
                     continue
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported native add-on process reference transfer"
+                )
+            global_end = _parse_global_base(source_text, index)
+            if global_end is not None:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on global reference transfer"
                 )
         index += 1
     return specifiers
@@ -1670,6 +1699,13 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
     create_require_specifiers = _create_require_specifiers(source_text)
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
+    process_module_specifiers = {"process", "node:process"}
+    if process_module_specifiers.intersection(
+        commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported native add-on process module import"
+        )
     execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
     module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
@@ -1679,6 +1715,10 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         if "\\" in specifier:
             raise RuntimeSourceContractError(
                 "runtime source import specifier contains an unsupported JavaScript escape"
+            )
+        if specifier in process_module_specifiers:
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported native add-on process module import"
             )
         specifiers.append((specifier, True, "import"))
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
