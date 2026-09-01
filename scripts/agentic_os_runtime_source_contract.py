@@ -378,98 +378,15 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
     )
 
 
-def _javascript_code_view(source_text: str) -> str:
-    """Return a same-length view with comments and literal bodies blanked."""
-
-    output = list(source_text)
-
-    def blank(start: int, end: int) -> None:
-        for offset in range(start, end):
-            if output[offset] != "\n":
-                output[offset] = " "
-
-    index = 0
-    while index < len(source_text):
-        if source_text.startswith("//", index):
-            end = source_text.find("\n", index + 2)
-            if end == -1:
-                end = len(source_text)
-            blank(index, end)
-            index = end
-            continue
-        if source_text.startswith("/*", index):
-            close = source_text.find("*/", index + 2)
-            if close == -1:
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unterminated JavaScript comment"
-                )
-            end = close + 2
-            blank(index, end)
-            index = end
-            continue
-        character = source_text[index]
-        if character in {"'", '"'}:
-            quote = character
-            end = index + 1
-            while end < len(source_text):
-                if source_text[end] == "\\" and end + 1 < len(source_text):
-                    end += 2
-                    continue
-                if source_text[end] == quote:
-                    end += 1
-                    break
-                end += 1
-            else:
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unterminated JavaScript string"
-                )
-            blank(index, end)
-            index = end
-            continue
-        if character == "`":
-            _, end = _template_expression_chunks(source_text, index)
-            blank(index, end)
-            index = end
-            continue
-        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
-        if regex_end is not None:
-            blank(index, regex_end)
-            index = regex_end
-            continue
-        index += 1
-    return "".join(output)
-
-
-def _reject_process_reference_transfers(source_text: str) -> None:
-    code_view = _javascript_code_view(source_text)
-    process_reference = r"(?:process|globalThis\s*\.\s*process)"
-    simple_transfer = re.compile(
-        rf"(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)\s*"
-        rf"(?<![=!<>])=(?!=)\s*\(*\s*{process_reference}\s*\)*"
-        rf"[ \t\r\f\v]*(?:[;,)\n]|$)",
-        re.DOTALL,
-    )
-    destructured_transfer = re.compile(
-        rf"\{{[^{{}}]*\}}\s*(?<![=!<>])=(?!=)\s*\(*\s*{process_reference}\s*\)*",
-        re.DOTALL,
-    )
-    if simple_transfer.search(code_view) or destructured_transfer.search(code_view):
-        raise RuntimeSourceContractError(
-            "runtime source contains an unsupported native add-on process reference transfer"
-        )
-
-
-def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
+def _parse_process_base(source_text: str, index: int) -> int | None:
     index = _skip_js_trivia(source_text, index)
     if index < len(source_text) and source_text[index] == "(":
-        inner_end = _parse_process_dlopen_target(source_text, index + 1)
+        inner_end = _parse_process_base(source_text, index + 1)
         if inner_end is None:
             return None
         close_index = _skip_js_trivia(source_text, inner_end)
         if close_index >= len(source_text) or source_text[close_index] != ")":
-            raise RuntimeSourceContractError(
-                "runtime source contains an unsupported native add-on entrypoint"
-            )
+            return None
         return close_index + 1
 
     process_start = index
@@ -479,10 +396,34 @@ def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
             source_text[after_global]
         ):
             return None
-        dot_index = _skip_js_trivia(source_text, after_global)
-        if dot_index >= len(source_text) or source_text[dot_index] != ".":
+        member_index = _skip_js_trivia(source_text, after_global)
+        if member_index < len(source_text) and source_text[member_index] == ".":
+            index = _skip_js_trivia(source_text, member_index + 1)
+            if not source_text.startswith("process", index):
+                return None
+            process_end = index + len("process")
+        elif member_index < len(source_text) and source_text[member_index] == "[":
+            property_index = _skip_js_trivia(source_text, member_index + 1)
+            parsed = _parse_quoted_specifier(source_text, property_index)
+            if parsed is None:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic native add-on global property access"
+                )
+            property_name, property_end = parsed
+            bracket_end = _skip_js_trivia(source_text, property_end)
+            if bracket_end >= len(source_text) or source_text[bracket_end] != "]":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic native add-on global property access"
+                )
+            if property_name != "process":
+                return None
+            return bracket_end + 1
+        else:
             return None
-        index = _skip_js_trivia(source_text, dot_index + 1)
+        after = source_text[process_end] if process_end < len(source_text) else ""
+        if after and _is_identifier_character(after):
+            return None
+        return process_end
     if not source_text.startswith("process", index):
         return None
     before = source_text[process_start - 1] if process_start > 0 else ""
@@ -492,8 +433,13 @@ def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
         after and _is_identifier_character(after)
     ):
         return None
+    return after_process
 
-    member_index = _skip_js_trivia(source_text, after_process)
+
+def _parse_process_member(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    member_index = _skip_js_trivia(source_text, index)
     if source_text.startswith("?.", member_index):
         property_index = _skip_js_trivia(source_text, member_index + 2)
     elif member_index < len(source_text) and source_text[member_index] == ".":
@@ -516,18 +462,52 @@ def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported dynamic native add-on process property access"
             )
-        if property_name != "dlopen":
-            return None
-        return bracket_end + 1
+        return property_name, bracket_end + 1
 
-    if not source_text.startswith("dlopen", property_index):
+    property_match = re.match(r"[A-Za-z_$][\w$]*", source_text[property_index:])
+    if property_match is None:
         return None
-    property_end = property_index + len("dlopen")
-    after_property = (
-        source_text[property_end] if property_end < len(source_text) else ""
-    )
-    if after_property and _is_identifier_character(after_property):
+    property_name = property_match.group(0)
+    property_end = property_index + len(property_name)
+    return property_name, property_end
+
+
+def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
+    index = _skip_js_trivia(source_text, index)
+    if index < len(source_text) and source_text[index] == "(":
+        inner_end = _parse_process_dlopen_target(source_text, index + 1)
+        if inner_end is not None:
+            close_index = _skip_js_trivia(source_text, inner_end)
+            if close_index >= len(source_text) or source_text[close_index] != ")":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on entrypoint"
+                )
+            return close_index + 1
+
+    base_end = _parse_process_base(source_text, index)
+    if base_end is None:
         return None
+    member = _parse_process_member(source_text, base_end)
+    if member is None:
+        return None
+    property_name, property_end = member
+    if property_name != "dlopen":
+        return None
+    return property_end
+
+
+def _parse_safe_process_member_access(source_text: str, index: int) -> int | None:
+    base_end = _parse_process_base(source_text, index)
+    if base_end is None:
+        return None
+    member = _parse_process_member(source_text, base_end)
+    if member is None:
+        return None
+    property_name, property_end = member
+    if property_name == "dlopen":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported native add-on entrypoint"
+        )
     return property_end
 
 
@@ -579,7 +559,6 @@ def _parse_process_dlopen_invocation(
 
 
 def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
-    _reject_process_reference_transfers(source_text)
     specifiers: list[str] = []
     index = 0
     while index < len(source_text):
@@ -620,6 +599,27 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
                 specifier, index = parsed
                 specifiers.append(specifier)
                 continue
+            safe_member_end = _parse_safe_process_member_access(source_text, index)
+            if safe_member_end is not None:
+                index = safe_member_end
+                continue
+            process_end = _parse_process_base(source_text, index)
+            if process_end is not None:
+                after_process = _skip_js_trivia(source_text, process_end)
+                before_process = index - 1
+                while before_process >= 0 and source_text[before_process].isspace():
+                    before_process -= 1
+                if (
+                    after_process < len(source_text)
+                    and source_text[after_process] == ":"
+                    and before_process >= 0
+                    and source_text[before_process] in {"{", ","}
+                ):
+                    index = process_end
+                    continue
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on process reference transfer"
+                )
         index += 1
     return specifiers
 

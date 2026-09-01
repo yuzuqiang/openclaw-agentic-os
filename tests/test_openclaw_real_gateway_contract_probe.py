@@ -1765,7 +1765,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             "(process.dlopen)(module, './runtime-addon.node');\n",
             "((process.dlopen))(module, './runtime-addon.node');\n",
             "(process['dlopen'])(module, './runtime-addon.node');\n",
+            "(process).dlopen(module, './runtime-addon.node');\n",
             "globalThis.process.dlopen(module, './runtime-addon.node');\n",
+            "globalThis['process'].dlopen(module, './runtime-addon.node');\n",
             "`${process.dlopen(module, './runtime-addon.node')}`;\n",
         )
         for source in variants:
@@ -1817,6 +1819,18 @@ class RealGatewayProbeTests(unittest.TestCase):
             "concatenated-path": (
                 "process.dlopen(module, './runtime-addon' + '.node');\n"
             ),
+            "sequence-transfer": (
+                "const p = (0, process);\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "conditional-transfer": (
+                "const p = true ? process : null;\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "container-transfer": (
+                "const holder = { p: process };\n"
+                "holder.p.dlopen(module, './runtime-addon.node');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1844,7 +1858,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "const quoted = \"process.dlopen(module, './runtime-addon.node')\";\n"
                         "const raw = `process.dlopen(module, './runtime-addon.node')`;\n"
                         "const pattern = /process\\.dlopen\\(module/;\n"
-                        "export { quoted, raw, pattern };\n"
+                        "const env = process.env;\n"
+                        "const labels = { process: 'runtime' };\n"
+                        "export { quoted, raw, pattern, env, labels };\n"
                     ),
                 },
             )
