@@ -60,12 +60,14 @@ class RealGatewayProbeTests(unittest.TestCase):
         self,
         run_root: Path,
         validation_anchor_key: bytes,
+        attestation_verification_key: bytes = ATTESTATION_HMAC_SECRET,
     ) -> dict[str, str]:
         pinned = MODULE._pin_prepared_run_root(run_root.resolve())
         try:
             return MODULE._validator_env(
                 run_root=pinned,
                 validation_anchor_key=validation_anchor_key,
+                attestation_verification_key=attestation_verification_key,
             )
         finally:
             pinned.close()
@@ -1510,6 +1512,75 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn("node_modules/fixture-runtime/node-entry.js", paths)
         self.assertNotIn("node_modules/fixture-runtime/default-entry.js", paths)
 
+    def test_persistent_runtime_source_closure_uses_node_legacy_package_index_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "src/gateway/client.ts": "import runtime from 'fixture-runtime';\n",
+                    "node_modules/fixture-runtime/package.json": (
+                        '{"name":"fixture-runtime"}\n'
+                    ),
+                    "node_modules/fixture-runtime/index.ts": (
+                        "export default 'typescript-decoy';\n"
+                    ),
+                    "node_modules/fixture-runtime/index.js": (
+                        "export default 'node-runtime';\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/index.js", paths)
+        self.assertNotIn("node_modules/fixture-runtime/index.ts", paths)
+
+    def test_persistent_runtime_source_closure_binds_child_process_node_entrypoints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawn, execFile } from 'node:child_process';\n"
+                        "spawn(process.execPath, ['./spawn-worker.mjs']);\n"
+                        "execFile(process.execPath, ['./exec-worker.mjs']);\n"
+                    ),
+                    "scripts/spawn-worker.mjs": "export const spawnWorker = true;\n",
+                    "scripts/exec-worker.mjs": "export const execWorker = true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/spawn-worker.mjs", paths)
+        self.assertIn("scripts/exec-worker.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_child_process_node_entrypoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawn } from 'node:child_process';\n"
+                        "const worker = './spawn-worker.mjs';\n"
+                        "spawn(process.execPath, [worker]);\n"
+                    ),
+                    "scripts/spawn-worker.mjs": "export const spawnWorker = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "child-process Node"):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_quoted_static_import_clause(
         self,
     ) -> None:
@@ -1924,6 +1995,74 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             validation = json.loads(validation_file.read_text(encoding="utf-8"))
             validation["lifecycle_attestation_sha256"] = "0" * 64
+            validation["authentication"] = {
+                "scheme": "hmac-sha256-env",
+                "key_env": MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
+                "signature": hmac.new(
+                    VALIDATION_ANCHOR_HMAC_SECRET,
+                    MODULE._canonical_json_bytes(
+                        MODULE._authentication_payload(validation)
+                    ),
+                    hashlib.sha256,
+                ).hexdigest(),
+            }
+            validation_file.write_text(json.dumps(validation), encoding="utf-8")
+            original_git = MODULE._git
+            previous_secret = os.environ.get(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV)
+            os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = (
+                VALIDATION_ANCHOR_HMAC_SECRET_HEX
+            )
+            try:
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                with self.assertRaisesRegex(MODULE.ProbeError, "lifecycle attestation"):
+                    MODULE._persistent_lifecycle_summary(
+                        openclaw_root=root,
+                        run_root=run_root,
+                        receipt_file=receipt_file,
+                        validation_file=validation_file,
+                        head=VALID_RUNTIME_HEAD,
+                        agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
+                        command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                        proc=type(
+                            "Proc",
+                            (),
+                            {"stdout": "", "stderr": "", "returncode": 0},
+                        )(),
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                    )
+            finally:
+                MODULE._git = original_git
+                if previous_secret is None:
+                    os.environ.pop(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, None)
+                else:
+                    os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = previous_secret
+
+    def test_persistent_summary_rejects_runner_authored_lifecycle_attestation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = self._valid_persistent_receipt()
+            run_root = root / "run"
+            receipt_file, validation_file = self._write_persistent_receipts(
+                run_root,
+                receipt,
+            )
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            validation["lifecycle_attestation"]["record_authority"] = (
+                "agentic-os-persistent-lifecycle-runner-receipt"
+            )
+            validation["lifecycle_attestation"]["record_transport"] = (
+                "non_rpc_pinned_run_root_receipt"
+            )
+            validation["lifecycle_attestation_sha256"] = MODULE._canonical_sha256(
+                validation["lifecycle_attestation"]
+            )
             validation["authentication"] = {
                 "scheme": "hmac-sha256-env",
                 "key_env": MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
@@ -2749,7 +2888,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["lifecycle_attestation"]["record_transport"],
-                "non_rpc_pinned_run_root_receipt",
+                "parent_fd_pinned_receipt_reverification",
             )
             self.assertEqual(
                 payload["lifecycle_attestation"]["signed_by"],
@@ -3068,9 +3207,13 @@ class RealGatewayProbeTests(unittest.TestCase):
             def fake_validator(**kwargs):
                 captured["validator_calls"] = int(captured.get("validator_calls", 0)) + 1
                 captured["validation_anchor_key"] = kwargs["validation_anchor_key"]
+                captured["attestation_verification_key"] = kwargs[
+                    "attestation_verification_key"
+                ]
                 captured["validator_env"] = MODULE._validator_env(
                     run_root=kwargs["pinned_run_root"],
                     validation_anchor_key=kwargs["validation_anchor_key"],
+                    attestation_verification_key=kwargs["attestation_verification_key"],
                 )
 
             def fake_summary(**kwargs):
@@ -3093,7 +3236,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             ), mock.patch.object(
                 MODULE.secrets,
                 "token_bytes",
-                return_value=VALIDATION_ANCHOR_HMAC_SECRET,
+                side_effect=[VALIDATION_ANCHOR_HMAC_SECRET, ATTESTATION_HMAC_SECRET],
             ), mock.patch.object(
                 MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
             ), mock.patch.object(
@@ -3145,6 +3288,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertEqual(
                 captured["summary_validation_anchor_key"],
                 VALIDATION_ANCHOR_HMAC_SECRET,
+            )
+            self.assertEqual(
+                captured["attestation_verification_key"], ATTESTATION_HMAC_SECRET
             )
             runner_env = captured["runner_env"]
             self.assertIsInstance(runner_env, dict)
@@ -3572,7 +3718,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(
                 validation["lifecycle_attestation"]["record_transport"],
-                "non_rpc_pinned_run_root_receipt",
+                "parent_fd_pinned_receipt_reverification",
             )
             self.assertEqual(validation_file.stat().st_mode & 0o777, 0o600)
 
@@ -3599,6 +3745,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._run_independent_validator(
                         validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        attestation_verification_key=ATTESTATION_HMAC_SECRET,
                         pinned_run_root=pinned,
                         agentic_sources=source_binding,
                         timeout=5,
@@ -3609,7 +3756,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             validation = json.loads(validation_file.read_text(encoding="utf-8"))
             self.assertTrue(validation["attestation_signature_verified"])
             self.assertTrue(validation["attestation_verification"]["verified"])
-            self.assertFalse(key_path.exists())
+            self.assertTrue(key_path.exists())
             serialized = validation_file.read_text(encoding="utf-8")
             self.assertNotIn(ATTESTATION_HMAC_SECRET_HEX, serialized)
             self.assertNotIn(VALIDATION_ANCHOR_HMAC_SECRET_HEX, serialized)
@@ -3716,6 +3863,35 @@ class RealGatewayProbeTests(unittest.TestCase):
             token_bytes.assert_not_called()
             self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, os.environ)
 
+    def test_attestation_verification_key_is_parent_selected_before_candidate_launch(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            MODULE.secrets,
+            "token_bytes",
+            return_value=ATTESTATION_HMAC_SECRET,
+        ) as token_bytes:
+            self.assertEqual(
+                MODULE._select_attestation_verification_key(),
+                ATTESTATION_HMAC_SECRET,
+            )
+            token_bytes.assert_called_once_with(32)
+            self.assertNotIn(MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, os.environ)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV: (
+                    ATTESTATION_HMAC_SECRET_HEX
+                )
+            },
+            clear=True,
+        ), mock.patch.object(MODULE.secrets, "token_bytes") as token_bytes:
+            self.assertEqual(
+                MODULE._select_attestation_verification_key(),
+                ATTESTATION_HMAC_SECRET,
+            )
+            token_bytes.assert_not_called()
+            self.assertNotIn(MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, os.environ)
+
     def test_parent_environment_is_sanitized_before_candidate_launch(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -3736,6 +3912,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._select_validation_anchor_key(),
                 VALIDATION_ANCHOR_HMAC_SECRET,
             )
+            self.assertEqual(
+                MODULE._select_attestation_verification_key(),
+                ATTESTATION_HMAC_SECRET,
+            )
             MODULE._sanitize_parent_environment_before_candidate_launch()
 
             self.assertEqual(os.environ["PATH"], "/usr/bin")
@@ -3744,7 +3924,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertNotIn(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, os.environ)
             self.assertNotIn(MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, os.environ)
 
-    def test_validator_env_consumes_private_attestation_key_and_separates_domains(self) -> None:
+    def test_validator_env_uses_parent_attestation_key_and_separates_domains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_root = Path(directory) / "run"
             key_path = run_root / MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH
@@ -3774,9 +3954,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 validator_env[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV],
                 VALIDATION_ANCHOR_HMAC_SECRET_HEX,
             )
-            self.assertFalse(key_path.exists())
+            self.assertTrue(key_path.exists())
 
-    def test_validator_env_rejects_unsafe_attestation_key_files(self) -> None:
+    def test_validator_env_ignores_candidate_authored_attestation_key_files(self) -> None:
         for case in ("symlink", "mode", "weak"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -3803,13 +3983,17 @@ class RealGatewayProbeTests(unittest.TestCase):
                         )
                     },
                 ):
-                    with self.assertRaisesRegex(MODULE.ProbeError, "unsafe|weak"):
-                        self._validator_env_for_path(
-                            run_root,
-                            validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
-                        )
+                    validator_env = self._validator_env_for_path(
+                        run_root,
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        attestation_verification_key=ATTESTATION_HMAC_SECRET,
+                    )
+                self.assertEqual(
+                    validator_env[MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV],
+                    ATTESTATION_HMAC_SECRET_HEX,
+                )
 
-    def test_validator_env_rejects_key_swapped_to_symlink_before_no_follow_open(self) -> None:
+    def test_validator_env_does_not_open_candidate_authored_attestation_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_root = root / "run"
@@ -3819,26 +4003,21 @@ class RealGatewayProbeTests(unittest.TestCase):
             os.chmod(key_path.parent, 0o700)
             key_path.write_bytes(ATTESTATION_HMAC_SECRET)
             os.chmod(key_path, 0o600)
-            replacement = root / "replacement.key"
-            replacement.write_bytes(ATTESTATION_HMAC_SECRET)
-            os.chmod(replacement, 0o600)
             original_open = MODULE.os.open
-            swapped = False
+            key_open_attempted = False
 
-            def swap_before_key_open(path, flags, mode=0o777, *, dir_fd=None):
-                nonlocal swapped
+            def fail_if_key_opened(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal key_open_attempted
                 if (
-                    not swapped
-                    and path == MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
+                    path == MODULE.PERSISTENT_ATTESTATION_KEY_RELATIVE_PATH.name
                     and dir_fd is not None
                 ):
-                    key_path.unlink()
-                    key_path.symlink_to(replacement)
-                    swapped = True
+                    key_open_attempted = True
+                    raise AssertionError("candidate-authored key must not be opened")
                 return original_open(path, flags, mode, dir_fd=dir_fd)
 
             pinned = MODULE._pin_prepared_run_root(run_root.resolve())
-            with mock.patch.object(MODULE.os, "open", swap_before_key_open), mock.patch.dict(
+            with mock.patch.object(MODULE.os, "open", fail_if_key_opened), mock.patch.dict(
                 os.environ,
                 {
                     MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV: (
@@ -3846,15 +4025,19 @@ class RealGatewayProbeTests(unittest.TestCase):
                     )
                 },
             ):
-                with self.assertRaisesRegex(MODULE.ProbeError, "unsafe|unavailable"):
-                    try:
-                        MODULE._validator_env(
-                            run_root=pinned,
-                            validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
-                        )
-                    finally:
-                        pinned.close()
-            self.assertTrue(swapped)
+                try:
+                    validator_env = MODULE._validator_env(
+                        run_root=pinned,
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        attestation_verification_key=ATTESTATION_HMAC_SECRET,
+                    )
+                finally:
+                    pinned.close()
+            self.assertFalse(key_open_attempted)
+            self.assertEqual(
+                validator_env[MODULE.PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV],
+                ATTESTATION_HMAC_SECRET_HEX,
+            )
 
     def test_validator_env_fails_explicitly_when_validation_anchor_is_weak(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3872,7 +4055,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     run_root,
                     validation_anchor_key=b"weak",
                 )
-            self.assertFalse(key_path.exists())
+            self.assertTrue(key_path.exists())
 
     def test_validator_env_rejects_reused_key_material_across_domains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -5109,6 +5292,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._run_independent_validator(
                         validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        attestation_verification_key=ATTESTATION_HMAC_SECRET,
                         pinned_run_root=pinned,
                         agentic_sources=source_binding,
                     )
@@ -5267,6 +5451,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._run_independent_validator(
                         validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        attestation_verification_key=ATTESTATION_HMAC_SECRET,
                         pinned_run_root=pinned,
                         agentic_sources=source_binding,
                         timeout=5,
@@ -5383,6 +5568,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._run_independent_validator(
                         validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                        attestation_verification_key=ATTESTATION_HMAC_SECRET,
                         pinned_run_root=pinned,
                         agentic_sources=source_binding,
                         timeout=5,

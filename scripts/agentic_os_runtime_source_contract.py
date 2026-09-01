@@ -35,6 +35,7 @@ PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES = (
     ".cjs",
     ".json",
 )
+NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES = (".js", ".json", ".node")
 PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES = {
     ".js": (".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js"),
     ".mjs": (".mts", ".mjs"),
@@ -166,6 +167,15 @@ FORK_ENTRYPOINT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
+    r"""
+    (?<![\w$])
+    (?:spawn|execFile|child_process\.(?:spawn|execFile))\s*\(\s*
+    process\.execPath\s*,\s*
+    \[\s*["'](?P<specifier>[^"']+)["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 CREATE_REQUIRE_IMPORT = re.compile(
     rf"""
     \bimport\s*\{{(?P<body>.*?)\}}\s*
@@ -216,21 +226,25 @@ def source_relative_path(root: Path, source_path: Path) -> str:
         ) from exc
 
 
-def import_candidates(base: Path) -> list[Path]:
+def import_candidates(
+    base: Path,
+    *,
+    suffixes: tuple[str, ...] = PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES,
+    suffix_aliases: dict[str, tuple[str, ...]] | None = PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES,
+) -> list[Path]:
     candidates: list[Path] = []
+    suffix_aliases = suffix_aliases or {}
     if base.suffix:
         candidates.append(base)
-        for suffix in PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES.get(
-            base.suffix, (base.suffix,)
-        ):
+        for suffix in suffix_aliases.get(base.suffix, (base.suffix,)):
             candidates.append(base.with_suffix(suffix))
     else:
         candidates.append(base)
         candidates.extend(
-            Path(f"{base}{suffix}") for suffix in PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES
+            Path(f"{base}{suffix}") for suffix in suffixes
         )
         candidates.extend(
-            base / f"index{suffix}" for suffix in PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES
+            base / f"index{suffix}" for suffix in suffixes
         )
     deduped: list[Path] = []
     seen: set[Path] = set()
@@ -925,6 +939,14 @@ def _runtime_execution_entrypoint_specifiers(
             )
         specifiers.append((specifier, "require"))
         accepted_spans.append(match.span())
+    for match in CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER.finditer(source_text):
+        specifier = match.group("specifier")
+        if "\\" in specifier:
+            raise RuntimeSourceContractError(
+                "runtime source child-process entrypoint contains an unsupported JavaScript escape"
+            )
+        specifiers.append((specifier, "import"))
+        accepted_spans.append(match.span())
 
     for match in re.finditer(r"\bnew\s+Worker\s*\(", source_text):
         if not any(start <= match.start() < end for start, end in accepted_spans):
@@ -937,6 +959,14 @@ def _runtime_execution_entrypoint_specifiers(
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported fork entrypoint"
+            )
+    for match in re.finditer(
+        r"(?<![\w$])(?:spawn|execFile|child_process\.(?:spawn|execFile))\s*\(\s*process\.execPath\s*,",
+        source_text,
+    ):
+        if not any(start <= match.start() < end for start, end in accepted_spans):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported child-process Node entrypoint"
             )
     return specifiers
 
@@ -1074,7 +1104,7 @@ def _package_entry_bases(
     *,
     subpath: str,
     import_kind: str,
-) -> tuple[list[Path], bool]:
+) -> tuple[list[tuple[Path, str]], bool]:
     conditions = RUNTIME_PACKAGE_CONDITIONS.get(
         import_kind, RUNTIME_PACKAGE_CONDITIONS["import"]
     )
@@ -1082,14 +1112,14 @@ def _package_entry_bases(
     if exports is not None:
         export_target = _exports_map_target(exports, subpath)
         targets = _export_condition_targets(export_target, conditions)
-        return [(package_root / target).resolve() for target in targets], True
+        return [((package_root / target).resolve(), "runtime") for target in targets], True
     if subpath:
-        return [(package_root / subpath).resolve()], False
-    bases: list[Path] = []
+        return [((package_root / subpath).resolve(), "node_legacy")], False
+    bases: list[tuple[Path, str]] = []
     main = package_json.get("main")
     if isinstance(main, str) and main:
-        bases.append((package_root / main).resolve())
-    bases.append(package_root / "index")
+        bases.append(((package_root / main).resolve(), "node_legacy"))
+    bases.append((package_root / "index", "node_legacy"))
     return bases, False
 
 
@@ -1116,8 +1146,14 @@ def _package_root_candidates(root: Path, importer: Path, package_name: str) -> l
     return deduped
 
 
-def _resolve_existing_candidate(root: Path, base: Path) -> Path | None:
-    for candidate in import_candidates(base):
+def _resolve_existing_candidate(
+    root: Path,
+    base: Path,
+    *,
+    suffixes: tuple[str, ...] = PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES,
+    suffix_aliases: dict[str, tuple[str, ...]] | None = PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES,
+) -> Path | None:
+    for candidate in import_candidates(base, suffixes=suffixes, suffix_aliases=suffix_aliases):
         resolved = candidate.resolve()
         try:
             resolved.relative_to(root)
@@ -1182,8 +1218,16 @@ def resolve_import(
             subpath=subpath,
             import_kind=import_kind,
         )
-        for base in entry_bases:
-            resolved = _resolve_existing_candidate(root, base)
+        for base, resolution_style in entry_bases:
+            if resolution_style == "node_legacy":
+                resolved = _resolve_existing_candidate(
+                    root,
+                    base,
+                    suffixes=NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES,
+                    suffix_aliases={},
+                )
+            else:
+                resolved = _resolve_existing_candidate(root, base)
             if resolved is not None:
                 return (package_json.resolve(), resolved)
         if export_restricted:

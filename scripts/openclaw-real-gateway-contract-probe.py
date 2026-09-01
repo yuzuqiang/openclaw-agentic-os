@@ -2055,6 +2055,20 @@ def _select_validation_anchor_key() -> bytes:
     )
 
 
+def _select_attestation_verification_key() -> bytes:
+    if PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV in os.environ:
+        key = _hmac_secret_from_env(
+            PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV,
+            "persistent attestation verification",
+        )
+        os.environ.pop(PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV, None)
+        return key
+    return _validate_hmac_key_material(
+        secrets.token_bytes(32),
+        "persistent attestation verification",
+    )
+
+
 def _authentication_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(record)
     payload.pop("authentication", None)
@@ -2203,9 +2217,9 @@ def _lifecycle_attestation_record(lifecycle: Mapping[str, Any]) -> dict[str, Any
     observations = _lifecycle_observation_snapshot(lifecycle)
     return {
         "schema_version": PERSISTENT_LIFECYCLE_ATTESTATION_SCHEMA_VERSION,
-        "record_authority": "agentic-os-persistent-lifecycle-runner-receipt",
+        "record_authority": "agentic-os-parent-post-run-lifecycle-observer",
         "authentication_authority": "agentic-os-independent-validation-subprocess",
-        "record_transport": "non_rpc_pinned_run_root_receipt",
+        "record_transport": "parent_fd_pinned_receipt_reverification",
         "observations_schema_version": PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION,
         "lifecycle_sha256": _canonical_sha256(observations),
         "observations": observations,
@@ -2219,14 +2233,14 @@ def _validate_lifecycle_attestation_record(
 ) -> None:
     if response.get("schema_version") != PERSISTENT_LIFECYCLE_ATTESTATION_SCHEMA_VERSION:
         raise ProbeError("persistent lifecycle attestation schema is invalid")
-    if response.get("record_authority") != "agentic-os-persistent-lifecycle-runner-receipt":
+    if response.get("record_authority") != "agentic-os-parent-post-run-lifecycle-observer":
         raise ProbeError("persistent lifecycle attestation authority is invalid")
     if (
         response.get("authentication_authority")
         != "agentic-os-independent-validation-subprocess"
     ):
         raise ProbeError("persistent lifecycle attestation authentication authority is invalid")
-    if response.get("record_transport") != "non_rpc_pinned_run_root_receipt":
+    if response.get("record_transport") != "parent_fd_pinned_receipt_reverification":
         raise ProbeError("persistent lifecycle attestation transport is invalid")
     if (
         response.get("observations_schema_version")
@@ -2601,13 +2615,18 @@ def _validator_env(
     *,
     run_root: _PinnedRunRoot,
     validation_anchor_key: bytes,
+    attestation_verification_key: bytes,
 ) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
         if key in RUNNER_ENV_ALLOWLIST and not _is_provider_secret_env_name(key)
     }
-    attestation_key = _consume_attestation_verification_key(run_root)
+    _assert_pinned_run_root_identity(run_root)
+    attestation_key = _validate_hmac_key_material(
+        attestation_verification_key,
+        "persistent attestation verification",
+    )
     anchor_key = _validate_hmac_key_material(
         validation_anchor_key,
         "persistent lifecycle validation anchor",
@@ -2623,6 +2642,7 @@ def _run_independent_validator(
     *,
     pinned_run_root: _PinnedRunRoot,
     validation_anchor_key: bytes,
+    attestation_verification_key: bytes,
     agentic_sources: list[dict[str, str]],
     timeout: int = 30,
 ) -> None:
@@ -2646,6 +2666,7 @@ def _run_independent_validator(
     validator_env = _validator_env(
         run_root=pinned_run_root,
         validation_anchor_key=validation_anchor_key,
+        attestation_verification_key=attestation_verification_key,
     )
     validator_env["AGENTIC_OS_PROBE_ROOT"] = str(ROOT.resolve())
     _assert_pinned_run_root_identity(pinned_run_root)
@@ -4214,6 +4235,7 @@ def _run_persistent_lifecycle_probe_once(
     transition_id: str,
     requested_process_boundary: str,
     validation_anchor_key: bytes,
+    attestation_verification_key: bytes,
     pinned_run_root: _PinnedRunRoot,
 ) -> dict[str, Any]:
     _assert_pinned_run_root_identity(pinned_run_root)
@@ -4415,6 +4437,7 @@ def _run_persistent_lifecycle_probe_once(
         )
         _run_independent_validator(
             validation_anchor_key=validation_anchor_key,
+            attestation_verification_key=attestation_verification_key,
             pinned_run_root=pinned_run_root,
             agentic_sources=agentic_sources,
         )
@@ -4535,6 +4558,9 @@ def _run_persistent_lifecycle_probe(
     requested_process_boundary: str = "external-container",
 ) -> dict[str, Any]:
     validation_anchor_key = _select_validation_anchor_key()
+    attestation_verification_key = _select_attestation_verification_key()
+    if hmac.compare_digest(validation_anchor_key, attestation_verification_key):
+        raise ProbeError("persistent lifecycle HMAC keys are not domain separated")
     _sanitize_parent_environment_before_candidate_launch()
     prepared_run_root = _prepare_private_run_root(run_root)
     pinned_run_root = _pin_prepared_run_root(prepared_run_root)
@@ -4554,6 +4580,7 @@ def _run_persistent_lifecycle_probe(
             transition_id=transition_id,
             requested_process_boundary=requested_process_boundary,
             validation_anchor_key=validation_anchor_key,
+            attestation_verification_key=attestation_verification_key,
             pinned_run_root=pinned_run_root,
         )
     except BaseException as exc:
