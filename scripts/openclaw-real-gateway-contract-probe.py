@@ -228,6 +228,17 @@ PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
         ("sessionKey", "limit", "includeTools"),
     ),
 }
+PERSISTENT_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
+    ("tools_catalog", "tools.catalog"),
+    ("allow_lease_status", "subagents.allowLease.status"),
+    (
+        "allow_lease_status_rejects_non_empty_params",
+        "subagents.allowLease.status",
+    ),
+)
+STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST = {
+    "requesterAgentId": "agentic-os-negative-status-params-probe"
+}
 STDIN_VALIDATOR_BOOTSTRAP = "\n".join(
     (
         "import hashlib, json, sys, types",
@@ -3281,7 +3292,7 @@ def _runtime_source_digest(runtime_sources: list[dict[str, str]], path: str) -> 
 
 
 def _reject_unsupported_persistent_rpc_records(rpc_evidence: Mapping[str, Any]) -> None:
-    expected = {"tools_catalog", "allow_lease_status"}
+    expected = {key for key, _method in PERSISTENT_RPC_TRANSCRIPT_RECORDS}
     unexpected = sorted(set(rpc_evidence) - expected)
     if unexpected:
         raise ProbeError(
@@ -3300,6 +3311,56 @@ def _validate_allow_lease_status_response(response: Mapping[str, Any]) -> None:
         raise ProbeError(
             "persistent attestation allowLease status leases must be empty before lifecycle"
         )
+
+
+def _validate_allow_lease_status_rejects_non_empty_params(
+    record: Mapping[str, Any]
+) -> str:
+    if record.get("method") != "subagents.allowLease.status":
+        raise ProbeError(
+            "persistent attestation allowLease status negative proof method mismatch"
+        )
+    request = _record(
+        record.get("request_params"),
+        "persistent attestation allowLease status negative request",
+    )
+    if dict(request) != STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST:
+        raise ProbeError(
+            "persistent attestation allowLease status negative request mismatch"
+        )
+    response = _record(
+        record.get("response"),
+        "persistent attestation allowLease status negative response",
+    )
+    raw_response_digest = _require_sha256_field(
+        record,
+        "raw_response_sha256",
+        "persistent attestation allowLease status negative proof",
+    )
+    if _canonical_sha256(response) != raw_response_digest:
+        raise ProbeError(
+            "persistent attestation allowLease status negative response mismatch"
+        )
+    result = response.get("result")
+    payload = result if isinstance(result, Mapping) else response
+    payload = _record(
+        payload,
+        "persistent attestation allowLease status negative payload",
+    )
+    if (
+        payload.get("ok") is True
+        or payload.get("status") == "ok"
+        or isinstance(payload.get("leases"), list)
+    ):
+        raise ProbeError(
+            "persistent attestation allowLease status accepted non-empty parameters"
+        )
+    response_text = json.dumps(payload, sort_keys=True).lower()
+    if "param" not in response_text:
+        raise ProbeError(
+            "persistent attestation allowLease status negative proof is not parameter-bound"
+        )
+    return raw_response_digest
 
 
 def _validate_persistent_attestation_evidence(
@@ -3432,35 +3493,35 @@ def _validate_persistent_attestation_evidence(
     if _canonical_sha256(rpc_evidence) != rpc_evidence_digest:
         raise ProbeError("persistent attestation RPC evidence digest mismatch")
     transcript_records: list[dict[str, Any]] = []
-    for key, method, response_validator in (
-        ("tools_catalog", "tools.catalog", _validate_runtime_catalog_response),
-        (
-            "allow_lease_status",
-            "subagents.allowLease.status",
-            _validate_allow_lease_status_response,
-        ),
-    ):
+    for key, method in PERSISTENT_RPC_TRANSCRIPT_RECORDS:
         record = _record(rpc_evidence.get(key), f"persistent attestation RPC evidence {key}")
         if record.get("method") != method:
             raise ProbeError(f"persistent attestation RPC evidence {key} method mismatch")
         request = _record(record.get("request_params"), f"persistent attestation {key} request")
-        if request:
+        if key != "allow_lease_status_rejects_non_empty_params" and request:
             raise ProbeError(f"persistent attestation RPC evidence {key} request is not empty")
-        response_record = _record(
-            record.get("response"), f"persistent attestation {key} response"
-        )
-        raw_response_digest = _require_sha256_field(
-            record, "raw_response_sha256", f"persistent attestation RPC evidence {key}"
-        )
-        if _canonical_sha256(response_record) != raw_response_digest:
-            raise ProbeError(f"persistent attestation RPC evidence {key} response mismatch")
-        if response_validator is not None:
-            response_validator(response_record)
+        if key == "allow_lease_status_rejects_non_empty_params":
+            raw_response_digest = _validate_allow_lease_status_rejects_non_empty_params(
+                record
+            )
+        else:
+            response_record = _record(
+                record.get("response"), f"persistent attestation {key} response"
+            )
+            raw_response_digest = _require_sha256_field(
+                record, "raw_response_sha256", f"persistent attestation RPC evidence {key}"
+            )
+            if _canonical_sha256(response_record) != raw_response_digest:
+                raise ProbeError(f"persistent attestation RPC evidence {key} response mismatch")
+            if key == "tools_catalog":
+                _validate_runtime_catalog_response(response_record)
+            if key == "allow_lease_status":
+                _validate_allow_lease_status_response(response_record)
         transcript_records.append(
             {
                 "key": key,
                 "method": method,
-                "request_params": {},
+                "request_params": dict(request),
                 "raw_response_sha256": raw_response_digest,
             }
         )

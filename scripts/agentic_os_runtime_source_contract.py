@@ -324,6 +324,59 @@ def _is_identifier_character(character: str) -> bool:
     return character.isalnum() or character in {"_", "$"}
 
 
+def _decode_js_identifier_escape(source_text: str, index: int) -> tuple[str, int]:
+    if not source_text.startswith("\\u", index):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported JavaScript identifier escape"
+        )
+    if index + 2 < len(source_text) and source_text[index + 2] == "{":
+        close_index = source_text.find("}", index + 3)
+        if close_index == -1:
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported JavaScript identifier escape"
+            )
+        digits = source_text[index + 3 : close_index]
+        next_index = close_index + 1
+    else:
+        digits = source_text[index + 2 : index + 6]
+        next_index = index + 6
+    if not digits or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported JavaScript identifier escape"
+        )
+    try:
+        character = chr(int(digits, 16))
+    except (OverflowError, ValueError) as exc:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported JavaScript identifier escape"
+        ) from exc
+    if not character.isascii() or not _is_identifier_character(character):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported JavaScript identifier escape"
+        )
+    return character, next_index
+
+
+def _parse_js_identifier(source_text: str, index: int) -> tuple[str, int] | None:
+    if index >= len(source_text):
+        return None
+    parts: list[str] = []
+    first = True
+    while index < len(source_text):
+        character = source_text[index]
+        if character == "\\":
+            character, index = _decode_js_identifier_escape(source_text, index)
+        elif _is_identifier_character(character):
+            index += 1
+        else:
+            break
+        if first and character.isdigit():
+            return None
+        parts.append(character)
+        first = False
+    return ("".join(parts), index) if parts else None
+
+
 def _skip_whitespace(source_text: str, index: int) -> int:
     while index < len(source_text) and source_text[index].isspace():
         index += 1
@@ -388,11 +441,14 @@ def _parse_global_base(source_text: str, index: int) -> int | None:
         if close_index >= len(source_text) or source_text[close_index] != ")":
             return None
         return close_index + 1
+    parsed_global = _parse_js_identifier(source_text, index)
+    if parsed_global is None:
+        return None
+    parsed_global_name, end = parsed_global
     for global_name in ("globalThis", "global"):
-        if not source_text.startswith(global_name, index):
+        if parsed_global_name != global_name:
             continue
         before = source_text[index - 1] if index > 0 else ""
-        end = index + len(global_name)
         after = source_text[end] if end < len(source_text) else ""
         if (before and (_is_identifier_character(before) or before == ".")) or (
             after and _is_identifier_character(after)
@@ -439,19 +495,19 @@ def _parse_process_base(source_text: str, index: int) -> int | None:
             if property_name != "process":
                 return None
             return bracket_end + 1
-        if source_text.startswith("process", property_index):
-            index = property_index
-            process_end = index + len("process")
-        else:
+        parsed_process = _parse_js_identifier(source_text, property_index)
+        if parsed_process is None or parsed_process[0] != "process":
             return None
+        process_end = parsed_process[1]
         after = source_text[process_end] if process_end < len(source_text) else ""
         if after and _is_identifier_character(after):
             return None
         return process_end
-    if not source_text.startswith("process", index):
+    parsed_process = _parse_js_identifier(source_text, index)
+    if parsed_process is None or parsed_process[0] != "process":
         return None
     before = source_text[process_start - 1] if process_start > 0 else ""
-    after_process = index + len("process")
+    after_process = parsed_process[1]
     after = source_text[after_process] if after_process < len(source_text) else ""
     if (before and (_is_identifier_character(before) or before == ".")) or (
         after and _is_identifier_character(after)
@@ -488,12 +544,10 @@ def _parse_process_member(
             )
         return property_name, bracket_end + 1
 
-    property_match = re.match(r"[A-Za-z_$][\w$]*", source_text[property_index:])
-    if property_match is None:
+    parsed_property = _parse_js_identifier(source_text, property_index)
+    if parsed_property is None:
         return None
-    property_name = property_match.group(0)
-    property_end = property_index + len(property_name)
-    return property_name, property_end
+    return parsed_property
 
 
 def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
@@ -2075,6 +2129,26 @@ def _package_root_candidates(root: Path, importer: Path, package_name: str) -> l
     return deduped
 
 
+def _nearest_package_self_reference(
+    root: Path, importer: Path, package_name: str
+) -> tuple[Path, dict[str, Any]] | None:
+    root = root.resolve()
+    current = importer.resolve().parent
+    while True:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            return None
+        package_json = current / "package.json"
+        if package_json.is_file():
+            payload = _load_package_json(package_json, package_name)
+            if payload.get("name") == package_name and payload.get("exports") is not None:
+                return current, payload
+        if current == root:
+            return None
+        current = current.parent
+
+
 def _resolve_existing_candidate(
     root: Path,
     base: Path,
@@ -2182,6 +2256,35 @@ def resolve_import(
     package_name = _package_name(normalized)
     subpath = _package_subpath(normalized, package_name)
     found_package_json: Path | None = None
+    self_reference = _nearest_package_self_reference(root, importer, package_name)
+    if self_reference is not None:
+        package_root, package_payload = self_reference
+        entry_bases, export_restricted = _package_entry_bases(
+            package_root,
+            package_payload,
+            subpath=subpath,
+            import_kind=import_kind,
+        )
+        for base, resolution_style in entry_bases:
+            if resolution_style == "node_legacy":
+                resolved = _resolve_existing_candidate(
+                    root,
+                    base,
+                    suffixes=NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES,
+                    suffix_aliases={},
+                )
+            else:
+                resolved = _resolve_existing_candidate(root, base)
+            if resolved is not None:
+                return ((package_root / "package.json").resolve(), resolved)
+        if export_restricted:
+            if required:
+                importer_relative = source_relative_path(root, importer)
+                raise RuntimeSourceContractError(
+                    "runtime package import could not be resolved: "
+                    f"{importer_relative} imports {specifier}"
+                )
+            return ((package_root / "package.json").resolve(),)
     for package_root in _package_root_candidates(root, importer, package_name):
         try:
             package_root.relative_to(root)

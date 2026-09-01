@@ -472,6 +472,28 @@ class RealGatewayProbeTests(unittest.TestCase):
                     {"status": "ok", "leases": []}
                 ),
             },
+            "allow_lease_status_rejects_non_empty_params": {
+                "method": "subagents.allowLease.status",
+                "request_params": dict(
+                    MODULE.STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST
+                ),
+                "response": {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_params",
+                        "message": "unexpected params: requesterAgentId",
+                    },
+                },
+                "raw_response_sha256": MODULE._canonical_sha256(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "invalid_params",
+                            "message": "unexpected params: requesterAgentId",
+                        },
+                    }
+                ),
+            },
         }
         expected_transcript_sha256 = MODULE._canonical_sha256(
             {
@@ -480,13 +502,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                     {
                         "key": key,
                         "method": rpc_evidence[key]["method"],
-                        "request_params": {},
+                        "request_params": dict(rpc_evidence[key]["request_params"]),
                         "raw_response_sha256": rpc_evidence[key]["raw_response_sha256"],
                     }
-                    for key in (
-                        "tools_catalog",
-                        "allow_lease_status",
-                    )
+                    for key, _method in MODULE.PERSISTENT_RPC_TRANSCRIPT_RECORDS
                 ],
             }
         )
@@ -1772,6 +1791,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             "globalThis?.process.dlopen(module, './runtime-addon.node');\n",
             "globalThis?.['process'].dlopen(module, './runtime-addon.node');\n",
             "global.process.dlopen(module, './runtime-addon.node');\n",
+            "process.dl\\u006fpen(module, './runtime-addon.node');\n",
+            "pro\\u0063ess.dlopen(module, './runtime-addon.node');\n",
+            "globalThis.pro\\u0063ess.dl\\u006fpen(module, './runtime-addon.node');\n",
             "`${process.dlopen(module, './runtime-addon.node')}`;\n",
         )
         for source in variants:
@@ -2201,6 +2223,40 @@ class RealGatewayProbeTests(unittest.TestCase):
             paths = MODULE._persistent_runtime_source_paths(root)
 
         self.assertIn("node_modules/fixture-runtime/dist/feature/x.js", paths)
+
+    def test_persistent_runtime_source_closure_resolves_package_self_reference_before_node_modules(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "package.json": json.dumps(
+                        {
+                            "name": "demo",
+                            "version": "0.0.0-test",
+                            "exports": {"./feature": "./real.js"},
+                        }
+                    )
+                    + "\n",
+                    "src/gateway/client.ts": "import { feature } from 'demo/feature';\n",
+                    "real.js": "export const feature = 'root';\n",
+                    "node_modules/demo/package.json": json.dumps(
+                        {
+                            "name": "demo",
+                            "exports": {"./feature": "./decoy.js"},
+                        }
+                    )
+                    + "\n",
+                    "node_modules/demo/decoy.js": "export const feature = 'decoy';\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("real.js", paths)
+        self.assertNotIn("node_modules/demo/decoy.js", paths)
 
     def test_persistent_runtime_source_closure_treats_core_subpath_overlap_as_package(
         self,
@@ -2758,12 +2814,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                                     {
                                         "key": key,
                                         "method": payload["rpc_evidence"][key]["method"],
-                                        "request_params": {},
+                                        "request_params": dict(
+                                            payload["rpc_evidence"][key]["request_params"]
+                                        ),
                                         "raw_response_sha256": payload["rpc_evidence"][key][
                                             "raw_response_sha256"
                                         ],
                                     }
-                                    for key in ("tools_catalog", "allow_lease_status")
+                                    for key, _method in MODULE.PERSISTENT_RPC_TRANSCRIPT_RECORDS
                                 ],
                             }
                         )
@@ -2780,6 +2838,41 @@ class RealGatewayProbeTests(unittest.TestCase):
                             receipt,
                             persistent_evidence_transform=replace_allow_lease_status,
                         )
+
+    def test_persistent_summary_requires_status_non_empty_params_rejection(
+        self,
+    ) -> None:
+        cases = {
+            "missing": lambda evidence: evidence["rpc_evidence"].pop(
+                "allow_lease_status_rejects_non_empty_params"
+            ),
+            "accepted": lambda evidence: evidence["rpc_evidence"][
+                "allow_lease_status_rejects_non_empty_params"
+            ].update(
+                {
+                    "response": {"status": "ok", "leases": []},
+                    "raw_response_sha256": MODULE._canonical_sha256(
+                        {"status": "ok", "leases": []}
+                    ),
+                }
+            ),
+        }
+        for name, transform in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                receipt = self._valid_persistent_receipt()
+
+                def mutate_status_negative_proof(payload: dict) -> None:
+                    transform(payload)
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "allowLease status|allow_lease_status_rejects_non_empty_params|accepted non-empty parameters|negative",
+                ):
+                    self._call_persistent_summary(
+                        Path(directory),
+                        receipt,
+                        persistent_evidence_transform=mutate_status_negative_proof,
+                    )
 
     def test_persistent_summary_rejects_missing_required_tool_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4355,7 +4448,11 @@ class RealGatewayProbeTests(unittest.TestCase):
             tools_catalog = persistent_evidence["rpc_evidence"]["tools_catalog"]["response"]
             self.assertEqual(
                 sorted(persistent_evidence["rpc_evidence"]),
-                ["allow_lease_status", "tools_catalog"],
+                [
+                    "allow_lease_status",
+                    "allow_lease_status_rejects_non_empty_params",
+                    "tools_catalog",
+                ],
             )
             self.assertEqual(validation["status"], "pass")
             self.assertEqual(

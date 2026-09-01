@@ -330,10 +330,7 @@ def persistent_status_receipt(signed_payload):
 
 def persistent_rpc_transcript_sha256(module, rpc_evidence):
     records = []
-    for key, method in (
-        ("tools_catalog", "tools.catalog"),
-        ("allow_lease_status", "subagents.allowLease.status"),
-    ):
+    for key, method in module.PERSISTENT_RPC_TRANSCRIPT_RECORDS:
         record = rpc_evidence[key]
         records.append(
             {
@@ -438,6 +435,13 @@ def build_persistent_evidence(
         "leases": [],
         "runtime_attestation": persistent_status_receipt(signed_payload),
     }
+    negative_status_response = {
+        "ok": False,
+        "error": {
+            "code": "invalid_params",
+            "message": "unexpected params: requesterAgentId",
+        },
+    }
     if status_response_transform is not None:
         status_response_transform(status_response)
     rpc_evidence = {
@@ -452,6 +456,12 @@ def build_persistent_evidence(
             "request_params": {},
             "response": status_response,
             "raw_response_sha256": canonical_sha256(status_response),
+        },
+        "allow_lease_status_rejects_non_empty_params": {
+            "method": "subagents.allowLease.status",
+            "request_params": dict(module.STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+            "response": negative_status_response,
+            "raw_response_sha256": canonical_sha256(negative_status_response),
         },
     }
     signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
@@ -559,6 +569,10 @@ def add_fake_openclaw_to_env(
             f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+            "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
+            "    if params != '{}':\n"
+            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params'}}, sort_keys=True))\n"
+            "        raise SystemExit(1)\n"
             "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
@@ -591,6 +605,10 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
             "    print(json.dumps({'groups': [{'id': 'unit', 'tools': entries}]}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+            "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
+            "    if params != '{}':\n"
+            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params'}}, sort_keys=True))\n"
+            "        raise SystemExit(1)\n"
             "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
@@ -1096,6 +1114,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "    print(json.dumps({'ok': False, 'error': 'catalog unavailable'}, sort_keys=True))\n"
                     "    raise SystemExit(1)\n"
                     "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
+                    "    if params != '{}':\n"
+                    "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params'}}, sort_keys=True))\n"
+                    "        raise SystemExit(1)\n"
                     "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
                     "    raise SystemExit(0)\n"
                     "raise SystemExit(2)\n"
@@ -4656,6 +4678,40 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("request params must be empty", payload["error"])
+
+    def test_persistent_attested_preflight_requires_status_negative_probe(self) -> None:
+        module = load_preflight_module()
+        cases = {
+            "missing": lambda evidence: evidence["rpc_evidence"].pop(
+                "allow_lease_status_rejects_non_empty_params"
+            ),
+            "accepted": lambda evidence: evidence["rpc_evidence"][
+                "allow_lease_status_rejects_non_empty_params"
+            ].update(
+                {
+                    "response": {"status": "ok", "leases": []},
+                    "raw_response_sha256": canonical_sha256(
+                        {"status": "ok", "leases": []}
+                    ),
+                }
+            ),
+        }
+        for name, transform in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as install_root:
+                fixture = write_persistent_runtime_fixture(install_root)
+                key_path, key = write_attestation_key()
+                evidence = build_persistent_evidence(module, install_root, fixture, key)
+                transform(evidence)
+
+                result = run_persistent_preflight(evidence, install_root, key_path)
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertRegex(
+                payload["error"],
+                "allow_lease_status_rejects_non_empty_params|accepted non-empty parameters",
+            )
 
 
 if __name__ == "__main__":

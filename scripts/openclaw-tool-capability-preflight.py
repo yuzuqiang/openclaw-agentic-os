@@ -127,6 +127,17 @@ PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
         ("sessionKey", "limit", "includeTools"),
     ),
 }
+PERSISTENT_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
+    ("tools_catalog", "tools.catalog"),
+    ("allow_lease_status", "subagents.allowLease.status"),
+    (
+        "allow_lease_status_rejects_non_empty_params",
+        "subagents.allowLease.status",
+    ),
+)
+STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST = {
+    "requesterAgentId": "agentic-os-negative-status-params-probe"
+}
 
 MODEL_TOOL_SCHEMA_MARKERS = {
     "sessions_spawn": "function createSessionsSpawnToolSchema",
@@ -985,6 +996,7 @@ def _run_gateway_tools_catalog(
     if scrub_env_override:
         env = dict(os.environ)
         env.pop("OPENCLAW_INSTALL_ROOT", None)
+
     try:
         proc = subprocess.run(
             [
@@ -1118,8 +1130,9 @@ def _run_gateway_allow_lease_status(
     if scrub_env_override:
         env = dict(os.environ)
         env.pop("OPENCLAW_INSTALL_ROOT", None)
-    try:
-        proc = subprocess.run(
+
+    def run_status_call(params: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [
                 str(executable),
                 "gateway",
@@ -1129,7 +1142,7 @@ def _run_gateway_allow_lease_status(
                 "--timeout",
                 str(timeout_ms),
                 "--params",
-                "{}",
+                params,
             ],
             text=True,
             stdout=subprocess.PIPE,
@@ -1138,6 +1151,9 @@ def _run_gateway_allow_lease_status(
             check=False,
             env=env,
         )
+
+    try:
+        proc = run_status_call("{}")
     except (OSError, subprocess.TimeoutExpired) as exc:
         catalog = _gateway_rpc_validation_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1258,7 +1274,82 @@ def _run_gateway_allow_lease_status(
             catalog=catalog,
         ) from exc
     corroboration["leases_count"] = len(leases)
+    negative_params = json.dumps(
+        STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST, sort_keys=True
+    )
+    try:
+        negative_proc = run_status_call(negative_params)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_negative_probe_unavailable",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status negative RPC unavailable",
+            catalog=catalog,
+        ) from exc
+    try:
+        negative_payload = json.loads((negative_proc.stdout or "").strip() or "{}")
+    except json.JSONDecodeError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_negative_probe_non_json",
+            stdout=negative_proc.stdout or "",
+            stderr=negative_proc.stderr or "",
+            returncode=negative_proc.returncode,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status negative RPC returned non-JSON output",
+            catalog=catalog,
+        ) from exc
+    negative_sha256 = _json_sha256(negative_payload)
+    try:
+        _validate_status_non_empty_params_rejection_payload(negative_payload)
+    except AdapterContractError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_negative_probe_failed",
+            error=str(exc),
+            response_sha256=negative_sha256,
+            stdout=negative_proc.stdout or "",
+            stderr=negative_proc.stderr or "",
+            returncode=negative_proc.returncode,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status accepted or failed to prove rejection of non-empty params",
+            catalog=catalog,
+        ) from exc
+    corroboration["non_empty_params_rejection"] = {
+        "status": "rejected",
+        "request_params": dict(STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+        "raw_response_sha256": negative_sha256,
+        "returncode": negative_proc.returncode,
+    }
     return corroboration
+
+
+def _validate_status_non_empty_params_rejection_payload(payload: Any) -> None:
+    if not isinstance(payload, Mapping):
+        raise AdapterContractError("status negative RPC response must be a JSON object")
+    result = payload.get("result")
+    status_payload = result if isinstance(result, Mapping) else payload
+    if not isinstance(status_payload, Mapping):
+        raise AdapterContractError("status negative RPC payload must be a JSON object")
+    if (
+        status_payload.get("ok") is True
+        or status_payload.get("status") == "ok"
+        or isinstance(status_payload.get("leases"), list)
+    ):
+        raise AdapterContractError("status RPC accepted non-empty parameters")
+    if "param" not in json.dumps(status_payload, sort_keys=True).lower():
+        raise AdapterContractError("status RPC rejection is not parameter-bound")
 
 
 def _validate_status_lease_items(leases: Iterable[Any], *, label: str) -> None:
@@ -2069,13 +2160,48 @@ def _require_persistent_rpc_record(
     return record
 
 
+def _require_persistent_status_negative_rpc_record(
+    evidence: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    rpc_evidence = _require_record(
+        evidence.get("rpc_evidence"), "persistent rpc_evidence"
+    )
+    key = "allow_lease_status_rejects_non_empty_params"
+    method = "subagents.allowLease.status"
+    record = _require_record(rpc_evidence.get(key), f"persistent rpc_evidence.{key}")
+    _require_exact_keys(
+        record,
+        ("method", "request_params", "response", "raw_response_sha256"),
+        f"persistent rpc_evidence.{key}",
+    )
+    if record.get("method") != method:
+        raise AdapterContractError(f"persistent RPC evidence method mismatch for {method}")
+    request_params = _require_record(
+        record.get("request_params"), f"persistent {method} negative request_params"
+    )
+    if dict(request_params) != STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST:
+        raise AdapterContractError(
+            "persistent subagents.allowLease.status negative request params mismatch"
+        )
+    response = _require_record(
+        record.get("response"), f"persistent {method} negative response"
+    )
+    digest = _canonical_json_sha256(response)
+    if record.get("raw_response_sha256") != digest:
+        raise AdapterContractError(
+            f"persistent {method} negative raw response digest mismatch"
+        )
+    _validate_status_non_empty_params_rejection_payload(response)
+    return record
+
+
 def _persistent_rpc_transcript_sha256(evidence: Mapping[str, Any]) -> str:
     records = []
-    for key, method in (
-        ("tools_catalog", "tools.catalog"),
-        ("allow_lease_status", "subagents.allowLease.status"),
-    ):
-        record = _require_persistent_rpc_record(evidence, key, method)
+    for key, method in PERSISTENT_RPC_TRANSCRIPT_RECORDS:
+        if key == "allow_lease_status_rejects_non_empty_params":
+            record = _require_persistent_status_negative_rpc_record(evidence)
+        else:
+            record = _require_persistent_rpc_record(evidence, key, method)
         records.append(
             {
                 "key": key,
@@ -2349,6 +2475,7 @@ def _persistent_gateway_status_from_evidence(
     if not isinstance(leases, list):
         raise AdapterContractError("persistent status RPC leases must be an array")
     _validate_status_lease_items(leases, label="persistent status RPC")
+    negative_record = _require_persistent_status_negative_rpc_record(evidence)
     corroboration: dict[str, Any] = {
         "method": "subagents.allowLease.status",
         "request_semantics": "read_only_request",
@@ -2360,6 +2487,11 @@ def _persistent_gateway_status_from_evidence(
         "ok": True,
         "runtime_attestation": dict(receipt),
         "leases_count": len(leases),
+        "non_empty_params_rejection": {
+            "status": "rejected",
+            "request_params": dict(STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+            "raw_response_sha256": negative_record.get("raw_response_sha256"),
+        },
     }
     return corroboration
 
