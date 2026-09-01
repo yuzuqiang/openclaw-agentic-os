@@ -709,6 +709,82 @@ def _parse_named_loader_invocation(
     return specifier, close_index + 1
 
 
+def _previous_non_trivia_character(source_text: str, index: int) -> str:
+    cursor = index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    return source_text[cursor] if cursor >= 0 else ""
+
+
+def _previous_code_word(source_text: str, index: int) -> str:
+    cursor = index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    return source_text[cursor + 1 : end]
+
+
+def _is_regex_literal_start(source_text: str, index: int) -> bool:
+    if index >= len(source_text) or source_text[index] != "/":
+        return False
+    next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+    if next_character in {"/", "*", ""}:
+        return False
+    previous = _previous_non_trivia_character(source_text, index)
+    if not previous:
+        return True
+    if previous in "({[=,:;!&|?+-*%^~<>":
+        return True
+    return _previous_code_word(source_text, index) in {
+        "await",
+        "case",
+        "delete",
+        "else",
+        "in",
+        "instanceof",
+        "new",
+        "of",
+        "return",
+        "throw",
+        "typeof",
+        "void",
+        "yield",
+    }
+
+
+def _regex_literal_end(source_text: str, index: int) -> int:
+    if not _is_regex_literal_start(source_text, index):
+        return index
+    cursor = index + 1
+    in_character_class = False
+    while cursor < len(source_text):
+        character = source_text[cursor]
+        if character == "\\":
+            cursor += 2
+            continue
+        if character == "[":
+            in_character_class = True
+            cursor += 1
+            continue
+        if character == "]" and in_character_class:
+            in_character_class = False
+            cursor += 1
+            continue
+        if character == "/" and not in_character_class:
+            cursor += 1
+            while cursor < len(source_text) and _is_identifier_character(source_text[cursor]):
+                cursor += 1
+            return cursor
+        if character in "\r\n":
+            break
+        cursor += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unterminated JavaScript regex literal"
+    )
+
+
 def _create_require_specifiers(
     source_text: str,
     inherited_loader_names: set[str] | None = None,
@@ -754,6 +830,9 @@ def _create_require_specifiers(
         if character == "/" and next_character == "*":
             index += 2
             state = "block_comment"
+            continue
+        if _is_regex_literal_start(source_text, index):
+            index = _regex_literal_end(source_text, index)
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
@@ -829,6 +908,9 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
         if character == "/" and next_character == "*":
             index += 2
             state = "block_comment"
+            continue
+        if _is_regex_literal_start(source_text, index):
+            index = _regex_literal_end(source_text, index)
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
@@ -927,6 +1009,9 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
         if character == "/" and next_character == "*":
             index += 2
             state = "block_comment"
+            continue
+        if _is_regex_literal_start(source_text, index):
+            index = _regex_literal_end(source_text, index)
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)

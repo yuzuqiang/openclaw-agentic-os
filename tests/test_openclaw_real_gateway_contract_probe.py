@@ -5,6 +5,7 @@ import hmac
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -46,9 +47,16 @@ class RealGatewayProbeTests(unittest.TestCase):
             "file:///bound/node_modules/tsx/dist/loader.mjs",
             self._valid_runtime_launch_sources(),
         )
+        self._original_assert_loopback_port_available_before_launch = (
+            MODULE._assert_loopback_port_available_before_launch
+        )
+        MODULE._assert_loopback_port_available_before_launch = lambda _port: None
 
     def tearDown(self) -> None:
         MODULE._runtime_launch_bindings = self._original_runtime_launch_bindings
+        MODULE._assert_loopback_port_available_before_launch = (
+            self._original_assert_loopback_port_available_before_launch
+        )
         if self._previous_validation_anchor is None:
             os.environ.pop(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, None)
         else:
@@ -238,6 +246,15 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "duplicate_release_owner_metadata_sha256": "4" * 64,
                 "release_idempotency_key_sha256": "5" * 64,
                 "duplicate_release_idempotency_key_sha256": "5" * 64,
+                "wrong_owner_release_status": "rejected",
+                "wrong_owner_release_sha256": "6" * 64,
+                "wrong_owner_release_gateway_lease_id_sha256": "e" * 64,
+                "wrong_owner_release_owner_metadata_sha256": "7" * 64,
+                "wrong_owner_release_idempotency_key_sha256": "8" * 64,
+                "listener_owner_status": "verified_before_lifecycle",
+                "listener_process_identity_sha256": MODULE._text_sha256(
+                    "1234:gateway-process:test"
+                ),
                 "sessions_list_count": 1,
                 "matching_session_count": 1,
             },
@@ -336,7 +353,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         source_records = runtime_sources or self._valid_runtime_sources()
         request_params = {
             "challenge": "challenge-1",
-            "client_process_id": "persistent-runner:unit-test",
+            "client_process_id": "persistent-runner:1234:unit-test",
             "expected_executable_sha256": "7" * 64,
             "expected_catalog_sha256": "8" * 64,
             "expected_runtime_identity_token_sha256": "d" * 64,
@@ -385,7 +402,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "build_id": receipt["attestation"].get(
                         "gateway_build_id", VALID_RUNTIME_HEAD
                     ),
-                    "process_identity": "gateway-process:test",
+                    "process_identity": "1234:gateway-process:test",
                 },
                 "transport": {
                     "kind": "gateway-websocket",
@@ -586,6 +603,8 @@ class RealGatewayProbeTests(unittest.TestCase):
             stderr = "runner stderr"
             returncode = 0
 
+        proc = self._attach_valid_process_cleanup(Proc())
+
         previous_secret = os.environ.get(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV)
         os.environ[MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV] = (
             VALIDATION_ANCHOR_HMAC_SECRET_HEX
@@ -602,7 +621,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 runtime_sources=runtime_sources,
                 runtime_launch_sources=self._valid_runtime_launch_sources(),
                 command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
-                proc=Proc(),
+                proc=proc,
                 port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
                 expected_run_id="run-id",
                 expected_transition_id="transition-id",
@@ -1603,6 +1622,26 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("scripts/lib/package.json", paths)
         self.assertIn("scripts/lib/actual.cjs", paths)
         self.assertNotIn("scripts/lib/index.js", paths)
+
+    def test_persistent_runtime_source_closure_parses_commonjs_after_regex_literal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const r = /'/;\n"
+                        "require('./runner-impl.cjs');\n"
+                    ),
+                    "scripts/runner-impl.cjs": "module.exports = { actual: true };\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-impl.cjs", paths)
 
     def test_persistent_runtime_source_closure_binds_child_process_node_entrypoints(
         self,
@@ -2732,6 +2771,70 @@ class RealGatewayProbeTests(unittest.TestCase):
                             receipt,
                             persistent_evidence_transform=drift,
                         )
+
+    def test_persistent_summary_rejects_missing_wrong_owner_release_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"].pop("wrong_owner_release_status")
+            with self.assertRaisesRegex(
+                MODULE.ProbeError, "wrong_owner_release_status|wrong-owner"
+            ):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_wrong_owner_release_using_owner_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["wrong_owner_release_owner_metadata_sha256"] = (
+                receipt["lifecycle"]["release_owner_metadata_sha256"]
+            )
+            with self.assertRaisesRegex(MODULE.ProbeError, "wrong-owner release"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_attestation_client_not_launched_runner_bound(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            def drift(evidence: dict) -> None:
+                raw_attestation = evidence["attestation"]
+                raw_attestation["request_params"]["client_process_id"] = (
+                    "persistent-runner:9999:unit-test"
+                )
+                response = raw_attestation["response"]
+                response["signed_payload"]["client_process_id"] = (
+                    "persistent-runner:9999:unit-test"
+                )
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "launched-runner"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=drift,
+                )
+
+    def test_persistent_summary_rejects_listener_process_outside_candidate_tree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            def drift(evidence: dict) -> None:
+                response = evidence["attestation"]["response"]
+                response["signed_payload"]["binding"]["gateway"][
+                    "process_identity"
+                ] = "9999:external-gateway"
+                self._resign_attestation_response(response)
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "listener process"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    persistent_evidence_transform=drift,
+                )
 
     def test_persistent_summary_rejects_missing_preflight_artifact_binding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4206,6 +4309,53 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             self.assertFalse(launched)
             self.assertFalse(run_root.exists())
+
+    def test_persistent_runner_fails_before_launch_when_loopback_port_is_occupied(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            output = root / "evidence.json"
+            launched = False
+
+            class OccupiedSocket:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def bind(self, address):
+                    raise OSError(MODULE.errno.EADDRINUSE, "occupied")
+
+            def fake_run(*args, **kwargs):
+                nonlocal launched
+                launched = True
+                raise AssertionError("runner must not launch on an occupied port")
+
+            with mock.patch.object(MODULE, "_git", return_value="agentic-head"), mock.patch.object(
+                MODULE,
+                "_assert_loopback_port_available_before_launch",
+                self._original_assert_loopback_port_available_before_launch,
+            ), mock.patch.object(
+                MODULE.socket, "socket", return_value=OccupiedSocket()
+            ), mock.patch.object(MODULE, "_run", side_effect=fake_run):
+                with self.assertRaisesRegex(MODULE.ProbeError, "already occupied"):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head=VALID_RUNTIME_HEAD,
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=run_root,
+                        port=20190,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+
+            self.assertFalse(launched)
 
     def test_persistent_runner_timeout_writes_fail_closed_cleanup_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

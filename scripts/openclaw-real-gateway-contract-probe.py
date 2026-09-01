@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import hmac
 import json
@@ -2204,6 +2205,13 @@ LIFECYCLE_OBSERVATION_FIELDS = (
     "duplicate_release_owner_metadata_sha256",
     "release_idempotency_key_sha256",
     "duplicate_release_idempotency_key_sha256",
+    "wrong_owner_release_status",
+    "wrong_owner_release_sha256",
+    "wrong_owner_release_gateway_lease_id_sha256",
+    "wrong_owner_release_owner_metadata_sha256",
+    "wrong_owner_release_idempotency_key_sha256",
+    "listener_owner_status",
+    "listener_process_identity_sha256",
     "sessions_list_count",
     "matching_session_count",
 )
@@ -2785,6 +2793,25 @@ def _wait_for_loopback_port_closed(port: int, *, timeout_seconds: float = 5.0) -
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
+
+
+def _assert_loopback_port_available_before_launch(port: int) -> None:
+    if not isinstance(port, int) or isinstance(port, bool) or port <= 0:
+        raise ProbeError("persistent lifecycle candidate loopback port is invalid")
+    for host in ("127.0.0.1", "::1"):
+        family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind((host, port))
+            except OSError as exc:
+                if host == "::1" and exc.errno in {
+                    errno.EAFNOSUPPORT,
+                    errno.EADDRNOTAVAIL,
+                }:
+                    continue
+                raise CandidatePortOpenError(
+                    "persistent lifecycle candidate loopback port is already occupied before launch"
+                ) from exc
 
 
 def _terminate_process_group(proc: subprocess.CompletedProcess[str]) -> bool:
@@ -3483,6 +3510,134 @@ def _validate_duplicate_release_identity(lifecycle: Mapping[str, Any]) -> dict[s
     return identity
 
 
+def _validate_cross_owner_release_rejection(
+    lifecycle: Mapping[str, Any],
+    *,
+    gateway_lease_id_sha256: str,
+    release_owner_metadata_sha256: str,
+    release_idempotency_key_sha256: str,
+) -> dict[str, str]:
+    wrong_owner_status = _require_non_empty_string(
+        lifecycle, "wrong_owner_release_status", "lifecycle"
+    )
+    if wrong_owner_status != "rejected":
+        raise ProbeError("persistent lifecycle did not prove wrong-owner release rejection")
+    wrong_owner_release_sha256 = _require_sha256_field(
+        lifecycle, "wrong_owner_release_sha256", "lifecycle"
+    )
+    wrong_owner_gateway_lease_id_sha256 = _require_sha256_field(
+        lifecycle, "wrong_owner_release_gateway_lease_id_sha256", "lifecycle"
+    )
+    if wrong_owner_gateway_lease_id_sha256 != gateway_lease_id_sha256:
+        raise ProbeError(
+            "persistent lifecycle wrong-owner release did not target the acquired lease"
+        )
+    wrong_owner_metadata_sha256 = _require_sha256_field(
+        lifecycle, "wrong_owner_release_owner_metadata_sha256", "lifecycle"
+    )
+    if wrong_owner_metadata_sha256 == release_owner_metadata_sha256:
+        raise ProbeError(
+            "persistent lifecycle wrong-owner release used the successful owner metadata"
+        )
+    wrong_owner_idempotency_sha256 = _require_sha256_field(
+        lifecycle, "wrong_owner_release_idempotency_key_sha256", "lifecycle"
+    )
+    if wrong_owner_idempotency_sha256 == release_idempotency_key_sha256:
+        raise ProbeError(
+            "persistent lifecycle wrong-owner release reused the successful idempotency key"
+        )
+    return {
+        "wrong_owner_release_status": wrong_owner_status,
+        "wrong_owner_release_sha256": wrong_owner_release_sha256,
+        "wrong_owner_release_gateway_lease_id_sha256": wrong_owner_gateway_lease_id_sha256,
+        "wrong_owner_release_owner_metadata_sha256": wrong_owner_metadata_sha256,
+        "wrong_owner_release_idempotency_key_sha256": wrong_owner_idempotency_sha256,
+    }
+
+
+def _process_identity_pid(value: str, label: str) -> int:
+    token = value.split(":", 2)[0]
+    if not token.isdigit():
+        raise ProbeError(f"{label} is not PID-bound")
+    pid = int(token)
+    if pid <= 0:
+        raise ProbeError(f"{label} is not PID-bound")
+    return pid
+
+
+def _client_process_id_pid(value: str) -> int:
+    for token in value.split(":"):
+        if token.isdigit() and int(token) > 0:
+            return int(token)
+    raise ProbeError("persistent attestation client process is not launcher PID-bound")
+
+
+def _validate_attestation_process_bindings(
+    *,
+    signed_payload: Mapping[str, Any],
+    request_params: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
+    candidate_cleanup: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    if candidate_cleanup is None or candidate_cleanup.get("tracking_status") != "available":
+        raise ProbeError("persistent attestation process binding lacks launcher cleanup evidence")
+    root_identity = _record(
+        candidate_cleanup.get("root_identity"), "persistent candidate root process identity"
+    )
+    root_pid = root_identity.get("pid")
+    if not isinstance(root_pid, int) or root_pid <= 0:
+        raise ProbeError("persistent candidate root process identity is invalid")
+    client_process_id = _require_non_empty_string(
+        request_params, "client_process_id", "persistent attestation request params"
+    )
+    if _client_process_id_pid(client_process_id) != root_pid:
+        raise ProbeError("persistent attestation client process is not launched-runner bound")
+    if signed_payload.get("client_process_id") != client_process_id:
+        raise ProbeError("persistent attestation client process is not request-bound")
+
+    binding = _record(
+        signed_payload.get("binding"), "persistent attestation runtime binding"
+    )
+    gateway = _record(binding.get("gateway"), "persistent attestation gateway binding")
+    gateway_process_identity = _require_non_empty_string(
+        gateway, "process_identity", "persistent attestation gateway binding"
+    )
+    gateway_pid = _process_identity_pid(
+        gateway_process_identity, "persistent attestation Gateway process identity"
+    )
+    allowed_pids = {root_pid}
+    descendants = candidate_cleanup.get("descendant_identities")
+    if isinstance(descendants, list):
+        for descendant in descendants:
+            if isinstance(descendant, dict) and isinstance(descendant.get("pid"), int):
+                allowed_pids.add(descendant["pid"])
+    if gateway_pid not in allowed_pids:
+        raise ProbeError(
+            "persistent attestation Gateway listener process is not a tracked candidate process"
+        )
+    listener_owner_status = _require_non_empty_string(
+        lifecycle, "listener_owner_status", "lifecycle"
+    )
+    if listener_owner_status != "verified_before_lifecycle":
+        raise ProbeError(
+            "persistent lifecycle did not prove listener ownership before lifecycle traffic"
+        )
+    listener_process_identity_sha256 = _require_sha256_field(
+        lifecycle, "listener_process_identity_sha256", "lifecycle"
+    )
+    gateway_process_identity_sha256 = _text_sha256(gateway_process_identity)
+    if listener_process_identity_sha256 != gateway_process_identity_sha256:
+        raise ProbeError(
+            "persistent lifecycle listener identity is not attestation-bound"
+        )
+    return {
+        "client_process_id_sha256": _text_sha256(client_process_id),
+        "gateway_process_identity_sha256": gateway_process_identity_sha256,
+        "listener_owner_status": listener_owner_status,
+        "listener_process_identity_sha256": listener_process_identity_sha256,
+    }
+
+
 def _safe_status(value: Any) -> str:
     return value if isinstance(value, str) and value else "unknown"
 
@@ -3812,7 +3967,19 @@ def _persistent_lifecycle_summary(
         duplicate_release_identity["release_gateway_lease_id_sha256"]
         != gateway_lease_id_sha256
     ):
-        raise ProbeError("persistent lifecycle release Gateway lease id did not match acquired lease")
+        raise ProbeError(
+            "persistent lifecycle release Gateway lease id did not match acquired lease"
+        )
+    wrong_owner_release_rejection = _validate_cross_owner_release_rejection(
+        lifecycle,
+        gateway_lease_id_sha256=gateway_lease_id_sha256,
+        release_owner_metadata_sha256=duplicate_release_identity[
+            "release_owner_metadata_sha256"
+        ],
+        release_idempotency_key_sha256=duplicate_release_identity[
+            "release_idempotency_key_sha256"
+        ],
+    )
     matching_session_count = lifecycle.get("matching_session_count")
     if (
         not isinstance(matching_session_count, int)
@@ -3931,6 +4098,17 @@ def _persistent_lifecycle_summary(
         lifecycle_attestation=lifecycle_attestation,
         validation_anchor_key=validation_anchor_key,
     )
+    attestation_process_binding = _validate_attestation_process_bindings(
+        signed_payload=_record(
+            response.get("signed_payload"), "persistent attestation signed payload"
+        ),
+        request_params=_record(
+            raw_attestation.get("request_params"),
+            "persistent attestation request params",
+        ),
+        lifecycle=lifecycle,
+        candidate_cleanup=_tracked_cleanup_from_process(proc),
+    )
     soak = _optional_record(receipt.get("soak"))
     historical_probe_audit = _optional_record(receipt.get("historical_probe_audit"))
 
@@ -3984,6 +4162,12 @@ def _persistent_lifecycle_summary(
             "catalog_sha256": attestation.get("catalog_sha256"),
             "contract_vector_sha256": attestation.get("contract_vector_sha256"),
             "rpc_transcript_sha256": attestation.get("rpc_transcript_sha256"),
+            "client_process_id_sha256": attestation_process_binding[
+                "client_process_id_sha256"
+            ],
+            "gateway_process_identity_sha256": attestation_process_binding[
+                "gateway_process_identity_sha256"
+            ],
             "runtime_authored_rpc_evidence_sha256": attestation.get(
                 "runtime_authored_rpc_evidence_sha256"
             ),
@@ -4024,6 +4208,13 @@ def _persistent_lifecycle_summary(
             "session_status_sha256": lifecycle.get("session_status_sha256"),
             "sessions_history_sha256": lifecycle.get("sessions_history_sha256"),
             **duplicate_release_identity,
+            **wrong_owner_release_rejection,
+            "listener_owner_status": attestation_process_binding[
+                "listener_owner_status"
+            ],
+            "listener_process_identity_sha256": attestation_process_binding[
+                "listener_process_identity_sha256"
+            ],
             "first_spawn_status": lifecycle.get("first_spawn_status"),
             "sessions_list_count": lifecycle.get("sessions_list_count"),
             "matching_session_count": lifecycle.get("matching_session_count"),
@@ -4287,6 +4478,7 @@ def _run_persistent_lifecycle_probe_once(
         "--evidence-dir",
         str(evidence_dir),
     ]
+    _assert_loopback_port_available_before_launch(port)
     try:
         proc = _run(
             command,
