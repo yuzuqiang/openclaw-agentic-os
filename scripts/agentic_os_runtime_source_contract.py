@@ -785,6 +785,27 @@ def _regex_literal_end(source_text: str, index: int) -> int:
     )
 
 
+def _regex_literal_end_or_fail_closed(source_text: str, index: int) -> int | None:
+    """Return the regex end, or reject slash contexts the scanner cannot prove safe.
+
+    A closing parenthesis or brace can end either an expression (where ``/`` is
+    division) or a control-flow/block construct (where ``/`` can begin a regex
+    literal).  Treating either case as division can make a quote inside the regex
+    hide a later loader call.  Until this scanner tracks full JavaScript grammar,
+    those contexts must fail closed instead of guessing.
+    """
+
+    if index >= len(source_text) or source_text[index] != "/":
+        return None
+    if _is_regex_literal_start(source_text, index):
+        return _regex_literal_end(source_text, index)
+    if _previous_non_trivia_character(source_text, index) in {")", "}"}:
+        raise RuntimeSourceContractError(
+            "runtime source contains an ambiguous JavaScript slash token"
+        )
+    return None
+
+
 def _create_require_specifiers(
     source_text: str,
     inherited_loader_names: set[str] | None = None,
@@ -831,8 +852,9 @@ def _create_require_specifiers(
             index += 2
             state = "block_comment"
             continue
-        if _is_regex_literal_start(source_text, index):
-            index = _regex_literal_end(source_text, index)
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
@@ -909,8 +931,9 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
             index += 2
             state = "block_comment"
             continue
-        if _is_regex_literal_start(source_text, index):
-            index = _regex_literal_end(source_text, index)
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
@@ -1010,8 +1033,9 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
             index += 2
             state = "block_comment"
             continue
-        if _is_regex_literal_start(source_text, index):
-            index = _regex_literal_end(source_text, index)
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)

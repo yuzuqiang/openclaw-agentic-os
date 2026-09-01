@@ -1643,6 +1643,35 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("scripts/runner-impl.cjs", paths)
 
+    def test_persistent_runtime_source_closure_fails_closed_on_ambiguous_slash(
+        self,
+    ) -> None:
+        cases = {
+            "control_header": "if (enabled) /'/.test(value);\n",
+            "loop_header": "while (enabled) /'/.test(value);\n",
+            "closing_block": "{} /'/.test(value);\n",
+        }
+        for name, prefix in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            prefix + "require('./runner-impl.cjs');\n"
+                        ),
+                        "scripts/runner-impl.cjs": (
+                            "module.exports = { actual: true };\n"
+                        ),
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "ambiguous JavaScript slash token",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_child_process_node_entrypoints(
         self,
     ) -> None:
