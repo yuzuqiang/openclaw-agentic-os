@@ -676,8 +676,11 @@ def _commonjs_require_alias_bindings(
     return aliases, declaration_spans
 
 
-def _module_register_loader_names(source_text: str) -> set[str]:
+def _module_register_loader_bindings(
+    source_text: str,
+) -> tuple[set[str], set[tuple[int, int]]]:
     loaders = {"module.register"}
+    declaration_spans: set[tuple[int, int]] = set()
     stripped = strip_source_comments(source_text)
     for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
@@ -694,7 +697,8 @@ def _module_register_loader_names(source_text: str) -> set[str]:
                     or imported.group("prop_alias")
                     or "register"
                 )
-    return loaders
+                declaration_spans.add(match.span())
+    return loaders, declaration_spans
 
 
 def _parse_named_loader_invocation(
@@ -754,14 +758,25 @@ def _parse_module_register_invocation(
         )
     specifier, end_index = parsed
     delimiter_index = _skip_js_trivia(source_text, end_index)
-    if delimiter_index >= len(source_text) or source_text[delimiter_index] not in {",", ")"}:
+    if delimiter_index >= len(source_text) or source_text[delimiter_index] != ",":
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported module.register hook signature"
         )
-    return specifier, delimiter_index + 1
+    parent_index = _skip_js_trivia(source_text, delimiter_index + 1)
+    parent_url = "import.meta.url"
+    if not source_text.startswith(parent_url, parent_index):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported module.register hook parent URL"
+        )
+    close_index = _skip_js_trivia(source_text, parent_index + len(parent_url))
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported module.register hook signature"
+        )
+    return specifier, close_index + 1
 
 
-def _is_forbidden_runtime_loader_call(
+def _is_forbidden_runtime_loader_reference(
     source_text: str, index: int, token: str
 ) -> bool:
     if not source_text.startswith(token, index):
@@ -769,12 +784,11 @@ def _is_forbidden_runtime_loader_call(
     after_index = index + len(token)
     before = source_text[index - 1] if index > 0 else ""
     after = source_text[after_index] if after_index < len(source_text) else ""
-    if before and (_is_identifier_character(before) or before == "."):
+    if before and _is_identifier_character(before):
         return False
     if after and _is_identifier_character(after):
         return False
-    call_index = _skip_js_trivia(source_text, after_index)
-    return call_index < len(source_text) and source_text[call_index] == "("
+    return True
 
 
 def _reject_evaluated_runtime_loaders(source_text: str) -> None:
@@ -828,9 +842,9 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             index += 1
             continue
         for token in EVALUATED_RUNTIME_LOADER_TOKENS:
-            if _is_forbidden_runtime_loader_call(source_text, index, token):
+            if _is_forbidden_runtime_loader_reference(source_text, index, token):
                 raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported evaluated loader call"
+                    "runtime source contains an unsupported evaluated loader reference"
                 )
         index += 1
 
@@ -1019,8 +1033,12 @@ def _create_require_specifiers(
     return specifiers
 
 
-def _commonjs_require_specifiers(source_text: str) -> list[str]:
-    alias_names, declaration_spans = _commonjs_require_alias_bindings(source_text)
+def _commonjs_require_specifiers(
+    source_text: str,
+    inherited_alias_names: set[str] | None = None,
+) -> list[str]:
+    local_alias_names, declaration_spans = _commonjs_require_alias_bindings(source_text)
+    alias_names = set(inherited_alias_names or ()) | local_alias_names
     specifiers: list[str] = []
     index = 0
     state = "code"
@@ -1064,7 +1082,7 @@ def _commonjs_require_specifiers(source_text: str) -> list[str]:
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
             for chunk in chunks:
-                specifiers.extend(_commonjs_require_specifiers(chunk))
+                specifiers.extend(_commonjs_require_specifiers(chunk, alias_names))
             continue
         if character in {"'", '"'}:
             state = "string"
@@ -1260,8 +1278,14 @@ def _runtime_execution_entrypoint_specifiers(
     return specifiers
 
 
-def _module_register_hook_specifiers(source_text: str) -> list[str]:
-    loader_names = _module_register_loader_names(source_text)
+def _module_register_hook_specifiers(
+    source_text: str,
+    inherited_loader_names: set[str] | None = None,
+) -> list[str]:
+    local_loader_names, declaration_spans = _module_register_loader_bindings(
+        source_text
+    )
+    loader_names = set(inherited_loader_names or ()) | local_loader_names
     specifiers: list[str] = []
     index = 0
     state = "code"
@@ -1305,7 +1329,7 @@ def _module_register_hook_specifiers(source_text: str) -> list[str]:
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
             for chunk in chunks:
-                specifiers.extend(_module_register_hook_specifiers(chunk))
+                specifiers.extend(_module_register_hook_specifiers(chunk, loader_names))
             continue
         if character in {"'", '"'}:
             state = "string"
@@ -1313,9 +1337,24 @@ def _module_register_hook_specifiers(source_text: str) -> list[str]:
             index += 1
             continue
         for loader_name in sorted(loader_names, key=len, reverse=True):
+            after_index = index + len(loader_name)
+            before = source_text[index - 1] if index > 0 else ""
+            after = source_text[after_index] if after_index < len(source_text) else ""
+            is_loader_identifier = (
+                source_text.startswith(loader_name, index)
+                and not (before and (_is_identifier_character(before) or before == "."))
+                and not (after and _is_identifier_character(after))
+            )
+            if not is_loader_identifier:
+                continue
+            if any(start <= index < end for start, end in declaration_spans):
+                index = after_index
+                break
             parsed = _parse_module_register_invocation(source_text, index, loader_name)
             if parsed is None:
-                continue
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported module.register hook usage"
+                )
             specifier, index = parsed
             specifiers.append(specifier)
             break

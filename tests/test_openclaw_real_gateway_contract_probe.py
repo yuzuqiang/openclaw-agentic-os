@@ -1754,6 +1754,11 @@ class RealGatewayProbeTests(unittest.TestCase):
         cases = {
             "eval_require": 'eval("require(\\\'./runner-impl.cjs\\\')");\n',
             "function_import": 'new Function("return import(\\\'./runner-impl.mjs\\\')")();\n',
+            "property_eval": 'globalThis.eval("require(\\\'./runner-impl.cjs\\\')");\n',
+            "indirect_eval": '(0, eval)("require(\\\'./runner-impl.cjs\\\')");\n',
+            "function_reference": (
+                'Reflect.construct(Function, ["return import(\\\'./runner-impl.mjs\\\')"])();\n'
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -1790,6 +1795,26 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("scripts/hooks.mjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_module_register_hook_in_template_expression(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { register as registerHook } from 'node:module';\n"
+                        "`${registerHook('./hooks.mjs', import.meta.url)}`;\n"
+                    ),
+                    "scripts/hooks.mjs": "export async function resolve() { return {}; }\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/hooks.mjs", paths)
+
     def test_persistent_runtime_source_closure_rejects_dynamic_module_register_hook(
         self,
     ) -> None:
@@ -1809,6 +1834,62 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(MODULE.ProbeError, "module.register hook"):
                 MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_module_register_parent_or_transfer(
+        self,
+    ) -> None:
+        cases = {
+            "dynamic_parent": (
+                "import { register } from 'node:module';\n"
+                "register('./hooks.mjs', parentURL);\n"
+            ),
+            "wrong_parent": (
+                "import { register } from 'node:module';\n"
+                "register('./hooks.mjs', 'file:///tmp/elsewhere.mjs');\n"
+            ),
+            "loader_transfer": (
+                "import { register as registerHook } from 'node:module';\n"
+                "const delegated = registerHook;\n"
+                "delegated('./hooks.mjs', import.meta.url);\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hooks.mjs": (
+                            "export async function resolve() { return {}; }\n"
+                        ),
+                    },
+                )
+
+                with self.assertRaisesRegex(MODULE.ProbeError, "module.register hook"):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_binds_commonjs_alias_in_template_expression(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const load = require;\n"
+                        "`${load('./runner-impl.cjs')}`;\n"
+                    ),
+                    "scripts/runner-impl.cjs": (
+                        "module.exports = { actual: true };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/runner-impl.cjs", paths)
 
     def test_persistent_runtime_source_closure_binds_quoted_static_import_clause(
         self,
