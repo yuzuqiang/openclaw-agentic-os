@@ -528,9 +528,15 @@ def _parse_safe_process_member_access(source_text: str, index: int) -> int | Non
     if member is None:
         return None
     property_name, property_end = member
-    if property_name == "dlopen":
+    if property_name in {
+        "_linkedBinding",
+        "binding",
+        "dlopen",
+        "getBuiltinModule",
+        "mainModule",
+    }:
         raise RuntimeSourceContractError(
-            "runtime source contains an unsupported native add-on entrypoint"
+            "runtime source contains an unsupported native add-on process capability"
         )
     return property_end
 
@@ -603,7 +609,11 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
             parsed = _parse_quoted_specifier(source_text, index)
             if parsed is None:
                 raise AssertionError("quoted JavaScript literal did not parse")
-            _, index = parsed
+            literal_value, index = parsed
+            if literal_value in {"process", "node:process"}:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on process acquisition"
+                )
             continue
         if character == "`":
             chunks, index = _template_expression_chunks(source_text, index)
@@ -649,6 +659,22 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported native add-on global reference transfer"
                 )
+            for forbidden_member in ("_load", "process"):
+                if not source_text.startswith(forbidden_member, index):
+                    continue
+                member_end = index + len(forbidden_member)
+                after_member = (
+                    source_text[member_end] if member_end < len(source_text) else ""
+                )
+                if after_member and _is_identifier_character(after_member):
+                    continue
+                before_member = index - 1
+                while before_member >= 0 and source_text[before_member].isspace():
+                    before_member -= 1
+                if before_member >= 0 and source_text[before_member] == ".":
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported native add-on process acquisition"
+                    )
         index += 1
     return specifiers
 

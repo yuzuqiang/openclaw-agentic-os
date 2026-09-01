@@ -1855,6 +1855,21 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "import p from 'node:process';\n"
                 "p.dlopen(module, './runtime-addon.node');\n"
             ),
+            "process-get-builtin-module": (
+                "process.getBuiltinModule('node:process').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "process-get-builtin-module-alias": (
+                "const p = process.getBuiltinModule('node:process');\n"
+                "p.dlopen(module, './runtime-addon.node');\n"
+            ),
+            "module-constructor-load": (
+                "module.constructor._load('node:process').dlopen("
+                "module, './runtime-addon.node');\n"
+            ),
+            "non-strict-this-process": (
+                "this.process.dlopen(module, './runtime-addon.node');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
