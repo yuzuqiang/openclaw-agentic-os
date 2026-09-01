@@ -101,6 +101,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         root_identity: dict | None = None,
         cleanup_marker_sha256: str = "a" * 64,
         teardown_status: str = "confirmed",
+        os_boundary_type: str = "external-container",
     ) -> dict:
         root_identity = root_identity or {
             "pid": pid,
@@ -114,7 +115,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             "teardown_status": teardown_status,
             "authority": MODULE.LAUNCHER_BOUNDARY_AUTHORITY,
             "evidence_authority": MODULE.LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY,
-            "os_boundary_type": MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
+            "os_boundary_type": os_boundary_type,
             "root_pid": pid,
             "root_identity": dict(root_identity),
             "root_process_group_id": pid,
@@ -230,6 +231,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "duplicate_acquire_same_lease": True,
                 "first_spawn_status": "accepted",
                 "duplicate_spawn_same_session": True,
+                "pre_release_status": "visible",
+                "pre_release_lease_count": 1,
+                "pre_release_gateway_lease_id_sha256": "e" * 64,
                 "post_release_lease_count": 0,
                 "gateway_lease_id_sha256": "e" * 64,
                 "session_key_sha256": "f" * 64,
@@ -246,6 +250,35 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "duplicate_release_owner_metadata_sha256": "4" * 64,
                 "release_idempotency_key_sha256": "5" * 64,
                 "duplicate_release_idempotency_key_sha256": "5" * 64,
+                "expected_release_idempotency_key_sha256": "5" * 64,
+                "release_client_lease_id_sha256": MODULE._text_sha256(
+                    "client-lease"
+                ),
+                "duplicate_release_client_lease_id_sha256": MODULE._text_sha256(
+                    "client-lease"
+                ),
+                "expected_release_client_lease_id_sha256": MODULE._text_sha256(
+                    "client-lease"
+                ),
+                "release_run_id_sha256": MODULE._text_sha256("run-id"),
+                "duplicate_release_run_id_sha256": MODULE._text_sha256("run-id"),
+                "release_phase_sha256": MODULE._text_sha256("phase-b"),
+                "duplicate_release_phase_sha256": MODULE._text_sha256("phase-b"),
+                "expected_release_phase_sha256": MODULE._text_sha256("phase-b"),
+                "release_transition_id_sha256": MODULE._text_sha256("transition-id"),
+                "duplicate_release_transition_id_sha256": MODULE._text_sha256(
+                    "transition-id"
+                ),
+                "release_agent_id_sha256": MODULE._text_sha256("agent"),
+                "duplicate_release_agent_id_sha256": MODULE._text_sha256("agent"),
+                "expected_release_agent_id_sha256": MODULE._text_sha256("agent"),
+                "release_requester_agent_id_sha256": MODULE._text_sha256("requester"),
+                "duplicate_release_requester_agent_id_sha256": MODULE._text_sha256(
+                    "requester"
+                ),
+                "expected_release_requester_agent_id_sha256": MODULE._text_sha256(
+                    "requester"
+                ),
                 "wrong_owner_release_status": "rejected",
                 "wrong_owner_release_sha256": "6" * 64,
                 "wrong_owner_release_gateway_lease_id_sha256": "e" * 64,
@@ -1715,6 +1748,68 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "child-process Node"):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_evaluated_loader_calls(
+        self,
+    ) -> None:
+        cases = {
+            "eval_require": 'eval("require(\\\'./runner-impl.cjs\\\')");\n',
+            "function_import": 'new Function("return import(\\\'./runner-impl.mjs\\\')")();\n',
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/runner-impl.cjs": "module.exports = { actual: true };\n",
+                        "scripts/runner-impl.mjs": "export const actual = true;\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(MODULE.ProbeError, "evaluated loader"):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_binds_module_register_hooks(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { register as registerHook } from 'node:module';\n"
+                        "registerHook('./hooks.mjs', import.meta.url);\n"
+                    ),
+                    "scripts/hooks.mjs": "export async function resolve() { return {}; }\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/hooks.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_module_register_hook(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { register } from 'node:module';\n"
+                        "const hook = './hooks.mjs';\n"
+                        "register(hook, import.meta.url);\n"
+                    ),
+                    "scripts/hooks.mjs": "export async function resolve() { return {}; }\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "module.register hook"):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_quoted_static_import_clause(
         self,
     ) -> None:
@@ -2469,6 +2564,25 @@ class RealGatewayProbeTests(unittest.TestCase):
                     with self.assertRaisesRegex(MODULE.ProbeError, message):
                         self._call_persistent_summary(Path(directory), receipt)
 
+    def test_persistent_summary_rejects_missing_release_owner_echo_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            del receipt["lifecycle"]["release_client_lease_id_sha256"]
+            with self.assertRaisesRegex(MODULE.ProbeError, "release_client_lease_id_sha256"):
+                self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_release_owner_echo_not_request_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+            receipt["lifecycle"]["release_agent_id_sha256"] = MODULE._text_sha256(
+                "another-agent"
+            )
+            receipt["lifecycle"]["duplicate_release_agent_id_sha256"] = (
+                receipt["lifecycle"]["release_agent_id_sha256"]
+            )
+            with self.assertRaisesRegex(MODULE.ProbeError, "release agent_id echo"):
+                self._call_persistent_summary(Path(directory), receipt)
+
     def test_persistent_summary_rejects_release_identity_not_acquired(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
@@ -2500,7 +2614,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_inconsistent_session_list_count(self) -> None:
-        for value in (None, 0, True, 1.0):
+        for value in (None, 0, True, 1.0, 2):
             with self.subTest(value=value):
                 with tempfile.TemporaryDirectory() as directory:
                     receipt = self._valid_persistent_receipt()
@@ -2510,6 +2624,23 @@ class RealGatewayProbeTests(unittest.TestCase):
                         receipt["lifecycle"]["sessions_list_count"] = value
                     with self.assertRaisesRegex(MODULE.ProbeError, "sessions list count"):
                         self._call_persistent_summary(Path(directory), receipt)
+
+    def test_persistent_summary_rejects_missing_pre_release_live_status(self) -> None:
+        for key, value in (
+            ("pre_release_status", "missing"),
+            ("pre_release_lease_count", 0),
+            ("pre_release_gateway_lease_id_sha256", "f" * 64),
+        ):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                receipt = self._valid_persistent_receipt()
+                if value == "missing":
+                    del receipt["lifecycle"][key]
+                else:
+                    receipt["lifecycle"][key] = value
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "status did not expose|pre_release"
+                ):
+                    self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_changed_production_config_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3702,6 +3833,32 @@ class RealGatewayProbeTests(unittest.TestCase):
             "unattributed_process_identities": [],
         }
         with self.assertRaisesRegex(MODULE.ProbeError, "launcher-owned boundary"):
+            MODULE._process_containment_boundary_receipt(
+                requested_boundary="external-container",
+                cleanup=cleanup,
+                process_group_cleanup_attempted=True,
+                process_group_reaped=True,
+                port_closed=True,
+            )
+
+    def test_process_containment_receipt_rejects_posix_only_boundary_for_external_container(
+        self,
+    ) -> None:
+        root_identity = {"pid": 1234, "uid": os.getuid(), "start_id": "root"}
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": root_identity,
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+            "launcher_owned_boundary": self._launcher_boundary(
+                root_identity=root_identity,
+                os_boundary_type=MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
+            ),
+        }
+        with self.assertRaisesRegex(MODULE.ProbeError, "requested OS boundary"):
             MODULE._process_containment_boundary_receipt(
                 requested_boundary="external-container",
                 cleanup=cleanup,

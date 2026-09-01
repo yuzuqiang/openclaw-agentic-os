@@ -326,6 +326,16 @@ DISABLED_FUTURE_RUNTIME_PROOFS = (
     "agentic_adapter_release_metadata_parity",
     "agentic_adapter_post_release_absent",
 )
+RELEASE_OWNER_ECHO_FIELDS = (
+    "client_lease_id",
+    "release_idempotency_key",
+    "run_id",
+    "phase",
+    "transition_id",
+    "agent_id",
+    "requester_agent_id",
+    "gateway_lease_id",
+)
 REQUIRED_CHILD_HASH_PROOFS = (
     "child_result_sha256",
     "child_run_id_sha256",
@@ -1729,8 +1739,10 @@ def _process_containment_boundary_receipt(
         raise ProbeError("process containment boundary authority is not launcher-owned")
     if launcher_boundary.get("evidence_authority") != LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY:
         raise ProbeError("process containment boundary evidence is not launcher-owned")
-    if launcher_boundary.get("os_boundary_type") != LAUNCHER_BOUNDARY_OS_TYPE:
-        raise ProbeError("process containment OS boundary type is not launcher-owned")
+    if launcher_boundary.get("os_boundary_type") != requested_boundary:
+        raise ProbeError(
+            "process containment requested OS boundary is not launcher-proven"
+        )
     _require_sha256_field(
         launcher_boundary,
         "boundary_id_sha256",
@@ -2189,6 +2201,9 @@ LIFECYCLE_OBSERVATION_FIELDS = (
     "duplicate_acquire_same_lease",
     "first_spawn_status",
     "duplicate_spawn_same_session",
+    "pre_release_status",
+    "pre_release_lease_count",
+    "pre_release_gateway_lease_id_sha256",
     "post_release_lease_count",
     "gateway_lease_id_sha256",
     "session_key_sha256",
@@ -2205,6 +2220,23 @@ LIFECYCLE_OBSERVATION_FIELDS = (
     "duplicate_release_owner_metadata_sha256",
     "release_idempotency_key_sha256",
     "duplicate_release_idempotency_key_sha256",
+    "release_client_lease_id_sha256",
+    "duplicate_release_client_lease_id_sha256",
+    "expected_release_client_lease_id_sha256",
+    "expected_release_idempotency_key_sha256",
+    "release_run_id_sha256",
+    "duplicate_release_run_id_sha256",
+    "release_phase_sha256",
+    "duplicate_release_phase_sha256",
+    "expected_release_phase_sha256",
+    "release_transition_id_sha256",
+    "duplicate_release_transition_id_sha256",
+    "release_agent_id_sha256",
+    "duplicate_release_agent_id_sha256",
+    "expected_release_agent_id_sha256",
+    "release_requester_agent_id_sha256",
+    "duplicate_release_requester_agent_id_sha256",
+    "expected_release_requester_agent_id_sha256",
     "wrong_owner_release_status",
     "wrong_owner_release_sha256",
     "wrong_owner_release_gateway_lease_id_sha256",
@@ -3510,6 +3542,51 @@ def _validate_duplicate_release_identity(lifecycle: Mapping[str, Any]) -> dict[s
     return identity
 
 
+def _validate_release_owner_echoes(
+    lifecycle: Mapping[str, Any],
+    *,
+    expected_run_id: str,
+    expected_transition_id: str,
+    gateway_lease_id_sha256: str,
+) -> dict[str, str]:
+    expected_response_digests = {
+        "run_id": _text_sha256(expected_run_id),
+        "transition_id": _text_sha256(expected_transition_id),
+        "gateway_lease_id": gateway_lease_id_sha256,
+    }
+    identity: dict[str, str] = {}
+    for field in RELEASE_OWNER_ECHO_FIELDS:
+        if field == "release_idempotency_key":
+            primary_key = "release_idempotency_key_sha256"
+            duplicate_key = "duplicate_release_idempotency_key_sha256"
+            expected_key = "expected_release_idempotency_key_sha256"
+        elif field == "gateway_lease_id":
+            primary_key = "release_gateway_lease_id_sha256"
+            duplicate_key = "duplicate_release_gateway_lease_id_sha256"
+            expected_key = "expected_release_gateway_lease_id_sha256"
+        else:
+            primary_key = f"release_{field}_sha256"
+            duplicate_key = f"duplicate_release_{field}_sha256"
+            expected_key = f"expected_release_{field}_sha256"
+        primary_digest = _require_sha256_field(lifecycle, primary_key, "lifecycle")
+        duplicate_digest = _require_sha256_field(lifecycle, duplicate_key, "lifecycle")
+        if duplicate_digest != primary_digest:
+            raise ProbeError(
+                f"persistent lifecycle duplicate release {field} echo mismatch"
+            )
+        expected_digest = expected_response_digests.get(field)
+        if expected_digest is None:
+            expected_digest = _require_sha256_field(lifecycle, expected_key, "lifecycle")
+        if primary_digest != expected_digest:
+            raise ProbeError(
+                f"persistent lifecycle release {field} echo is not request-bound"
+            )
+        identity[primary_key] = primary_digest
+        identity[duplicate_key] = duplicate_digest
+        identity[expected_key] = expected_digest
+    return identity
+
+
 def _validate_cross_owner_release_rejection(
     lifecycle: Mapping[str, Any],
     *,
@@ -3552,6 +3629,39 @@ def _validate_cross_owner_release_rejection(
         "wrong_owner_release_gateway_lease_id_sha256": wrong_owner_gateway_lease_id_sha256,
         "wrong_owner_release_owner_metadata_sha256": wrong_owner_metadata_sha256,
         "wrong_owner_release_idempotency_key_sha256": wrong_owner_idempotency_sha256,
+    }
+
+
+def _validate_pre_release_status_observed(
+    lifecycle: Mapping[str, Any], *, gateway_lease_id_sha256: str
+) -> dict[str, Any]:
+    pre_release_status = _require_non_empty_string(
+        lifecycle, "pre_release_status", "lifecycle"
+    )
+    if pre_release_status != "visible":
+        raise ProbeError(
+            "persistent lifecycle status did not expose the acquired live lease"
+        )
+    pre_release_lease_count = lifecycle.get("pre_release_lease_count")
+    if (
+        not isinstance(pre_release_lease_count, int)
+        or isinstance(pre_release_lease_count, bool)
+        or pre_release_lease_count != 1
+    ):
+        raise ProbeError(
+            "persistent lifecycle status did not expose exactly one acquired live lease"
+        )
+    pre_release_gateway_lease_id_sha256 = _require_sha256_field(
+        lifecycle, "pre_release_gateway_lease_id_sha256", "lifecycle"
+    )
+    if pre_release_gateway_lease_id_sha256 != gateway_lease_id_sha256:
+        raise ProbeError(
+            "persistent lifecycle status did not expose the acquired Gateway lease"
+        )
+    return {
+        "pre_release_status": pre_release_status,
+        "pre_release_lease_count": pre_release_lease_count,
+        "pre_release_gateway_lease_id_sha256": pre_release_gateway_lease_id_sha256,
     }
 
 
@@ -3970,6 +4080,12 @@ def _persistent_lifecycle_summary(
         raise ProbeError(
             "persistent lifecycle release Gateway lease id did not match acquired lease"
         )
+    release_owner_echoes = _validate_release_owner_echoes(
+        lifecycle,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        gateway_lease_id_sha256=gateway_lease_id_sha256,
+    )
     wrong_owner_release_rejection = _validate_cross_owner_release_rejection(
         lifecycle,
         gateway_lease_id_sha256=gateway_lease_id_sha256,
@@ -3991,9 +4107,12 @@ def _persistent_lifecycle_summary(
     if (
         not isinstance(sessions_list_count, int)
         or isinstance(sessions_list_count, bool)
-        or sessions_list_count < matching_session_count
+        or sessions_list_count != matching_session_count
     ):
         raise ProbeError("persistent lifecycle sessions list count is inconsistent")
+    pre_release_status_observation = _validate_pre_release_status_observed(
+        lifecycle, gateway_lease_id_sha256=gateway_lease_id_sha256
+    )
     runtime_launch_sources = _validate_runtime_launch_sources(runtime_launch_sources)
 
     required_tool_names = preflight.get("required_tool_names")
@@ -4208,7 +4327,9 @@ def _persistent_lifecycle_summary(
             "session_status_sha256": lifecycle.get("session_status_sha256"),
             "sessions_history_sha256": lifecycle.get("sessions_history_sha256"),
             **duplicate_release_identity,
+            **release_owner_echoes,
             **wrong_owner_release_rejection,
+            **pre_release_status_observation,
             "listener_owner_status": attestation_process_binding[
                 "listener_owner_status"
             ],

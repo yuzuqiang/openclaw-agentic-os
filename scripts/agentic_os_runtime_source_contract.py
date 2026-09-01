@@ -176,6 +176,7 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
 CREATE_REQUIRE_IMPORT = re.compile(
     rf"""
     \bimport\s*\{{(?P<body>.*?)\}}\s*
@@ -675,6 +676,27 @@ def _commonjs_require_alias_bindings(
     return aliases, declaration_spans
 
 
+def _module_register_loader_names(source_text: str) -> set[str]:
+    loaders = {"module.register"}
+    stripped = strip_source_comments(source_text)
+    for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
+        for match in pattern.finditer(stripped):
+            for part in match.group("body").split(","):
+                part = part.strip()
+                imported = re.fullmatch(
+                    rf"register(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
+                    part,
+                )
+                if imported is None:
+                    continue
+                loaders.add(
+                    imported.group("alias")
+                    or imported.group("prop_alias")
+                    or "register"
+                )
+    return loaders
+
+
 def _parse_named_loader_invocation(
     source_text: str,
     index: int,
@@ -707,6 +729,110 @@ def _parse_named_loader_invocation(
             f"runtime source contains an unsupported {loader_description} signature"
         )
     return specifier, close_index + 1
+
+
+def _parse_module_register_invocation(
+    source_text: str, index: int, loader_name: str
+) -> tuple[str, int] | None:
+    if not source_text.startswith(loader_name, index):
+        return None
+    after_index = index + len(loader_name)
+    before = source_text[index - 1] if index > 0 else ""
+    after = source_text[after_index] if after_index < len(source_text) else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    if after and _is_identifier_character(after):
+        return None
+    call_index = _skip_js_trivia(source_text, after_index)
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, call_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic module.register hook"
+        )
+    specifier, end_index = parsed
+    delimiter_index = _skip_js_trivia(source_text, end_index)
+    if delimiter_index >= len(source_text) or source_text[delimiter_index] not in {",", ")"}:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported module.register hook signature"
+        )
+    return specifier, delimiter_index + 1
+
+
+def _is_forbidden_runtime_loader_call(
+    source_text: str, index: int, token: str
+) -> bool:
+    if not source_text.startswith(token, index):
+        return False
+    after_index = index + len(token)
+    before = source_text[index - 1] if index > 0 else ""
+    after = source_text[after_index] if after_index < len(source_text) else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return False
+    if after and _is_identifier_character(after):
+        return False
+    call_index = _skip_js_trivia(source_text, after_index)
+    return call_index < len(source_text) and source_text[call_index] == "("
+
+
+def _reject_evaluated_runtime_loaders(source_text: str) -> None:
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                _reject_evaluated_runtime_loaders(chunk)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        for token in EVALUATED_RUNTIME_LOADER_TOKENS:
+            if _is_forbidden_runtime_loader_call(source_text, index, token):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported evaluated loader call"
+                )
+        index += 1
 
 
 def _previous_non_trivia_character(source_text: str, index: int) -> str:
@@ -1134,11 +1260,77 @@ def _runtime_execution_entrypoint_specifiers(
     return specifiers
 
 
+def _module_register_hook_specifiers(source_text: str) -> list[str]:
+    loader_names = _module_register_loader_names(source_text)
+    specifiers: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                specifiers.extend(_module_register_hook_specifiers(chunk))
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        for loader_name in sorted(loader_names, key=len, reverse=True):
+            parsed = _parse_module_register_invocation(source_text, index, loader_name)
+            if parsed is None:
+                continue
+            specifier, index = parsed
+            specifiers.append(specifier)
+            break
+        else:
+            index += 1
+    return specifiers
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
+    _reject_evaluated_runtime_loaders(source_text)
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
     create_require_specifiers = _create_require_specifiers(source_text)
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
     execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
+    module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
     for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text):
@@ -1155,6 +1347,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         (specifier, True, import_kind)
         for specifier, import_kind in execution_entrypoints
     )
+    specifiers.extend((specifier, True, "import") for specifier in module_register_hooks)
     return specifiers
 
 
