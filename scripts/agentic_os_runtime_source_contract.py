@@ -205,7 +205,7 @@ CHILD_PROCESS_DESTRUCTURED_REQUIRE = re.compile(
 CHILD_PROCESS_NODE_ENTRYPOINT_NAMES = frozenset(
     ("spawn", "spawnSync", "execFile", "execFileSync")
 )
-CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES = frozenset(("execSync",))
+CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES = frozenset(("exec", "execSync"))
 FORK_ENTRYPOINT_SPECIFIER = re.compile(
     r"""
     (?<![\w$])
@@ -261,6 +261,19 @@ CREATE_REQUIRE_DESTRUCTURED_REQUIRE = re.compile(
     rf"""
     \b(?:const|let|var)\s*\{{(?P<body>.*?)\}}\s*=\s*
     require\s*\(\s*["'](?:node:)?module["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+INLINE_CREATE_REQUIRE_SPECIFIER = re.compile(
+    rf"""
+    (?:
+        require\s*\(\s*["'](?:node:)?module["']\s*\)
+      | process\s*(?:\.|\?\.)\s*getBuiltinModule\s*\(\s*["'](?:node:)?module["']\s*\)
+      | {JS_IDENTIFIER}
+    )
+    \s*(?:\.|\?\.)\s*createRequire\s*
+    \([^)]*\)\s*
+    \(\s*["'](?P<specifier>[^"']+)["']
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -1591,12 +1604,16 @@ def _child_process_sync_shell_call_pattern(
             reverse=True,
         )
     )
+    member_alternatives = "|".join(
+        re.escape(name)
+        for name in sorted(CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES, key=len, reverse=True)
+    )
     return re.compile(
         rf"""
         (?:
             (?<![\w$.])(?:{named_alternatives})\s*\(
           |
-            (?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*\.\s*execSync\s*\(
+            (?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*\.\s*(?:{member_alternatives})\s*\(
         )
         """,
         re.VERBOSE | re.DOTALL,
@@ -2280,13 +2297,22 @@ def _create_require_specifiers(
     source_text: str,
     inherited_loader_names: set[str] | None = None,
 ) -> list[str]:
+    specifiers: list[str] = []
+    for match in INLINE_CREATE_REQUIRE_SPECIFIER.finditer(
+        strip_source_comments(source_text)
+    ):
+        specifier = match.group("specifier")
+        if "\\" in specifier:
+            raise RuntimeSourceContractError(
+                "runtime source createRequire specifier contains an unsupported JavaScript escape"
+            )
+        specifiers.append(specifier)
     local_loader_names, declaration_spans = _create_require_loader_bindings(
         source_text
     )
     loader_names = set(inherited_loader_names or ()) | local_loader_names
     if not loader_names:
-        return []
-    specifiers: list[str] = []
+        return specifiers
     index = 0
     state = "code"
     quote = ""
@@ -2623,7 +2649,7 @@ def _runtime_execution_entrypoint_specifiers(
         source_text
     ):
         raise RuntimeSourceContractError(
-            "runtime source contains an unsupported synchronous child-process entrypoint"
+            "runtime source contains an unsupported shell child-process entrypoint"
         )
 
     for constructor_name in sorted(worker_constructor_names, key=len, reverse=True):

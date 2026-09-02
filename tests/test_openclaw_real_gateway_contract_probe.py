@@ -545,6 +545,52 @@ class RealGatewayProbeTests(unittest.TestCase):
         release_idempotency_key = "release-idempotency:unit-test"
         wrong_owner_metadata = "wrong-owner-metadata:unit-test"
         wrong_owner_idempotency_key = "wrong-owner-idempotency:unit-test"
+        lifecycle_metadata = {
+            "run_id": "run-id",
+            "transition_id": "transition-id",
+            "phase": "phase-b",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+        }
+        acquire_request = {
+            "client_lease_id": "client-lease",
+            "idempotency_key": "acquire-idempotency:unit-test",
+            "run_id": "run-id",
+            "phase": "phase-b",
+            "transition_id": "transition-id",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+            "ttl_ms": 60000,
+        }
+        spawn_request = {
+            "task": "unit-test lifecycle child",
+            "taskName": "unit_test_lifecycle_child",
+            "runtime": "subagent",
+            "mode": "run",
+            "agentId": "agent",
+            "cleanup": "delete",
+            "context": "isolated",
+            "lightContext": True,
+            "client_request_id": "spawn-client-request:unit-test",
+            "idempotency_key": "spawn-idempotency:unit-test",
+            "gateway_lease_id": lease_id,
+            "metadata": lifecycle_metadata,
+        }
+        release_request = {
+            "client_lease_id": "client-lease",
+            "release_idempotency_key": release_idempotency_key,
+            "run_id": "run-id",
+            "phase": "phase-b",
+            "transition_id": "transition-id",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+            "gateway_lease_id": lease_id,
+        }
+        wrong_owner_release_request = {
+            **release_request,
+            "requester_agent_id": "wrong-requester",
+            "release_idempotency_key": wrong_owner_idempotency_key,
+        }
         release_response = {
             "status": "released",
             "gateway_lease_id": lease_id,
@@ -574,8 +620,23 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "status": "ok",
                 "leases": [{"gateway_lease_id": lease_id}],
             },
-            "session_status": {"status": "completed", "session_key": session_key},
-            "sessions_history": {"items": [{"session_key": session_key}]},
+            "session_status": {
+                "status": "completed",
+                "session_key": session_key,
+                "child_run_id": child_run_id,
+                "metadata": lifecycle_metadata,
+                "child_result": {"status": "ok"},
+            },
+            "sessions_history": {
+                "items": [
+                    {
+                        "session_key": session_key,
+                        "child_run_id": child_run_id,
+                        "metadata": lifecycle_metadata,
+                        "child_result": {"status": "ok"},
+                    }
+                ]
+            },
             "sessions_list": {"sessions": [{"session_key": session_key}]},
             "wrong_owner_release": {
                 "status": "rejected",
@@ -590,7 +651,24 @@ class RealGatewayProbeTests(unittest.TestCase):
         lifecycle_rpc_records = {
             key: {
                 "method": method,
-                "request_params": {},
+                "request_params": {
+                    "acquire": acquire_request,
+                    "duplicate_acquire": acquire_request,
+                    "first_spawn": spawn_request,
+                    "duplicate_spawn": spawn_request,
+                    "pre_release_status": {},
+                    "session_status": {"sessionKey": session_key},
+                    "sessions_history": {
+                        "sessionKey": session_key,
+                        "limit": 20,
+                        "includeTools": True,
+                    },
+                    "sessions_list": {},
+                    "wrong_owner_release": wrong_owner_release_request,
+                    "release": release_request,
+                    "duplicate_release": release_request,
+                    "post_release_status": {},
+                }[key],
                 "response": lifecycle_rpc_responses[key],
                 "raw_response_sha256": MODULE._canonical_sha256(
                     lifecycle_rpc_responses[key]
@@ -605,7 +683,6 @@ class RealGatewayProbeTests(unittest.TestCase):
             "captured_after_runner_exit": True,
             "captured_with_pinned_receipts_fd": True,
             "capture_parent_process_id": os.getpid(),
-            "source_transcript_sha256": "9" * 64,
             "run_id": "run-id",
             "transition_id": "transition-id",
             "records": lifecycle_rpc_records,
@@ -2056,7 +2133,46 @@ class RealGatewayProbeTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MODULE.ProbeError,
-                    "synchronous child-process entrypoint",
+                    "shell child-process entrypoint",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_async_shell_exec(
+        self,
+    ) -> None:
+        cases = {
+            "direct_import": (
+                "import { exec } from 'node:child_process';\n"
+                "exec(process.execPath + ' ./hidden.mjs');\n"
+            ),
+            "aliased_import": (
+                "import { exec as shellLater } from 'child_process';\n"
+                "shellLater(process.execPath + ' ./hidden.mjs');\n"
+            ),
+            "cjs_destructured_alias": (
+                "const { exec: shellLater } = require('node:child_process');\n"
+                "shellLater(process.execPath + ' ./hidden.cjs');\n"
+            ),
+            "namespace_call": (
+                "const child_process = require('child_process');\n"
+                "child_process.exec(process.execPath + ' ./hidden.cjs');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.mjs": "export const hidden = true;\n",
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "shell child-process entrypoint",
                 ):
                     MODULE._persistent_runtime_source_paths(root)
 
@@ -2086,9 +2202,36 @@ class RealGatewayProbeTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MODULE.ProbeError,
-                    "synchronous child-process entrypoint|child-process Node entrypoint",
+                    "shell child-process entrypoint|child-process Node entrypoint",
                 ):
                     MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_binds_inline_create_require_invocation(
+        self,
+    ) -> None:
+        cases = {
+            "commonjs_inline": (
+                "require('module').createRequire(__filename)('./hidden.cjs');\n"
+            ),
+            "namespace_inline": (
+                "const moduleApi = require('node:module');\n"
+                "moduleApi.createRequire(__filename)('./hidden.cjs');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("scripts/hidden.cjs", paths)
 
     def test_persistent_runtime_source_closure_binds_native_addon_entrypoint(
         self,
@@ -3450,6 +3593,79 @@ class RealGatewayProbeTests(unittest.TestCase):
                     Path(directory),
                     receipt,
                     lifecycle_transcript_transform=fabricate_spawn,
+                )
+
+    def test_persistent_summary_rejects_runner_copied_lifecycle_transcript(
+        self,
+    ) -> None:
+        def mark_as_copied(transcript: dict) -> None:
+            transcript["source_transcript_sha256"] = "9" * 64
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "copied from runner"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=mark_as_copied,
+                )
+
+    def test_persistent_summary_rejects_unsuccessful_acquire_response_status(
+        self,
+    ) -> None:
+        def reject_acquire(transcript: dict) -> None:
+            response = transcript["records"]["acquire"]["response"]
+            response["status"] = "rejected"
+            transcript["records"]["acquire"]["raw_response_sha256"] = (
+                MODULE._canonical_sha256(response)
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "acquire response was not accepted"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=reject_acquire,
+                )
+
+    def test_persistent_summary_rejects_empty_lifecycle_request_payloads(
+        self,
+    ) -> None:
+        def empty_request(transcript: dict) -> None:
+            transcript["records"]["first_spawn"]["request_params"] = {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "request does not match method schema"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=empty_request,
+                )
+
+    def test_persistent_summary_rejects_empty_session_read_responses(
+        self,
+    ) -> None:
+        def empty_session_reads(transcript: dict) -> None:
+            for key in ("session_status", "sessions_history"):
+                response = transcript["records"][key]["response"]
+                response.clear()
+                transcript["records"][key]["raw_response_sha256"] = (
+                    MODULE._canonical_sha256(response)
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "session_status"):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=empty_session_reads,
                 )
 
     def test_persistent_summary_rejects_lifecycle_transcript_without_parent_capture(

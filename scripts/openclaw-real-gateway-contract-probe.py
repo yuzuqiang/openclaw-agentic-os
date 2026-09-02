@@ -284,6 +284,20 @@ PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
     ("duplicate_release", "subagents.allowLease.release"),
     ("post_release_status", "subagents.allowLease.status"),
 )
+PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_METHOD_BINDINGS: Mapping[str, str] = {
+    "acquire": "allow_lease_acquire",
+    "duplicate_acquire": "allow_lease_acquire",
+    "first_spawn": "sessions_spawn",
+    "duplicate_spawn": "sessions_spawn",
+    "pre_release_status": "allow_lease_status",
+    "session_status": "session_status",
+    "sessions_history": "sessions_history",
+    "sessions_list": "sessions_list",
+    "wrong_owner_release": "allow_lease_release",
+    "release": "allow_lease_release",
+    "duplicate_release": "allow_lease_release",
+    "post_release_status": "allow_lease_status",
+}
 STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST = {
     "requesterAgentId": "agentic-os-negative-status-params-probe"
 }
@@ -2412,6 +2426,264 @@ def _field_text_digest(value: Any, label: str) -> str:
     return _text_sha256(value)
 
 
+def _json_contains_text(value: Any, expected: str) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            _json_contains_text(key, expected) or _json_contains_text(item, expected)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_json_contains_text(item, expected) for item in value)
+    return isinstance(value, str) and value == expected
+
+
+def _json_has_key_fragment(value: Any, fragment: str) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if fragment in str(key):
+                return True
+            if _json_has_key_fragment(item, fragment):
+                return True
+    if isinstance(value, list):
+        return any(_json_has_key_fragment(item, fragment) for item in value)
+    return False
+
+
+def _require_lifecycle_request_schema(
+    request: Mapping[str, Any],
+    *,
+    key: str,
+    method: str,
+) -> None:
+    binding_key = PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_METHOD_BINDINGS[key]
+    binding_method, parameter_names = PERSISTENT_METHOD_BINDINGS[binding_key]
+    if binding_method != method:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} method binding mismatch")
+    expected_keys = set(parameter_names)
+    actual_keys = set(request)
+    if actual_keys != expected_keys:
+        raise ProbeError(
+            f"persistent lifecycle RPC transcript {key} request does not match method schema"
+        )
+
+
+def _request_text_digest(request: Mapping[str, Any], key: str, label: str) -> str:
+    return _field_text_digest(request.get(key), label)
+
+
+def _require_request_digest_matches_lifecycle(
+    request: Mapping[str, Any],
+    request_key: str,
+    lifecycle: Mapping[str, Any],
+    lifecycle_key: str,
+    label: str,
+) -> None:
+    _require_matching_lifecycle_digest(
+        lifecycle, lifecycle_key, _request_text_digest(request, request_key, label)
+    )
+
+
+def _require_request_identity(
+    request: Mapping[str, Any],
+    *,
+    expected_run_id: str,
+    expected_transition_id: str,
+    key: str,
+) -> None:
+    if request.get("run_id") != expected_run_id:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} request run id mismatch")
+    if request.get("transition_id") != expected_transition_id:
+        raise ProbeError(
+            f"persistent lifecycle RPC transcript {key} request transition id mismatch"
+        )
+
+
+def _validate_lifecycle_acquire_request(
+    request: Mapping[str, Any],
+    *,
+    lifecycle: Mapping[str, Any],
+    expected_run_id: str,
+    expected_transition_id: str,
+    key: str,
+) -> None:
+    _require_request_identity(
+        request,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        key=key,
+    )
+    for required in ("client_lease_id", "idempotency_key", "phase", "agent_id", "requester_agent_id"):
+        _field_text_digest(
+            request.get(required),
+            f"persistent lifecycle RPC transcript {key} request {required}",
+        )
+    if not isinstance(request.get("ttl_ms"), int) or isinstance(request.get("ttl_ms"), bool) or request.get("ttl_ms") <= 0:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} request ttl_ms is invalid")
+    for request_key, lifecycle_key in (
+        ("client_lease_id", "expected_release_client_lease_id_sha256"),
+        ("phase", "expected_release_phase_sha256"),
+        ("agent_id", "expected_release_agent_id_sha256"),
+        ("requester_agent_id", "expected_release_requester_agent_id_sha256"),
+    ):
+        _require_request_digest_matches_lifecycle(
+            request,
+            request_key,
+            lifecycle,
+            lifecycle_key,
+            f"persistent lifecycle RPC transcript {key} request {request_key}",
+        )
+
+
+def _validate_lifecycle_spawn_request(
+    request: Mapping[str, Any],
+    *,
+    lifecycle: Mapping[str, Any],
+    expected_run_id: str,
+    expected_transition_id: str,
+    gateway_lease_id_digest: str,
+    key: str,
+) -> None:
+    if request.get("runtime") != "subagent" or request.get("mode") != "run":
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} request runtime mismatch")
+    if request.get("gateway_lease_id") is None:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} request lease is missing")
+    if _text_sha256(str(request.get("gateway_lease_id"))) != gateway_lease_id_digest:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} request lease mismatch")
+    for required in ("task", "taskName", "agentId", "cleanup", "context", "client_request_id", "idempotency_key"):
+        _field_text_digest(
+            request.get(required),
+            f"persistent lifecycle RPC transcript {key} request {required}",
+        )
+    if not isinstance(request.get("lightContext"), bool):
+        raise ProbeError(
+            f"persistent lifecycle RPC transcript {key} request lightContext is invalid"
+        )
+    _require_matching_lifecycle_digest(
+        lifecycle,
+        "expected_release_agent_id_sha256",
+        _text_sha256(str(request.get("agentId"))),
+    )
+    metadata = _record(
+        request.get("metadata"),
+        f"persistent lifecycle RPC transcript {key} request metadata",
+    )
+    for metadata_key, expected in (
+        ("run_id", expected_run_id),
+        ("transition_id", expected_transition_id),
+    ):
+        if metadata.get(metadata_key) != expected:
+            raise ProbeError(
+                f"persistent lifecycle RPC transcript {key} request metadata mismatch"
+            )
+    for metadata_key, lifecycle_key in (
+        ("phase", "expected_release_phase_sha256"),
+        ("agent_id", "expected_release_agent_id_sha256"),
+        ("requester_agent_id", "expected_release_requester_agent_id_sha256"),
+    ):
+        _require_matching_lifecycle_digest(
+            lifecycle,
+            lifecycle_key,
+            _field_text_digest(
+                metadata.get(metadata_key),
+                f"persistent lifecycle RPC transcript {key} request metadata {metadata_key}",
+            ),
+        )
+
+
+def _validate_lifecycle_release_request(
+    request: Mapping[str, Any],
+    *,
+    lifecycle: Mapping[str, Any],
+    expected_run_id: str,
+    expected_transition_id: str,
+    gateway_lease_id_digest: str,
+    key: str,
+) -> None:
+    _require_request_identity(
+        request,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        key=key,
+    )
+    _require_matching_lifecycle_digest(
+        lifecycle,
+        "gateway_lease_id_sha256",
+        _request_text_digest(
+            request,
+            "gateway_lease_id",
+            f"persistent lifecycle RPC transcript {key} request gateway_lease_id",
+        ),
+    )
+    if _request_text_digest(
+        request,
+        "gateway_lease_id",
+        f"persistent lifecycle RPC transcript {key} request gateway_lease_id",
+    ) != gateway_lease_id_digest:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} request lease mismatch")
+    release_key_map = (
+        ("client_lease_id", "expected_release_client_lease_id_sha256"),
+        ("phase", "expected_release_phase_sha256"),
+        ("agent_id", "expected_release_agent_id_sha256"),
+    )
+    for request_key, lifecycle_key in release_key_map:
+        _require_request_digest_matches_lifecycle(
+            request,
+            request_key,
+            lifecycle,
+            lifecycle_key,
+            f"persistent lifecycle RPC transcript {key} request {request_key}",
+        )
+    if key != "wrong_owner_release":
+        for request_key, lifecycle_key in (
+            ("release_idempotency_key", "expected_release_idempotency_key_sha256"),
+            ("requester_agent_id", "expected_release_requester_agent_id_sha256"),
+        ):
+            _require_request_digest_matches_lifecycle(
+                request,
+                request_key,
+                lifecycle,
+                lifecycle_key,
+                f"persistent lifecycle RPC transcript {key} request {request_key}",
+            )
+    else:
+        for required in ("release_idempotency_key", "requester_agent_id"):
+            _field_text_digest(
+                request.get(required),
+                f"persistent lifecycle RPC transcript {key} request {required}",
+            )
+
+
+def _validate_lifecycle_session_reads(
+    *,
+    session_status: Mapping[str, Any],
+    sessions_history: Mapping[str, Any],
+    session_key: str,
+    child_run_id: str,
+    expected_run_id: str,
+    expected_transition_id: str,
+) -> None:
+    if session_status.get("status") not in {"completed", "done", "succeeded"}:
+        raise ProbeError("persistent lifecycle session_status did not observe completion")
+    for label, payload in (
+        ("session_status", session_status),
+        ("sessions_history", sessions_history),
+    ):
+        for expected, expected_label in (
+            (session_key, "accepted session"),
+            (child_run_id, "child run"),
+            (expected_run_id, "run id"),
+            (expected_transition_id, "transition id"),
+        ):
+            if not _json_contains_text(payload, expected):
+                raise ProbeError(
+                    f"persistent lifecycle {label} response is missing {expected_label}"
+                )
+        if not _json_has_key_fragment(payload, "result"):
+            raise ProbeError(
+                f"persistent lifecycle {label} response is missing child result"
+            )
+
+
 def _require_matching_lifecycle_digest(
     lifecycle: Mapping[str, Any],
     key: str,
@@ -2477,6 +2749,10 @@ def _validate_lifecycle_gateway_rpc_transcript(
         raise ProbeError(
             "persistent lifecycle Gateway RPC transcript is not bound to pinned receipts"
         )
+    if "source_transcript_sha256" in transcript:
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript was copied from runner evidence"
+        )
     if transcript.get("run_id") != expected_run_id:
         raise ProbeError("persistent lifecycle Gateway RPC transcript run id mismatch")
     if transcript.get("transition_id") != expected_transition_id:
@@ -2498,13 +2774,38 @@ def _validate_lifecycle_gateway_rpc_transcript(
 
     response_digests: dict[str, str] = {}
     response_payloads: dict[str, Mapping[str, Any]] = {}
+    request_payloads: dict[str, Mapping[str, Any]] = {}
     for key, method in PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS:
-        _request, response, digest = _lifecycle_rpc_record(records, key, method)
+        request, response, digest = _lifecycle_rpc_record(records, key, method)
+        _require_lifecycle_request_schema(request, key=key, method=method)
+        request_payloads[key] = request
         response_digests[key] = digest
         response_payloads[key] = _lifecycle_rpc_record_payload(response)
 
     acquire = response_payloads["acquire"]
     duplicate_acquire = response_payloads["duplicate_acquire"]
+    if acquire.get("status") != "accepted":
+        raise ProbeError("persistent lifecycle acquire response was not accepted")
+    if duplicate_acquire.get("status") != "accepted":
+        raise ProbeError(
+            "persistent lifecycle duplicate acquire response was not accepted"
+        )
+    _validate_lifecycle_acquire_request(
+        request_payloads["acquire"],
+        lifecycle=lifecycle,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        key="acquire",
+    )
+    _validate_lifecycle_acquire_request(
+        request_payloads["duplicate_acquire"],
+        lifecycle=lifecycle,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        key="duplicate_acquire",
+    )
+    if request_payloads["duplicate_acquire"] != request_payloads["acquire"]:
+        raise ProbeError("persistent lifecycle duplicate acquire request mismatch")
     gateway_lease_id_digest = _field_text_digest(
         acquire.get("gateway_lease_id"),
         "persistent lifecycle acquire response gateway_lease_id",
@@ -2523,6 +2824,24 @@ def _validate_lifecycle_gateway_rpc_transcript(
 
     first_spawn = response_payloads["first_spawn"]
     duplicate_spawn = response_payloads["duplicate_spawn"]
+    _validate_lifecycle_spawn_request(
+        request_payloads["first_spawn"],
+        lifecycle=lifecycle,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        gateway_lease_id_digest=gateway_lease_id_digest,
+        key="first_spawn",
+    )
+    _validate_lifecycle_spawn_request(
+        request_payloads["duplicate_spawn"],
+        lifecycle=lifecycle,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        gateway_lease_id_digest=gateway_lease_id_digest,
+        key="duplicate_spawn",
+    )
+    if request_payloads["duplicate_spawn"] != request_payloads["first_spawn"]:
+        raise ProbeError("persistent lifecycle duplicate spawn request mismatch")
     if first_spawn.get("status") != "accepted":
         raise ProbeError("persistent lifecycle first spawn response was not accepted")
     if lifecycle.get("first_spawn_status") != first_spawn.get("status"):
@@ -2555,6 +2874,29 @@ def _validate_lifecycle_gateway_rpc_transcript(
     if lifecycle.get("duplicate_spawn_same_session") is not True:
         raise ProbeError("persistent lifecycle duplicate spawn was not observed")
 
+    if request_payloads["pre_release_status"] != {}:
+        raise ProbeError("persistent lifecycle pre-release status request is not empty")
+    if request_payloads["sessions_list"] != {}:
+        raise ProbeError("persistent lifecycle sessions list request is not empty")
+    if request_payloads["post_release_status"] != {}:
+        raise ProbeError("persistent lifecycle post-release status request is not empty")
+    if request_payloads["session_status"].get("sessionKey") != (
+        first_spawn.get("session_key") or first_spawn.get("sessionKey")
+    ):
+        raise ProbeError("persistent lifecycle session_status request session mismatch")
+    if request_payloads["sessions_history"].get("sessionKey") != (
+        first_spawn.get("session_key") or first_spawn.get("sessionKey")
+    ):
+        raise ProbeError("persistent lifecycle sessions_history request session mismatch")
+    if not isinstance(request_payloads["sessions_history"].get("limit"), int) or isinstance(
+        request_payloads["sessions_history"].get("limit"), bool
+    ) or request_payloads["sessions_history"].get("limit") <= 0:
+        raise ProbeError("persistent lifecycle sessions_history request limit is invalid")
+    if not isinstance(request_payloads["sessions_history"].get("includeTools"), bool):
+        raise ProbeError(
+            "persistent lifecycle sessions_history request includeTools is invalid"
+        )
+
     pre_release_status = response_payloads["pre_release_status"]
     leases = pre_release_status.get("leases")
     if not isinstance(leases, list) or len(leases) != 1:
@@ -2573,6 +2915,16 @@ def _validate_lifecycle_gateway_rpc_transcript(
     )
     _require_matching_lifecycle_digest(
         lifecycle, "sessions_history_sha256", response_digests["sessions_history"]
+    )
+    session_key = str(first_spawn.get("session_key") or first_spawn.get("sessionKey"))
+    child_run_id = str(first_spawn.get("child_run_id") or first_spawn.get("childRunId"))
+    _validate_lifecycle_session_reads(
+        session_status=response_payloads["session_status"],
+        sessions_history=response_payloads["sessions_history"],
+        session_key=session_key,
+        child_run_id=child_run_id,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
     )
     sessions_list = response_payloads["sessions_list"].get("sessions")
     if not isinstance(sessions_list, list):
@@ -2595,6 +2947,14 @@ def _validate_lifecycle_gateway_rpc_transcript(
         ("duplicate_release", "duplicate_release_status", "released"),
     ):
         payload = response_payloads[key]
+        _validate_lifecycle_release_request(
+            request_payloads[key],
+            lifecycle=lifecycle,
+            expected_run_id=expected_run_id,
+            expected_transition_id=expected_transition_id,
+            gateway_lease_id_digest=gateway_lease_id_digest,
+            key=key,
+        )
         if payload.get("status") != expected_status:
             raise ProbeError(f"persistent lifecycle {key} response status mismatch")
         if lifecycle.get(lifecycle_status_key) != expected_status:
@@ -3110,7 +3470,20 @@ def _bind_probe_parent_lifecycle_gateway_rpc_transcript(
         value=lifecycle.get("gateway_rpc_transcript_file"),
         label="persistent lifecycle Gateway RPC transcript",
     )
-    source_transcript_sha256 = _sha256_bytes(source_transcript_bytes)
+    if (
+        source_transcript.get("record_authority")
+        != PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORD_AUTHORITY
+    ):
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript must be captured outside the runner"
+        )
+    if (
+        source_transcript.get("capture_authority")
+        != PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_CAPTURE_AUTHORITY
+    ):
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript missing direct probe-parent capture"
+        )
     parent_transcript = dict(source_transcript)
     parent_transcript.update(
         {
@@ -3118,7 +3491,6 @@ def _bind_probe_parent_lifecycle_gateway_rpc_transcript(
             "captured_after_runner_exit": True,
             "captured_with_pinned_receipts_fd": True,
             "capture_parent_process_id": os.getpid(),
-            "source_transcript_sha256": source_transcript_sha256,
         }
     )
     _write_pinned_receipt_json(
