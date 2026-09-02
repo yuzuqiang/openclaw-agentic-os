@@ -5342,7 +5342,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         boundary = cleanup["launcher_owned_boundary"]
         self.assertEqual(boundary["schema_version"], MODULE.LAUNCHER_BOUNDARY_SCHEMA_VERSION)
         self.assertEqual(boundary["authority"], MODULE.LAUNCHER_BOUNDARY_AUTHORITY)
-        self.assertEqual(boundary["boundary_type"], "external-container")
+        self.assertEqual(boundary["boundary_type"], MODULE.LAUNCHER_BOUNDARY_OS_TYPE)
+        self.assertEqual(
+            boundary["os_boundary_type"], MODULE.LAUNCHER_BOUNDARY_OS_TYPE
+        )
         self.assertEqual(boundary["teardown_status"], "confirmed")
         self.assertEqual(boundary["root_pid"], cleanup["root_pid"])
         self.assertEqual(boundary["root_identity"], cleanup["root_identity"])
