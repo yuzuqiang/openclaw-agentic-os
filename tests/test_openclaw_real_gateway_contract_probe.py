@@ -585,6 +585,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             },
             "release": release_response,
             "duplicate_release": dict(release_response),
+            "post_release_status": {"status": "ok", "leases": []},
         }
         lifecycle_rpc_records = {
             key: {
@@ -600,6 +601,11 @@ class RealGatewayProbeTests(unittest.TestCase):
         lifecycle_rpc_transcript = {
             "schema_version": MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION,
             "record_authority": MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORD_AUTHORITY,
+            "capture_authority": MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_CAPTURE_AUTHORITY,
+            "captured_after_runner_exit": True,
+            "captured_with_pinned_receipts_fd": True,
+            "capture_parent_process_id": os.getpid(),
+            "source_transcript_sha256": "9" * 64,
             "run_id": "run-id",
             "transition_id": "transition-id",
             "records": lifecycle_rpc_records,
@@ -674,7 +680,9 @@ class RealGatewayProbeTests(unittest.TestCase):
         for key, value in lifecycle_derived.items():
             if lifecycle.get(key) == lifecycle_defaults[key]:
                 lifecycle[key] = value
-        lifecycle_transcript_file = receipts / "lifecycle-rpc-transcript.json"
+        lifecycle_transcript_file = (
+            receipts / MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_FILE
+        )
         lifecycle_transcript_file.write_text(
             json.dumps(lifecycle_rpc_transcript), encoding="utf-8"
         )
@@ -1956,6 +1964,61 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("scripts/spawn-worker.mjs", paths)
         self.assertIn("scripts/exec-worker.mjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_sync_child_process_node_entrypoints(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawnSync, execFileSync } from 'node:child_process';\n"
+                        "spawnSync(process.execPath, ['./spawn-sync-worker.mjs']);\n"
+                        "execFileSync(process.execPath, ['./exec-file-sync-worker.mjs']);\n"
+                    ),
+                    "scripts/spawn-sync-worker.mjs": "export const spawnSyncWorker = true;\n",
+                    "scripts/exec-file-sync-worker.mjs": (
+                        "export const execFileSyncWorker = true;\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/spawn-sync-worker.mjs", paths)
+        self.assertIn("scripts/exec-file-sync-worker.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_unbound_exec_sync(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "import { execSync } from 'node:child_process';\n"
+                "execSync(process.execPath + ' ./hidden.mjs');\n"
+            ),
+            (
+                "import * as cp from 'node:child_process';\n"
+                "cp.spawnSync(process.execPath, ['./hidden.mjs']);\n"
+            ),
+        )
+        for source in cases:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.mjs": "export const hidden = true;\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "synchronous child-process entrypoint|child-process Node entrypoint",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_native_addon_entrypoint(
         self,
     ) -> None:
@@ -2834,6 +2897,62 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("scripts/runner-worker.mjs", paths)
         self.assertIn("scripts/runner-child.cjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_qualified_worker_entrypoints(
+        self,
+    ) -> None:
+        variants = (
+            (
+                "import * as wt from 'node:worker_threads';\n"
+                "new wt.Worker(new URL('./runner-worker.mjs', import.meta.url));\n"
+            ),
+            (
+                "import { Worker as ThreadWorker } from 'worker_threads';\n"
+                "new ThreadWorker(new URL('./runner-worker.mjs', import.meta.url));\n"
+            ),
+            (
+                "const wt = require('node:worker_threads');\n"
+                "new wt['Worker'](new URL('./runner-worker.mjs', import.meta.url));\n"
+            ),
+            (
+                "const { Worker: ThreadWorker } = require('worker_threads');\n"
+                "new ThreadWorker(new URL('./runner-worker.mjs', import.meta.url));\n"
+            ),
+        )
+        for source in variants:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/runner-worker.mjs": "export const worker = true;\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("scripts/runner-worker.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_qualified_worker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import * as wt from 'node:worker_threads';\n"
+                        "const workerUrl = new URL('./runner-worker.mjs', import.meta.url);\n"
+                        "new wt.Worker(workerUrl);\n"
+                    ),
+                    "scripts/runner-worker.mjs": "export const worker = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "Worker entrypoint"):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_dynamic_worker_entrypoint(
         self,
     ) -> None:
@@ -3260,6 +3379,48 @@ class RealGatewayProbeTests(unittest.TestCase):
                     Path(directory),
                     receipt,
                     lifecycle_transcript_transform=fabricate_spawn,
+                )
+
+    def test_persistent_summary_rejects_lifecycle_transcript_without_parent_capture(
+        self,
+    ) -> None:
+        def remove_parent_capture(transcript: dict) -> None:
+            transcript.pop("capture_authority", None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "probe-parent capture",
+            ):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=remove_parent_capture,
+                )
+
+    def test_persistent_summary_rejects_live_lease_after_release_transcript_status(
+        self,
+    ) -> None:
+        def leave_release_live(transcript: dict) -> None:
+            response = transcript["records"]["post_release_status"]["response"]
+            response["leases"] = [{"gateway_lease_id": "gateway-lease:unit-test"}]
+            transcript["records"]["post_release_status"]["raw_response_sha256"] = (
+                MODULE._canonical_sha256(response)
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "post-release status",
+            ):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=leave_release_live,
                 )
 
     def test_persistent_summary_rejects_validation_without_lifecycle_rpc_binding(
@@ -4299,6 +4460,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
             original_runtime_launch_bindings = MODULE._runtime_launch_bindings
+            original_bind_parent_transcript = (
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript
+            )
             original_terminate_and_verify_process_group = (
                 MODULE._terminate_and_verify_process_group
             )
@@ -4355,6 +4519,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_independent_validator = lambda **kwargs: captured_validator.update(
                     kwargs
                 )
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    lambda **kwargs: None
+                )
                 MODULE._runtime_launch_bindings = lambda _root, _env: (
                     Path("/bound/node"),
                     "file:///bound/node_modules/tsx/dist/loader.mjs",
@@ -4386,6 +4553,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    original_bind_parent_transcript
+                )
                 MODULE._runtime_launch_bindings = original_runtime_launch_bindings
                 MODULE._terminate_and_verify_process_group = (
                     original_terminate_and_verify_process_group
@@ -4524,6 +4694,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ),
             ), mock.patch.object(
                 MODULE, "_run_independent_validator", side_effect=fake_validator
+            ), mock.patch.object(
+                MODULE,
+                "_bind_probe_parent_lifecycle_gateway_rpc_transcript",
+                return_value=None,
             ), mock.patch.object(
                 MODULE, "_persistent_lifecycle_summary", side_effect=fake_summary
             ), mock.patch.object(
@@ -7090,6 +7264,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
+            original_bind_parent_transcript = (
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript
+            )
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
             original_terminate_and_verify_process_group = (
@@ -7117,6 +7294,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._wait_for_loopback_port_closed = lambda port: False
                 MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = lambda proc: True
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    lambda **kwargs: None
+                )
                 with self.assertRaisesRegex(MODULE.ProbeError, "candidate port remained open"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -7136,6 +7316,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    original_bind_parent_transcript
+                )
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
                 MODULE._terminate_and_verify_process_group = (
@@ -7429,6 +7612,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
+            original_bind_parent_transcript = (
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript
+            )
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
             original_terminate_and_verify_process_group = (
@@ -7458,6 +7644,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._terminate_process_group = lambda proc: captured.setdefault(
                     "cleanup_attempted", True
                 )
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    lambda **kwargs: None
+                )
                 with self.assertRaisesRegex(MODULE.ProbeError, "remained open before cleanup"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -7477,6 +7666,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    original_bind_parent_transcript
+                )
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
                 MODULE._terminate_and_verify_process_group = (
@@ -7508,6 +7700,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
+            original_bind_parent_transcript = (
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript
+            )
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
             original_terminate_and_verify_process_group = (
@@ -7538,6 +7733,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._wait_for_loopback_port_closed = lambda port: True
                 MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = fake_terminate
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    lambda **kwargs: None
+                )
                 with self.assertRaisesRegex(MODULE.ProbeError, "evidence was rejected"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -7557,6 +7755,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    original_bind_parent_transcript
+                )
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
                 MODULE._terminate_and_verify_process_group = (
@@ -7589,6 +7790,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
             original_run_independent_validator = MODULE._run_independent_validator
+            original_bind_parent_transcript = (
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript
+            )
             original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
             original_terminate_process_group = MODULE._terminate_process_group
             original_terminate_and_verify_process_group = (
@@ -7611,6 +7815,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._wait_for_loopback_port_closed = lambda port: False
                 MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
                 MODULE._terminate_process_group = lambda proc: True
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    lambda **kwargs: None
+                )
                 with self.assertRaisesRegex(MODULE.ProbeError, "port remained open"):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
@@ -7630,6 +7837,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = original_validate_candidate_root
                 MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
                 MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    original_bind_parent_transcript
+                )
                 MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
                 MODULE._terminate_process_group = original_terminate_process_group
                 MODULE._terminate_and_verify_process_group = (

@@ -266,6 +266,10 @@ PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION = (
 PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORD_AUTHORITY = (
     "agentic-os-parent-post-run-gateway-rpc-observer"
 )
+PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_CAPTURE_AUTHORITY = (
+    "agentic-os-probe-parent-pinned-receipts-observer"
+)
+PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_FILE = "parent-lifecycle-rpc-transcript.json"
 PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
     ("acquire", "subagents.allowLease.acquire"),
     ("duplicate_acquire", "subagents.allowLease.acquire"),
@@ -278,6 +282,7 @@ PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
     ("wrong_owner_release", "subagents.allowLease.release"),
     ("release", "subagents.allowLease.release"),
     ("duplicate_release", "subagents.allowLease.release"),
+    ("post_release_status", "subagents.allowLease.status"),
 )
 STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST = {
     "requesterAgentId": "agentic-os-negative-status-params-probe"
@@ -2431,6 +2436,14 @@ def _validate_lifecycle_gateway_rpc_transcript(
         value=lifecycle.get("gateway_rpc_transcript_file"),
         label="persistent lifecycle Gateway RPC transcript",
     )
+    transcript_path_value = lifecycle.get("gateway_rpc_transcript_file")
+    if (
+        not isinstance(transcript_path_value, str)
+        or Path(transcript_path_value).name != PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_FILE
+    ):
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript was not captured by the probe parent"
+        )
     transcript_sha256 = _sha256_bytes(transcript_bytes)
     if (
         _require_sha256_field(lifecycle, "gateway_rpc_transcript_sha256", "lifecycle")
@@ -2448,6 +2461,21 @@ def _validate_lifecycle_gateway_rpc_transcript(
     ):
         raise ProbeError(
             "persistent lifecycle Gateway RPC transcript was not parent-observed"
+        )
+    if (
+        transcript.get("capture_authority")
+        != PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_CAPTURE_AUTHORITY
+    ):
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript missing probe-parent capture"
+        )
+    if transcript.get("captured_after_runner_exit") is not True:
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript was not captured after runner exit"
+        )
+    if transcript.get("captured_with_pinned_receipts_fd") is not True:
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript is not bound to pinned receipts"
         )
     if transcript.get("run_id") != expected_run_id:
         raise ProbeError("persistent lifecycle Gateway RPC transcript run id mismatch")
@@ -2648,6 +2676,16 @@ def _validate_lifecycle_gateway_rpc_transcript(
                 wrong_owner_payload.get(raw_field),
                 f"persistent lifecycle wrong-owner release response {raw_field}",
             ),
+        )
+    post_release_status = response_payloads["post_release_status"]
+    post_release_leases = post_release_status.get("leases")
+    if post_release_status.get("status") != "ok" or post_release_leases != []:
+        raise ProbeError(
+            "persistent lifecycle release cleanup post-release status did not prove empty leases"
+        )
+    if lifecycle.get("post_release_lease_count") != 0:
+        raise ProbeError(
+            "persistent lifecycle release cleanup post-release lease count is not response-bound"
         )
     return {
         "schema_version": PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION,
@@ -3006,6 +3044,105 @@ def _write_independent_validation_file(
     finally:
         if temporary_validation_file.exists():
             temporary_validation_file.unlink()
+
+
+def _write_pinned_receipt_json(
+    pinned_run_root: _PinnedRunRoot,
+    file_name: str,
+    payload: Mapping[str, Any],
+    *,
+    label: str,
+) -> None:
+    if Path(file_name).name != file_name:
+        raise ProbeError(f"{label} file name is unsafe")
+    _assert_pinned_run_root_identity(pinned_run_root)
+    output = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    temporary_name = f".{file_name}.{os.getpid()}.tmp"
+    temporary_fd = -1
+    try:
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=pinned_run_root.receipts.fd,
+        )
+        offset = 0
+        while offset < len(output):
+            offset += os.write(temporary_fd, output[offset:])
+        os.fchmod(temporary_fd, 0o600)
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = -1
+        os.replace(
+            temporary_name,
+            file_name,
+            src_dir_fd=pinned_run_root.receipts.fd,
+            dst_dir_fd=pinned_run_root.receipts.fd,
+        )
+        _assert_pinned_run_root_identity(pinned_run_root)
+    except ProbeError:
+        raise
+    except OSError as exc:
+        raise ProbeError(f"{label} output path is unsafe or unavailable") from exc
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=pinned_run_root.receipts.fd)
+        except FileNotFoundError:
+            pass
+
+
+def _bind_probe_parent_lifecycle_gateway_rpc_transcript(
+    *,
+    run_root: Path,
+    pinned_run_root: _PinnedRunRoot,
+) -> None:
+    receipt, _receipt_bytes = _read_pinned_json_file(
+        pinned_run_root,
+        "receipts/lifecycle-receipt.json",
+        "persistent lifecycle receipt",
+    )
+    lifecycle = _record(receipt.get("lifecycle"), "lifecycle")
+    source_transcript, source_transcript_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=lifecycle.get("gateway_rpc_transcript_file"),
+        label="persistent lifecycle Gateway RPC transcript",
+    )
+    source_transcript_sha256 = _sha256_bytes(source_transcript_bytes)
+    parent_transcript = dict(source_transcript)
+    parent_transcript.update(
+        {
+            "capture_authority": PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_CAPTURE_AUTHORITY,
+            "captured_after_runner_exit": True,
+            "captured_with_pinned_receipts_fd": True,
+            "capture_parent_process_id": os.getpid(),
+            "source_transcript_sha256": source_transcript_sha256,
+        }
+    )
+    _write_pinned_receipt_json(
+        pinned_run_root,
+        PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_FILE,
+        parent_transcript,
+        label="persistent lifecycle parent Gateway RPC transcript",
+    )
+    parent_bytes = _read_pinned_artifact_bytes(
+        pinned_run_root,
+        f"receipts/{PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_FILE}",
+        "persistent lifecycle parent Gateway RPC transcript",
+    )
+    lifecycle["gateway_rpc_transcript_file"] = (
+        f"receipts/{PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_FILE}"
+    )
+    lifecycle["gateway_rpc_transcript_sha256"] = _sha256_bytes(parent_bytes)
+    receipt["lifecycle"] = dict(lifecycle)
+    _write_pinned_receipt_json(
+        pinned_run_root,
+        "lifecycle-receipt.json",
+        receipt,
+        label="persistent lifecycle parent-bound receipt",
+    )
 
 
 def _consume_attestation_verification_key(run_root: _PinnedRunRoot) -> bytes:
@@ -5241,6 +5378,10 @@ def _run_persistent_lifecycle_probe_once(
         )
         validation_file = _descriptor_path(pinned_run_root.receipts.fd) / (
             "independent-validation.json"
+        )
+        _bind_probe_parent_lifecycle_gateway_rpc_transcript(
+            run_root=run_root,
+            pinned_run_root=pinned_run_root,
         )
         _run_independent_validator(
             validation_anchor_key=validation_anchor_key,

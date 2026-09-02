@@ -160,6 +160,34 @@ WORKER_ENTRYPOINT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+WORKER_THREADS_IMPORT = re.compile(
+    rf"""
+    \bimport\s*\{{(?P<body>.*?)\}}\s*
+    from\s*["'](?:node:)?worker_threads["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+WORKER_THREADS_NAMESPACE_IMPORT = re.compile(
+    rf"""
+    \bimport\s+\*\s+as\s+(?P<name>{JS_IDENTIFIER})\s*
+    from\s*["'](?:node:)?worker_threads["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+WORKER_THREADS_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(\s*["'](?:node:)?worker_threads["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+WORKER_THREADS_DESTRUCTURED_REQUIRE = re.compile(
+    rf"""
+    \b(?:const|let|var)\s*\{{(?P<body>.*?)\}}\s*=\s*
+    require\s*\(\s*["'](?:node:)?worker_threads["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 FORK_ENTRYPOINT_SPECIFIER = re.compile(
     r"""
     (?<![\w$])
@@ -171,9 +199,26 @@ FORK_ENTRYPOINT_SPECIFIER = re.compile(
 CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     r"""
     (?<![\w$])
-    (?:spawn|execFile|child_process\.(?:spawn|execFile))\s*\(\s*
+    (?:
+        spawn
+      | spawnSync
+      | execFile
+      | execFileSync
+      | child_process\.(?:spawn|spawnSync|execFile|execFileSync)
+    )\s*\(\s*
     process\.execPath\s*,\s*
     \[\s*["'](?P<specifier>[^"']+)["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CHILD_PROCESS_SYNC_ENTRYPOINT_CALL = re.compile(
+    r"""
+    (?<![\w$])
+    (?:
+        execSync
+      | child_process\.execSync
+      | [A-Za-z_$][0-9A-Za-z_$]*\s*\.\s*execSync
+    )\s*\(
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -1449,6 +1494,55 @@ def _module_register_loader_bindings(
     return loaders, declaration_spans
 
 
+def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
+    stripped = strip_source_comments(source_text)
+    constructor_names = {"Worker"}
+    namespace_names: set[str] = set()
+
+    for pattern in (WORKER_THREADS_IMPORT, WORKER_THREADS_DESTRUCTURED_REQUIRE):
+        for match in pattern.finditer(stripped):
+            for part in match.group("body").split(","):
+                imported = re.fullmatch(
+                    rf"\s*Worker(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?\s*",
+                    part,
+                )
+                if imported is None:
+                    continue
+                constructor_names.add(
+                    imported.group("alias")
+                    or imported.group("prop_alias")
+                    or "Worker"
+                )
+    for pattern in (WORKER_THREADS_NAMESPACE_IMPORT, WORKER_THREADS_REQUIRE_ASSIGNMENT):
+        for match in pattern.finditer(stripped):
+            namespace_names.add(match.group("name"))
+    return constructor_names, namespace_names
+
+
+def _worker_constructor_pattern(
+    constructor_names: set[str],
+    namespace_names: set[str],
+) -> re.Pattern[str]:
+    alternatives: list[str] = [re.escape(name) for name in constructor_names]
+    alternatives.extend(
+        rf"{re.escape(name)}\s*(?:\.|\?\.)\s*Worker" for name in namespace_names
+    )
+    alternatives.extend(
+        rf"{re.escape(name)}\s*(?:\.|\?\.)?\s*\[\s*['\"]Worker['\"]\s*\]"
+        for name in namespace_names
+    )
+    return re.compile(
+        rf"""
+        \bnew\s+(?:{'|'.join(sorted(alternatives, key=len, reverse=True))})\s*\(\s*
+        new\s+URL\s*\(\s*
+        ["'](?P<specifier>[^"']+)["']\s*,\s*
+        import\.meta\.url\s*
+        \)
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
 def _parse_named_loader_invocation(
     source_text: str,
     index: int,
@@ -2394,7 +2488,11 @@ def _runtime_execution_entrypoint_specifiers(
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, str]] = []
     accepted_spans: list[tuple[int, int]] = []
-    for match in WORKER_ENTRYPOINT_SPECIFIER.finditer(source_text):
+    worker_constructor_names, worker_namespace_names = _worker_thread_bindings(source_text)
+    worker_entrypoint_pattern = _worker_constructor_pattern(
+        worker_constructor_names, worker_namespace_names
+    )
+    for match in worker_entrypoint_pattern.finditer(source_text):
         specifier = match.group("specifier")
         if "\\" in specifier:
             raise RuntimeSourceContractError(
@@ -2421,6 +2519,27 @@ def _runtime_execution_entrypoint_specifiers(
     for specifier in _native_addon_entrypoint_specifiers(source_text):
         specifiers.append((specifier, "require"))
 
+    if CHILD_PROCESS_SYNC_ENTRYPOINT_CALL.search(source_text):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported synchronous child-process entrypoint"
+        )
+
+    for constructor_name in sorted(worker_constructor_names, key=len, reverse=True):
+        for match in re.finditer(rf"\bnew\s+{re.escape(constructor_name)}\s*\(", source_text):
+            if not any(start <= match.start() < end for start, end in accepted_spans):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported Worker entrypoint"
+                )
+    for namespace_name in sorted(worker_namespace_names, key=len, reverse=True):
+        for pattern in (
+            rf"\bnew\s+{re.escape(namespace_name)}\s*(?:\.|\?\.)\s*Worker\s*\(",
+            rf"\bnew\s+{re.escape(namespace_name)}\s*(?:\.|\?\.)?\s*\[\s*['\"]Worker['\"]\s*\]\s*\(",
+        ):
+            for match in re.finditer(pattern, source_text):
+                if not any(start <= match.start() < end for start, end in accepted_spans):
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported Worker entrypoint"
+                    )
     for match in re.finditer(r"\bnew\s+Worker\s*\(", source_text):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
@@ -2434,7 +2553,7 @@ def _runtime_execution_entrypoint_specifiers(
                 "runtime source contains an unsupported fork entrypoint"
             )
     for match in re.finditer(
-        r"(?<![\w$])(?:spawn|execFile|child_process\.(?:spawn|execFile))\s*\(\s*process\.execPath\s*,",
+        r"(?<![\w$])(?:spawn|spawnSync|execFile|execFileSync|child_process\.(?:spawn|spawnSync|execFile|execFileSync)|[A-Za-z_$][0-9A-Za-z_$]*\s*\.\s*(?:spawn|spawnSync|execFile|execFileSync))\s*\(\s*process\.execPath\s*,",
         source_text,
     ):
         if not any(start <= match.start() < end for start, end in accepted_spans):

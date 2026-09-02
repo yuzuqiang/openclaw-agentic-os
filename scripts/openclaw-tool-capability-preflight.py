@@ -208,6 +208,7 @@ STATUS_RPC_INCIDENTAL_MUTATIONS = (
 )
 EVIDENCE_CAPABILITY_SOURCE_PATHS = (
     "scripts/openclaw-tool-capability-preflight.py",
+    "scripts/agentic_os_runtime_source_contract.py",
     "scripts/openclaw-live-accepted-session-probe.py",
     "scripts/openclaw-real-gateway-contract-probe.py",
     "src/agentic_os/openclaw_adapter.py",

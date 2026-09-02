@@ -637,6 +637,14 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(content)
 
+    def test_evidence_lineage_includes_runtime_source_contract_helper(self) -> None:
+        module = load_preflight_module()
+
+        self.assertIn(
+            "scripts/agentic_os_runtime_source_contract.py",
+            module.EVIDENCE_CAPABILITY_SOURCE_PATHS,
+        )
+
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
 
