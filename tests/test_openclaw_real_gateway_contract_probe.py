@@ -2039,20 +2039,41 @@ class RealGatewayProbeTests(unittest.TestCase):
     def test_persistent_runtime_source_closure_rejects_module_compile(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._write_runtime_source_fixture(
-                root,
-                {
-                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                        "module._compile(\"require('./hidden.cjs')\", __filename);\n"
-                    ),
-                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
-                },
-            )
+        cases = {
+            "direct_module_compile": (
+                "module._compile(\"require('./hidden.cjs')\", __filename);\n"
+            ),
+            "constructed_node_module_compile": (
+                "new (require('node:module'))(__filename)"
+                "._compile(\"require('./hidden.cjs')\", __filename);\n"
+            ),
+            "constructed_node_module_member_compile": (
+                "new (require('node:module').Module)(__filename)"
+                "._compile(\"require('./hidden.cjs')\", __filename);\n"
+            ),
+            "grouped_constructed_node_module_member_compile": (
+                "(new (require('node:module').Module)(__filename))"
+                "['_com' + 'pile'](\"require('./hidden.cjs')\", __filename);\n"
+            ),
+            "destructured_node_module_constructor_compile": (
+                "const { Module: RuntimeModule } = require('node:module');\n"
+                "new RuntimeModule(__filename)"
+                "._compile(\"require('./hidden.cjs')\", __filename);\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
 
-            with self.assertRaisesRegex(MODULE.ProbeError, "runtime compiler"):
-                MODULE._persistent_runtime_source_paths(root)
+                with self.assertRaisesRegex(MODULE.ProbeError, "runtime compiler"):
+                    MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_custom_commonjs_extensions(
         self,
@@ -2064,6 +2085,23 @@ class RealGatewayProbeTests(unittest.TestCase):
             ),
             "module_extensions": (
                 "module._extensions['.foo'] = module._extensions['.js'];\n"
+                "require('./impl.foo');\n"
+            ),
+            "require_node_module_extensions": (
+                "require('node:module')._extensions['.foo'] = () => {};\n"
+                "require('./impl.foo');\n"
+            ),
+            "require_node_module_legacy_extensions": (
+                "require('node:module').extensions['.foo'] = () => {};\n"
+                "require('./impl.foo');\n"
+            ),
+            "require_node_module_member_extensions": (
+                "require('node:module').Module['_ext' + 'ensions']['.foo'] = () => {};\n"
+                "require('./impl.foo');\n"
+            ),
+            "aliased_node_module_extensions": (
+                "const runtimeModule = require('node:module');\n"
+                "runtimeModule.extensions['.foo'] = () => {};\n"
                 "require('./impl.foo');\n"
             ),
         }

@@ -179,8 +179,10 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
 )
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
 EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS = frozenset(("WebAssembly",))
+NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
+COMMONJS_MODULE_CONSTRUCTOR_MEMBER_NAMES = frozenset(("Module", "default"))
 EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
     (
         "compileFunction",
@@ -204,6 +206,35 @@ CREATE_REQUIRE_DESTRUCTURED_REQUIRE = re.compile(
     rf"""
     \b(?:const|let|var)\s*\{{(?P<body>.*?)\}}\s*=\s*
     require\s*\(\s*["'](?:node:)?module["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_MODULE_NAMESPACE_IMPORT = re.compile(
+    rf"""
+    \bimport\s+\*\s+as\s+(?P<name>{JS_IDENTIFIER})\s*
+    from\s*["'](?:node:)?module["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_MODULE_DEFAULT_IMPORT = re.compile(
+    rf"""
+    \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    from\s*["'](?:node:)?module["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_MODULE_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(\s*["'](?:node:)?module["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_MODULE_MEMBER_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(\s*["'](?:node:)?module["']\s*\)
+    \s*(?:\.|\?\.)\s*Module
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -585,6 +616,31 @@ def _parse_named_runtime_member(
     if base_end is None:
         return None
     return _parse_process_member(source_text, base_end)
+
+
+def _parse_static_runtime_member(
+    source_text: str, index: int, *, dynamic_error: str
+) -> tuple[str, int] | None:
+    member_index = _skip_js_trivia(source_text, index)
+    if source_text.startswith("?.", member_index):
+        property_index = _skip_js_trivia(source_text, member_index + 2)
+    elif member_index < len(source_text) and source_text[member_index] == ".":
+        property_index = _skip_js_trivia(source_text, member_index + 1)
+    elif member_index < len(source_text) and source_text[member_index] == "[":
+        property_index = member_index
+    else:
+        return None
+
+    if property_index < len(source_text) and source_text[property_index] == "[":
+        computed_member = _static_computed_member_name(source_text, property_index)
+        if computed_member is None:
+            raise RuntimeSourceContractError(dynamic_error)
+        return computed_member
+
+    parsed_property = _parse_js_identifier(source_text, property_index)
+    if parsed_property is None:
+        return None
+    return parsed_property
 
 
 def _parse_process_dlopen_target(source_text: str, index: int) -> int | None:
@@ -1396,7 +1452,341 @@ def _is_forbidden_runtime_loader_reference(
     return True
 
 
+def _node_module_runtime_binding_names(source_text: str) -> tuple[set[str], set[str]]:
+    stripped = strip_source_comments(source_text)
+    namespace_names: set[str] = set()
+    constructor_names: set[str] = set()
+
+    for match in NODE_MODULE_NAMESPACE_IMPORT.finditer(stripped):
+        namespace_names.add(match.group("name"))
+    for match in NODE_MODULE_DEFAULT_IMPORT.finditer(stripped):
+        name = match.group("name")
+        namespace_names.add(name)
+        constructor_names.add(name)
+    for match in NODE_MODULE_REQUIRE_ASSIGNMENT.finditer(stripped):
+        name = match.group("name")
+        namespace_names.add(name)
+        constructor_names.add(name)
+    for match in NODE_MODULE_MEMBER_REQUIRE_ASSIGNMENT.finditer(stripped):
+        constructor_names.add(match.group("name"))
+
+    for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
+        for match in pattern.finditer(stripped):
+            for part in match.group("body").split(","):
+                part = part.strip()
+                imported = re.fullmatch(
+                    rf"Module(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
+                    part,
+                )
+                if imported is None:
+                    continue
+                constructor_names.add(
+                    imported.group("alias")
+                    or imported.group("prop_alias")
+                    or "Module"
+                )
+
+    return namespace_names, constructor_names
+
+
+def _parse_commonjs_module_require_namespace_end(
+    source_text: str, index: int
+) -> int | None:
+    index = _skip_js_trivia(source_text, index)
+    if index < len(source_text) and source_text[index] == "(":
+        inner_end = _parse_commonjs_module_require_namespace_end(
+            source_text, index + 1
+        )
+        if inner_end is None:
+            return None
+        close_index = _skip_js_trivia(source_text, inner_end)
+        if close_index >= len(source_text) or source_text[close_index] != ")":
+            return None
+        return close_index + 1
+
+    if not source_text.startswith(COMMONJS_REQUIRE_TOKEN, index):
+        return None
+    parsed = _parse_require_invocation(source_text, index)
+    if parsed is None:
+        return None
+    specifier, end_index = parsed
+    if specifier not in NODE_MODULE_SPECIFIERS:
+        return None
+    return end_index
+
+
+def _parse_known_node_module_namespace_end(
+    source_text: str, index: int, namespace_names: set[str]
+) -> int | None:
+    direct_end = _parse_commonjs_module_require_namespace_end(source_text, index)
+    if direct_end is not None:
+        return direct_end
+    for namespace_name in sorted(namespace_names, key=len, reverse=True):
+        namespace_end = _parse_grouped_named_base(source_text, index, namespace_name)
+        if namespace_end is not None:
+            return namespace_end
+    return None
+
+
+def _reject_commonjs_module_dangerous_member(member_name: str) -> None:
+    if member_name in COMMONJS_COMPILE_MEMBER_NAMES:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS runtime compiler"
+        )
+    if member_name in COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported custom CommonJS extension loader"
+        )
+
+
+def _commonjs_module_namespace_access_end_or_fail(
+    source_text: str,
+    index: int,
+    *,
+    namespace_names: set[str],
+    constructor_names: set[str],
+) -> int | None:
+    namespace_end = _parse_known_node_module_namespace_end(
+        source_text, index, namespace_names
+    )
+    if namespace_end is None:
+        for constructor_name in sorted(constructor_names, key=len, reverse=True):
+            namespace_end = _parse_grouped_named_base(
+                source_text, index, constructor_name
+            )
+            if namespace_end is not None:
+                break
+    if namespace_end is None:
+        return None
+
+    member = _parse_static_runtime_member(
+        source_text,
+        namespace_end,
+        dynamic_error=(
+            "runtime source contains an unsupported custom CommonJS extension loader"
+        ),
+    )
+    if member is None:
+        return namespace_end
+    member_name, member_end = member
+    _reject_commonjs_module_dangerous_member(member_name)
+    if member_name not in COMMONJS_MODULE_CONSTRUCTOR_MEMBER_NAMES:
+        return member_end
+
+    constructor_member = _parse_static_runtime_member(
+        source_text,
+        member_end,
+        dynamic_error=(
+            "runtime source contains an unsupported custom CommonJS extension loader"
+        ),
+    )
+    if constructor_member is None:
+        return member_end
+    constructor_member_name, constructor_member_end = constructor_member
+    _reject_commonjs_module_dangerous_member(constructor_member_name)
+    return constructor_member_end
+
+
+def _parenthesized_expression_has_target(source_text: str, paren_index: int) -> bool:
+    before = paren_index - 1
+    while before >= 0 and source_text[before].isspace():
+        before -= 1
+    if before < 0:
+        return False
+    character = source_text[before]
+    if _is_identifier_character(character) and _previous_code_word(
+        source_text, paren_index
+    ) == "new":
+        return False
+    return character in {")", "]"} or _is_identifier_character(character)
+
+
+def _parenthesized_expression_end(source_text: str, index: int) -> int:
+    if index >= len(source_text) or source_text[index] != "(":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS runtime compiler"
+        )
+    depth = 1
+    index += 1
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            _, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character == "(":
+            depth += 1
+            index += 1
+            continue
+        if character == ")":
+            depth -= 1
+            index += 1
+            if depth == 0:
+                return index
+            continue
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unsupported CommonJS runtime compiler"
+    )
+
+
+def _parse_commonjs_module_constructor_reference_end(
+    source_text: str,
+    index: int,
+    *,
+    namespace_names: set[str],
+    constructor_names: set[str],
+) -> int | None:
+    index = _skip_js_trivia(source_text, index)
+    if (
+        index < len(source_text)
+        and source_text[index] == "("
+        and not _parenthesized_expression_has_target(source_text, index)
+    ):
+        inner_end = _parse_commonjs_module_constructor_reference_end(
+            source_text,
+            index + 1,
+            namespace_names=namespace_names,
+            constructor_names=constructor_names,
+        )
+        if inner_end is None:
+            return None
+        close_index = _skip_js_trivia(source_text, inner_end)
+        if close_index >= len(source_text) or source_text[close_index] != ")":
+            return None
+        return close_index + 1
+
+    namespace_end = _parse_known_node_module_namespace_end(
+        source_text, index, namespace_names
+    )
+    if namespace_end is not None:
+        member = _parse_static_runtime_member(
+            source_text,
+            namespace_end,
+            dynamic_error=(
+                "runtime source contains an unsupported custom CommonJS extension loader"
+            ),
+        )
+        if member is None:
+            return namespace_end
+        member_name, member_end = member
+        _reject_commonjs_module_dangerous_member(member_name)
+        if member_name in COMMONJS_MODULE_CONSTRUCTOR_MEMBER_NAMES:
+            return member_end
+        return None
+
+    for constructor_name in sorted(constructor_names, key=len, reverse=True):
+        constructor_end = _parse_grouped_named_base(source_text, index, constructor_name)
+        if constructor_end is not None:
+            return constructor_end
+    return None
+
+
+def _commonjs_module_instance_access_end_or_fail(
+    source_text: str,
+    index: int,
+    *,
+    namespace_names: set[str],
+    constructor_names: set[str],
+) -> int | None:
+    index = _skip_js_trivia(source_text, index)
+    if (
+        index < len(source_text)
+        and source_text[index] == "("
+        and not _parenthesized_expression_has_target(source_text, index)
+    ):
+        inner_end = _commonjs_module_instance_access_end_or_fail(
+            source_text,
+            index + 1,
+            namespace_names=namespace_names,
+            constructor_names=constructor_names,
+        )
+        if inner_end is None:
+            return None
+        close_index = _skip_js_trivia(source_text, inner_end)
+        if close_index >= len(source_text) or source_text[close_index] != ")":
+            return None
+        instance_end = close_index + 1
+    else:
+        parsed_new = _parse_js_identifier(source_text, index)
+        if parsed_new is None or parsed_new[0] != "new":
+            return None
+        constructor_start = _skip_js_trivia(source_text, parsed_new[1])
+        constructor_end = _parse_commonjs_module_constructor_reference_end(
+            source_text,
+            constructor_start,
+            namespace_names=namespace_names,
+            constructor_names=constructor_names,
+        )
+        if constructor_end is None:
+            return None
+        call_index = _skip_js_trivia(source_text, constructor_end)
+        if call_index < len(source_text) and source_text[call_index] == "(":
+            instance_end = _parenthesized_expression_end(source_text, call_index)
+        else:
+            instance_end = constructor_end
+
+    member = _parse_static_runtime_member(
+        source_text,
+        instance_end,
+        dynamic_error=(
+            "runtime source contains an unsupported CommonJS runtime compiler"
+        ),
+    )
+    if member is None:
+        return instance_end
+    member_name, member_end = member
+    if member_name in COMMONJS_COMPILE_MEMBER_NAMES:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS runtime compiler"
+        )
+    return member_end
+
+
 def _reject_evaluated_runtime_loaders(source_text: str) -> None:
+    node_module_namespace_names, node_module_constructor_names = (
+        _node_module_runtime_binding_names(source_text)
+    )
     index = 0
     state = "code"
     quote = ""
@@ -1467,6 +1857,24 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported evaluated loader reference"
                 )
+        module_instance_end = _commonjs_module_instance_access_end_or_fail(
+            source_text,
+            index,
+            namespace_names=node_module_namespace_names,
+            constructor_names=node_module_constructor_names,
+        )
+        if module_instance_end is not None:
+            index = max(index, module_instance_end - 1)
+            continue
+        module_namespace_end = _commonjs_module_namespace_access_end_or_fail(
+            source_text,
+            index,
+            namespace_names=node_module_namespace_names,
+            constructor_names=node_module_constructor_names,
+        )
+        if module_namespace_end is not None:
+            index = max(index, module_namespace_end - 1)
+            continue
         module_member = _parse_named_runtime_member(source_text, index, "module")
         if module_member is not None:
             member_name, member_end = module_member

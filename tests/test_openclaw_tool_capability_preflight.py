@@ -697,6 +697,36 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     Path(root), persistent_contract=True
                 )
 
+    def test_persistent_contract_snapshot_rejects_node_module_extension_chain(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "require('node:module').Module['_ext' + 'ensions']['.foo'] = () => {};\n"
+                "require('./impl.foo');\n",
+            )
+            with self.assertRaisesRegex(OSError, "CommonJS extension"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
+
+    def test_persistent_contract_snapshot_rejects_constructed_module_compile_chain(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "(new (require('node:module').Module)(__filename))"
+                "['_com' + 'pile'](\"require('./hidden.cjs')\", __filename);\n",
+            )
+            with self.assertRaisesRegex(OSError, "runtime compiler"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
+
     def test_persistent_contract_snapshot_rejects_unresolved_literal_dynamic_import(
         self,
     ) -> None:
