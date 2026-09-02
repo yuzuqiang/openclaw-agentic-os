@@ -179,6 +179,9 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
 )
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
 EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS = frozenset(("WebAssembly",))
+EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS = frozenset(
+    ("inspector", "inspector/promises", "node:inspector", "node:inspector/promises")
+)
 NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
@@ -475,6 +478,90 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
         index += 1
     raise RuntimeSourceContractError(
         "runtime source contains an unterminated CommonJS require specifier"
+    )
+
+
+def _skip_static_dynamic_import_attributes(source_text: str, index: int) -> int:
+    index = _skip_js_trivia(source_text, index)
+    if index >= len(source_text) or source_text[index] != "{":
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic import signature"
+        )
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\":
+                raise RuntimeSourceContractError(
+                    "runtime source import attributes contain an unsupported JavaScript escape"
+                )
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            if character != "{":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic import signature"
+                )
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if character != "}":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported dynamic import signature"
+                )
+            depth -= 1
+            index += 1
+            if depth == 0:
+                return index
+            continue
+        if character in "`,;":
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported dynamic import signature"
+            )
+        if not (
+            character.isspace()
+            or character in ":_-"
+            or character.isalnum()
+            or character in "$"
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported dynamic import signature"
+            )
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unsupported dynamic import signature"
     )
 
 
@@ -2285,6 +2372,11 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
                 )
             specifier, end_index = parsed
             close_index = _skip_js_trivia(source_text, end_index)
+            if close_index < len(source_text) and source_text[close_index] == ",":
+                close_index = _skip_js_trivia(
+                    source_text,
+                    _skip_static_dynamic_import_attributes(source_text, close_index + 1),
+                )
             if close_index >= len(source_text) or source_text[close_index] != ")":
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported dynamic import signature"
@@ -2463,7 +2555,18 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported native add-on process module import"
             )
+        if specifier in EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS:
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported inspector evaluation capability"
+            )
         specifiers.append((specifier, True, "import"))
+    if any(
+        specifier in EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS
+        for specifier in commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported inspector evaluation capability"
+        )
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in create_require_specifiers)

@@ -260,6 +260,25 @@ PERSISTENT_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
         "subagents.allowLease.status",
     ),
 )
+PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION = (
+    "agentic-os.persistent-lifecycle-gateway-rpc-transcript.v1"
+)
+PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORD_AUTHORITY = (
+    "agentic-os-parent-post-run-gateway-rpc-observer"
+)
+PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
+    ("acquire", "subagents.allowLease.acquire"),
+    ("duplicate_acquire", "subagents.allowLease.acquire"),
+    ("first_spawn", "sessions_spawn"),
+    ("duplicate_spawn", "sessions_spawn"),
+    ("pre_release_status", "subagents.allowLease.status"),
+    ("session_status", "session_status"),
+    ("sessions_history", "sessions_history"),
+    ("sessions_list", "sessions_list"),
+    ("wrong_owner_release", "subagents.allowLease.release"),
+    ("release", "subagents.allowLease.release"),
+    ("duplicate_release", "subagents.allowLease.release"),
+)
 STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST = {
     "requesterAgentId": "agentic-os-negative-status-params-probe"
 }
@@ -2341,11 +2360,300 @@ LIFECYCLE_OBSERVATION_FIELDS = (
     "listener_process_identity_sha256",
     "sessions_list_count",
     "matching_session_count",
+    "gateway_rpc_transcript_sha256",
 )
 
 
 def _lifecycle_observation_snapshot(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
     return {key: lifecycle.get(key) for key in LIFECYCLE_OBSERVATION_FIELDS}
+
+
+def _lifecycle_rpc_record_payload(response: Mapping[str, Any]) -> Mapping[str, Any]:
+    result = response.get("result")
+    if isinstance(result, Mapping):
+        return result
+    return response
+
+
+def _lifecycle_rpc_record(
+    records: Mapping[str, Any],
+    key: str,
+    method: str,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], str]:
+    record = _record(records.get(key), f"persistent lifecycle RPC transcript {key}")
+    if record.get("method") != method:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} method mismatch")
+    request = _record(
+        record.get("request_params"),
+        f"persistent lifecycle RPC transcript {key} request",
+    )
+    response = _record(
+        record.get("response"),
+        f"persistent lifecycle RPC transcript {key} response",
+    )
+    response_digest = _require_sha256_field(
+        record,
+        "raw_response_sha256",
+        f"persistent lifecycle RPC transcript {key}",
+    )
+    if _canonical_sha256(response) != response_digest:
+        raise ProbeError(f"persistent lifecycle RPC transcript {key} response mismatch")
+    return request, response, response_digest
+
+
+def _field_text_digest(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ProbeError(f"{label} is missing")
+    return _text_sha256(value)
+
+
+def _require_matching_lifecycle_digest(
+    lifecycle: Mapping[str, Any],
+    key: str,
+    digest: str,
+) -> None:
+    expected = _require_sha256_field(lifecycle, key, "lifecycle")
+    if expected != digest:
+        raise ProbeError(f"persistent lifecycle RPC transcript does not authenticate {key}")
+
+
+def _validate_lifecycle_gateway_rpc_transcript(
+    *,
+    run_root: Path,
+    lifecycle: Mapping[str, Any],
+    expected_run_id: str,
+    expected_transition_id: str,
+    pinned_run_root: _PinnedRunRoot | None = None,
+) -> dict[str, Any]:
+    transcript, transcript_bytes = _read_run_json_artifact(
+        run_root=run_root,
+        pinned_run_root=pinned_run_root,
+        value=lifecycle.get("gateway_rpc_transcript_file"),
+        label="persistent lifecycle Gateway RPC transcript",
+    )
+    transcript_sha256 = _sha256_bytes(transcript_bytes)
+    if (
+        _require_sha256_field(lifecycle, "gateway_rpc_transcript_sha256", "lifecycle")
+        != transcript_sha256
+    ):
+        raise ProbeError("persistent lifecycle Gateway RPC transcript digest mismatch")
+    if (
+        transcript.get("schema_version")
+        != PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION
+    ):
+        raise ProbeError("persistent lifecycle Gateway RPC transcript schema is invalid")
+    if (
+        transcript.get("record_authority")
+        != PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORD_AUTHORITY
+    ):
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript was not parent-observed"
+        )
+    if transcript.get("run_id") != expected_run_id:
+        raise ProbeError("persistent lifecycle Gateway RPC transcript run id mismatch")
+    if transcript.get("transition_id") != expected_transition_id:
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript transition id mismatch"
+        )
+    records = _record(
+        transcript.get("records"),
+        "persistent lifecycle Gateway RPC transcript records",
+    )
+    unexpected = sorted(
+        set(records) - {key for key, _method in PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS}
+    )
+    if unexpected:
+        raise ProbeError(
+            "persistent lifecycle Gateway RPC transcript contains unsupported records: "
+            + ", ".join(unexpected)
+        )
+
+    response_digests: dict[str, str] = {}
+    response_payloads: dict[str, Mapping[str, Any]] = {}
+    for key, method in PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS:
+        _request, response, digest = _lifecycle_rpc_record(records, key, method)
+        response_digests[key] = digest
+        response_payloads[key] = _lifecycle_rpc_record_payload(response)
+
+    acquire = response_payloads["acquire"]
+    duplicate_acquire = response_payloads["duplicate_acquire"]
+    gateway_lease_id_digest = _field_text_digest(
+        acquire.get("gateway_lease_id"),
+        "persistent lifecycle acquire response gateway_lease_id",
+    )
+    _require_matching_lifecycle_digest(
+        lifecycle, "gateway_lease_id_sha256", gateway_lease_id_digest
+    )
+    duplicate_gateway_lease_id_digest = _field_text_digest(
+        duplicate_acquire.get("gateway_lease_id"),
+        "persistent lifecycle duplicate acquire response gateway_lease_id",
+    )
+    if duplicate_gateway_lease_id_digest != gateway_lease_id_digest:
+        raise ProbeError("persistent lifecycle duplicate acquire Gateway lease mismatch")
+    if lifecycle.get("duplicate_acquire_same_lease") is not True:
+        raise ProbeError("persistent lifecycle duplicate acquire was not observed")
+
+    first_spawn = response_payloads["first_spawn"]
+    duplicate_spawn = response_payloads["duplicate_spawn"]
+    if first_spawn.get("status") != "accepted":
+        raise ProbeError("persistent lifecycle first spawn response was not accepted")
+    if lifecycle.get("first_spawn_status") != first_spawn.get("status"):
+        raise ProbeError("persistent lifecycle first spawn status is not response-bound")
+    session_key_digest = _field_text_digest(
+        first_spawn.get("session_key") or first_spawn.get("sessionKey"),
+        "persistent lifecycle first spawn response session key",
+    )
+    child_run_id_digest = _field_text_digest(
+        first_spawn.get("child_run_id") or first_spawn.get("childRunId"),
+        "persistent lifecycle first spawn response child run id",
+    )
+    _require_matching_lifecycle_digest(lifecycle, "session_key_sha256", session_key_digest)
+    _require_matching_lifecycle_digest(
+        lifecycle, "child_run_id_sha256", child_run_id_digest
+    )
+    if (
+        _field_text_digest(
+            duplicate_spawn.get("session_key") or duplicate_spawn.get("sessionKey"),
+            "persistent lifecycle duplicate spawn response session key",
+        )
+        != session_key_digest
+        or _field_text_digest(
+            duplicate_spawn.get("child_run_id") or duplicate_spawn.get("childRunId"),
+            "persistent lifecycle duplicate spawn response child run id",
+        )
+        != child_run_id_digest
+    ):
+        raise ProbeError("persistent lifecycle duplicate spawn identity mismatch")
+    if lifecycle.get("duplicate_spawn_same_session") is not True:
+        raise ProbeError("persistent lifecycle duplicate spawn was not observed")
+
+    pre_release_status = response_payloads["pre_release_status"]
+    leases = pre_release_status.get("leases")
+    if not isinstance(leases, list) or len(leases) != 1:
+        raise ProbeError("persistent lifecycle pre-release status response is not bound")
+    status_lease = _record(leases[0], "persistent lifecycle pre-release status lease")
+    status_lease_digest = _field_text_digest(
+        status_lease.get("gateway_lease_id"),
+        "persistent lifecycle pre-release status gateway_lease_id",
+    )
+    _require_matching_lifecycle_digest(
+        lifecycle, "pre_release_gateway_lease_id_sha256", status_lease_digest
+    )
+
+    _require_matching_lifecycle_digest(
+        lifecycle, "session_status_sha256", response_digests["session_status"]
+    )
+    _require_matching_lifecycle_digest(
+        lifecycle, "sessions_history_sha256", response_digests["sessions_history"]
+    )
+    sessions_list = response_payloads["sessions_list"].get("sessions")
+    if not isinstance(sessions_list, list):
+        raise ProbeError("persistent lifecycle sessions list response is malformed")
+    matching_sessions = [
+        item
+        for item in sessions_list
+        if isinstance(item, Mapping)
+        and _text_sha256(str(item.get("session_key") or item.get("sessionKey") or ""))
+        == session_key_digest
+    ]
+    if lifecycle.get("sessions_list_count") != len(sessions_list) or lifecycle.get(
+        "matching_session_count"
+    ) != len(matching_sessions):
+        raise ProbeError("persistent lifecycle sessions list counts are not response-bound")
+
+    for key, lifecycle_status_key, expected_status in (
+        ("wrong_owner_release", "wrong_owner_release_status", "rejected"),
+        ("release", "release_status", "released"),
+        ("duplicate_release", "duplicate_release_status", "released"),
+    ):
+        payload = response_payloads[key]
+        if payload.get("status") != expected_status:
+            raise ProbeError(f"persistent lifecycle {key} response status mismatch")
+        if lifecycle.get(lifecycle_status_key) != expected_status:
+            raise ProbeError(
+                f"persistent lifecycle {lifecycle_status_key} is not response-bound"
+            )
+    _require_matching_lifecycle_digest(
+        lifecycle, "wrong_owner_release_sha256", response_digests["wrong_owner_release"]
+    )
+    _require_matching_lifecycle_digest(
+        lifecycle, "primary_release_sha256", response_digests["release"]
+    )
+    _require_matching_lifecycle_digest(
+        lifecycle, "duplicate_release_sha256", response_digests["duplicate_release"]
+    )
+    release_payload = response_payloads["release"]
+    duplicate_release_payload = response_payloads["duplicate_release"]
+    for raw_field, primary_key, duplicate_key in (
+        (
+            "gateway_lease_id",
+            "release_gateway_lease_id_sha256",
+            "duplicate_release_gateway_lease_id_sha256",
+        ),
+        (
+            "owner_metadata",
+            "release_owner_metadata_sha256",
+            "duplicate_release_owner_metadata_sha256",
+        ),
+        (
+            "release_idempotency_key",
+            "release_idempotency_key_sha256",
+            "duplicate_release_idempotency_key_sha256",
+        ),
+        (
+            "client_lease_id",
+            "release_client_lease_id_sha256",
+            "duplicate_release_client_lease_id_sha256",
+        ),
+        ("run_id", "release_run_id_sha256", "duplicate_release_run_id_sha256"),
+        ("phase", "release_phase_sha256", "duplicate_release_phase_sha256"),
+        (
+            "transition_id",
+            "release_transition_id_sha256",
+            "duplicate_release_transition_id_sha256",
+        ),
+        ("agent_id", "release_agent_id_sha256", "duplicate_release_agent_id_sha256"),
+        (
+            "requester_agent_id",
+            "release_requester_agent_id_sha256",
+            "duplicate_release_requester_agent_id_sha256",
+        ),
+    ):
+        _require_matching_lifecycle_digest(
+            lifecycle,
+            primary_key,
+            _field_text_digest(
+                release_payload.get(raw_field),
+                f"persistent lifecycle release response {raw_field}",
+            ),
+        )
+        _require_matching_lifecycle_digest(
+            lifecycle,
+            duplicate_key,
+            _field_text_digest(
+                duplicate_release_payload.get(raw_field),
+                f"persistent lifecycle duplicate release response {raw_field}",
+            ),
+        )
+    wrong_owner_payload = response_payloads["wrong_owner_release"]
+    for raw_field, lifecycle_key in (
+        ("gateway_lease_id", "wrong_owner_release_gateway_lease_id_sha256"),
+        ("owner_metadata", "wrong_owner_release_owner_metadata_sha256"),
+        ("release_idempotency_key", "wrong_owner_release_idempotency_key_sha256"),
+    ):
+        _require_matching_lifecycle_digest(
+            lifecycle,
+            lifecycle_key,
+            _field_text_digest(
+                wrong_owner_payload.get(raw_field),
+                f"persistent lifecycle wrong-owner release response {raw_field}",
+            ),
+        )
+    return {
+        "schema_version": PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION,
+        "sha256": transcript_sha256,
+        "response_digests": response_digests,
+    }
 
 
 def _lifecycle_attestation_record(lifecycle: Mapping[str, Any]) -> dict[str, Any]:
@@ -2354,7 +2662,7 @@ def _lifecycle_attestation_record(lifecycle: Mapping[str, Any]) -> dict[str, Any
         "schema_version": PERSISTENT_LIFECYCLE_ATTESTATION_SCHEMA_VERSION,
         "record_authority": "agentic-os-parent-post-run-lifecycle-observer",
         "authentication_authority": "agentic-os-independent-validation-subprocess",
-        "record_transport": "parent_fd_pinned_receipt_reverification",
+        "record_transport": "validator_pinned_gateway_rpc_transcript_reverification",
         "observations_schema_version": PERSISTENT_LIFECYCLE_OBSERVATIONS_SCHEMA_VERSION,
         "lifecycle_sha256": _canonical_sha256(observations),
         "observations": observations,
@@ -2375,7 +2683,7 @@ def _validate_lifecycle_attestation_record(
         != "agentic-os-independent-validation-subprocess"
     ):
         raise ProbeError("persistent lifecycle attestation authentication authority is invalid")
-    if response.get("record_transport") != "parent_fd_pinned_receipt_reverification":
+    if response.get("record_transport") != "validator_pinned_gateway_rpc_transcript_reverification":
         raise ProbeError("persistent lifecycle attestation transport is invalid")
     if (
         response.get("observations_schema_version")
@@ -2398,6 +2706,7 @@ def _validate_independent_validation(
     receipt_sha256: str,
     attestation_response_sha256: str,
     tools_catalog_response_sha256: str,
+    lifecycle_rpc_transcript_sha256: str,
     lifecycle_attestation: Mapping[str, Any],
     validation_anchor_key: bytes,
 ) -> None:
@@ -2409,6 +2718,10 @@ def _validate_independent_validation(
         raise ProbeError("persistent lifecycle validation is not bound to the attestation response")
     if validation.get("tools_catalog_response_sha256") != tools_catalog_response_sha256:
         raise ProbeError("persistent lifecycle validation is not bound to the tools catalog")
+    if validation.get("lifecycle_rpc_transcript_sha256") != lifecycle_rpc_transcript_sha256:
+        raise ProbeError(
+            "persistent lifecycle validation is not bound to Gateway lifecycle RPC transcript"
+        )
     if "lifecycle_observations_response_sha256" in validation:
         raise ProbeError(
             "persistent lifecycle validation uses legacy RPC lifecycle observations"
@@ -2543,6 +2856,7 @@ def _build_independent_validation_record(
     )
     preflight = _record(receipt.get("preflight"), "preflight")
     lifecycle = _record(receipt.get("lifecycle"), "lifecycle")
+    immutable_inputs = _record(receipt.get("immutable_inputs"), "receipt immutable_inputs")
     evidence, _ = _read_run_json_artifact(
         run_root=run_root,
         pinned_run_root=pinned_run_root,
@@ -2580,6 +2894,17 @@ def _build_independent_validation_record(
         tools_catalog.get("response"), "persistent attestation tools_catalog response"
     )
     _validate_runtime_catalog_response(tools_catalog_response)
+    lifecycle_rpc_transcript = _validate_lifecycle_gateway_rpc_transcript(
+        run_root=run_root,
+        lifecycle=lifecycle,
+        expected_run_id=_require_non_empty_string(
+            immutable_inputs, "run_id", "receipt immutable_inputs"
+        ),
+        expected_transition_id=_require_non_empty_string(
+            immutable_inputs, "transition_id", "receipt immutable_inputs"
+        ),
+        pinned_run_root=pinned_run_root,
+    )
     lifecycle_attestation = _lifecycle_attestation_record(lifecycle)
     _validate_lifecycle_attestation_record(lifecycle_attestation, lifecycle=lifecycle)
     validation: dict[str, Any] = {
@@ -2588,6 +2913,7 @@ def _build_independent_validation_record(
         "receipt_sha256": _sha256_bytes(receipt_bytes),
         "attestation_response_sha256": _canonical_sha256(response),
         "tools_catalog_response_sha256": _canonical_sha256(tools_catalog_response),
+        "lifecycle_rpc_transcript_sha256": lifecycle_rpc_transcript["sha256"],
         "lifecycle_attestation_sha256": _canonical_sha256(lifecycle_attestation),
         "lifecycle_attestation": lifecycle_attestation,
         "attestation_signature_verified": True,
@@ -2601,6 +2927,11 @@ def _build_independent_validation_record(
         "validator_authority": "agentic-os-independent-validation-subprocess",
         "validator_identity": "agentic-os-persistent-validator",
         "validator_identity_sha256": _text_sha256("agentic-os-persistent-validator"),
+        "lifecycle_rpc_transcript": {
+            "schema_version": lifecycle_rpc_transcript["schema_version"],
+            "sha256": lifecycle_rpc_transcript["sha256"],
+            "response_digests": lifecycle_rpc_transcript["response_digests"],
+        },
     }
     validation["authentication"] = _hmac_authentication(
         validation, key_env=PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV
@@ -4353,12 +4684,20 @@ def _persistent_lifecycle_summary(
     tools_catalog_response = _record(
         tools_catalog.get("response"), "persistent attestation tools_catalog response"
     )
+    lifecycle_rpc_transcript = _validate_lifecycle_gateway_rpc_transcript(
+        run_root=run_root,
+        lifecycle=lifecycle,
+        expected_run_id=expected_run_id,
+        expected_transition_id=expected_transition_id,
+        pinned_run_root=pinned_run_root,
+    )
     lifecycle_attestation = _lifecycle_attestation_record(lifecycle)
     _validate_independent_validation(
         validation,
         receipt_sha256=receipt_sha256,
         attestation_response_sha256=_canonical_sha256(response),
         tools_catalog_response_sha256=_canonical_sha256(tools_catalog_response),
+        lifecycle_rpc_transcript_sha256=lifecycle_rpc_transcript["sha256"],
         lifecycle_attestation=lifecycle_attestation,
         validation_anchor_key=validation_anchor_key,
     )
@@ -4485,6 +4824,8 @@ def _persistent_lifecycle_summary(
             "sessions_list_count": lifecycle.get("sessions_list_count"),
             "matching_session_count": lifecycle.get("matching_session_count"),
             "post_release_lease_count": lifecycle.get("post_release_lease_count"),
+            "gateway_rpc_transcript_sha256": lifecycle_rpc_transcript["sha256"],
+            "gateway_rpc_response_digests": lifecycle_rpc_transcript["response_digests"],
         },
         "rollback": {
             "status": "pass",

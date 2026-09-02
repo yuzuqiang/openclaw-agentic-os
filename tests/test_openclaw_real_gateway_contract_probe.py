@@ -372,6 +372,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         tools_catalog_response: dict | None = None,
         persistent_evidence_transform=None,
         preflight_evidence_transform=None,
+        lifecycle_transcript_transform=None,
         runtime_sources: list[dict[str, str]] | None = None,
     ) -> tuple[Path, Path]:
         receipts = run_root / "receipts"
@@ -537,6 +538,150 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
         if persistent_evidence_transform is not None:
             persistent_evidence_transform(persistent_evidence)
+        lease_id = "gateway-lease:unit-test"
+        session_key = "agent:unit-test:session"
+        child_run_id = "child-run:unit-test"
+        release_owner_metadata = "owner-metadata:unit-test"
+        release_idempotency_key = "release-idempotency:unit-test"
+        wrong_owner_metadata = "wrong-owner-metadata:unit-test"
+        wrong_owner_idempotency_key = "wrong-owner-idempotency:unit-test"
+        release_response = {
+            "status": "released",
+            "gateway_lease_id": lease_id,
+            "owner_metadata": release_owner_metadata,
+            "release_idempotency_key": release_idempotency_key,
+            "client_lease_id": "client-lease",
+            "run_id": "run-id",
+            "phase": "phase-b",
+            "transition_id": "transition-id",
+            "agent_id": "agent",
+            "requester_agent_id": "requester",
+        }
+        lifecycle_rpc_responses = {
+            "acquire": {"status": "accepted", "gateway_lease_id": lease_id},
+            "duplicate_acquire": {"status": "accepted", "gateway_lease_id": lease_id},
+            "first_spawn": {
+                "status": "accepted",
+                "session_key": session_key,
+                "child_run_id": child_run_id,
+            },
+            "duplicate_spawn": {
+                "status": "accepted",
+                "session_key": session_key,
+                "child_run_id": child_run_id,
+            },
+            "pre_release_status": {
+                "status": "ok",
+                "leases": [{"gateway_lease_id": lease_id}],
+            },
+            "session_status": {"status": "completed", "session_key": session_key},
+            "sessions_history": {"items": [{"session_key": session_key}]},
+            "sessions_list": {"sessions": [{"session_key": session_key}]},
+            "wrong_owner_release": {
+                "status": "rejected",
+                "gateway_lease_id": lease_id,
+                "owner_metadata": wrong_owner_metadata,
+                "release_idempotency_key": wrong_owner_idempotency_key,
+            },
+            "release": release_response,
+            "duplicate_release": dict(release_response),
+        }
+        lifecycle_rpc_records = {
+            key: {
+                "method": method,
+                "request_params": {},
+                "response": lifecycle_rpc_responses[key],
+                "raw_response_sha256": MODULE._canonical_sha256(
+                    lifecycle_rpc_responses[key]
+                ),
+            }
+            for key, method in MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORDS
+        }
+        lifecycle_rpc_transcript = {
+            "schema_version": MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_SCHEMA_VERSION,
+            "record_authority": MODULE.PERSISTENT_LIFECYCLE_RPC_TRANSCRIPT_RECORD_AUTHORITY,
+            "run_id": "run-id",
+            "transition_id": "transition-id",
+            "records": lifecycle_rpc_records,
+        }
+        if lifecycle_transcript_transform is not None:
+            lifecycle_transcript_transform(lifecycle_rpc_transcript)
+        lifecycle = receipt["lifecycle"]
+        lifecycle_defaults = {
+            "pre_release_gateway_lease_id_sha256": "e" * 64,
+            "gateway_lease_id_sha256": "e" * 64,
+            "session_key_sha256": "f" * 64,
+            "child_run_id_sha256": "0" * 64,
+            "session_status_sha256": "1" * 64,
+            "sessions_history_sha256": "2" * 64,
+            "primary_release_sha256": "3" * 64,
+            "duplicate_release_sha256": "3" * 64,
+            "release_gateway_lease_id_sha256": "e" * 64,
+            "duplicate_release_gateway_lease_id_sha256": "e" * 64,
+            "release_owner_metadata_sha256": "4" * 64,
+            "duplicate_release_owner_metadata_sha256": "4" * 64,
+            "release_idempotency_key_sha256": "5" * 64,
+            "duplicate_release_idempotency_key_sha256": "5" * 64,
+            "expected_release_idempotency_key_sha256": "5" * 64,
+            "wrong_owner_release_sha256": "6" * 64,
+            "wrong_owner_release_gateway_lease_id_sha256": "e" * 64,
+            "wrong_owner_release_owner_metadata_sha256": "7" * 64,
+            "wrong_owner_release_idempotency_key_sha256": "8" * 64,
+        }
+        lifecycle_derived = {
+            "pre_release_gateway_lease_id_sha256": MODULE._text_sha256(lease_id),
+            "gateway_lease_id_sha256": MODULE._text_sha256(lease_id),
+            "session_key_sha256": MODULE._text_sha256(session_key),
+            "child_run_id_sha256": MODULE._text_sha256(child_run_id),
+            "session_status_sha256": lifecycle_rpc_records["session_status"][
+                "raw_response_sha256"
+            ],
+            "sessions_history_sha256": lifecycle_rpc_records["sessions_history"][
+                "raw_response_sha256"
+            ],
+            "primary_release_sha256": lifecycle_rpc_records["release"][
+                "raw_response_sha256"
+            ],
+            "duplicate_release_sha256": lifecycle_rpc_records["duplicate_release"][
+                "raw_response_sha256"
+            ],
+            "release_gateway_lease_id_sha256": MODULE._text_sha256(lease_id),
+            "duplicate_release_gateway_lease_id_sha256": MODULE._text_sha256(lease_id),
+            "release_owner_metadata_sha256": MODULE._text_sha256(release_owner_metadata),
+            "duplicate_release_owner_metadata_sha256": MODULE._text_sha256(
+                release_owner_metadata
+            ),
+            "release_idempotency_key_sha256": MODULE._text_sha256(
+                release_idempotency_key
+            ),
+            "duplicate_release_idempotency_key_sha256": MODULE._text_sha256(
+                release_idempotency_key
+            ),
+            "expected_release_idempotency_key_sha256": MODULE._text_sha256(
+                release_idempotency_key
+            ),
+            "wrong_owner_release_sha256": lifecycle_rpc_records["wrong_owner_release"][
+                "raw_response_sha256"
+            ],
+            "wrong_owner_release_gateway_lease_id_sha256": MODULE._text_sha256(lease_id),
+            "wrong_owner_release_owner_metadata_sha256": MODULE._text_sha256(
+                wrong_owner_metadata
+            ),
+            "wrong_owner_release_idempotency_key_sha256": MODULE._text_sha256(
+                wrong_owner_idempotency_key
+            ),
+        }
+        for key, value in lifecycle_derived.items():
+            if lifecycle.get(key) == lifecycle_defaults[key]:
+                lifecycle[key] = value
+        lifecycle_transcript_file = receipts / "lifecycle-rpc-transcript.json"
+        lifecycle_transcript_file.write_text(
+            json.dumps(lifecycle_rpc_transcript), encoding="utf-8"
+        )
+        lifecycle["gateway_rpc_transcript_file"] = str(lifecycle_transcript_file)
+        lifecycle["gateway_rpc_transcript_sha256"] = MODULE._sha256_bytes(
+            lifecycle_transcript_file.read_bytes()
+        )
         preflight = receipt["preflight"]
         preflight_required_tool_names = preflight.get("required_tool_names")
         if not isinstance(preflight_required_tool_names, list):
@@ -583,6 +728,12 @@ class RealGatewayProbeTests(unittest.TestCase):
         validation_file = receipts / "independent-validation.json"
         receipt_file.write_text(json.dumps(receipt), encoding="utf-8")
         if validation is None:
+            lifecycle_rpc_transcript = MODULE._validate_lifecycle_gateway_rpc_transcript(
+                run_root=run_root,
+                lifecycle=receipt["lifecycle"],
+                expected_run_id="run-id",
+                expected_transition_id="transition-id",
+            )
             lifecycle_attestation = MODULE._lifecycle_attestation_record(
                 receipt["lifecycle"]
             )
@@ -596,6 +747,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "tools_catalog_response_sha256": MODULE._canonical_sha256(
                     tools_catalog_response
                 ),
+                "lifecycle_rpc_transcript_sha256": lifecycle_rpc_transcript["sha256"],
                 "lifecycle_attestation_sha256": MODULE._canonical_sha256(
                     lifecycle_attestation
                 ),
@@ -615,13 +767,20 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "validator_identity_sha256": MODULE._text_sha256(
                     "phase-c-verifier:unit-test"
                 ),
+                "lifecycle_rpc_transcript": {
+                    "schema_version": lifecycle_rpc_transcript["schema_version"],
+                    "sha256": lifecycle_rpc_transcript["sha256"],
+                    "response_digests": lifecycle_rpc_transcript["response_digests"],
+                },
             }
             validation["authentication"] = {
                 "scheme": "hmac-sha256-env",
                 "key_env": MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV,
                 "signature": hmac.new(
                     VALIDATION_ANCHOR_HMAC_SECRET,
-                    MODULE._canonical_json_bytes(MODULE._authentication_payload(validation)),
+                    MODULE._canonical_json_bytes(
+                        MODULE._authentication_payload(validation)
+                    ),
                     hashlib.sha256,
                 ).hexdigest(),
             }
@@ -636,6 +795,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         tools_catalog_response: dict | None = None,
         persistent_evidence_transform=None,
         preflight_evidence_transform=None,
+        lifecycle_transcript_transform=None,
         runtime_sources: list[dict[str, str]] | None = None,
     ):
         run_root = root / "run"
@@ -647,6 +807,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             tools_catalog_response=tools_catalog_response,
             persistent_evidence_transform=persistent_evidence_transform,
             preflight_evidence_transform=preflight_evidence_transform,
+            lifecycle_transcript_transform=lifecycle_transcript_transform,
             runtime_sources=runtime_sources,
         )
         original_git = MODULE._git
@@ -1384,6 +1545,28 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_accepts_dynamic_import_attributes(
+        self,
+    ) -> None:
+        for attribute_key in ("with", "assert"):
+            with self.subTest(attribute_key=attribute_key), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            "const config = await import("
+                            f"'./config.json', {{ {attribute_key}: {{ type: 'json' }} }});\n"
+                            "export { config };\n"
+                        ),
+                        "scripts/config.json": '{"runtime": true}\n',
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+                self.assertIn("scripts/config.json", paths)
+
     def test_persistent_runtime_source_closure_binds_commonjs_callable_variants(
         self,
     ) -> None:
@@ -2020,6 +2203,15 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "import { Script } from 'node:vm';\n"
                 "new Script('require(\\'./runner-impl.cjs\\')').runInThisContext();\n"
             ),
+            "inspector_runtime_evaluate": (
+                "import inspector from 'node:inspector';\n"
+                "const session = new inspector.Session();\n"
+                "session.connect();\n"
+                "session.post('Runtime.evaluate', {"
+                " expression: \"process.getBuiltinModule('module')"
+                ".createRequire(process.cwd() + '/x')('./hidden.cjs')\""
+                "});\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -2033,7 +2225,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                     },
                 )
 
-                with self.assertRaisesRegex(MODULE.ProbeError, "evaluated loader"):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "evaluated loader|inspector evaluation"
+                ):
                     MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_module_compile(
@@ -3001,6 +3195,122 @@ class RealGatewayProbeTests(unittest.TestCase):
                     persistent_evidence_transform=add_lifecycle_observations,
                 )
 
+    def test_persistent_summary_requires_private_lifecycle_rpc_transcript(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "run"
+            receipt_file, validation_file = self._write_persistent_receipts(
+                run_root,
+                self._valid_persistent_receipt(),
+            )
+            receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+            Path(receipt["lifecycle"]["gateway_rpc_transcript_file"]).unlink()
+            original_git = MODULE._git
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "Gateway RPC transcript",
+            ):
+                try:
+                    MODULE._git = lambda git_root, *args: "agentic-head"
+                    MODULE._persistent_lifecycle_summary(
+                        openclaw_root=root,
+                        run_root=run_root,
+                        receipt_file=receipt_file,
+                        validation_file=validation_file,
+                        head=VALID_RUNTIME_HEAD,
+                        agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
+                        command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                        proc=self._attach_valid_process_cleanup(
+                            type(
+                                "Proc",
+                                (),
+                                {"stdout": "", "stderr": "", "returncode": 0},
+                            )()
+                        ),
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                    )
+                finally:
+                    MODULE._git = original_git
+
+    def test_persistent_summary_rejects_lifecycle_values_not_bound_to_rpc_transcript(
+        self,
+    ) -> None:
+        def fabricate_spawn(transcript: dict) -> None:
+            response = transcript["records"]["first_spawn"]["response"]
+            response["status"] = "rejected"
+            transcript["records"]["first_spawn"]["raw_response_sha256"] = (
+                MODULE._canonical_sha256(response)
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = self._valid_persistent_receipt()
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "first spawn response|response-bound",
+            ):
+                self._call_persistent_summary(
+                    Path(directory),
+                    receipt,
+                    lifecycle_transcript_transform=fabricate_spawn,
+                )
+
+    def test_persistent_summary_rejects_validation_without_lifecycle_rpc_binding(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_root = Path(directory) / "run"
+            receipt_file, validation_file = self._write_persistent_receipts(
+                run_root,
+                self._valid_persistent_receipt(),
+            )
+            validation = json.loads(validation_file.read_text(encoding="utf-8"))
+            validation.pop("lifecycle_rpc_transcript_sha256")
+            validation["authentication"]["signature"] = hmac.new(
+                VALIDATION_ANCHOR_HMAC_SECRET,
+                MODULE._canonical_json_bytes(MODULE._authentication_payload(validation)),
+                hashlib.sha256,
+            ).hexdigest()
+            validation_file.write_text(json.dumps(validation), encoding="utf-8")
+            original_git = MODULE._git
+            try:
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "Gateway lifecycle RPC transcript",
+                ):
+                    MODULE._persistent_lifecycle_summary(
+                        openclaw_root=Path(directory),
+                        run_root=run_root,
+                        receipt_file=receipt_file,
+                        validation_file=validation_file,
+                        head=VALID_RUNTIME_HEAD,
+                        agentic_sources=[{"path": "agentic.py", "sha256": "0" * 64}],
+                        runtime_sources=self._valid_runtime_sources(),
+                        runtime_launch_sources=self._valid_runtime_launch_sources(),
+                        command=["node", MODULE.PERSISTENT_LIFECYCLE_RUNNER],
+                        proc=self._attach_valid_process_cleanup(
+                            type(
+                                "Proc",
+                                (),
+                                {"stdout": "", "stderr": "", "returncode": 0},
+                            )()
+                        ),
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        expected_run_id="run-id",
+                        expected_transition_id="transition-id",
+                        validation_anchor_key=VALIDATION_ANCHOR_HMAC_SECRET,
+                    )
+            finally:
+                MODULE._git = original_git
+
     def test_persistent_summary_rejects_malformed_allow_lease_status_response(
         self,
     ) -> None:
@@ -3133,7 +3443,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
             receipt["lifecycle"]["duplicate_acquire_same_lease"] = False
-            with self.assertRaisesRegex(MODULE.ProbeError, "duplicate acquire lease"):
+            with self.assertRaisesRegex(MODULE.ProbeError, "duplicate acquire"):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_missing_duplicate_release_identity_digest(self) -> None:
@@ -3154,21 +3464,23 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
             receipt["lifecycle"]["release_status"] = "rejected"
-            with self.assertRaisesRegex(MODULE.ProbeError, "primary release status"):
+            with self.assertRaisesRegex(MODULE.ProbeError, "primary release status|release_status"):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_arbitrary_duplicate_release_hash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt = self._valid_persistent_receipt()
             receipt["lifecycle"]["duplicate_release_sha256"] = "4" * 64
-            with self.assertRaisesRegex(MODULE.ProbeError, "duplicate release response"):
+            with self.assertRaisesRegex(
+                MODULE.ProbeError, "duplicate release response|duplicate_release_sha256"
+            ):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_mismatched_duplicate_release_identity(self) -> None:
         for key, message in (
-            ("duplicate_release_gateway_lease_id_sha256", "Gateway lease id"),
-            ("duplicate_release_owner_metadata_sha256", "owner metadata"),
-            ("duplicate_release_idempotency_key_sha256", "idempotency key"),
+            ("duplicate_release_gateway_lease_id_sha256", "Gateway lease id|duplicate_release_gateway_lease_id_sha256"),
+            ("duplicate_release_owner_metadata_sha256", "owner metadata|duplicate_release_owner_metadata_sha256"),
+            ("duplicate_release_idempotency_key_sha256", "idempotency key|duplicate_release_idempotency_key_sha256"),
         ):
             with self.subTest(key=key):
                 with tempfile.TemporaryDirectory() as directory:
@@ -3193,7 +3505,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             receipt["lifecycle"]["duplicate_release_agent_id_sha256"] = (
                 receipt["lifecycle"]["release_agent_id_sha256"]
             )
-            with self.assertRaisesRegex(MODULE.ProbeError, "release agent_id echo"):
+            with self.assertRaisesRegex(
+                MODULE.ProbeError, "release_agent_id_sha256"
+            ):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_release_identity_not_acquired(self) -> None:
@@ -3201,7 +3515,9 @@ class RealGatewayProbeTests(unittest.TestCase):
             receipt = self._valid_persistent_receipt()
             receipt["lifecycle"]["release_gateway_lease_id_sha256"] = "6" * 64
             receipt["lifecycle"]["duplicate_release_gateway_lease_id_sha256"] = "6" * 64
-            with self.assertRaisesRegex(MODULE.ProbeError, "acquired lease"):
+            with self.assertRaisesRegex(
+                MODULE.ProbeError, "acquired lease|release_gateway_lease_id_sha256"
+            ):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_non_integer_lifecycle_counts(self) -> None:
@@ -3213,7 +3529,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                         del receipt["lifecycle"]["matching_session_count"]
                     else:
                         receipt["lifecycle"]["matching_session_count"] = value
-                    with self.assertRaisesRegex(MODULE.ProbeError, "matching accepted session"):
+                    with self.assertRaisesRegex(
+                        MODULE.ProbeError,
+                        "matching accepted session|sessions list counts",
+                    ):
                         self._call_persistent_summary(Path(directory), receipt)
         for value in (None, False, 0.0, 1):
             with self.subTest(post_release_lease_count=value):
@@ -3562,7 +3881,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             receipt["lifecycle"]["wrong_owner_release_owner_metadata_sha256"] = (
                 receipt["lifecycle"]["release_owner_metadata_sha256"]
             )
-            with self.assertRaisesRegex(MODULE.ProbeError, "wrong-owner release"):
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "wrong-owner release|wrong_owner_release_owner_metadata_sha256",
+            ):
                 self._call_persistent_summary(Path(directory), receipt)
 
     def test_persistent_summary_rejects_attestation_client_not_launched_runner_bound(
@@ -3830,7 +4152,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(
                 payload["lifecycle_attestation"]["record_transport"],
-                "parent_fd_pinned_receipt_reverification",
+                "validator_pinned_gateway_rpc_transcript_reverification",
             )
             self.assertEqual(
                 payload["lifecycle_attestation"]["signed_by"],
@@ -4692,7 +5014,11 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(
                 validation["lifecycle_attestation"]["record_transport"],
-                "parent_fd_pinned_receipt_reverification",
+                "validator_pinned_gateway_rpc_transcript_reverification",
+            )
+            self.assertEqual(
+                validation["lifecycle_rpc_transcript_sha256"],
+                receipt_payload["lifecycle"]["gateway_rpc_transcript_sha256"],
             )
             self.assertEqual(validation_file.stat().st_mode & 0o777, 0o600)
 
