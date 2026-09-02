@@ -188,6 +188,24 @@ WORKER_THREADS_DESTRUCTURED_REQUIRE = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+CHILD_PROCESS_IMPORT = re.compile(
+    rf"""
+    \bimport\s*\{{(?P<body>.*?)\}}\s*
+    from\s*["'](?:node:)?child_process["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CHILD_PROCESS_DESTRUCTURED_REQUIRE = re.compile(
+    rf"""
+    \b(?:const|let|var)\s*\{{(?P<body>.*?)\}}\s*=\s*
+    require\s*\(\s*["'](?:node:)?child_process["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CHILD_PROCESS_NODE_ENTRYPOINT_NAMES = frozenset(
+    ("spawn", "spawnSync", "execFile", "execFileSync")
+)
+CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES = frozenset(("execSync",))
 FORK_ENTRYPOINT_SPECIFIER = re.compile(
     r"""
     (?<![\w$])
@@ -208,17 +226,6 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     )\s*\(\s*
     process\.execPath\s*,\s*
     \[\s*["'](?P<specifier>[^"']+)["']
-    """,
-    re.VERBOSE | re.DOTALL,
-)
-CHILD_PROCESS_SYNC_ENTRYPOINT_CALL = re.compile(
-    r"""
-    (?<![\w$])
-    (?:
-        execSync
-      | child_process\.execSync
-      | [A-Za-z_$][0-9A-Za-z_$]*\s*\.\s*execSync
-    )\s*\(
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -1519,6 +1526,83 @@ def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
     return constructor_names, namespace_names
 
 
+def _child_process_sync_alias_bindings(source_text: str) -> tuple[set[str], set[str]]:
+    stripped = strip_source_comments(source_text)
+    node_entrypoint_names: set[str] = set()
+    sync_shell_names: set[str] = set()
+    entrypoint_alternatives = "|".join(
+        sorted(
+            CHILD_PROCESS_NODE_ENTRYPOINT_NAMES
+            | CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES,
+            key=len,
+            reverse=True,
+        )
+    )
+
+    for pattern in (CHILD_PROCESS_IMPORT, CHILD_PROCESS_DESTRUCTURED_REQUIRE):
+        for match in pattern.finditer(stripped):
+            for part in match.group("body").split(","):
+                imported = re.fullmatch(
+                    rf"\s*(?P<entrypoint>{entrypoint_alternatives})(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?\s*",
+                    part,
+                )
+                if imported is None:
+                    continue
+                entrypoint = imported.group("entrypoint")
+                local_name = (
+                    imported.group("alias")
+                    or imported.group("prop_alias")
+                    or entrypoint
+                )
+                if entrypoint in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
+                    node_entrypoint_names.add(local_name)
+                elif entrypoint in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
+                    sync_shell_names.add(local_name)
+    return node_entrypoint_names, sync_shell_names
+
+
+def _child_process_alias_node_entrypoint_pattern(
+    node_entrypoint_names: set[str],
+    *,
+    require_literal_script_argument: bool,
+) -> re.Pattern[str] | None:
+    if not node_entrypoint_names:
+        return None
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
+    )
+    suffix = r"\s*\(\s*process\.execPath\s*,"
+    if require_literal_script_argument:
+        suffix += r"\s*\[\s*[\"'](?P<specifier>[^\"']+)[\"']"
+    return re.compile(
+        rf"(?<![\w$.])(?:{alternatives}){suffix}",
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_sync_shell_call_pattern(
+    sync_shell_names: set[str],
+) -> re.Pattern[str]:
+    named_alternatives = "|".join(
+        re.escape(name)
+        for name in sorted(
+            set(sync_shell_names) | CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES,
+            key=len,
+            reverse=True,
+        )
+    )
+    return re.compile(
+        rf"""
+        (?:
+            (?<![\w$.])(?:{named_alternatives})\s*\(
+          |
+            (?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*\.\s*execSync\s*\(
+        )
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
 def _worker_constructor_pattern(
     constructor_names: set[str],
     namespace_names: set[str],
@@ -2492,6 +2576,9 @@ def _runtime_execution_entrypoint_specifiers(
     worker_entrypoint_pattern = _worker_constructor_pattern(
         worker_constructor_names, worker_namespace_names
     )
+    child_process_node_alias_names, child_process_sync_alias_names = (
+        _child_process_sync_alias_bindings(source_text)
+    )
     for match in worker_entrypoint_pattern.finditer(source_text):
         specifier = match.group("specifier")
         if "\\" in specifier:
@@ -2516,10 +2603,25 @@ def _runtime_execution_entrypoint_specifiers(
             )
         specifiers.append((specifier, "import"))
         accepted_spans.append(match.span())
+    child_process_alias_pattern = _child_process_alias_node_entrypoint_pattern(
+        child_process_node_alias_names,
+        require_literal_script_argument=True,
+    )
+    if child_process_alias_pattern is not None:
+        for match in child_process_alias_pattern.finditer(source_text):
+            specifier = match.group("specifier")
+            if "\\" in specifier:
+                raise RuntimeSourceContractError(
+                    "runtime source child-process entrypoint contains an unsupported JavaScript escape"
+                )
+            specifiers.append((specifier, "import"))
+            accepted_spans.append(match.span())
     for specifier in _native_addon_entrypoint_specifiers(source_text):
         specifiers.append((specifier, "require"))
 
-    if CHILD_PROCESS_SYNC_ENTRYPOINT_CALL.search(source_text):
+    if _child_process_sync_shell_call_pattern(child_process_sync_alias_names).search(
+        source_text
+    ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported synchronous child-process entrypoint"
         )
@@ -2560,6 +2662,18 @@ def _runtime_execution_entrypoint_specifiers(
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
             )
+    child_process_alias_process_execpath_pattern = _child_process_alias_node_entrypoint_pattern(
+        child_process_node_alias_names,
+        require_literal_script_argument=False,
+    )
+    if child_process_alias_process_execpath_pattern is not None:
+        for match in child_process_alias_process_execpath_pattern.finditer(
+            source_text
+        ):
+            if not any(start <= match.start() < end for start, end in accepted_spans):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported child-process Node entrypoint"
+                )
     return specifiers
 
 

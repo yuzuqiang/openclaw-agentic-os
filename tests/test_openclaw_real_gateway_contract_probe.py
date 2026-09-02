@@ -1989,6 +1989,77 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("scripts/spawn-sync-worker.mjs", paths)
         self.assertIn("scripts/exec-file-sync-worker.mjs", paths)
 
+    def test_persistent_runtime_source_closure_binds_aliased_sync_child_process_node_entrypoints(
+        self,
+    ) -> None:
+        cases = {
+            "esm_renamed_spawn_sync": (
+                "import { spawnSync as launchNode } from 'node:child_process';\n"
+                "launchNode(process.execPath, ['./esm-spawn-alias.mjs']);\n",
+                "scripts/esm-spawn-alias.mjs",
+            ),
+            "esm_renamed_exec_file_sync": (
+                "import { execFileSync as launchFile } from 'child_process';\n"
+                "launchFile(process.execPath, ['./esm-exec-file-alias.mjs']);\n",
+                "scripts/esm-exec-file-alias.mjs",
+            ),
+            "cjs_destructured_spawn_sync": (
+                "const { spawnSync: runNodeNow } = require('node:child_process');\n"
+                "runNodeNow(process.execPath, ['./cjs-spawn-alias.cjs']);\n",
+                "scripts/cjs-spawn-alias.cjs",
+            ),
+            "cjs_destructured_exec_file_sync": (
+                "const { execFileSync: runFileNow } = require('child_process');\n"
+                "runFileNow(process.execPath, ['./cjs-exec-file-alias.cjs']);\n",
+                "scripts/cjs-exec-file-alias.cjs",
+            ),
+        }
+        for name, (source, worker) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        worker: "module.exports = { worker: true };\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn(worker, paths)
+
+    def test_persistent_runtime_source_closure_rejects_aliased_exec_sync(
+        self,
+    ) -> None:
+        cases = {
+            "esm_renamed_exec_sync": (
+                "import { execSync as shellNow } from 'node:child_process';\n"
+                "shellNow(process.execPath + ' ./hidden.mjs');\n"
+            ),
+            "cjs_destructured_exec_sync": (
+                "const { execSync: shellNow } = require('child_process');\n"
+                "shellNow(process.execPath + ' ./hidden.cjs');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.mjs": "export const hidden = true;\n",
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "synchronous child-process entrypoint",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_unbound_exec_sync(
         self,
     ) -> None:
