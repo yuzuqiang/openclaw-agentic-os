@@ -234,6 +234,7 @@ EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS = frozenset(("WebAssembly",))
 EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS = frozenset(
     ("inspector", "inspector/promises", "node:inspector", "node:inspector/promises")
 )
+EVALUATED_RUNTIME_REPL_SPECIFIERS = frozenset(("repl", "node:repl"))
 NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
@@ -1639,6 +1640,73 @@ def _child_process_sync_shell_call_pattern(
     )
 
 
+def _child_process_indirect_alias_node_entrypoint_pattern(
+    node_entrypoint_names: set[str],
+) -> re.Pattern[str] | None:
+    if not node_entrypoint_names:
+        return None
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        \(\s*
+        [^()]*,\s*
+        (?:{alternatives})\s*
+        \)\s*\(\s*process\.execPath\s*,
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_indirect_namespace_node_entrypoint_pattern() -> re.Pattern[str]:
+    member_alternatives = "|".join(
+        re.escape(name)
+        for name in sorted(CHILD_PROCESS_NODE_ENTRYPOINT_NAMES, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        \(\s*
+        [^()]*,\s*
+        (?:child_process|{JS_IDENTIFIER})\s*(?:\.|\?\.)\s*
+        (?:{member_alternatives})\s*
+        \)\s*\(\s*process\.execPath\s*,
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_indirect_shell_call_pattern(
+    sync_shell_names: set[str],
+) -> re.Pattern[str]:
+    named_alternatives = "|".join(
+        re.escape(name)
+        for name in sorted(
+            set(sync_shell_names) | CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES,
+            key=len,
+            reverse=True,
+        )
+    )
+    member_alternatives = "|".join(
+        re.escape(name)
+        for name in sorted(CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        \(\s*
+        [^()]*,\s*
+        (?:
+            (?:{named_alternatives})
+          |
+            (?:child_process|{JS_IDENTIFIER})\s*(?:\.|\?\.)\s*
+            (?:{member_alternatives})
+        )\s*
+        \)\s*\(
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
 def _worker_constructor_pattern(
     constructor_names: set[str],
     namespace_names: set[str],
@@ -2169,7 +2237,7 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             constructor_names=node_module_constructor_names,
         )
         if module_instance_end is not None:
-            index = max(index, module_instance_end - 1)
+            index = max(index + 1, module_instance_end)
             continue
         module_namespace_end = _commonjs_module_namespace_access_end_or_fail(
             source_text,
@@ -2178,7 +2246,7 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             constructor_names=node_module_constructor_names,
         )
         if module_namespace_end is not None:
-            index = max(index, module_namespace_end - 1)
+            index = max(index + 1, module_namespace_end)
             continue
         module_member = _parse_named_runtime_member(source_text, index, "module")
         if module_member is not None:
@@ -2677,6 +2745,10 @@ def _runtime_execution_entrypoint_specifiers(
 
     if _child_process_sync_shell_call_pattern(child_process_sync_alias_names).search(
         source_text
+    ) or _child_process_indirect_shell_call_pattern(
+        child_process_sync_alias_names
+    ).search(
+        source_text
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported shell child-process entrypoint"
@@ -2747,6 +2819,24 @@ def _runtime_execution_entrypoint_specifiers(
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
                 )
+    child_process_indirect_alias_pattern = (
+        _child_process_indirect_alias_node_entrypoint_pattern(
+            child_process_node_alias_names
+        )
+    )
+    if child_process_indirect_alias_pattern is not None:
+        for match in child_process_indirect_alias_pattern.finditer(source_text):
+            if not any(start <= match.start() < end for start, end in accepted_spans):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported child-process Node entrypoint"
+                )
+    for match in _child_process_indirect_namespace_node_entrypoint_pattern().finditer(
+        source_text
+    ):
+        if not any(start <= match.start() < end for start, end in accepted_spans):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported child-process Node entrypoint"
+            )
     return specifiers
 
 
@@ -2865,6 +2955,10 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported inspector evaluation capability"
             )
+        if specifier in EVALUATED_RUNTIME_REPL_SPECIFIERS:
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported REPL evaluated loader capability"
+            )
         specifiers.append((specifier, True, "import"))
     if any(
         specifier in EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS
@@ -2872,6 +2966,13 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported inspector evaluation capability"
+        )
+    if any(
+        specifier in EVALUATED_RUNTIME_REPL_SPECIFIERS
+        for specifier in commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported REPL evaluated loader capability"
         )
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)

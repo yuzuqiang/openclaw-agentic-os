@@ -2213,6 +2213,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "cp.spawnSync(process.execPath, ['./hidden.mjs']);\n"
             ),
             (
+                "import * as cp from 'node:child_process';\n"
+                "(0, cp.spawnSync)(process.execPath, ['./hidden.mjs']);\n"
+            ),
+            (
+                "import { spawnSync } from 'node:child_process';\n"
+                "(0, spawnSync)(process.execPath, ['./hidden.mjs']);\n"
+            ),
+            (
                 "const cp = require('node:child_process');\n"
                 "cp['spawnSync'](process.execPath, ['./hidden.mjs']);\n"
             ),
@@ -2268,6 +2276,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             "namespace_inline": (
                 "const moduleApi = require('node:module');\n"
                 "moduleApi.createRequire(__filename)('./hidden.cjs');\n"
+            ),
+            "one_character_namespace_inline": (
+                "const m = require('node:module');\n"
+                "m.createRequire(__filename)('./hidden.cjs');\n"
             ),
         }
         for name, source in cases.items():
@@ -2541,6 +2553,11 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ".createRequire(process.cwd() + '/x')('./hidden.cjs')\""
                 "});\n"
             ),
+            "repl_source_load": (
+                "import repl from 'node:repl';\n"
+                "const server = repl.start({ prompt: '', terminal: false });\n"
+                "server.commands.load.action.call(server, './hidden.cjs');\n"
+            ),
         }
         for name, source in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -2555,7 +2572,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 )
 
                 with self.assertRaisesRegex(
-                    MODULE.ProbeError, "evaluated loader|inspector evaluation"
+                    MODULE.ProbeError,
+                    "evaluated loader|inspector evaluation|REPL",
                 ):
                     MODULE._persistent_runtime_source_paths(root)
 
