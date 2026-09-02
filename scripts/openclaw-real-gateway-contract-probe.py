@@ -109,15 +109,15 @@ PROCESS_CONTAINMENT_BOUNDARY_ENV = "AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY"
 INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV = (
     "AGENTIC_OS_INTERNAL_PROCESS_CONTAINMENT_BOUNDARY"
 )
+LAUNCHER_BOUNDARY_OS_TYPE = "posix-session-process-group"
 PROCESS_CONTAINMENT_BOUNDARY_VALUES = frozenset(
-    {"dedicated-cgroup-v2", "external-container"}
+    {"dedicated-cgroup-v2", "external-container", LAUNCHER_BOUNDARY_OS_TYPE}
 )
 LAUNCHER_BOUNDARY_SCHEMA_VERSION = "agentic-os.launcher-owned-process-boundary.v1"
 LAUNCHER_BOUNDARY_AUTHORITY = "agentic-os-probe-launcher"
 LAUNCHER_BOUNDARY_EVIDENCE_AUTHORITY = (
     "host-process-table-and-posix-session-observation"
 )
-LAUNCHER_BOUNDARY_OS_TYPE = "posix-session-process-group"
 LAUNCHER_BOUNDARY_KEYS = (
     "schema_version",
     "boundary_type",
@@ -1926,6 +1926,7 @@ def _process_containment_boundary_receipt(
     receipt = {
         "schema_version": "agentic-os.process-containment-boundary-receipt.v1",
         "requested_boundary": requested_boundary,
+        "proven_os_boundary": launcher_boundary.get("os_boundary_type"),
         "receipt_authority": LAUNCHER_BOUNDARY_AUTHORITY,
         "evidence_authority": "host-process-table-and-loopback-port-observation",
         "cleanup_method": "process-group-sigkill-plus-tracked-descendant-identity-sigkill",
@@ -5875,7 +5876,7 @@ def _run_persistent_lifecycle_probe(
     port: int,
     run_id: str,
     transition_id: str,
-    requested_process_boundary: str = "external-container",
+    requested_process_boundary: str = LAUNCHER_BOUNDARY_OS_TYPE,
 ) -> dict[str, Any]:
     validation_anchor_key = _select_validation_anchor_key()
     attestation_verification_key = _select_attestation_verification_key()

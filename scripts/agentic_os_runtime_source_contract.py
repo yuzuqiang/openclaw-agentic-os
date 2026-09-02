@@ -237,6 +237,7 @@ EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS = frozenset(
 NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
+COMMONJS_RUNTIME_LOADER_MEMBER_NAMES = frozenset(("runMain",))
 COMMONJS_MODULE_CONSTRUCTOR_MEMBER_NAMES = frozenset(("Module", "default"))
 EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
     (
@@ -1249,6 +1250,24 @@ def _parse_parenthesized_require_invocation(
     return specifier, invocation_end + 1
 
 
+def _reject_indirect_parenthesized_commonjs_require_invocation(
+    source_text: str, index: int
+) -> None:
+    if index >= len(source_text) or source_text[index] != "(":
+        return
+    expression_end = _parenthesized_expression_end(source_text, index)
+    call_index = _skip_js_trivia(source_text, expression_end)
+    if source_text.startswith("?.", call_index):
+        call_index = _skip_js_trivia(source_text, call_index + 2)
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return
+    expression = source_text[index + 1 : expression_end - 1]
+    if re.search(rf"(?<![\w$.]){COMMONJS_REQUIRE_TOKEN}(?![\w$])", expression):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported indirect CommonJS require invocation"
+        )
+
+
 def _template_expression_end(source_text: str, index: int) -> int:
     depth = 1
     state = "code"
@@ -1811,6 +1830,10 @@ def _parse_known_node_module_namespace_end(
 
 
 def _reject_commonjs_module_dangerous_member(member_name: str) -> None:
+    if member_name in COMMONJS_RUNTIME_LOADER_MEMBER_NAMES:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS runtime loader"
+        )
     if member_name in COMMONJS_COMPILE_MEMBER_NAMES:
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported CommonJS runtime compiler"
@@ -2160,6 +2183,10 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
         module_member = _parse_named_runtime_member(source_text, index, "module")
         if module_member is not None:
             member_name, member_end = module_member
+            if member_name in COMMONJS_RUNTIME_LOADER_MEMBER_NAMES:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS runtime loader"
+                )
             if member_name in COMMONJS_COMPILE_MEMBER_NAMES:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported CommonJS runtime compiler"
@@ -2497,6 +2524,9 @@ def _commonjs_require_specifiers(
                     specifier, index = parsed
                     specifiers.append(specifier)
                     continue
+                _reject_indirect_parenthesized_commonjs_require_invocation(
+                    source_text, index
+                )
             index += 1
             continue
         continue
@@ -2688,6 +2718,23 @@ def _runtime_execution_entrypoint_specifiers(
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
             )
+    for match in re.finditer(
+        rf"(?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*(?:\?\.)?\s*\[\s*['\"](?:spawn|spawnSync|execFile|execFileSync)['\"]\s*\]\s*\(\s*process\.execPath\s*,",
+        source_text,
+        re.DOTALL,
+    ):
+        if not any(start <= match.start() < end for start, end in accepted_spans):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported child-process Node entrypoint"
+            )
+    if re.search(
+        rf"(?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*(?:\?\.)?\s*\[\s*['\"](?:exec|execSync)['\"]\s*\]\s*\(",
+        source_text,
+        re.DOTALL,
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported shell child-process entrypoint"
+        )
     child_process_alias_process_execpath_pattern = _child_process_alias_node_entrypoint_pattern(
         child_process_node_alias_names,
         require_literal_script_argument=False,

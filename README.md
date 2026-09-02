@@ -526,7 +526,7 @@ process-containment boundary for persistent lifecycle execution, and writes
 hash-only evidence:
 
 ```bash
-AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY=external-container \
+AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY=posix-session-process-group \
 python3 scripts/openclaw-real-gateway-contract-probe.py \
   --openclaw-root /path/to/openclaw-candidate \
   --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json
@@ -535,8 +535,12 @@ python3 scripts/openclaw-real-gateway-contract-probe.py \
 The containment boundary declaration is intentionally parent-only: without it,
 the persistent lifecycle probe fails before launching candidate code, because a
 same-UID process that detaches and clears cooperative cleanup markers cannot be
-safely killed without an OS-level sandbox such as a container or dedicated
-cgroup. The legacy E2E fallback is unchanged.
+safely promoted without a launcher-owned OS boundary receipt. The documented
+local persistent probe requests the boundary the launcher can actually prove:
+a fresh POSIX session/process group with host process-table and loopback-port
+teardown evidence. Stronger external-container or dedicated-cgroup requests
+remain fail-closed unless the launcher records matching OS-boundary evidence.
+The legacy E2E fallback is unchanged.
 
 No validation-key environment setup is required for this command. The trusted
 probe parent generates an ephemeral 32-byte validation-anchor key when

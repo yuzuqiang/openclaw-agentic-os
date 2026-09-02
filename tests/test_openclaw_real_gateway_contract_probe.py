@@ -102,8 +102,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         root_identity: dict | None = None,
         cleanup_marker_sha256: str = "a" * 64,
         teardown_status: str = "confirmed",
-        os_boundary_type: str = "external-container",
+        boundary_type: str = "external-container",
+        os_boundary_type: str | None = None,
     ) -> dict:
+        os_boundary_type = os_boundary_type or boundary_type
         root_identity = root_identity or {
             "pid": pid,
             "uid": os.getuid(),
@@ -111,7 +113,7 @@ class RealGatewayProbeTests(unittest.TestCase):
         }
         boundary = {
             "schema_version": MODULE.LAUNCHER_BOUNDARY_SCHEMA_VERSION,
-            "boundary_type": "external-container",
+            "boundary_type": boundary_type,
             "boundary_nonce_sha256": "c" * 64,
             "teardown_status": teardown_status,
             "authority": MODULE.LAUNCHER_BOUNDARY_AUTHORITY,
@@ -154,6 +156,7 @@ class RealGatewayProbeTests(unittest.TestCase):
             "launcher_owned_boundary": self._launcher_boundary(
                 pid=pid,
                 root_identity=root_identity,
+                boundary_type=MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
             ),
         }
         return proc
@@ -1691,6 +1694,27 @@ class RealGatewayProbeTests(unittest.TestCase):
                     paths = MODULE._persistent_runtime_source_paths(root)
                     self.assertIn("scripts/runner-impl.cjs", paths)
 
+    def test_persistent_runtime_source_closure_rejects_indirect_bare_commonjs_require(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "(0, require)('./hidden.cjs');\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "indirect CommonJS require",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_commonjs_require_alias(
         self,
     ) -> None:
@@ -2188,6 +2212,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "import * as cp from 'node:child_process';\n"
                 "cp.spawnSync(process.execPath, ['./hidden.mjs']);\n"
             ),
+            (
+                "const cp = require('node:child_process');\n"
+                "cp['spawnSync'](process.execPath, ['./hidden.mjs']);\n"
+            ),
         )
         for source in cases:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
@@ -2203,6 +2231,30 @@ class RealGatewayProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     MODULE.ProbeError,
                     "shell child-process entrypoint|child-process Node entrypoint",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_module_run_main(
+        self,
+    ) -> None:
+        cases = (
+            "require('module').runMain('./hidden.cjs');\n",
+            "const moduleApi = require('node:module');\nmoduleApi.runMain('./hidden.cjs');\n",
+        )
+        for source in cases:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "CommonJS runtime loader",
                 ):
                     MODULE._persistent_runtime_source_paths(root)
 
@@ -4953,7 +5005,11 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             with mock.patch.dict(
                 os.environ,
-                {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
+                {
+                    MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: (
+                        MODULE.LAUNCHER_BOUNDARY_OS_TYPE
+                    )
+                },
                 clear=True,
             ), mock.patch.object(
                 MODULE.secrets,
@@ -5142,12 +5198,16 @@ class RealGatewayProbeTests(unittest.TestCase):
     def test_persistent_runner_accepts_boundary_env_only_as_launch_request(self) -> None:
         with mock.patch.dict(
             os.environ,
-            {MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container"},
+            {
+                MODULE.PROCESS_CONTAINMENT_BOUNDARY_ENV: (
+                    MODULE.LAUNCHER_BOUNDARY_OS_TYPE
+                )
+            },
             clear=True,
         ):
             self.assertEqual(
                 MODULE._require_process_containment_boundary_request(),
-                "external-container",
+                MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
             )
 
     def test_process_containment_receipt_rejects_caller_only_boundary_without_cleanup(self) -> None:
@@ -5300,7 +5360,9 @@ class RealGatewayProbeTests(unittest.TestCase):
     def _run_launcher_owned_boundary_cleanup_probe_once(self):
         with tempfile.TemporaryDirectory() as directory:
             env = {
-                MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV: "external-container",
+                MODULE.INTERNAL_PROCESS_CONTAINMENT_BOUNDARY_ENV: (
+                    MODULE.LAUNCHER_BOUNDARY_OS_TYPE
+                ),
             }
             proc = MODULE._run(
                 [
@@ -5388,6 +5450,34 @@ class RealGatewayProbeTests(unittest.TestCase):
             cleanup["launcher_owned_boundary"]["boundary_id_sha256"],
         )
         self.assertEqual(receipt["cleanup_receipt_sha256"], MODULE._canonical_sha256(cleanup))
+
+    def test_process_containment_receipt_accepts_realizable_posix_boundary(
+        self,
+    ) -> None:
+        root_identity = {"pid": 1234, "uid": os.getuid(), "start_id": "root"}
+        cleanup = {
+            "tracking_status": "available",
+            "root_pid": 1234,
+            "root_identity": root_identity,
+            "cleanup_marker_sha256": "a" * 64,
+            "cleanup_marker_verified": True,
+            "descendant_identities": [],
+            "unattributed_process_identities": [],
+            "launcher_owned_boundary": self._launcher_boundary(
+                root_identity=root_identity,
+                boundary_type=MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
+            ),
+        }
+        receipt = MODULE._process_containment_boundary_receipt(
+            requested_boundary=MODULE.LAUNCHER_BOUNDARY_OS_TYPE,
+            cleanup=cleanup,
+            process_group_cleanup_attempted=True,
+            process_group_reaped=True,
+            port_closed=True,
+        )
+
+        self.assertEqual(receipt["requested_boundary"], MODULE.LAUNCHER_BOUNDARY_OS_TYPE)
+        self.assertEqual(receipt["proven_os_boundary"], MODULE.LAUNCHER_BOUNDARY_OS_TYPE)
 
     def test_process_containment_receipt_rejects_replayed_launcher_boundary(self) -> None:
         root_identity = {"pid": 1234, "uid": os.getuid(), "start_id": "root"}
