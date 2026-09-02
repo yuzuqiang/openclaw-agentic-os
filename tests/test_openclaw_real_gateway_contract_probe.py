@@ -65,6 +65,56 @@ class RealGatewayProbeTests(unittest.TestCase):
                 self._previous_validation_anchor
             )
 
+    def test_persistent_status_negative_rejection_requires_invalid_params(
+        self,
+    ) -> None:
+        valid = {
+            "method": "subagents.allowLease.status",
+            "request_params": dict(MODULE.STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+            "response": {
+                "ok": False,
+                "error": {
+                    "code": "invalid_params",
+                    "message": "unexpected params: requesterAgentId",
+                },
+            },
+        }
+        valid["raw_response_sha256"] = MODULE._canonical_sha256(valid["response"])
+        self.assertEqual(
+            MODULE._validate_allow_lease_status_rejects_non_empty_params(valid),
+            valid["raw_response_sha256"],
+        )
+
+        cases = {
+            "top_level_success": {
+                "ok": True,
+                "result": {"error": "parameter cache unavailable"},
+            },
+            "string_error": {"ok": False, "error": "parameter backend unavailable"},
+            "wrong_code": {
+                "ok": False,
+                "error": {"code": "unavailable", "message": "param"},
+            },
+            "missing_field": {
+                "ok": False,
+                "error": {"code": "invalid_params", "message": "param"},
+            },
+        }
+        for name, response in cases.items():
+            record = {
+                "method": "subagents.allowLease.status",
+                "request_params": dict(
+                    MODULE.STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST
+                ),
+                "response": response,
+                "raw_response_sha256": MODULE._canonical_sha256(response),
+            }
+            with self.subTest(name=name), self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "accepted non-empty parameters|structured invalid_params|requesterAgentId",
+            ):
+                MODULE._validate_allow_lease_status_rejects_non_empty_params(record)
+
     def _validator_env_for_path(
         self,
         run_root: Path,
@@ -3180,6 +3230,66 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn("scripts/runner-worker.mjs", paths)
         self.assertIn("scripts/runner-child.cjs", paths)
+
+    def test_persistent_runtime_source_closure_binds_aliased_fork_entrypoints(
+        self,
+    ) -> None:
+        cases = {
+            "esm_renamed_fork": (
+                "import { fork as launch } from 'node:child_process';\n"
+                "launch('./hidden.cjs');\n"
+            ),
+            "cjs_destructured_fork": (
+                "const { fork: launch } = require('child_process');\n"
+                "launch('./hidden.cjs');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("scripts/hidden.cjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_cluster_entrypoints(
+        self,
+    ) -> None:
+        cases = {
+            "esm_cluster": (
+                "import cluster from 'node:cluster';\n"
+                "cluster.setupPrimary({ exec: './hidden.cjs' });\n"
+                "Reflect.apply(cluster.fork, cluster, []);\n"
+            ),
+            "cjs_cluster": (
+                "const cluster = require('cluster');\n"
+                "cluster.setupPrimary({ exec: './hidden.cjs' });\n"
+                "cluster.fork();\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "cluster execution capability",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_binds_qualified_worker_entrypoints(
         self,
@@ -8120,6 +8230,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 captured["cleanup_attempted"] = True
                 return True
 
+            def fake_terminate_and_verify(proc):
+                captured["cleanup_attempted"] = True
+                return (True, True)
+
             try:
                 MODULE._run = fake_run
                 MODULE._git = lambda git_root, *args: "agentic-head"
@@ -8129,7 +8243,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE.ProbeError("contradictory receipt")
                 )
                 MODULE._wait_for_loopback_port_closed = lambda port: True
-                MODULE._terminate_and_verify_process_group = lambda proc: (True, True)
+                MODULE._terminate_and_verify_process_group = fake_terminate_and_verify
                 MODULE._terminate_process_group = fake_terminate
                 MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
                     lambda **kwargs: None
@@ -8216,7 +8330,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
                     lambda **kwargs: None
                 )
-                with self.assertRaisesRegex(MODULE.ProbeError, "port remained open"):
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "candidate process cleanup remained incomplete",
+                ):
                     MODULE._run_persistent_lifecycle_probe(
                         root,
                         output,
@@ -8252,6 +8369,99 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
             self.assertEqual(cleanup["status"], "fail")
             self.assertIs(cleanup["candidate_port_closed"], False)
+
+    def test_persistent_runner_success_rejection_fails_on_tracked_descendant_survival(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("// runner\n", encoding="utf-8")
+            output = root / "evidence.json"
+            original_run = MODULE._run
+            original_git = MODULE._git
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_persistent_lifecycle_summary = MODULE._persistent_lifecycle_summary
+            original_run_independent_validator = MODULE._run_independent_validator
+            original_bind_parent_transcript = (
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript
+            )
+            original_wait_for_loopback_port_closed = MODULE._wait_for_loopback_port_closed
+            original_terminate_and_verify_process_group = (
+                MODULE._terminate_and_verify_process_group
+            )
+
+            class Proc:
+                returncode = 0
+                stdout = "runner stdout"
+                stderr = "runner stderr"
+
+            proc = self._attach_valid_process_cleanup(Proc())
+            proc._agentic_os_process_cleanup["descendant_identities"] = [
+                {
+                    "pid": 234567,
+                    "uid": os.getuid(),
+                    "start_id": "detached-start",
+                }
+            ]
+
+            try:
+                MODULE._run = lambda *args, **kwargs: proc
+                MODULE._git = lambda git_root, *args: "agentic-head"
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
+                MODULE._run_independent_validator = lambda **kwargs: None
+                MODULE._persistent_lifecycle_summary = lambda **kwargs: (_ for _ in ()).throw(
+                    MODULE.ProbeError("contradictory receipt")
+                )
+                MODULE._wait_for_loopback_port_closed = lambda port: True
+                cleanup_results = iter(((True, True), (True, False)))
+                MODULE._terminate_and_verify_process_group = lambda proc: next(
+                    cleanup_results
+                )
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    lambda **kwargs: None
+                )
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "candidate process cleanup remained incomplete",
+                ):
+                    MODULE._run_persistent_lifecycle_probe(
+                        root,
+                        output,
+                        timeout=1,
+                        head=VALID_RUNTIME_HEAD,
+                        agentic_sources=[],
+                        runtime_sources=[],
+                        run_root=root / "run",
+                        port=MODULE.PERSISTENT_LIFECYCLE_DEFAULT_PORT,
+                        run_id="run-id",
+                        transition_id="transition-id",
+                    )
+            finally:
+                MODULE._run = original_run
+                MODULE._git = original_git
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._persistent_lifecycle_summary = original_persistent_lifecycle_summary
+                MODULE._run_independent_validator = original_run_independent_validator
+                MODULE._bind_probe_parent_lifecycle_gateway_rpc_transcript = (
+                    original_bind_parent_transcript
+                )
+                MODULE._wait_for_loopback_port_closed = original_wait_for_loopback_port_closed
+                MODULE._terminate_and_verify_process_group = (
+                    original_terminate_and_verify_process_group
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            cleanup = next(
+                item
+                for item in payload["fail_closed_matrix"]
+                if item["check"] == "post_success_validation_process_group_cleanup"
+            )
+            self.assertEqual(cleanup["status"], "fail")
+            self.assertIs(cleanup["candidate_port_closed"], True)
+            self.assertIs(cleanup["tracked_cleanup_available"], True)
+            self.assertIs(cleanup["all_candidate_processes_reaped"], False)
 
 
 if __name__ == "__main__":

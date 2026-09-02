@@ -202,6 +202,7 @@ CHILD_PROCESS_DESTRUCTURED_REQUIRE = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+CHILD_PROCESS_FORK_ENTRYPOINT_NAMES = frozenset(("fork",))
 CHILD_PROCESS_NODE_ENTRYPOINT_NAMES = frozenset(
     ("spawn", "spawnSync", "execFile", "execFileSync")
 )
@@ -235,6 +236,7 @@ EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS = frozenset(
     ("inspector", "inspector/promises", "node:inspector", "node:inspector/promises")
 )
 EVALUATED_RUNTIME_REPL_SPECIFIERS = frozenset(("repl", "node:repl"))
+EVALUATED_RUNTIME_CLUSTER_SPECIFIERS = frozenset(("cluster", "node:cluster"))
 NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
@@ -1559,12 +1561,17 @@ def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
     return constructor_names, namespace_names
 
 
-def _child_process_sync_alias_bindings(source_text: str) -> tuple[set[str], set[str]]:
+def _child_process_sync_alias_bindings(
+    source_text: str,
+) -> tuple[set[str], set[str], set[str]]:
     stripped = strip_source_comments(source_text)
+    fork_entrypoint_names: set[str] = set()
     node_entrypoint_names: set[str] = set()
     sync_shell_names: set[str] = set()
     entrypoint_alternatives = "|".join(
         sorted(
+            CHILD_PROCESS_FORK_ENTRYPOINT_NAMES
+            |
             CHILD_PROCESS_NODE_ENTRYPOINT_NAMES
             | CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES,
             key=len,
@@ -1587,11 +1594,31 @@ def _child_process_sync_alias_bindings(source_text: str) -> tuple[set[str], set[
                     or imported.group("prop_alias")
                     or entrypoint
                 )
-                if entrypoint in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
+                if entrypoint in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
+                    fork_entrypoint_names.add(local_name)
+                elif entrypoint in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
                     node_entrypoint_names.add(local_name)
                 elif entrypoint in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
                     sync_shell_names.add(local_name)
-    return node_entrypoint_names, sync_shell_names
+    return fork_entrypoint_names, node_entrypoint_names, sync_shell_names
+
+
+def _child_process_fork_entrypoint_pattern(
+    fork_entrypoint_names: set[str],
+) -> re.Pattern[str] | None:
+    if not fork_entrypoint_names:
+        return None
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(fork_entrypoint_names, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        (?<![\w$.])
+        (?:{alternatives})\s*\(\s*
+        ["'](?P<specifier>[^"']+)["']
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
 
 
 def _child_process_alias_node_entrypoint_pattern(
@@ -2700,7 +2727,11 @@ def _runtime_execution_entrypoint_specifiers(
     worker_entrypoint_pattern = _worker_constructor_pattern(
         worker_constructor_names, worker_namespace_names
     )
-    child_process_node_alias_names, child_process_sync_alias_names = (
+    (
+        child_process_fork_alias_names,
+        child_process_node_alias_names,
+        child_process_sync_alias_names,
+    ) = (
         _child_process_sync_alias_bindings(source_text)
     )
     for match in worker_entrypoint_pattern.finditer(source_text):
@@ -2719,6 +2750,18 @@ def _runtime_execution_entrypoint_specifiers(
             )
         specifiers.append((specifier, "require"))
         accepted_spans.append(match.span())
+    child_process_fork_alias_pattern = _child_process_fork_entrypoint_pattern(
+        child_process_fork_alias_names
+    )
+    if child_process_fork_alias_pattern is not None:
+        for match in child_process_fork_alias_pattern.finditer(source_text):
+            specifier = match.group("specifier")
+            if "\\" in specifier:
+                raise RuntimeSourceContractError(
+                    "runtime source fork entrypoint contains an unsupported JavaScript escape"
+                )
+            specifiers.append((specifier, "require"))
+            accepted_spans.append(match.span())
     for match in CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER.finditer(source_text):
         specifier = match.group("specifier")
         if "\\" in specifier:
@@ -2782,6 +2825,19 @@ def _runtime_execution_entrypoint_specifiers(
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported fork entrypoint"
             )
+    if child_process_fork_alias_names:
+        fork_alias_alternatives = "|".join(
+            re.escape(name)
+            for name in sorted(child_process_fork_alias_names, key=len, reverse=True)
+        )
+        for match in re.finditer(
+            rf"(?<![\w$.])(?:{fork_alias_alternatives})\s*\(",
+            source_text,
+        ):
+            if not any(start <= match.start() < end for start, end in accepted_spans):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported fork entrypoint"
+                )
     for match in re.finditer(
         r"(?<![\w$])(?:spawn|spawnSync|execFile|execFileSync|child_process\.(?:spawn|spawnSync|execFile|execFileSync)|[A-Za-z_$][0-9A-Za-z_$]*\s*\.\s*(?:spawn|spawnSync|execFile|execFileSync))\s*\(\s*process\.execPath\s*,",
         source_text,
@@ -2937,6 +2993,13 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported native add-on process module import"
         )
+    if any(
+        specifier in EVALUATED_RUNTIME_CLUSTER_SPECIFIERS
+        for specifier in commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported cluster execution capability"
+        )
     execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
     module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
@@ -2959,6 +3022,10 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported REPL evaluated loader capability"
             )
+        if specifier in EVALUATED_RUNTIME_CLUSTER_SPECIFIERS:
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported cluster execution capability"
+            )
         specifiers.append((specifier, True, "import"))
     if any(
         specifier in EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS
@@ -2973,6 +3040,13 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported REPL evaluated loader capability"
+        )
+    if any(
+        specifier in EVALUATED_RUNTIME_CLUSTER_SPECIFIERS
+        for specifier in commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported cluster execution capability"
         )
     specifiers.extend((specifier, True, "import") for specifier in dynamic_specifiers)
     specifiers.extend((specifier, True, "require") for specifier in commonjs_specifiers)

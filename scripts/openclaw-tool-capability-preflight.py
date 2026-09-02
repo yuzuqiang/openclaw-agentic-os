@@ -1339,6 +1339,8 @@ def _run_gateway_allow_lease_status(
 def _validate_status_non_empty_params_rejection_payload(payload: Any) -> None:
     if not isinstance(payload, Mapping):
         raise AdapterContractError("status negative RPC response must be a JSON object")
+    if payload.get("ok") is True or payload.get("status") == "ok":
+        raise AdapterContractError("status RPC accepted non-empty parameters")
     result = payload.get("result")
     status_payload = result if isinstance(result, Mapping) else payload
     if not isinstance(status_payload, Mapping):
@@ -1349,8 +1351,20 @@ def _validate_status_non_empty_params_rejection_payload(payload: Any) -> None:
         or isinstance(status_payload.get("leases"), list)
     ):
         raise AdapterContractError("status RPC accepted non-empty parameters")
-    if "param" not in json.dumps(status_payload, sort_keys=True).lower():
-        raise AdapterContractError("status RPC rejection is not parameter-bound")
+    error = status_payload.get("error")
+    if not isinstance(error, Mapping):
+        raise AdapterContractError(
+            "status RPC rejection did not return structured invalid_params error"
+        )
+    if error.get("code") != "invalid_params":
+        raise AdapterContractError(
+            "status RPC rejection did not return structured invalid_params error"
+        )
+    response_text = json.dumps(error, sort_keys=True).lower()
+    if "requesteragentid" not in response_text:
+        raise AdapterContractError(
+            "status RPC rejection is not bound to unexpected requesterAgentId"
+        )
 
 
 def _validate_status_lease_items(leases: Iterable[Any], *, label: str) -> None:

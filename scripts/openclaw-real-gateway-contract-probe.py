@@ -4266,6 +4266,10 @@ def _validate_allow_lease_status_rejects_non_empty_params(
         raise ProbeError(
             "persistent attestation allowLease status negative response mismatch"
         )
+    if response.get("ok") is True or response.get("status") == "ok":
+        raise ProbeError(
+            "persistent attestation allowLease status accepted non-empty parameters"
+        )
     result = response.get("result")
     payload = result if isinstance(result, Mapping) else response
     payload = _record(
@@ -4280,10 +4284,15 @@ def _validate_allow_lease_status_rejects_non_empty_params(
         raise ProbeError(
             "persistent attestation allowLease status accepted non-empty parameters"
         )
-    response_text = json.dumps(payload, sort_keys=True).lower()
-    if "param" not in response_text:
+    error = payload.get("error")
+    if not isinstance(error, Mapping) or error.get("code") != "invalid_params":
         raise ProbeError(
-            "persistent attestation allowLease status negative proof is not parameter-bound"
+            "persistent attestation allowLease status negative proof is not structured invalid_params"
+        )
+    response_text = json.dumps(error, sort_keys=True).lower()
+    if "requesteragentid" not in response_text:
+        raise ProbeError(
+            "persistent attestation allowLease status negative proof is not bound to unexpected requesterAgentId"
         )
     return raw_response_digest
 
@@ -5829,7 +5838,10 @@ def _run_persistent_lifecycle_probe_once(
     except Exception as exc:
         if isinstance(exc, (CandidatePortOpenError, CandidateProcessGroupOpenError)):
             raise
-        process_group_cleanup_attempted = _terminate_process_group(proc)
+        cleanup_snapshot = _tracked_cleanup_from_process(proc)
+        process_group_cleanup_attempted, all_candidate_processes_reaped = (
+            _terminate_and_verify_process_group(proc)
+        )
         port_closed = _wait_for_loopback_port_closed(port)
         payload = _persistent_failure_summary(
             openclaw_root=openclaw_root,
@@ -5847,16 +5859,21 @@ def _run_persistent_lifecycle_probe_once(
         payload["fail_closed_matrix"].append(
             {
                 "check": "post_success_validation_process_group_cleanup",
-                "status": "pass" if port_closed else "fail",
+                "status": "pass" if port_closed and all_candidate_processes_reaped else "fail",
                 "process_group_cleanup_attempted": process_group_cleanup_attempted,
+                "tracked_cleanup_available": (
+                    isinstance(cleanup_snapshot, Mapping)
+                    and cleanup_snapshot.get("tracking_status") == "available"
+                ),
+                "all_candidate_processes_reaped": all_candidate_processes_reaped,
                 "candidate_port_closed": port_closed,
                 "rejected_after_runner_success": True,
             }
         )
         _write_validated_payload(evidence_file, payload)
-        if not port_closed:
+        if not port_closed or not all_candidate_processes_reaped:
             raise ProbeError(
-                "persistent lifecycle runner evidence was rejected and candidate port remained open"
+                "persistent lifecycle runner evidence was rejected and candidate process cleanup remained incomplete"
             ) from exc
         raise ProbeError(
             "persistent lifecycle runner evidence was rejected after successful runner exit "

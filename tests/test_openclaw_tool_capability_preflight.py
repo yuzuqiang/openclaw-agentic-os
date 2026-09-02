@@ -571,7 +571,7 @@ def add_fake_openclaw_to_env(
             "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
             "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
             "    if params != '{}':\n"
-            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params'}}, sort_keys=True))\n"
+            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params: requesterAgentId'}}, sort_keys=True))\n"
             "        raise SystemExit(1)\n"
             "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
@@ -607,7 +607,7 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
             "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
             "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
             "    if params != '{}':\n"
-            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params'}}, sort_keys=True))\n"
+            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params: requesterAgentId'}}, sort_keys=True))\n"
             "        raise SystemExit(1)\n"
             "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
@@ -647,6 +647,32 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
 
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
+
+    def test_status_negative_rejection_requires_structured_invalid_params(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        accepted_or_ambiguous = (
+            {"ok": True, "result": {"error": "parameter cache unavailable"}},
+            {"ok": False, "error": "parameter backend unavailable"},
+            {"ok": False, "error": {"code": "unavailable", "message": "param"}},
+            {"ok": False, "error": {"code": "invalid_params", "message": "param"}},
+        )
+        for payload in accepted_or_ambiguous:
+            with self.subTest(payload=payload), self.assertRaises(
+                module.AdapterContractError
+            ):
+                module._validate_status_non_empty_params_rejection_payload(payload)
+
+        module._validate_status_non_empty_params_rejection_payload(
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_params",
+                    "message": "unexpected params: requesterAgentId",
+                },
+            }
+        )
 
     def test_persistent_contract_snapshot_binds_commonjs_require_closure(self) -> None:
         module = load_preflight_module()
@@ -1154,7 +1180,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
                     "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
                     "    if params != '{}':\n"
-                    "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params'}}, sort_keys=True))\n"
+                    "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params: requesterAgentId'}}, sort_keys=True))\n"
                     "        raise SystemExit(1)\n"
                     "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
                     "    raise SystemExit(0)\n"
