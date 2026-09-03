@@ -1,4 +1,4 @@
-name: PR45 Workbench Export
+name: PR45 Workbench Export Git
 
 on:
   push:
@@ -9,23 +9,23 @@ permissions:
   contents: read
 
 jobs:
-  export-source:
+  export-git-source:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out exact PR head
+      - name: Check out exact PR head with history
         uses: actions/checkout@v4
         with:
           ref: phase-b/issue44-live-runtime-readiness-20260824
           fetch-depth: 0
-      - name: Package source snapshot
+      - name: Package source and Git metadata
         shell: bash
         run: |
           set -euo pipefail
-          tar --exclude=.git -czf "$RUNNER_TEMP/pr45-source.tar.gz" .
-      - name: Upload source snapshot
+          tar -czf "$RUNNER_TEMP/pr45-git-source.tar.gz" .
+      - name: Upload Git source snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: pr45-source-bf957cbb
-          path: ${{ runner.temp }}/pr45-source.tar.gz
+          name: pr45-git-bf957cbb
+          path: ${{ runner.temp }}/pr45-git-source.tar.gz
           if-no-files-found: error
           retention-days: 1
