@@ -790,7 +790,8 @@ class _ProcessCleanupTracker:
                 self.unattributed_identities = {}
             if not hasattr(self, "_pending_unattributed_identities"):
                 self._pending_unattributed_identities = {}
-            if root is not None and root.get("uid") == self.uid:
+            root_is_candidate = root is not None and root.get("uid") == self.uid
+            if root_is_candidate:
                 self.root_identity = _process_identity(root)
                 if self.cleanup_marker is not None:
                     root_has_marker = _process_has_cleanup_marker(
@@ -850,7 +851,7 @@ class _ProcessCleanupTracker:
                         else:
                             identity = _process_identity(record)
                             pending = self._pending_unattributed_identities.get(pid)
-                            if self.root_identity is None or (
+                            if not root_is_candidate or self.root_identity is None or (
                                 isinstance(pending, Mapping)
                                 and pending.get("uid") == identity.get("uid")
                                 and pending.get("start_id") == identity.get("start_id")

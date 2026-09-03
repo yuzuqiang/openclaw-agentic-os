@@ -2738,7 +2738,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.ProbeError, "WebAssembly"):
                     MODULE._persistent_runtime_source_paths(root)
 
-    def test_persistent_runtime_source_closure_binds_module_register_hooks(
+    def test_persistent_runtime_source_closure_rejects_module_register_hooks(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2754,11 +2754,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 },
             )
 
-            paths = MODULE._persistent_runtime_source_paths(root)
+            with self.assertRaisesRegex(MODULE.ProbeError, "module.register hook"):
+                MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/hooks.mjs", paths)
-
-    def test_persistent_runtime_source_closure_binds_module_register_hook_in_template_expression(
+    def test_persistent_runtime_source_closure_rejects_module_register_hook_in_template_expression(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2774,9 +2773,103 @@ class RealGatewayProbeTests(unittest.TestCase):
                 },
             )
 
-            paths = MODULE._persistent_runtime_source_paths(root)
+            with self.assertRaisesRegex(MODULE.ProbeError, "module.register hook"):
+                MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/hooks.mjs", paths)
+    def test_persistent_runtime_source_closure_rejects_register_hooks_source_substitution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { registerHooks } from 'node:module';\n"
+                        "registerHooks({ load() {} });\n"
+                    ),
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "evaluated loader"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_unbound_execution_capabilities(
+        self,
+    ) -> None:
+        cases = {
+            "node_test": (
+                "import { run } from 'node:test';\n"
+                "run({ files: ['./hidden.cjs'] });\n"
+            ),
+            "node_vm": (
+                "import vm from 'node:vm';\n"
+                "const member = ['run', 'InThis', 'Context'].join('');\n"
+                "vm[member]('hidden source');\n"
+            ),
+            "node_sqlite": (
+                "import { DatabaseSync } from 'node:sqlite';\n"
+                "new DatabaseSync(':memory:', { allowExtension: true })"
+                ".loadExtension('./hidden.so');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {MODULE.PERSISTENT_LIFECYCLE_RUNNER: source},
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "unbound execution capability"
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_callable_constructor_evaluation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import fs from 'node:fs';\n"
+                        "[].filter.constructor("
+                        "fs.readFileSync('./hidden.txt', 'utf8'))();\n"
+                    ),
+                    "scripts/hidden.txt": "globalThis.hidden = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "evaluated loader"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_indirect_fork_aliases(
+        self,
+    ) -> None:
+        cases = (
+            "import { fork as launch } from 'node:child_process';\n"
+            "(0, launch)('./hidden.cjs');\n",
+            "import { fork as launch } from 'node:child_process';\n"
+            "Reflect.apply(launch, null, ['./hidden.cjs']);\n",
+        )
+        for source in cases:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = {};\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "indirect child-process fork entrypoint"
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_module_register_hook(
         self,
@@ -6637,6 +6730,57 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIsNone(snapshot["root_identity"])
         self.assertEqual(snapshot["tracking_status"], "unavailable")
         self.assertIn("candidate process identity", snapshot["tracking_error"])
+        self.assertEqual(
+            snapshot["unattributed_process_identities"],
+            [
+                {
+                    "pid": escaped_pid,
+                    "uid": os.getuid(),
+                    "start_id": "escaped-start",
+                }
+            ],
+        )
+
+    def test_cleanup_tracker_rejects_first_seen_detached_child_after_root_exit(
+        self,
+    ) -> None:
+        root_pid = 123456
+        escaped_pid = 234567
+        marker = "unit-cleanup-marker"
+        tracker = MODULE._ProcessCleanupTracker.__new__(MODULE._ProcessCleanupTracker)
+        tracker.root_pid = root_pid
+        tracker.uid = os.getuid()
+        tracker.cleanup_marker = marker
+        tracker.cleanup_marker_verified = True
+        tracker.baseline_identities = {}
+        tracker.root_identity = {
+            "pid": root_pid,
+            "uid": os.getuid(),
+            "start_id": "root-start",
+        }
+        tracker.descendants = {}
+        tracker.unattributed_identities = {}
+        tracker._pending_unattributed_identities = {}
+        tracker.unavailable_error = None
+        tracker._lock = MODULE.threading.Lock()
+        records = {
+            escaped_pid: {
+                "pid": escaped_pid,
+                "ppid": 1,
+                "pgid": escaped_pid,
+                "uid": os.getuid(),
+                "start_id": "escaped-start",
+            }
+        }
+
+        with mock.patch.object(MODULE, "_process_table", return_value=records), mock.patch.object(
+            MODULE, "_process_has_cleanup_marker", return_value=False
+        ):
+            tracker._poll_once()
+
+        snapshot = tracker.snapshot()
+        self.assertEqual(snapshot["tracking_status"], "unavailable")
+        self.assertIn("without candidate cleanup marker", snapshot["tracking_error"])
         self.assertEqual(
             snapshot["unattributed_process_identities"],
             [

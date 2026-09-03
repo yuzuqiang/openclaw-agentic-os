@@ -230,17 +230,27 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
-EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(("eval", "Function"))
+EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(
+    ("constructor", "eval", "Function", "registerHooks")
+)
 EVALUATED_RUNTIME_WEBASSEMBLY_TOKENS = frozenset(("WebAssembly",))
+EVALUATED_RUNTIME_TEST_RUNNER_SPECIFIERS = frozenset(
+    ("test", "node:test", "test/reporters", "node:test/reporters")
+)
+EVALUATED_RUNTIME_VM_SPECIFIERS = frozenset(("vm", "node:vm"))
+EVALUATED_RUNTIME_SQLITE_SPECIFIERS = frozenset(("sqlite", "node:sqlite"))
 EVALUATED_RUNTIME_INSPECTOR_SPECIFIERS = frozenset(
     ("inspector", "inspector/promises", "node:inspector", "node:inspector/promises")
 )
 EVALUATED_RUNTIME_REPL_SPECIFIERS = frozenset(("repl", "node:repl"))
 EVALUATED_RUNTIME_CLUSTER_SPECIFIERS = frozenset(("cluster", "node:cluster"))
+EVALUATED_RUNTIME_SQLITE_TOKENS = frozenset(("loadExtension",))
 NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
-COMMONJS_RUNTIME_LOADER_MEMBER_NAMES = frozenset(("runMain",))
+COMMONJS_RUNTIME_LOADER_MEMBER_NAMES = frozenset(
+    ("register", "registerHooks", "runMain")
+)
 COMMONJS_MODULE_CONSTRUCTOR_MEMBER_NAMES = frozenset(("Module", "default"))
 EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
     (
@@ -299,6 +309,51 @@ NODE_MODULE_REQUIRE_ASSIGNMENT = re.compile(
     rf"""
     \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
     require\s*\(\s*["'](?:node:)?module["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_TEST_IMPORT = re.compile(
+    rf"""
+    \bimport\s+\{{(?P<body>.*?)\}}\s*from\s*["'](?:node:)?test(?:/reporters)?["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_TEST_DEFAULT_OR_NAMESPACE_IMPORT = re.compile(
+    rf"""
+    \bimport\s+(?:
+        (?P<default>{JS_IDENTIFIER})\s*
+      | \*\s+as\s+(?P<namespace>{JS_IDENTIFIER})
+    )\s+from\s*["'](?:node:)?test(?:/reporters)?["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_TEST_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(\s*["'](?:node:)?test(?:/reporters)?["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_TEST_REQUIRE_DESTRUCTURED_REQUIRE = re.compile(
+    rf"""
+    \b(?:const|let|var)\s*\{{(?P<body>.*?)\}}\s*=\s*
+    require\s*\(\s*["'](?:node:)?test(?:/reporters)?["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+VM_IMPORT = re.compile(
+    rf"""
+    \bimport\s+(?:
+        (?P<default>{JS_IDENTIFIER})\s*
+      | \*\s+as\s+(?P<namespace>{JS_IDENTIFIER})
+    )\s+from\s*["'](?:node:)?vm["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+VM_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(\s*["'](?:node:)?vm["']\s*\)
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -1511,6 +1566,61 @@ def _commonjs_require_alias_bindings(
     return aliases, declaration_spans
 
 
+def _node_test_runner_bindings(
+    source_text: str,
+) -> tuple[set[str], set[str]]:
+    run_names: set[str] = set()
+    namespace_names: set[str] = set()
+    stripped = strip_source_comments(source_text)
+    for match in NODE_TEST_IMPORT.finditer(stripped):
+        for part in match.group("body").split(","):
+            part = part.strip()
+            imported = re.fullmatch(
+                rf"run(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER}))?\s*",
+                part,
+            )
+            if imported is None:
+                continue
+            run_names.add(imported.group("alias") or "run")
+    for match in NODE_TEST_DEFAULT_OR_NAMESPACE_IMPORT.finditer(stripped):
+        default_name = match.group("default")
+        namespace_name = match.group("namespace")
+        if default_name is not None:
+            namespace_names.add(default_name)
+        if namespace_name is not None:
+            namespace_names.add(namespace_name)
+    for match in NODE_TEST_REQUIRE_ASSIGNMENT.finditer(stripped):
+        namespace_names.add(match.group("name"))
+    for match in NODE_TEST_REQUIRE_DESTRUCTURED_REQUIRE.finditer(stripped):
+        for part in match.group("body").split(","):
+            part = part.strip()
+            imported = re.fullmatch(
+                rf"run(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
+                part,
+            )
+            if imported is None:
+                continue
+            run_names.add(imported.group("alias") or imported.group("prop_alias") or "run")
+    return run_names, namespace_names
+
+
+def _vm_namespace_names(
+    source_text: str,
+) -> set[str]:
+    names: set[str] = {"vm"}
+    stripped = strip_source_comments(source_text)
+    for match in VM_IMPORT.finditer(stripped):
+        default_name = match.group("default")
+        namespace_name = match.group("namespace")
+        if default_name is not None:
+            names.add(default_name)
+        if namespace_name is not None:
+            names.add(namespace_name)
+    for match in VM_REQUIRE_ASSIGNMENT.finditer(stripped):
+        names.add(match.group("name"))
+    return names
+
+
 def _module_register_loader_bindings(
     source_text: str,
 ) -> tuple[set[str], set[tuple[int, int]]]:
@@ -1681,6 +1791,27 @@ def _child_process_indirect_alias_node_entrypoint_pattern(
         [^()]*,\s*
         (?:{alternatives})\s*
         \)\s*\(\s*process\.execPath\s*,
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_indirect_fork_entrypoint_pattern(
+    fork_entrypoint_names: set[str],
+) -> re.Pattern[str] | None:
+    if not fork_entrypoint_names:
+        return None
+    alternatives = "|".join(
+        re.escape(name)
+        for name in sorted(fork_entrypoint_names, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        (?:
+            \(\s*[^()]*,\s*(?:{alternatives})\s*\)\s*\(
+          |
+            \bReflect\s*\.\s*(?:apply|call)\s*\(\s*(?:{alternatives})\s*,
+        )
         """,
         re.VERBOSE | re.DOTALL,
     )
@@ -2252,11 +2383,6 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported WebAssembly evaluation reference"
                 )
-        for token in EVALUATED_RUNTIME_LOADER_TOKENS:
-            if _is_forbidden_runtime_loader_reference(source_text, index, token):
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported evaluated loader reference"
-                )
         module_instance_end = _commonjs_module_instance_access_end_or_fail(
             source_text,
             index,
@@ -2300,6 +2426,11 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported custom CommonJS extension loader"
             )
+        for token in EVALUATED_RUNTIME_LOADER_TOKENS:
+            if _is_forbidden_runtime_loader_reference(source_text, index, token):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported evaluated loader reference"
+                )
         parsed_identifier = _parse_js_identifier(source_text, index)
         if (
             parsed_identifier is not None
@@ -2796,6 +2927,13 @@ def _runtime_execution_entrypoint_specifiers(
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported shell child-process entrypoint"
         )
+    indirect_fork_pattern = _child_process_indirect_fork_entrypoint_pattern(
+        child_process_fork_alias_names
+    )
+    if indirect_fork_pattern is not None and indirect_fork_pattern.search(source_text):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported indirect child-process fork entrypoint"
+        )
 
     for constructor_name in sorted(worker_constructor_names, key=len, reverse=True):
         for match in re.finditer(rf"\bnew\s+{re.escape(constructor_name)}\s*\(", source_text):
@@ -2973,9 +3111,10 @@ def _module_register_hook_specifiers(
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported module.register hook usage"
                 )
-            specifier, index = parsed
-            specifiers.append(specifier)
-            break
+            _specifier, index = parsed
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported module.register hook"
+            )
         else:
             index += 1
     return specifiers
@@ -2986,19 +3125,34 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
     create_require_specifiers = _create_require_specifiers(source_text)
     dynamic_specifiers = _dynamic_import_specifiers(source_text)
+    nonstatic_specifiers = (
+        commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+    )
     process_module_specifiers = {"process", "node:process"}
     if process_module_specifiers.intersection(
-        commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+        nonstatic_specifiers
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported native add-on process module import"
         )
     if any(
         specifier in EVALUATED_RUNTIME_CLUSTER_SPECIFIERS
-        for specifier in commonjs_specifiers + create_require_specifiers + dynamic_specifiers
+        for specifier in nonstatic_specifiers
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported cluster execution capability"
+        )
+    if any(
+        specifier
+        in (
+            EVALUATED_RUNTIME_TEST_RUNNER_SPECIFIERS
+            | EVALUATED_RUNTIME_VM_SPECIFIERS
+            | EVALUATED_RUNTIME_SQLITE_SPECIFIERS
+        )
+        for specifier in nonstatic_specifiers
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported unbound execution capability"
         )
     execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
     module_register_hooks = _module_register_hook_specifiers(source_text)
@@ -3025,6 +3179,14 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         if specifier in EVALUATED_RUNTIME_CLUSTER_SPECIFIERS:
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported cluster execution capability"
+            )
+        if specifier in (
+            EVALUATED_RUNTIME_TEST_RUNNER_SPECIFIERS
+            | EVALUATED_RUNTIME_VM_SPECIFIERS
+            | EVALUATED_RUNTIME_SQLITE_SPECIFIERS
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported unbound execution capability"
             )
         specifiers.append((specifier, True, "import"))
     if any(
