@@ -2321,8 +2321,8 @@ def _commonjs_module_instance_access_end_or_fail(
 
 def _reject_evaluated_runtime_loaders(source_text: str) -> None:
     source_text = re.sub(
-        r"\\u([0-9A-Fa-f]{4})",
-        lambda match: chr(int(match.group(1), 16)),
+        r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})",
+        lambda match: chr(int(match.group(1) or match.group(2), 16)),
         source_text,
     )
     node_module_namespace_names, node_module_constructor_names = (
@@ -2956,6 +2956,13 @@ def _runtime_execution_entrypoint_specifiers(
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported Worker entrypoint"
                 )
+        if re.search(
+            rf"\bnew\s*\(\s*[^()]*,\s*{re.escape(constructor_name)}\s*\)\s*\(",
+            source_text,
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported indirect Worker entrypoint"
+            )
     for namespace_name in sorted(worker_namespace_names, key=len, reverse=True):
         for pattern in (
             rf"\bnew\s+{re.escape(namespace_name)}\s*(?:\.|\?\.)\s*Worker\s*\(",

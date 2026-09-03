@@ -2880,6 +2880,11 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "[].filter.constr\\u0075ctor("
                 "fs.readFileSync('./hidden.txt', 'utf8'))();\n"
             ),
+            "brace_escaped_constructor": (
+                "import fs from 'node:fs';\n"
+                "[].filter.constr\\u{75}ctor("
+                "fs.readFileSync('./hidden.txt', 'utf8'))();\n"
+            ),
             "process_execve": (
                 "process.execve(process.execPath, "
                 "[process.execPath, './hidden.cjs'], process.env);\n"
@@ -2895,6 +2900,25 @@ class RealGatewayProbeTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(MODULE.ProbeError, "unsupported"):
                     MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_indirect_worker_constructor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { Worker } from 'node:worker_threads';\n"
+                        "new (0, Worker)(new URL('./hidden.mjs', import.meta.url));\n"
+                    ),
+                    "scripts/hidden.mjs": "export const hidden = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "indirect Worker"):
+                MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_module_register_hook(
         self,
