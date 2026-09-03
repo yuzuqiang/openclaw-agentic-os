@@ -2871,6 +2871,31 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_escaped_constructor_and_execve(
+        self,
+    ) -> None:
+        cases = {
+            "escaped_constructor": (
+                "import fs from 'node:fs';\n"
+                "[].filter.constr\\u0075ctor("
+                "fs.readFileSync('./hidden.txt', 'utf8'))();\n"
+            ),
+            "process_execve": (
+                "process.execve(process.execPath, "
+                "[process.execPath, './hidden.cjs'], process.env);\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {MODULE.PERSISTENT_LIFECYCLE_RUNNER: source},
+                )
+
+                with self.assertRaisesRegex(MODULE.ProbeError, "unsupported"):
+                    MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_dynamic_module_register_hook(
         self,
     ) -> None:

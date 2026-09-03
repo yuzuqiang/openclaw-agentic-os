@@ -890,6 +890,7 @@ def _parse_safe_process_member_access(source_text: str, index: int) -> int | Non
         "_linkedBinding",
         "binding",
         "dlopen",
+        "execve",
         "getBuiltinModule",
         "mainModule",
     }:
@@ -2185,6 +2186,10 @@ def _parenthesized_expression_end(source_text: str, index: int) -> int:
             quote = character
             index += 1
             continue
+        if character == "\\" and next_character == "u":
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported escaped JavaScript identifier"
+            )
         if character == "(":
             depth += 1
             index += 1
@@ -2367,6 +2372,10 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             quote = character
             index += 1
             continue
+        if character == "\\" and next_character == "u":
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported escaped JavaScript identifier"
+            )
         if character == "[":
             computed_member = _static_computed_member_name(source_text, index)
             if (
