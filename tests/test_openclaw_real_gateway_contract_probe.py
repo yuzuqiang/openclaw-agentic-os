@@ -8632,6 +8632,44 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertIs(cleanup["tracked_cleanup_available"], True)
             self.assertIs(cleanup["all_candidate_processes_reaped"], False)
 
+    def test_runtime_source_snapshot_preserves_bound_bytes_after_origin_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
+            hidden = root / "scripts/hidden.mjs"
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            runner.write_text("import './hidden.mjs';\n", encoding="utf-8")
+            hidden.write_text("export const safe = true;\n", encoding="utf-8")
+            (root / ".git").write_text("gitdir: /tmp/test-gitdir\n", encoding="utf-8")
+            sources = [
+                {
+                    "path": MODULE.PERSISTENT_LIFECYCLE_RUNNER,
+                    "sha256": MODULE._sha256_bytes(runner.read_bytes()),
+                },
+                {
+                    "path": "scripts/hidden.mjs",
+                    "sha256": MODULE._sha256_bytes(hidden.read_bytes()),
+                },
+            ]
+
+            snapshot = MODULE._stage_immutable_runtime_sources(
+                root, sources, root / "run"
+            )
+            hidden.write_text("export const altered = true;\n", encoding="utf-8")
+
+            self.assertEqual(
+                (snapshot / "scripts/hidden.mjs").read_text(encoding="utf-8"),
+                "export const safe = true;\n",
+            )
+            self.assertEqual(
+                (snapshot / MODULE.PERSISTENT_LIFECYCLE_RUNNER).read_text(
+                    encoding="utf-8"
+                ),
+                "import './hidden.mjs';\n",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

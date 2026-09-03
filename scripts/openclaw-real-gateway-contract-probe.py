@@ -1360,6 +1360,43 @@ def _assert_runtime_sources_still_bound(
         raise ProbeError("persistent runtime source closure changed after candidate runner exit")
 
 
+def _stage_immutable_runtime_sources(
+    openclaw_root: Path,
+    runtime_sources: list[dict[str, str]],
+    run_root: Path,
+) -> Path:
+    snapshot_root = run_root / "runtime-source-snapshot"
+    snapshot_root.mkdir(parents=True, mode=0o700)
+    for source in runtime_sources:
+        relative = source.get("path")
+        expected_sha256 = source.get("sha256")
+        if not isinstance(relative, str) or not isinstance(expected_sha256, str):
+            raise ProbeError("runtime source snapshot binding is invalid")
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise ProbeError("runtime source snapshot path is invalid")
+        origin = openclaw_root / relative_path
+        if not origin.is_file() or _sha256_bytes(origin.read_bytes()) != expected_sha256:
+            raise ProbeError("runtime source changed before immutable snapshot staging")
+        destination = snapshot_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copyfile(origin, destination)
+        os.chmod(destination, 0o400)
+    runner = snapshot_root / PERSISTENT_LIFECYCLE_RUNNER
+    if not runner.is_file():
+        raise ProbeError("immutable runtime source snapshot is missing the lifecycle runner")
+    git_metadata = openclaw_root / ".git"
+    if git_metadata.is_file():
+        shutil.copyfile(git_metadata, snapshot_root / ".git")
+    elif git_metadata.is_dir():
+        (snapshot_root / ".git").write_text(
+            f"gitdir: {git_metadata.resolve()}\n", encoding="utf-8"
+        )
+    else:
+        raise ProbeError("runtime source snapshot Git metadata is unavailable")
+    return snapshot_root
+
+
 def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -> None:
     current_sources = _source_bindings(ROOT, AGENTIC_SOURCE_PATHS)
     expected = {
@@ -5585,6 +5622,11 @@ def _run_persistent_lifecycle_probe_once(
     runner_env[PERSISTENT_ATTESTATION_VERIFICATION_HMAC_ENV] = (
         attestation_verification_key.hex()
     )
+    snapshot_root = (
+        _stage_immutable_runtime_sources(openclaw_root, runtime_sources, run_root)
+        if runtime_sources
+        else openclaw_root
+    )
     command = [
         str(node_executable),
         "--import",
@@ -5592,7 +5634,7 @@ def _run_persistent_lifecycle_probe_once(
         PERSISTENT_LIFECYCLE_RUNNER,
         "run",
         "--runtime-worktree",
-        str(openclaw_root.resolve()),
+        str(snapshot_root),
         "--agentic-os-worktree",
         str(ROOT.resolve()),
         "--expected-runtime-head",
@@ -5614,7 +5656,7 @@ def _run_persistent_lifecycle_probe_once(
     try:
         proc = _run(
             command,
-            cwd=openclaw_root,
+            cwd=snapshot_root,
             env=runner_env,
             timeout=timeout,
             start_new_session=True,
