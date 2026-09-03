@@ -1,0 +1,31 @@
+name: PR45 Workbench Export
+
+on:
+  push:
+    branches:
+      - automation/pr45-workbench-20260903
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: phase-b/issue44-live-runtime-readiness-20260824
+          fetch-depth: 0
+      - name: Package source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git -czf "$RUNNER_TEMP/pr45-source.tar.gz" .
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr45-source-bf957cbb
+          path: ${{ runner.temp }}/pr45-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
