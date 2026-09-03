@@ -2320,6 +2320,11 @@ def _commonjs_module_instance_access_end_or_fail(
 
 
 def _reject_evaluated_runtime_loaders(source_text: str) -> None:
+    source_text = re.sub(
+        r"\\u([0-9A-Fa-f]{4})",
+        lambda match: chr(int(match.group(1), 16)),
+        source_text,
+    )
     node_module_namespace_names, node_module_constructor_names = (
         _node_module_runtime_binding_names(source_text)
     )
@@ -2372,10 +2377,6 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             quote = character
             index += 1
             continue
-        if character == "\\" and next_character == "u":
-            raise RuntimeSourceContractError(
-                "runtime source contains an unsupported escaped JavaScript identifier"
-            )
         if character == "[":
             computed_member = _static_computed_member_name(source_text, index)
             if (
