@@ -2428,6 +2428,11 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
             )
         for token in EVALUATED_RUNTIME_LOADER_TOKENS:
             if _is_forbidden_runtime_loader_reference(source_text, index, token):
+                if token == "constructor":
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported evaluated loader reference "
+                        "or native add-on capability"
+                    )
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported evaluated loader reference"
                 )
