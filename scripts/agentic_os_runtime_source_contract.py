@@ -23,11 +23,12 @@ PERSISTENT_RUNTIME_SOURCE_PATHS = (
 )
 PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS = PERSISTENT_RUNTIME_SOURCE_PATHS
 PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES = frozenset(
-    (".cjs", ".cts", ".js", ".mjs", ".mts", ".ts", ".tsx")
+    (".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx")
 )
 PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES = (
     ".ts",
     ".tsx",
+    ".jsx",
     ".mts",
     ".cts",
     ".d.ts",
@@ -38,7 +39,7 @@ PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES = (
 )
 NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES = (".js", ".json", ".node")
 PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES = {
-    ".js": (".ts", ".tsx", ".mts", ".cts", ".d.ts", ".js"),
+    ".js": (".ts", ".tsx", ".jsx", ".mts", ".cts", ".d.ts", ".js"),
     ".mjs": (".mts", ".mjs"),
     ".cjs": (".cts", ".cjs"),
 }
@@ -198,7 +199,7 @@ WORKER_THREADS_DESTRUCTURED_REQUIRE = re.compile(
 )
 CHILD_PROCESS_IMPORT = re.compile(
     rf"""
-    \bimport\s*\{{(?P<body>.*?)\}}\s*
+    \bimport\s*(?:(?P<default>{JS_IDENTIFIER})\s*,\s*)?\{{(?P<body>.*?)\}}\s*
     from\s*["'](?:node:)?child_process["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -220,6 +221,7 @@ CHILD_PROCESS_NAMESPACE_IMPORT = re.compile(
 CHILD_PROCESS_DEFAULT_IMPORT = re.compile(
     rf"""
     \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    (?:,\s*(?:\{{.*?\}}|\*\s+as\s+{JS_IDENTIFIER})\s*)?
     from\s*["'](?:node:)?child_process["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -300,6 +302,7 @@ EVALUATED_RUNTIME_REPL_SPECIFIERS = frozenset(("repl", "node:repl"))
 EVALUATED_RUNTIME_CLUSTER_SPECIFIERS = frozenset(("cluster", "node:cluster"))
 EVALUATED_RUNTIME_SQLITE_TOKENS = frozenset(("loadExtension",))
 NODE_MODULE_SPECIFIERS = frozenset(("module", "node:module"))
+CHILD_PROCESS_SPECIFIERS = frozenset(("child_process", "node:child_process"))
 COMMONJS_CUSTOM_EXTENSION_MEMBER_NAMES = frozenset(("_extensions", "extensions"))
 COMMONJS_COMPILE_MEMBER_NAMES = frozenset(("_compile",))
 COMMONJS_RUNTIME_LOADER_MEMBER_NAMES = frozenset(
@@ -320,7 +323,7 @@ EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
 )
 CREATE_REQUIRE_IMPORT = re.compile(
     rf"""
-    \bimport\s*\{{(?P<body>.*?)\}}\s*
+    \bimport\s*(?:{JS_IDENTIFIER}\s*,\s*)?\{{(?P<body>.*?)\}}\s*
     from\s*["'](?:node:)?module["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -355,6 +358,7 @@ NODE_MODULE_NAMESPACE_IMPORT = re.compile(
 NODE_MODULE_DEFAULT_IMPORT = re.compile(
     rf"""
     \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    (?:,\s*(?:\{{.*?\}}|\*\s+as\s+{JS_IDENTIFIER})\s*)?
     from\s*["'](?:node:)?module["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -432,6 +436,18 @@ COMMONJS_REQUIRE_ALIAS_ASSIGNMENT = re.compile(
     \(?\s*require\s*\)?\s*(?:;|,|\n|$)
     """,
     re.VERBOSE,
+)
+INDIRECT_COMMONJS_REQUIRE_INVOCATION = re.compile(
+    rf"""
+    (?:
+        (?<![\w$.])
+        require\s*(?:\.|\?\.)\s*(?:call|apply)\s*\(
+      |
+        (?<![\w$.])
+        Reflect\s*(?:\.|\?\.)\s*apply\s*\(\s*require\s*,
+    )
+    """,
+    re.VERBOSE | re.DOTALL,
 )
 RUNTIME_PACKAGE_CONDITIONS = {
     "import": frozenset(
@@ -618,6 +634,111 @@ def _parse_js_identifier(source_text: str, index: int) -> tuple[str, int] | None
     return ("".join(parts), index) if parts else None
 
 
+def _decode_js_identifier_escapes_in_executable_code(source_text: str) -> str:
+    output: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            output.append(character)
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            output.append(character)
+            if character == "*" and next_character == "/":
+                output.append(next_character)
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            output.append(character)
+            if character == "\\" and index + 1 < len(source_text):
+                output.append(next_character)
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            output.extend((character, next_character))
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            output.extend((character, next_character))
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            output.append(source_text[index:regex_end])
+            index = regex_end
+            continue
+        if character == "`":
+            template_start = index
+            _chunks, index = _template_expression_chunks(source_text, index)
+            output.append(source_text[template_start:index])
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            output.append(character)
+            index += 1
+            continue
+        if character == "\\" and next_character == "u":
+            decoded, index = _decode_js_identifier_escape(source_text, index)
+            output.append(decoded)
+            continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
+def _parse_named_binding_part(part: str) -> tuple[str, str] | None:
+    part = part.strip()
+    if not part:
+        return None
+    if part[0] in {"'", '"'}:
+        parsed_literal = _parse_quoted_specifier(part, 0)
+        if parsed_literal is None:
+            return None
+        imported_name, index = parsed_literal
+    else:
+        parsed_identifier = _parse_js_identifier(part, 0)
+        if parsed_identifier is None:
+            return None
+        imported_name, index = parsed_identifier
+    index = _skip_whitespace(part, index)
+    if index == len(part):
+        return imported_name, imported_name
+    if part.startswith("as", index):
+        after_as = index + 2
+        after = part[after_as] if after_as < len(part) else ""
+        if after and not after.isspace():
+            return None
+        parsed_alias = _parse_js_identifier(part, _skip_whitespace(part, after_as))
+        if parsed_alias is None:
+            return None
+        alias_name, alias_end = parsed_alias
+        return (imported_name, alias_name) if part[alias_end:].strip() == "" else None
+    if part[index] != ":":
+        return None
+    parsed_alias = _parse_js_identifier(part, _skip_whitespace(part, index + 1))
+    if parsed_alias is None:
+        return None
+    alias_name, alias_end = parsed_alias
+    return (imported_name, alias_name) if part[alias_end:].strip() == "" else None
+
+
 def _skip_whitespace(source_text: str, index: int) -> int:
     while index < len(source_text) and source_text[index].isspace():
         index += 1
@@ -673,6 +794,26 @@ def _parse_quoted_specifier(source_text: str, index: int) -> tuple[str, int] | N
         index += 1
     raise RuntimeSourceContractError(
         "runtime source contains an unterminated CommonJS require specifier"
+    )
+
+
+def _quoted_literal_end(source_text: str, index: int) -> int:
+    if index >= len(source_text) or source_text[index] not in {"'", '"'}:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unterminated JavaScript string"
+        )
+    quote = source_text[index]
+    index += 1
+    while index < len(source_text):
+        character = source_text[index]
+        if character == "\\" and index + 1 < len(source_text):
+            index += 2
+            continue
+        if character == quote:
+            return index + 1
+        index += 1
+    raise RuntimeSourceContractError(
+        "runtime source contains an unterminated JavaScript string"
     )
 
 
@@ -1194,13 +1335,14 @@ def _native_addon_entrypoint_specifiers(source_text: str) -> list[str]:
                 continue
         if character in {"'", '"'}:
             quote_index = index
+            if not _quoted_literal_is_computed_member(source_text, quote_index):
+                index = _quoted_literal_end(source_text, index)
+                continue
             parsed = _parse_quoted_specifier(source_text, index)
             if parsed is None:
                 raise AssertionError("quoted JavaScript literal did not parse")
             literal_value, index = parsed
-            if literal_value in {"_load", "constructor", "process"} and (
-                _quoted_literal_is_computed_member(source_text, quote_index)
-            ):
+            if literal_value in {"_load", "constructor", "process"}:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported native add-on capability access"
                 )
@@ -1597,18 +1739,12 @@ def _create_require_factory_names(source_text: str) -> set[str]:
     for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
-                part = part.strip()
-                imported = re.fullmatch(
-                    rf"createRequire(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
-                    part,
-                )
-                if imported is None:
+                binding = _parse_named_binding_part(part)
+                if binding is None:
                     continue
-                factories.add(
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or "createRequire"
-                )
+                imported_name, local_name = binding
+                if imported_name == "createRequire":
+                    factories.add(local_name)
     return factories
 
 
@@ -1646,14 +1782,12 @@ def _node_test_runner_bindings(
     stripped = strip_source_comments(source_text)
     for match in NODE_TEST_IMPORT.finditer(stripped):
         for part in match.group("body").split(","):
-            part = part.strip()
-            imported = re.fullmatch(
-                rf"run(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER}))?\s*",
-                part,
-            )
-            if imported is None:
+            binding = _parse_named_binding_part(part)
+            if binding is None:
                 continue
-            run_names.add(imported.group("alias") or "run")
+            imported_name, local_name = binding
+            if imported_name == "run":
+                run_names.add(local_name)
     for match in NODE_TEST_DEFAULT_OR_NAMESPACE_IMPORT.finditer(stripped):
         default_name = match.group("default")
         namespace_name = match.group("namespace")
@@ -1665,14 +1799,12 @@ def _node_test_runner_bindings(
         namespace_names.add(match.group("name"))
     for match in NODE_TEST_REQUIRE_DESTRUCTURED_REQUIRE.finditer(stripped):
         for part in match.group("body").split(","):
-            part = part.strip()
-            imported = re.fullmatch(
-                rf"run(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
-                part,
-            )
-            if imported is None:
+            binding = _parse_named_binding_part(part)
+            if binding is None:
                 continue
-            run_names.add(imported.group("alias") or imported.group("prop_alias") or "run")
+            imported_name, local_name = binding
+            if imported_name == "run":
+                run_names.add(local_name)
     return run_names, namespace_names
 
 
@@ -1702,19 +1834,13 @@ def _module_register_loader_bindings(
     for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
-                part = part.strip()
-                imported = re.fullmatch(
-                    rf"register(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
-                    part,
-                )
-                if imported is None:
+                binding = _parse_named_binding_part(part)
+                if binding is None:
                     continue
-                loaders.add(
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or "register"
-                )
-                declaration_spans.add(match.span())
+                imported_name, local_name = binding
+                if imported_name == "register":
+                    loaders.add(local_name)
+                    declaration_spans.add(match.span())
     return loaders, declaration_spans
 
 
@@ -1726,17 +1852,12 @@ def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
     for pattern in (WORKER_THREADS_IMPORT, WORKER_THREADS_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
-                imported = re.fullmatch(
-                    rf"\s*Worker(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?\s*",
-                    part,
-                )
-                if imported is None:
+                binding = _parse_named_binding_part(part)
+                if binding is None:
                     continue
-                constructor_names.add(
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or "Worker"
-                )
+                imported_name, local_name = binding
+                if imported_name == "Worker":
+                    constructor_names.add(local_name)
     for pattern in (
         WORKER_THREADS_NAMESPACE_IMPORT,
         WORKER_THREADS_DEFAULT_IMPORT,
@@ -1755,32 +1876,14 @@ def _child_process_sync_alias_bindings(
     node_entrypoint_names: set[str] = set()
     sync_shell_names: set[str] = set()
     namespace_names = {"child_process"}
-    entrypoint_alternatives = "|".join(
-        sorted(
-            CHILD_PROCESS_FORK_ENTRYPOINT_NAMES
-            |
-            CHILD_PROCESS_NODE_ENTRYPOINT_NAMES
-            | CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES,
-            key=len,
-            reverse=True,
-        )
-    )
 
     for pattern in (CHILD_PROCESS_IMPORT, CHILD_PROCESS_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
-                imported = re.fullmatch(
-                    rf"\s*(?P<entrypoint>{entrypoint_alternatives})(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?\s*",
-                    part,
-                )
-                if imported is None:
+                binding = _parse_named_binding_part(part)
+                if binding is None:
                     continue
-                entrypoint = imported.group("entrypoint")
-                local_name = (
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or entrypoint
-                )
+                entrypoint, local_name = binding
                 if entrypoint in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
                     fork_entrypoint_names.add(local_name)
                 elif entrypoint in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
@@ -2130,34 +2233,22 @@ def _node_module_runtime_binding_names(
     for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
-                part = part.strip()
-                imported = re.fullmatch(
-                    rf"Module(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
-                    part,
-                )
-                if imported is None:
+                binding = _parse_named_binding_part(part)
+                if binding is None:
                     continue
-                constructor_names.add(
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or "Module"
-                )
+                imported_name, local_name = binding
+                if imported_name == "Module":
+                    constructor_names.add(local_name)
 
     for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
-                part = part.strip()
-                imported = re.fullmatch(
-                    rf"runMain(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
-                    part,
-                )
-                if imported is None:
+                binding = _parse_named_binding_part(part)
+                if binding is None:
                     continue
-                runtime_loader_names.add(
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or "runMain"
-                )
+                imported_name, local_name = binding
+                if imported_name == "runMain":
+                    runtime_loader_names.add(local_name)
 
     return namespace_names, constructor_names, runtime_loader_names
 
@@ -2465,11 +2556,7 @@ def _commonjs_module_instance_access_end_or_fail(
 
 
 def _reject_evaluated_runtime_loaders(source_text: str) -> None:
-    source_text = re.sub(
-        r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})",
-        lambda match: chr(int(match.group(1) or match.group(2), 16)),
-        source_text,
-    )
+    source_text = _decode_js_identifier_escapes_in_executable_code(source_text)
     (
         node_module_namespace_names,
         node_module_constructor_names,
@@ -2999,6 +3086,10 @@ def _commonjs_require_specifiers(
     source_text: str,
     inherited_alias_names: set[str] | None = None,
 ) -> list[str]:
+    if _executable_pattern_matches(source_text, INDIRECT_COMMONJS_REQUIRE_INVOCATION):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported indirect CommonJS require invocation"
+        )
     local_alias_names, declaration_spans = _commonjs_require_alias_bindings(source_text)
     alias_names = set(inherited_alias_names or ()) | local_alias_names
     specifiers: list[str] = []
@@ -3204,11 +3295,7 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
 def _runtime_execution_entrypoint_specifiers(
     source_text: str,
 ) -> list[tuple[str, str]]:
-    source_text = re.sub(
-        r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})",
-        lambda match: chr(int(match.group(1) or match.group(2), 16)),
-        source_text,
-    )
+    source_text = _decode_js_identifier_escapes_in_executable_code(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, str]] = []
     accepted_spans: list[tuple[int, int]] = []
@@ -3592,6 +3679,14 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported cluster execution capability"
+        )
+    if any(specifier in CHILD_PROCESS_SPECIFIERS for specifier in dynamic_specifiers):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic child-process execution capability"
+        )
+    if any(specifier in NODE_MODULE_SPECIFIERS for specifier in dynamic_specifiers):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported dynamic CommonJS runtime loader capability"
         )
     if any(
         specifier
@@ -4081,6 +4176,10 @@ def resolve_import(
     )
     if _is_node_builtin(normalized):
         return ()
+    if not normalized.startswith(".") and "%" in normalized:
+        raise RuntimeSourceContractError(
+            "runtime package import contains an unsupported percent-encoded path"
+        )
     if normalized.startswith("."):
         base = (importer.parent / normalized).resolve()
         try:

@@ -9426,6 +9426,219 @@ class RealGatewayProbeTests(unittest.TestCase):
             ):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_preserves_unicode_escapes_in_data(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "// \\u000a[].filter.constructor('hidden')();\n"
+                        "const quoted = \"\\u0022; [].filter.constructor('hidden')();//\";\n"
+                        "const raw = `\\u0060; [].filter.constructor('hidden')();//`;\n"
+                        "const pattern = /\\u002f [].filter.constructor('hidden')/;\n"
+                        "export { quoted, raw, pattern };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn(MODULE.PERSISTENT_LIFECYCLE_RUNNER, paths)
+
+    def test_persistent_runtime_source_closure_handles_combined_child_process_imports(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import cp, { spawnSync as runNode } from 'node:child_process';\n"
+                        "runNode(process.execPath, ['./combined-child.mjs']);\n"
+                    ),
+                    "scripts/combined-child.mjs": "export const child = true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/combined-child.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_combined_child_process_default(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import cp, { spawnSync } from 'node:child_process';\n"
+                        "cp.execSync(process.execPath + ' ./hidden.cjs');\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "shell child-process entrypoint",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_combined_node_module_imports(
+        self,
+    ) -> None:
+        cases = {
+            "named_run_main": (
+                "import moduleApi, { runMain } from 'node:module';\n"
+                "runMain('./hidden.cjs');\n"
+            ),
+            "default_run_main": (
+                "import moduleApi, { createRequire } from 'node:module';\n"
+                "moduleApi.runMain('./hidden.cjs');\n"
+            ),
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "CommonJS runtime loader",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_execution_builtins(
+        self,
+    ) -> None:
+        cases = {
+            "child_process": "await import('node:child_process');\n",
+            "node_module": "await import('node:module');\n",
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {MODULE.PERSISTENT_LIFECYCLE_RUNNER: source},
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "dynamic .*execution capability|dynamic CommonJS runtime loader",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_handles_string_named_child_process(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const { 'spawnSync': runNode } = require('node:child_process');\n"
+                        "runNode(process.execPath, ['./string-named-child.cjs']);\n"
+                    ),
+                    "scripts/string-named-child.cjs": (
+                        "module.exports = { child: true };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/string-named-child.cjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_indirect_commonjs_require(
+        self,
+    ) -> None:
+        cases = {
+            "require_call": "require.call(null, './hidden.cjs');\n",
+            "reflect_apply": "Reflect.apply(require, null, ['./hidden.cjs']);\n",
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "indirect CommonJS require invocation",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_encoded_bare_package_subpath(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import 'fixture-runtime/%68idden.mjs';\n"
+                    ),
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {"name": "fixture-runtime"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/%68idden.mjs": (
+                        "export default 'decoy';\n"
+                    ),
+                    "node_modules/fixture-runtime/hidden.mjs": (
+                        "export default 'real';\n"
+                    ),
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported percent-encoded path",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_recurses_into_jsx_dependencies(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import './view.jsx';\n",
+                    "scripts/view.jsx": (
+                        "import './view-model.mjs';\n"
+                        "export const View = () => <div />;\n"
+                    ),
+                    "scripts/view-model.mjs": "export const model = true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/view.jsx", paths)
+        self.assertIn("scripts/view-model.mjs", paths)
+
 
 if __name__ == "__main__":
     unittest.main()
