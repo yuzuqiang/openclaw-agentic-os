@@ -9240,7 +9240,7 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 MODULE.ProbeError,
-                "unsupported non-Node child-process executable",
+                "unsupported child-process Node entrypoint",
             ):
                 MODULE._persistent_runtime_source_paths(root)
 

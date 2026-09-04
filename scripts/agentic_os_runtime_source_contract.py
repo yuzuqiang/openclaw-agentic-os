@@ -3261,7 +3261,7 @@ def _runtime_execution_entrypoint_specifiers(
         for match in child_process_alias_call_pattern.finditer(source_text):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported non-Node child-process executable"
+                    "runtime source contains an unsupported child-process Node entrypoint"
                 )
     child_process_namespace_pattern = _child_process_namespace_node_entrypoint_pattern(
         child_process_namespace_names
@@ -3270,7 +3270,7 @@ def _runtime_execution_entrypoint_specifiers(
         for match in child_process_namespace_pattern.finditer(source_text):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported non-Node child-process executable"
+                    "runtime source contains an unsupported child-process Node entrypoint"
                 )
     for specifier in _native_addon_entrypoint_specifiers(source_text):
         specifiers.append((specifier, "require"))
