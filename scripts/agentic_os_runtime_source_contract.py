@@ -138,9 +138,9 @@ STATIC_IMPORT_CLAUSE_FRAGMENT = r"""
 """
 STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     r"""
-    \b(?:import|export)\s+(?:type\s+)?
+    \b(?:import|export)\s*(?:type\s+)?
     (?:
-        __STATIC_IMPORT_CLAUSE_FRAGMENT__\s+from\s*
+        __STATIC_IMPORT_CLAUSE_FRAGMENT__\s*from\s*
       |
     )
     ["'](?P<specifier>[^"']+)["']
@@ -227,6 +227,14 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
     )\s*\(\s*
     process\.execPath\s*,\s*
     \[\s*["'](?P<specifier>[^"']+)["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT = re.compile(
+    r"""
+    \brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)
+    \s*(?:\.|\?\.)\s*
+    (?:fork|spawn|spawnSync|execFile|execFileSync|exec|execSync)\s*\(
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -381,7 +389,9 @@ COMMONJS_REQUIRE_ALIAS_ASSIGNMENT = re.compile(
 )
 RUNTIME_PACKAGE_CONDITIONS = {
     "import": frozenset(("import", "node-addons", "node", "default")),
-    "require": frozenset(("require", "node-addons", "node", "default")),
+    "require": frozenset(
+        ("module-sync", "require", "node-addons", "node", "default")
+    ),
 }
 
 
@@ -2880,6 +2890,10 @@ def _runtime_execution_entrypoint_specifiers(
     ) = (
         _child_process_sync_alias_bindings(source_text)
     )
+    if INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT.search(source_text):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported inline require child-process entrypoint"
+        )
     for match in worker_entrypoint_pattern.finditer(source_text):
         specifier = match.group("specifier")
         if "\\" in specifier:

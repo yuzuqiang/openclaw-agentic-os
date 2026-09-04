@@ -8728,6 +8728,85 @@ class RealGatewayProbeTests(unittest.TestCase):
         ):
             self._original_require_trusted_persistent_lifecycle_boundary()
 
+    def test_persistent_runtime_source_closure_uses_module_sync_require_condition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "require('fixture-runtime');\n",
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {
+                            "name": "fixture-runtime",
+                            "exports": {
+                                ".": {
+                                    "module-sync": "./module-sync.cjs",
+                                    "require": "./require.cjs",
+                                }
+                            },
+                        }
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/module-sync.cjs": (
+                        "module.exports = { selected: 'module-sync' };\n"
+                    ),
+                    "node_modules/fixture-runtime/require.cjs": (
+                        "module.exports = { selected: 'require' };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/module-sync.cjs", paths)
+        self.assertNotIn("node_modules/fixture-runtime/require.cjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_inline_require_child_process(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "require('node:child_process').execFileSync("
+                        "process.execPath, ['./hidden.cjs']);\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "inline require child-process",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_binds_whitespace_free_static_imports(
+        self,
+    ) -> None:
+        for source in (
+            "import'./hidden.mjs';\n",
+            "import*as hidden from'./hidden.mjs';\n",
+            "export*from'./hidden.mjs';\n",
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
+                        "scripts/hidden.mjs": "export const hidden = true;\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("scripts/hidden.mjs", paths)
+
 
 if __name__ == "__main__":
     unittest.main()
