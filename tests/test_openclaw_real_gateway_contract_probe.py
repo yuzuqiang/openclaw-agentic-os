@@ -2416,9 +2416,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                     },
                 )
 
-                paths = MODULE._persistent_runtime_source_paths(root)
-
-            self.assertIn("scripts/runtime-addon.node", paths)
+                with self.assertRaisesRegex(MODULE.ProbeError, "native add-on"):
+                    MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_dynamic_native_addon_entrypoint(
         self,
