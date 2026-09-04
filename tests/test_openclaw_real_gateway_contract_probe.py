@@ -8972,5 +8972,166 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertNotIn("node_modules/fixture-runtime/import.mjs", paths)
 
 
+    def test_persistent_runtime_source_closure_rejects_indirect_create_require_factory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { createRequire } from 'node:module';\n"
+                        "const load = (createRequire)("
+                        "new URL('../alternate/base.mjs', import.meta.url));\n"
+                        "load('./hidden.cjs');\n"
+                    ),
+                    "alternate/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "indirect createRequire factory invocation",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_dynamic_import_after_postfix_operator(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "let x = 1; x++ / import('fixture-runtime') / 2;\n"
+                    ),
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {"name": "fixture-runtime", "exports": "./hidden.mjs"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/hidden.mjs": "export default true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "ambiguous JavaScript slash token",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_ignores_computed_require_in_string_data(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        'const doc = "require(\'node:module\')[\'createRequire\']";\n'
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn(MODULE.PERSISTENT_LIFECYCLE_RUNNER, paths)
+
+    def test_persistent_runtime_source_closure_recognizes_all_line_comment_terminators(
+        self,
+    ) -> None:
+        for terminator in ("\r", "\u2028", "\u2029"):
+            with self.subTest(terminator=repr(terminator)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            f"// comment{terminator}import('fixture-runtime');\n"
+                        ),
+                        "node_modules/fixture-runtime/package.json": json.dumps(
+                            {"name": "fixture-runtime", "exports": "./hidden.mjs"}
+                        )
+                        + "\n",
+                        "node_modules/fixture-runtime/hidden.mjs": "export default true;\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("node_modules/fixture-runtime/hidden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_uses_node_package_pattern_precedence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "package.json": json.dumps(
+                        {
+                            "name": "fixture-root",
+                            "imports": {
+                                "#*/bar": "./root-a.mjs",
+                                "#foo/*": "./root-b.mjs",
+                            },
+                        }
+                    )
+                    + "\n",
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import 'fixture-runtime/foo/bar';\nimport '#foo/bar';\n"
+                    ),
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {
+                            "name": "fixture-runtime",
+                            "exports": {
+                                "./*/bar": "./external-a.mjs",
+                                "./foo/*": "./external-b.mjs",
+                            },
+                        }
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/external-a.mjs": "export default 'a';\n",
+                    "node_modules/fixture-runtime/external-b.mjs": "export default 'b';\n",
+                    "root-a.mjs": "export default 'a';\n",
+                    "root-b.mjs": "export default 'b';\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/external-b.mjs", paths)
+        self.assertIn("root-b.mjs", paths)
+        self.assertNotIn("node_modules/fixture-runtime/external-a.mjs", paths)
+        self.assertNotIn("root-a.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_encoded_package_export_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import 'fixture-runtime';\n",
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {"name": "fixture-runtime", "exports": "./%68idden.mjs"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/%68idden.mjs": "export default 'decoy';\n",
+                    "node_modules/fixture-runtime/hidden.mjs": "export default 'real';\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported percent-encoded path",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+
 if __name__ == "__main__":
     unittest.main()

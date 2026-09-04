@@ -478,7 +478,7 @@ def strip_source_comments(source_text: str) -> str:
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 output.append(character)
                 state = "code"
             else:
@@ -530,6 +530,10 @@ def strip_source_comments(source_text: str) -> str:
 
 def _is_identifier_character(character: str) -> bool:
     return character.isalnum() or character in {"_", "$"}
+
+
+def _is_js_line_terminator(character: str) -> bool:
+    return character in {"\n", "\r", "\u2028", "\u2029"}
 
 
 def _decode_js_identifier_escape(source_text: str, index: int) -> tuple[str, int]:
@@ -652,7 +656,7 @@ def _skip_static_dynamic_import_attributes(source_text: str, index: int) -> int:
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -1369,7 +1373,7 @@ def _template_expression_end(source_text: str, index: int) -> int:
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -2180,7 +2184,7 @@ def _parenthesized_expression_end(source_text: str, index: int) -> int:
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -2369,7 +2373,7 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -2525,6 +2529,15 @@ def _is_regex_literal_start(source_text: str, index: int) -> bool:
     if not previous:
         return True
     if previous in "({[=,:;!&|?+-*%^~<>":
+        previous_index = index - 1
+        while previous_index >= 0 and source_text[previous_index].isspace():
+            previous_index -= 1
+        if (
+            previous in {"+", "-"}
+            and previous_index > 0
+            and source_text[previous_index - 1] == previous
+        ):
+            return False
         return True
     return _previous_code_word(source_text, index) in {
         "await",
@@ -2595,22 +2608,182 @@ def _regex_literal_end_or_fail_closed(source_text: str, index: int) -> int | Non
     return None
 
 
+def _executable_pattern_matches(
+    source_text: str, pattern: re.Pattern[str]
+) -> list[re.Match[str]]:
+    matches: list[re.Match[str]] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                matches.extend(_executable_pattern_matches(chunk, pattern))
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        match = pattern.match(source_text, index)
+        if match is not None:
+            matches.append(match)
+            index = match.end()
+            continue
+        index += 1
+    return matches
+
+
+def _create_require_base_end(source_text: str, opening_index: int) -> int | None:
+    index = _skip_js_trivia(source_text, opening_index + 1)
+    if source_text.startswith("__filename", index):
+        end_index = index + len("__filename")
+        if end_index < len(source_text) and _is_identifier_character(source_text[end_index]):
+            return None
+    else:
+        match = re.match(
+            r"import\s*\.\s*meta\s*\.\s*url\b", source_text[index:]
+        )
+        if match is None:
+            return None
+        end_index = index + match.end()
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        return None
+    return close_index + 1
+
+
+def _validate_create_require_factory_calls(source_text: str) -> None:
+    factories = _create_require_factory_names(source_text)
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            chunks, index = _template_expression_chunks(source_text, index)
+            for chunk in chunks:
+                _validate_create_require_factory_calls(chunk)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        for factory in sorted(factories, key=len, reverse=True):
+            end_index = index + len(factory)
+            before = source_text[index - 1] if index > 0 else ""
+            after = source_text[end_index] if end_index < len(source_text) else ""
+            if (
+                not source_text.startswith(factory, index)
+                or (before and _is_identifier_character(before))
+                or (after and _is_identifier_character(after))
+            ):
+                continue
+            next_index = _skip_js_trivia(source_text, end_index)
+            if next_index < len(source_text) and source_text[next_index] == "(":
+                base_end = _create_require_base_end(source_text, next_index)
+                if base_end is None:
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported non-local createRequire base"
+                    )
+                index = base_end
+                break
+            if next_index < len(source_text) and source_text[next_index] == ")":
+                next_index = _skip_js_trivia(source_text, next_index + 1)
+                if next_index < len(source_text) and source_text[next_index] == "(":
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported indirect createRequire factory invocation"
+                    )
+            if source_text.startswith("?.", next_index) or (
+                next_index < len(source_text) and source_text[next_index] == "."
+            ):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported indirect createRequire factory invocation"
+                )
+        else:
+            index += 1
+    
+
 def _create_require_specifiers(
     source_text: str,
     inherited_loader_names: set[str] | None = None,
 ) -> list[str]:
     specifiers: list[str] = []
-    stripped_source = strip_source_comments(source_text)
-    for factory in _create_require_factory_names(source_text):
-        if re.search(
-            rf"(?<![\w$.]){re.escape(factory)}\s*\(\s*"
-            r"(?!(?:import\s*\.\s*meta\s*\.\s*url|__filename)\s*\))",
-            stripped_source,
-        ):
-            raise RuntimeSourceContractError(
-                "runtime source contains an unsupported non-local createRequire base"
-            )
-    for match in INLINE_CREATE_REQUIRE_SPECIFIER.finditer(stripped_source):
+    _validate_create_require_factory_calls(source_text)
+    for match in _executable_pattern_matches(
+        source_text, INLINE_CREATE_REQUIRE_SPECIFIER
+    ):
         specifier = match.group("specifier")
         if "\\" in specifier:
             raise RuntimeSourceContractError(
@@ -2630,7 +2803,7 @@ def _create_require_specifiers(
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -2713,7 +2886,7 @@ def _commonjs_require_specifiers(
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -2825,7 +2998,7 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -2922,12 +3095,14 @@ def _runtime_execution_entrypoint_specifiers(
     ) = (
         _child_process_sync_alias_bindings(source_text)
     )
-    if INLINE_REQUIRE_CHILD_PROCESS_COMPUTED_MEMBER.search(source_text):
+    if _executable_pattern_matches(
+        source_text, INLINE_REQUIRE_CHILD_PROCESS_COMPUTED_MEMBER
+    ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported computed inline require "
             "child-process entrypoint"
         )
-    if INLINE_REQUIRE_MODULE_COMPUTED_MEMBER.search(source_text):
+    if _executable_pattern_matches(source_text, INLINE_REQUIRE_MODULE_COMPUTED_MEMBER):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported computed inline require module member"
         )
@@ -3127,7 +3302,7 @@ def _module_register_hook_specifiers(
         character = source_text[index]
         next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
         if state == "line_comment":
-            if character == "\n":
+            if _is_js_line_terminator(character):
                 state = "code"
             index += 1
             continue
@@ -3438,7 +3613,7 @@ def _substitute_export_target(target: Any, replacement: str) -> Any:
 
 
 def _exports_pattern_target(exports: dict[str, Any], export_key: str) -> Any:
-    matches: list[tuple[int, str, Any]] = []
+    matches: list[tuple[int, int, str, Any]] = []
     for key, target in exports.items():
         if not isinstance(key, str) or "*" not in key or not key.startswith("."):
             continue
@@ -3448,15 +3623,15 @@ def _exports_pattern_target(exports: dict[str, Any], export_key: str) -> Any:
         replacement = export_key[len(prefix) : len(export_key) - len(suffix)]
         if not replacement:
             continue
-        matches.append((len(prefix) + len(suffix), replacement, target))
+        matches.append((len(prefix), len(key), replacement, target))
     if not matches:
         return None
-    _, replacement, target = max(matches, key=lambda item: item[0])
+    _, _, replacement, target = max(matches, key=lambda item: item[:2])
     return _substitute_export_target(target, replacement)
 
 
 def _imports_pattern_target(imports: dict[str, Any], specifier: str) -> Any:
-    matches: list[tuple[int, str, Any]] = []
+    matches: list[tuple[int, int, str, Any]] = []
     for key, target in imports.items():
         if not isinstance(key, str) or "*" not in key or not key.startswith("#"):
             continue
@@ -3466,10 +3641,10 @@ def _imports_pattern_target(imports: dict[str, Any], specifier: str) -> Any:
         replacement = specifier[len(prefix) : len(specifier) - len(suffix)]
         if not replacement:
             continue
-        matches.append((len(prefix) + len(suffix), replacement, target))
+        matches.append((len(prefix), len(key), replacement, target))
     if not matches:
         return None
-    _, replacement, target = max(matches, key=lambda item: item[0])
+    _, _, replacement, target = max(matches, key=lambda item: item[:2])
     return _substitute_export_target(target, replacement)
 
 
@@ -3512,6 +3687,10 @@ def _package_entry_bases(
     if exports is not None:
         export_target = _exports_map_target(exports, subpath)
         targets = _export_condition_targets(export_target, conditions)
+        if any("%" in target for target in targets):
+            raise RuntimeSourceContractError(
+                "runtime package export target contains an unsupported percent-encoded path"
+            )
         return [((package_root / target).resolve(), "runtime") for target in targets], True
     if subpath:
         return [((package_root / subpath).resolve(), "node_legacy")], False
