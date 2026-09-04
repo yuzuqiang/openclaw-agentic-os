@@ -3579,6 +3579,10 @@ def _resolve_existing_candidate(
                 "runtime source import escapes the OpenClaw candidate root"
             ) from exc
         if resolved.is_file():
+            if resolved.suffix == ".node":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported native add-on"
+                )
             return resolved
     return None
 

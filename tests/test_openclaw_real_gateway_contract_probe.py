@@ -52,6 +52,10 @@ class RealGatewayProbeTests(unittest.TestCase):
             MODULE._assert_loopback_port_available_before_launch
         )
         MODULE._assert_loopback_port_available_before_launch = lambda _port: None
+        self._original_require_trusted_persistent_lifecycle_boundary = (
+            MODULE._require_trusted_persistent_lifecycle_boundary
+        )
+        MODULE._require_trusted_persistent_lifecycle_boundary = lambda: None
         self._original_statvfs = MODULE.os.statvfs
         MODULE.os.statvfs = lambda _path: type(
             "StatVFS",
@@ -63,6 +67,9 @@ class RealGatewayProbeTests(unittest.TestCase):
         MODULE._runtime_launch_bindings = self._original_runtime_launch_bindings
         MODULE._assert_loopback_port_available_before_launch = (
             self._original_assert_loopback_port_available_before_launch
+        )
+        MODULE._require_trusted_persistent_lifecycle_boundary = (
+            self._original_require_trusted_persistent_lifecycle_boundary
         )
         MODULE.os.statvfs = self._original_statvfs
         if self._previous_validation_anchor is None:
@@ -2026,6 +2033,26 @@ class RealGatewayProbeTests(unittest.TestCase):
         self.assertIn("scripts/lib/package.json", paths)
         self.assertIn("scripts/lib/actual.cjs", paths)
         self.assertNotIn("scripts/lib/index.js", paths)
+
+    def test_persistent_runtime_source_closure_rejects_native_addons(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "require('fixture-native-addon');\n",
+                    "node_modules/fixture-native-addon/package.json": json.dumps(
+                        {"name": "fixture-native-addon", "main": "native-addon"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-native-addon/native-addon.node": "native fixture\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "native add-on"):
+                MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_preserves_commonjs_query_filename(
         self,
@@ -8694,6 +8721,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE._require_immutable_runtime_source_root(root, [])
             finally:
                 MODULE.os.statvfs = simulated_statvfs
+
+    def test_persistent_lifecycle_requires_external_trusted_boundary(self) -> None:
+        with self.assertRaisesRegex(
+            MODULE.ProbeError,
+            "persistent lifecycle authority is disabled",
+        ):
+            self._original_require_trusted_persistent_lifecycle_boundary()
 
 
 if __name__ == "__main__":

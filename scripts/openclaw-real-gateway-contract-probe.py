@@ -5567,6 +5567,24 @@ def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> No
             temporary_evidence_file.unlink()
 
 
+def _require_trusted_persistent_lifecycle_boundary() -> None:
+    """Block authority until a parent-owned trusted launcher is available.
+
+    The current candidate runner cannot be trusted with an attestation signing
+    key or with authoring the claimed Gateway transcript. File permissions and
+    a read-only mount check also cannot prove that the candidate has no
+    writable alias for every source inode. Do not launch or accept persistent
+    lifecycle evidence until an external launcher supplies all three controls:
+    a recursive alias-free read-only source namespace, parent-held signing
+    authority, and a direct parent Gateway transport interceptor.
+    """
+    raise ProbeError(
+        "persistent lifecycle authority is disabled pending an external trusted "
+        "launcher with immutable sources, parent-held attestation signing, and "
+        "direct Gateway RPC capture"
+    )
+
+
 def _run_persistent_lifecycle_probe_once(
     openclaw_root: Path,
     evidence_file: Path,
@@ -5584,6 +5602,7 @@ def _run_persistent_lifecycle_probe_once(
     attestation_verification_key: bytes,
     pinned_run_root: _PinnedRunRoot,
 ) -> dict[str, Any]:
+    _require_trusted_persistent_lifecycle_boundary()
     _assert_pinned_run_root_identity(pinned_run_root)
     evidence_dir = run_root / "evidence"
     runner_home = run_root / "runner-home"
