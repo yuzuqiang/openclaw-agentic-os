@@ -52,12 +52,19 @@ class RealGatewayProbeTests(unittest.TestCase):
             MODULE._assert_loopback_port_available_before_launch
         )
         MODULE._assert_loopback_port_available_before_launch = lambda _port: None
+        self._original_statvfs = MODULE.os.statvfs
+        MODULE.os.statvfs = lambda _path: type(
+            "StatVFS",
+            (),
+            {"f_flag": getattr(MODULE.os, "ST_RDONLY", 1)},
+        )()
 
     def tearDown(self) -> None:
         MODULE._runtime_launch_bindings = self._original_runtime_launch_bindings
         MODULE._assert_loopback_port_available_before_launch = (
             self._original_assert_loopback_port_available_before_launch
         )
+        MODULE.os.statvfs = self._original_statvfs
         if self._previous_validation_anchor is None:
             os.environ.pop(MODULE.PERSISTENT_VALIDATION_ANCHOR_HMAC_ENV, None)
         else:
@@ -8656,43 +8663,37 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertIs(cleanup["tracked_cleanup_available"], True)
             self.assertIs(cleanup["all_candidate_processes_reaped"], False)
 
-    def test_runtime_source_snapshot_preserves_bound_bytes_after_origin_mutation(
+    def test_immutable_runtime_source_root_preserves_package_symlink_topology(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            runner = root / MODULE.PERSISTENT_LIFECYCLE_RUNNER
-            hidden = root / "scripts/hidden.mjs"
-            runner.parent.mkdir(parents=True, exist_ok=True)
-            runner.write_text("import './hidden.mjs';\n", encoding="utf-8")
-            hidden.write_text("export const safe = true;\n", encoding="utf-8")
-            (root / ".git").write_text("gitdir: /tmp/test-gitdir\n", encoding="utf-8")
-            sources = [
-                {
-                    "path": MODULE.PERSISTENT_LIFECYCLE_RUNNER,
-                    "sha256": MODULE._sha256_bytes(runner.read_bytes()),
-                },
-                {
-                    "path": "scripts/hidden.mjs",
-                    "sha256": MODULE._sha256_bytes(hidden.read_bytes()),
-                },
-            ]
+            package_root = root / "node_modules/.pnpm/pkg@1/node_modules/pkg"
+            package_root.mkdir(parents=True)
+            package_link = root / "node_modules/pkg"
+            package_link.symlink_to(".pnpm/pkg@1/node_modules/pkg", target_is_directory=True)
+            execution_root = MODULE._require_immutable_runtime_source_root(root, [])
 
-            snapshot = MODULE._stage_immutable_runtime_sources(
-                root, sources, root / "run"
+            self.assertEqual(execution_root, root)
+            self.assertTrue((execution_root / "node_modules/pkg").is_symlink())
+            self.assertEqual(
+                (execution_root / "node_modules/pkg").resolve(), package_root.resolve()
             )
-            hidden.write_text("export const altered = true;\n", encoding="utf-8")
 
-            self.assertEqual(
-                (snapshot / "scripts/hidden.mjs").read_text(encoding="utf-8"),
-                "export const safe = true;\n",
-            )
-            self.assertEqual(
-                (snapshot / MODULE.PERSISTENT_LIFECYCLE_RUNNER).read_text(
-                    encoding="utf-8"
-                ),
-                "import './hidden.mjs';\n",
-            )
+    def test_persistent_runtime_source_root_requires_external_read_only_mount(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            simulated_statvfs = MODULE.os.statvfs
+            MODULE.os.statvfs = self._original_statvfs
+            try:
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError, "externally enforced read-only runtime source mount"
+                ):
+                    MODULE._require_immutable_runtime_source_root(root, [])
+            finally:
+                MODULE.os.statvfs = simulated_statvfs
 
 
 if __name__ == "__main__":

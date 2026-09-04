@@ -1360,41 +1360,32 @@ def _assert_runtime_sources_still_bound(
         raise ProbeError("persistent runtime source closure changed after candidate runner exit")
 
 
-def _stage_immutable_runtime_sources(
+def _require_immutable_runtime_source_root(
     openclaw_root: Path,
     runtime_sources: list[dict[str, str]],
-    run_root: Path,
 ) -> Path:
-    snapshot_root = run_root / "runtime-source-snapshot"
-    snapshot_root.mkdir(parents=True, mode=0o700)
-    for source in runtime_sources:
-        relative = source.get("path")
-        expected_sha256 = source.get("sha256")
-        if not isinstance(relative, str) or not isinstance(expected_sha256, str):
-            raise ProbeError("runtime source snapshot binding is invalid")
-        relative_path = Path(relative)
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise ProbeError("runtime source snapshot path is invalid")
-        origin = openclaw_root / relative_path
-        if not origin.is_file() or _sha256_bytes(origin.read_bytes()) != expected_sha256:
-            raise ProbeError("runtime source changed before immutable snapshot staging")
-        destination = snapshot_root / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copyfile(origin, destination)
-        os.chmod(destination, 0o400)
-    runner = snapshot_root / PERSISTENT_LIFECYCLE_RUNNER
-    if not runner.is_file():
-        raise ProbeError("immutable runtime source snapshot is missing the lifecycle runner")
-    git_metadata = openclaw_root / ".git"
-    if git_metadata.is_file():
-        shutil.copyfile(git_metadata, snapshot_root / ".git")
-    elif git_metadata.is_dir():
-        (snapshot_root / ".git").write_text(
-            f"gitdir: {git_metadata.resolve()}\n", encoding="utf-8"
+    """Return a runtime root the candidate cannot mutate during execution.
+
+    File modes do not isolate sources from a candidate that shares this
+    process's UID. The authoritative job must therefore expose the audited
+    worktree through an external read-only mount, such as a container bind
+    mount, before the probe launches the persistent runner.
+    """
+    read_only_flag = getattr(os, "ST_RDONLY", 1)
+    try:
+        filesystem_flags = int(os.statvfs(openclaw_root).f_flag)
+    except (AttributeError, OSError) as exc:
+        raise ProbeError(
+            "persistent runtime requires an externally enforced read-only "
+            "runtime source mount"
+        ) from exc
+    if not filesystem_flags & read_only_flag:
+        raise ProbeError(
+            "persistent runtime requires an externally enforced read-only "
+            "runtime source mount"
         )
-    else:
-        raise ProbeError("runtime source snapshot Git metadata is unavailable")
-    return snapshot_root
+    _assert_runtime_sources_still_bound(openclaw_root, runtime_sources)
+    return openclaw_root
 
 
 def _assert_agentic_sources_still_bound(agentic_sources: list[dict[str, str]]) -> None:
@@ -5623,7 +5614,7 @@ def _run_persistent_lifecycle_probe_once(
         attestation_verification_key.hex()
     )
     snapshot_root = (
-        _stage_immutable_runtime_sources(openclaw_root, runtime_sources, run_root)
+        _require_immutable_runtime_source_root(openclaw_root, runtime_sources)
         if runtime_sources
         else openclaw_root
     )
