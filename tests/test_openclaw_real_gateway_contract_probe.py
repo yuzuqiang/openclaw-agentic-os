@@ -9267,5 +9267,100 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._persistent_runtime_source_paths(root)
 
 
+    def test_persistent_runtime_source_closure_rejects_optional_and_grouped_run_main(
+        self,
+    ) -> None:
+        cases = (
+            "runMain?.('./hidden.cjs');\n",
+            "(runMain)('./hidden.cjs');\n",
+        )
+        for invocation in cases:
+            with self.subTest(invocation=invocation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            "import { runMain } from 'node:module';\n" + invocation
+                        ),
+                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "unsupported CommonJS runtime loader",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_optional_and_grouped_child_process_aliases(
+        self,
+    ) -> None:
+        cases = (
+            "go?.('./hidden.sh');\n",
+            "(go)('./hidden.sh');\n",
+        )
+        for invocation in cases:
+            with self.subTest(invocation=invocation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            "import { spawnSync as go } from 'node:child_process';\n"
+                            + invocation
+                        ),
+                        "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "unsupported child-process Node entrypoint",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_tracks_default_worker_threads_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import wt from 'node:worker_threads';\n"
+                        "new wt.Worker(new URL('./hidden.mjs', import.meta.url));\n"
+                    ),
+                    "scripts/hidden.mjs": "export default true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/hidden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_url_suffixed_package_export_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import 'fixture-runtime';\n",
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {"name": "fixture-runtime", "exports": "./real.mjs?x"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/real.mjs": "export default 'real';\n",
+                    "node_modules/fixture-runtime/real.mjs?x": "export default 'decoy';\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "unsupported URL suffix"):
+                MODULE._persistent_runtime_source_paths(root)
+
+
 if __name__ == "__main__":
     unittest.main()

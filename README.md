@@ -516,34 +516,24 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-The current Issue #44 candidate proof for the downstream runtime surface is the
-isolated real-Gateway probe. It refuses dirty candidate worktrees, binds
-downstream OpenClaw head `602cc113bc65877c501c304ef7bbb86d0313eeb6`, adapts to
-the candidate's `scripts/agentic-os-persistent-lifecycle-runner.mts` harness
-when that harness is present, starts the candidate's token-authenticated
-Gateway with isolated runner and Gateway state, requires an external OS
-process-containment boundary for persistent lifecycle execution, and writes
-hash-only evidence:
+The current Issue #44 persistent-lifecycle candidate proof is intentionally
+disabled. The repository probe refuses to launch a candidate or write runtime
+evidence until a trusted external launcher supplies immutable runtime sources,
+parent-held attestation signing, direct Gateway RPC capture, and an
+OS-enforced process-containment receipt. No repository command currently
+provides that launcher integration, so the historical invocation must not be
+treated as runnable evidence collection.
 
-```bash
-AGENTIC_OS_PROCESS_CONTAINMENT_BOUNDARY=posix-session-process-group \
-python3 scripts/openclaw-real-gateway-contract-probe.py \
-  --openclaw-root /path/to/openclaw-candidate \
-  --evidence-file docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json
-```
+The containment boundary must be launcher-owned: without it, the persistent
+lifecycle probe fails before candidate code runs because a same-UID process can
+detach and clear cooperative cleanup markers. A future external launcher must
+record a fresh POSIX session/process group or stronger matching OS-boundary
+receipt, plus host process-table and loopback-port teardown evidence. The legacy
+E2E fallback is unchanged.
 
-The containment boundary declaration is intentionally parent-only: without it,
-the persistent lifecycle probe fails before launching candidate code, because a
-same-UID process that detaches and clears cooperative cleanup markers cannot be
-safely promoted without a launcher-owned OS boundary receipt. The documented
-local persistent probe requests the boundary the launcher can actually prove:
-a fresh POSIX session/process group with host process-table and loopback-port
-teardown evidence. Stronger external-container or dedicated-cgroup requests
-remain fail-closed unless the launcher records matching OS-boundary evidence.
-The legacy E2E fallback is unchanged.
-
-No validation-key environment setup is required for this command. The trusted
-probe parent generates an ephemeral 32-byte validation-anchor key when
+The following validation-key behavior applies only after the external launcher
+integration exists; it is not configuration for a runnable repository command.
+The trusted probe parent generates an ephemeral 32-byte validation-anchor key when
 `AGENTIC_OS_PERSISTENT_VALIDATION_ANCHOR_HMAC_KEY_HEX` is absent, retains it
 only in parent memory, and passes it only to the independent validator. The
 candidate runner receives neither validation key in its environment or argv,

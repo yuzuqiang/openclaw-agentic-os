@@ -174,6 +174,13 @@ WORKER_THREADS_NAMESPACE_IMPORT = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+WORKER_THREADS_DEFAULT_IMPORT = re.compile(
+    rf"""
+    \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    from\s*["'](?:node:)?worker_threads["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 WORKER_THREADS_REQUIRE_ASSIGNMENT = re.compile(
     rf"""
     \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
@@ -1729,7 +1736,11 @@ def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
                     or imported.group("prop_alias")
                     or "Worker"
                 )
-    for pattern in (WORKER_THREADS_NAMESPACE_IMPORT, WORKER_THREADS_REQUIRE_ASSIGNMENT):
+    for pattern in (
+        WORKER_THREADS_NAMESPACE_IMPORT,
+        WORKER_THREADS_DEFAULT_IMPORT,
+        WORKER_THREADS_REQUIRE_ASSIGNMENT,
+    ):
         for match in pattern.finditer(stripped):
             namespace_names.add(match.group("name"))
     return constructor_names, namespace_names
@@ -1819,7 +1830,7 @@ def _child_process_alias_node_entrypoint_pattern(
     alternatives = "|".join(
         re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
     )
-    suffix = r"\s*\("
+    suffix = r"\s*(?:\?\.)?\s*\("
     if require_node_executable:
         suffix += r"\s*process\.execPath\s*,"
     if require_literal_script_argument:
@@ -1845,9 +1856,23 @@ def _child_process_namespace_node_entrypoint_pattern(
     return re.compile(
         rf"""
         (?<![\w$])(?:{namespaces})\s*(?:\.|\?\.)?\s*
-        (?:{members}|\[\s*["'](?:{members})["']\s*\])\s*\(
+        (?:{members}|\[\s*["'](?:{members})["']\s*\])\s*(?:\?\.)?\s*\(
         """,
         re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_grouped_alias_node_entrypoint_pattern(
+    node_entrypoint_names: set[str],
+) -> re.Pattern[str] | None:
+    if not node_entrypoint_names:
+        return None
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"\(\s*(?:{alternatives})\s*\)\s*(?:\?\.)?\s*\(",
+        re.DOTALL,
     )
 
 
@@ -2572,7 +2597,12 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
         parsed_identifier = _parse_js_identifier(source_text, index)
         if parsed_identifier is not None and parsed_identifier[0] in node_module_runtime_loader_names:
             call_index = _skip_js_trivia(source_text, parsed_identifier[1])
-            if call_index < len(source_text) and source_text[call_index] == "(":
+            while call_index < len(source_text) and source_text[call_index] == ")":
+                call_index = _skip_js_trivia(source_text, call_index + 1)
+            if (
+                source_text.startswith("?.(", call_index)
+                or (call_index < len(source_text) and source_text[call_index] == "(")
+            ):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported CommonJS runtime loader"
                 )
@@ -3263,6 +3293,17 @@ def _runtime_execution_entrypoint_specifiers(
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
                 )
+    grouped_child_process_alias_pattern = (
+        _child_process_grouped_alias_node_entrypoint_pattern(
+            child_process_node_alias_names
+        )
+    )
+    if grouped_child_process_alias_pattern is not None and _executable_pattern_matches(
+        source_text, grouped_child_process_alias_pattern
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported child-process Node entrypoint"
+        )
     child_process_namespace_pattern = _child_process_namespace_node_entrypoint_pattern(
         child_process_namespace_names
     )
@@ -3804,6 +3845,10 @@ def _package_entry_bases(
             raise RuntimeSourceContractError(
                 "runtime package export target contains an unsupported percent-encoded path"
             )
+        if any("?" in target or "#" in target for target in targets):
+            raise RuntimeSourceContractError(
+                "runtime package export target contains an unsupported URL suffix"
+            )
         return [((package_root / target).resolve(), "runtime") for target in targets], True
     if subpath:
         return [((package_root / subpath).resolve(), "node_legacy")], False
@@ -3908,6 +3953,10 @@ def _resolve_package_import(
         if "%" in target:
             raise RuntimeSourceContractError(
                 "runtime package import target contains an unsupported percent-encoded path"
+            )
+        if "?" in target or "#" in target:
+            raise RuntimeSourceContractError(
+                "runtime package import target contains an unsupported URL suffix"
             )
         if not target.startswith("./"):
             raise RuntimeSourceContractError(
