@@ -241,6 +241,20 @@ INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+INLINE_REQUIRE_CHILD_PROCESS_COMPUTED_MEMBER = re.compile(
+    r"""
+    \brequire\s*\(\s*[\"'](?:node:)?child_process[\"']\s*\)
+    \s*(?:\.|\?\.)?\s*\[
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+INLINE_REQUIRE_MODULE_COMPUTED_MEMBER = re.compile(
+    r"""
+    \brequire\s*\(\s*[\"'](?:node:)?module[\"']\s*\)
+    \s*(?:\.|\?\.)?\s*\[
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 EVALUATED_RUNTIME_LOADER_TOKENS = frozenset(
     ("constructor", "eval", "Function", "registerHooks")
 )
@@ -500,6 +514,11 @@ def strip_source_comments(source_text: str) -> str:
             output.extend((" ", " "))
             index += 2
             state = "block_comment"
+            continue
+        if character == "/" and _is_regex_literal_start(source_text, index):
+            regex_end = _regex_literal_end(source_text, index)
+            output.append(source_text[index:regex_end])
+            index = regex_end
             continue
         if character in {"'", '"', "`"}:
             state = "string"
@@ -2581,9 +2600,17 @@ def _create_require_specifiers(
     inherited_loader_names: set[str] | None = None,
 ) -> list[str]:
     specifiers: list[str] = []
-    for match in INLINE_CREATE_REQUIRE_SPECIFIER.finditer(
-        strip_source_comments(source_text)
-    ):
+    stripped_source = strip_source_comments(source_text)
+    for factory in _create_require_factory_names(source_text):
+        if re.search(
+            rf"(?<![\w$.]){re.escape(factory)}\s*\(\s*"
+            r"(?!(?:import\s*\.\s*meta\s*\.\s*url|__filename)\s*\))",
+            stripped_source,
+        ):
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported non-local createRequire base"
+            )
+    for match in INLINE_CREATE_REQUIRE_SPECIFIER.finditer(stripped_source):
         specifier = match.group("specifier")
         if "\\" in specifier:
             raise RuntimeSourceContractError(
@@ -2895,6 +2922,15 @@ def _runtime_execution_entrypoint_specifiers(
     ) = (
         _child_process_sync_alias_bindings(source_text)
     )
+    if INLINE_REQUIRE_CHILD_PROCESS_COMPUTED_MEMBER.search(source_text):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported computed inline require "
+            "child-process entrypoint"
+        )
+    if INLINE_REQUIRE_MODULE_COMPUTED_MEMBER.search(source_text):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported computed inline require module member"
+        )
     if INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT.search(source_text):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported inline require child-process entrypoint"

@@ -2381,6 +2381,30 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             self.assertIn("scripts/hidden.cjs", paths)
 
+    def test_persistent_runtime_source_closure_rejects_nonlocal_create_require_base(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { createRequire } from 'node:module';\n"
+                        "const load = createRequire("
+                        "new URL('../alternate/base.mjs', import.meta.url));\n"
+                        "load('./hidden.cjs');\n"
+                    ),
+                    "alternate/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported non-local createRequire base",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_native_addon_entrypoint(
         self,
     ) -> None:
@@ -8807,6 +8831,50 @@ class RealGatewayProbeTests(unittest.TestCase):
             ):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_template_inline_require_child_process(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "require('node:child_process')[`execFileSync`]("
+                        "process.execPath, ['./hidden.cjs']);\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "computed inline require child-process",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_bracketed_inline_create_require(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "require('node:module')['createRequire'](__filename)"
+                        "('./hidden.cjs');\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "computed inline require module member",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_whitespace_free_static_imports(
         self,
     ) -> None:
@@ -8846,6 +8914,25 @@ class RealGatewayProbeTests(unittest.TestCase):
                 paths = MODULE._persistent_runtime_source_paths(root)
 
             self.assertNotIn("node_modules/not-a-package", paths)
+
+    def test_persistent_runtime_source_closure_preserves_regex_before_static_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const grammar = /[/*]/; import './hidden.mjs';\n"
+                    ),
+                    "scripts/hidden.mjs": "export const hidden = true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/hidden.mjs", paths)
 
     def test_persistent_runtime_source_closure_uses_module_sync_import_condition(
         self,
