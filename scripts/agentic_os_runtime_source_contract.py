@@ -2983,7 +2983,7 @@ def _validate_create_require_factory_calls(source_text: str) -> None:
                 )
         else:
             index += 1
-    
+
 
 def _create_require_specifiers(
     source_text: str,
