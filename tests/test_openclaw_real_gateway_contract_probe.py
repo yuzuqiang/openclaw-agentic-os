@@ -9362,5 +9362,70 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._persistent_runtime_source_paths(root)
 
 
+    def test_persistent_runtime_source_closure_tracks_combined_default_worker_threads_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import wt, { Worker } from 'node:worker_threads';\n"
+                        "new wt.Worker(new URL('./hidden.mjs', import.meta.url));\n"
+                    ),
+                    "scripts/hidden.mjs": "export default true;\n",
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("scripts/hidden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_nested_grouped_child_process_alias(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawnSync as go } from 'node:child_process';\n"
+                        "((go))('./hidden.sh');\n"
+                    ),
+                    "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported child-process Node entrypoint",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_escaped_child_process_alias(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawnSync as g\\u006f } from 'node:child_process';\n"
+                        "g\\u006f('./hidden.sh');\n"
+                    ),
+                    "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported child-process Node entrypoint",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+
 if __name__ == "__main__":
     unittest.main()

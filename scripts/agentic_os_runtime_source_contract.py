@@ -177,6 +177,7 @@ WORKER_THREADS_NAMESPACE_IMPORT = re.compile(
 WORKER_THREADS_DEFAULT_IMPORT = re.compile(
     rf"""
     \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    (?:,\s*(?:\{{.*?\}}|\*\s+as\s+{JS_IDENTIFIER})\s*)?
     from\s*["'](?:node:)?worker_threads["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -1871,7 +1872,7 @@ def _child_process_grouped_alias_node_entrypoint_pattern(
         re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
     )
     return re.compile(
-        rf"\(\s*(?:{alternatives})\s*\)\s*(?:\?\.)?\s*\(",
+        rf"\(\s*(?:\(\s*)*(?:{alternatives})(?:\s*\))*\s*(?:\?\.)?\s*\(",
         re.DOTALL,
     )
 
@@ -3203,6 +3204,11 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
 def _runtime_execution_entrypoint_specifiers(
     source_text: str,
 ) -> list[tuple[str, str]]:
+    source_text = re.sub(
+        r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})",
+        lambda match: chr(int(match.group(1) or match.group(2), 16)),
+        source_text,
+    )
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, str]] = []
     accepted_spans: list[tuple[int, int]] = []
