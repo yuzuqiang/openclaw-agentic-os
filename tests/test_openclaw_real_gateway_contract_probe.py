@@ -8785,6 +8785,28 @@ class RealGatewayProbeTests(unittest.TestCase):
             ):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_bracketed_inline_require_child_process(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "require('node:child_process')['execFileSync']("
+                        "process.execPath, ['./hidden.cjs']);\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "inline require child-process",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_binds_whitespace_free_static_imports(
         self,
     ) -> None:
@@ -8806,6 +8828,61 @@ class RealGatewayProbeTests(unittest.TestCase):
                 paths = MODULE._persistent_runtime_source_paths(root)
 
             self.assertIn("scripts/hidden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_ignores_static_import_text_in_data(
+        self,
+    ) -> None:
+        for source in (
+            "const grammar = /import'not-a-package'/;\n",
+            "const grammar = \"import'not-a-package'\";\n",
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {MODULE.PERSISTENT_LIFECYCLE_RUNNER: source},
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertNotIn("node_modules/not-a-package", paths)
+
+    def test_persistent_runtime_source_closure_uses_module_sync_import_condition(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import runtime from 'fixture-runtime';\n"
+                    ),
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {
+                            "name": "fixture-runtime",
+                            "exports": {
+                                ".": {
+                                    "module-sync": "./module-sync.mjs",
+                                    "import": "./import.mjs",
+                                }
+                            },
+                        }
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/module-sync.mjs": (
+                        "export default 'module-sync';\n"
+                    ),
+                    "node_modules/fixture-runtime/import.mjs": (
+                        "export default 'import';\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/module-sync.mjs", paths)
+        self.assertNotIn("node_modules/fixture-runtime/import.mjs", paths)
 
 
 if __name__ == "__main__":

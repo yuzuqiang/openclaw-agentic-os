@@ -233,8 +233,11 @@ CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER = re.compile(
 INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT = re.compile(
     r"""
     \brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)
-    \s*(?:\.|\?\.)\s*
-    (?:fork|spawn|spawnSync|execFile|execFileSync|exec|execSync)\s*\(
+    \s*(?:
+        (?:\.|\?\.)\s*(?:fork|spawn|spawnSync|execFile|execFileSync|exec|execSync)
+      |
+        (?:\.|\?\.)?\s*\[\s*["'](?:fork|spawn|spawnSync|execFile|execFileSync|exec|execSync)["']\s*\]
+    )\s*\(
     """,
     re.VERBOSE | re.DOTALL,
 )
@@ -388,7 +391,9 @@ COMMONJS_REQUIRE_ALIAS_ASSIGNMENT = re.compile(
     re.VERBOSE,
 )
 RUNTIME_PACKAGE_CONDITIONS = {
-    "import": frozenset(("import", "node-addons", "node", "default")),
+    "import": frozenset(
+        ("module-sync", "import", "node-addons", "node", "default")
+    ),
     "require": frozenset(
         ("module-sync", "require", "node-addons", "node", "default")
     ),
@@ -3156,6 +3161,45 @@ def _module_register_hook_specifiers(
     return specifiers
 
 
+def _static_runtime_import_specifiers(source_text: str) -> list[str]:
+    """Return static import/export specifiers found in executable code only."""
+    source_text = strip_source_comments(source_text)
+    specifiers: list[str] = []
+    index = 0
+    while index < len(source_text):
+        character = source_text[index]
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            while index < len(source_text):
+                if source_text[index] == "\\" and index + 1 < len(source_text):
+                    index += 2
+                    continue
+                if source_text[index] == quote:
+                    index += 1
+                    break
+                index += 1
+            else:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unterminated JavaScript string"
+                )
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        match = STATIC_RUNTIME_IMPORT_SPECIFIER.match(source_text, index)
+        if match is not None:
+            specifiers.append(match.group("specifier"))
+            index = match.end()
+            continue
+        index += 1
+    return specifiers
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     _reject_evaluated_runtime_loaders(source_text)
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
@@ -3194,8 +3238,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
-    for match in STATIC_RUNTIME_IMPORT_SPECIFIER.finditer(source_text):
-        specifier = match.group("specifier")
+    for specifier in _static_runtime_import_specifiers(source_text):
         if "\\" in specifier:
             raise RuntimeSourceContractError(
                 "runtime source import specifier contains an unsupported JavaScript escape"
