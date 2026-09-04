@@ -9133,5 +9133,139 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._persistent_runtime_source_paths(root)
 
 
+    def test_persistent_runtime_source_closure_recognizes_trivia_comment_terminators(
+        self,
+    ) -> None:
+        for terminator in ("\r", "\u2028", "\u2029"):
+            with self.subTest(terminator=repr(terminator)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            f"import// comment{terminator}('./hidden.mjs');\n"
+                        ),
+                        "scripts/hidden.mjs": "export default true;\n",
+                    },
+                )
+
+                paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("scripts/hidden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_rejects_nested_indirect_create_require_factory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { createRequire } from 'node:module';\n"
+                        "const load = ((createRequire))("
+                        "new URL('../alternate/base.mjs', import.meta.url));\n"
+                        "load('./hidden.cjs');\n"
+                    ),
+                    "alternate/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "indirect createRequire factory invocation",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_encoded_package_import_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    "package.json": json.dumps(
+                        {
+                            "name": "fixture-root",
+                            "imports": {"#x": "./%68idden.mjs"},
+                        }
+                    )
+                    + "\n",
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import '#x';\n",
+                    "%68idden.mjs": "export default 'decoy';\n",
+                    "hidden.mjs": "export default 'real';\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported percent-encoded path",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_ignores_inline_child_process_in_string_data(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        'const doc = "require(\'node:child_process\').execFileSync(";\n'
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn(MODULE.PERSISTENT_LIFECYCLE_RUNNER, paths)
+
+    def test_persistent_runtime_source_closure_rejects_named_non_node_child_process_executable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawnSync } from 'node:child_process';\n"
+                        "spawnSync('./hidden.sh');\n"
+                    ),
+                    "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported non-Node child-process executable",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_named_run_main_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { runMain } from 'node:module';\n"
+                        "runMain('./hidden.cjs');\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported CommonJS runtime loader",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+
 if __name__ == "__main__":
     unittest.main()

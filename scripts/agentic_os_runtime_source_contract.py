@@ -202,6 +202,27 @@ CHILD_PROCESS_DESTRUCTURED_REQUIRE = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+CHILD_PROCESS_NAMESPACE_IMPORT = re.compile(
+    rf"""
+    \bimport\s+\*\s+as\s+(?P<name>{JS_IDENTIFIER})\s*
+    from\s*["'](?:node:)?child_process["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CHILD_PROCESS_DEFAULT_IMPORT = re.compile(
+    rf"""
+    \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    from\s*["'](?:node:)?child_process["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+CHILD_PROCESS_REQUIRE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(\s*["'](?:node:)?child_process["']\s*\)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 CHILD_PROCESS_FORK_ENTRYPOINT_NAMES = frozenset(("fork",))
 CHILD_PROCESS_NODE_ENTRYPOINT_NAMES = frozenset(
     ("spawn", "spawnSync", "execFile", "execFileSync")
@@ -599,10 +620,14 @@ def _skip_js_trivia(source_text: str, index: int) -> int:
     while index < len(source_text):
         index = _skip_whitespace(source_text, index)
         if source_text.startswith("//", index):
-            newline_index = source_text.find("\n", index + 2)
-            if newline_index == -1:
+            index += 2
+            while index < len(source_text) and not _is_js_line_terminator(
+                source_text[index]
+            ):
+                index += 1
+            if index == len(source_text):
                 return len(source_text)
-            index = newline_index + 1
+            index += 1
             continue
         if source_text.startswith("/*", index):
             close_index = source_text.find("*/", index + 2)
@@ -1712,11 +1737,12 @@ def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
 
 def _child_process_sync_alias_bindings(
     source_text: str,
-) -> tuple[set[str], set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str], set[str]]:
     stripped = strip_source_comments(source_text)
     fork_entrypoint_names: set[str] = set()
     node_entrypoint_names: set[str] = set()
     sync_shell_names: set[str] = set()
+    namespace_names = {"child_process"}
     entrypoint_alternatives = "|".join(
         sorted(
             CHILD_PROCESS_FORK_ENTRYPOINT_NAMES
@@ -1749,7 +1775,19 @@ def _child_process_sync_alias_bindings(
                     node_entrypoint_names.add(local_name)
                 elif entrypoint in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
                     sync_shell_names.add(local_name)
-    return fork_entrypoint_names, node_entrypoint_names, sync_shell_names
+    for pattern in (
+        CHILD_PROCESS_NAMESPACE_IMPORT,
+        CHILD_PROCESS_DEFAULT_IMPORT,
+        CHILD_PROCESS_REQUIRE_ASSIGNMENT,
+    ):
+        for match in pattern.finditer(stripped):
+            namespace_names.add(match.group("name"))
+    return (
+        fork_entrypoint_names,
+        node_entrypoint_names,
+        sync_shell_names,
+        namespace_names,
+    )
 
 
 def _child_process_fork_entrypoint_pattern(
@@ -1774,17 +1812,41 @@ def _child_process_alias_node_entrypoint_pattern(
     node_entrypoint_names: set[str],
     *,
     require_literal_script_argument: bool,
+    require_node_executable: bool = True,
 ) -> re.Pattern[str] | None:
     if not node_entrypoint_names:
         return None
     alternatives = "|".join(
         re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
     )
-    suffix = r"\s*\(\s*process\.execPath\s*,"
+    suffix = r"\s*\("
+    if require_node_executable:
+        suffix += r"\s*process\.execPath\s*,"
     if require_literal_script_argument:
         suffix += r"\s*\[\s*[\"'](?P<specifier>[^\"']+)[\"']"
     return re.compile(
         rf"(?<![\w$.])(?:{alternatives}){suffix}",
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_namespace_node_entrypoint_pattern(
+    namespace_names: set[str],
+) -> re.Pattern[str] | None:
+    if not namespace_names:
+        return None
+    namespaces = "|".join(
+        re.escape(name) for name in sorted(namespace_names, key=len, reverse=True)
+    )
+    members = "|".join(
+        re.escape(name)
+        for name in sorted(CHILD_PROCESS_NODE_ENTRYPOINT_NAMES, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        (?<![\w$])(?:{namespaces})\s*(?:\.|\?\.)?\s*
+        (?:{members}|\[\s*["'](?:{members})["']\s*\])\s*\(
+        """,
         re.VERBOSE | re.DOTALL,
     )
 
@@ -2018,10 +2080,13 @@ def _is_forbidden_runtime_loader_reference(
     return True
 
 
-def _node_module_runtime_binding_names(source_text: str) -> tuple[set[str], set[str]]:
+def _node_module_runtime_binding_names(
+    source_text: str,
+) -> tuple[set[str], set[str], set[str]]:
     stripped = strip_source_comments(source_text)
     namespace_names: set[str] = set()
     constructor_names: set[str] = set()
+    runtime_loader_names: set[str] = set()
 
     for match in NODE_MODULE_NAMESPACE_IMPORT.finditer(stripped):
         namespace_names.add(match.group("name"))
@@ -2052,7 +2117,23 @@ def _node_module_runtime_binding_names(source_text: str) -> tuple[set[str], set[
                     or "Module"
                 )
 
-    return namespace_names, constructor_names
+    for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
+        for match in pattern.finditer(stripped):
+            for part in match.group("body").split(","):
+                part = part.strip()
+                imported = re.fullmatch(
+                    rf"runMain(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?",
+                    part,
+                )
+                if imported is None:
+                    continue
+                runtime_loader_names.add(
+                    imported.group("alias")
+                    or imported.group("prop_alias")
+                    or "runMain"
+                )
+
+    return namespace_names, constructor_names, runtime_loader_names
 
 
 def _parse_commonjs_module_require_namespace_end(
@@ -2363,7 +2444,11 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
         lambda match: chr(int(match.group(1) or match.group(2), 16)),
         source_text,
     )
-    node_module_namespace_names, node_module_constructor_names = (
+    (
+        node_module_namespace_names,
+        node_module_constructor_names,
+        node_module_runtime_loader_names,
+    ) = (
         _node_module_runtime_binding_names(source_text)
     )
     index = 0
@@ -2485,6 +2570,12 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
                     "runtime source contains an unsupported evaluated loader reference"
                 )
         parsed_identifier = _parse_js_identifier(source_text, index)
+        if parsed_identifier is not None and parsed_identifier[0] in node_module_runtime_loader_names:
+            call_index = _skip_js_trivia(source_text, parsed_identifier[1])
+            if call_index < len(source_text) and source_text[call_index] == "(":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS runtime loader"
+                )
         if (
             parsed_identifier is not None
             and parsed_identifier[0] in EVALUATED_RUNTIME_VM_MEMBER_NAMES
@@ -2760,7 +2851,8 @@ def _validate_create_require_factory_calls(source_text: str) -> None:
                 index = base_end
                 break
             if next_index < len(source_text) and source_text[next_index] == ")":
-                next_index = _skip_js_trivia(source_text, next_index + 1)
+                while next_index < len(source_text) and source_text[next_index] == ")":
+                    next_index = _skip_js_trivia(source_text, next_index + 1)
                 if next_index < len(source_text) and source_text[next_index] == "(":
                     raise RuntimeSourceContractError(
                         "runtime source contains an unsupported indirect createRequire factory invocation"
@@ -3092,6 +3184,7 @@ def _runtime_execution_entrypoint_specifiers(
         child_process_fork_alias_names,
         child_process_node_alias_names,
         child_process_sync_alias_names,
+        child_process_namespace_names,
     ) = (
         _child_process_sync_alias_bindings(source_text)
     )
@@ -3106,7 +3199,7 @@ def _runtime_execution_entrypoint_specifiers(
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported computed inline require module member"
         )
-    if INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT.search(source_text):
+    if _executable_pattern_matches(source_text, INLINE_REQUIRE_CHILD_PROCESS_ENTRYPOINT):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported inline require child-process entrypoint"
         )
@@ -3159,6 +3252,26 @@ def _runtime_execution_entrypoint_specifiers(
                 )
             specifiers.append((specifier, "import"))
             accepted_spans.append(match.span())
+    child_process_alias_call_pattern = _child_process_alias_node_entrypoint_pattern(
+        child_process_node_alias_names,
+        require_literal_script_argument=False,
+        require_node_executable=False,
+    )
+    if child_process_alias_call_pattern is not None:
+        for match in child_process_alias_call_pattern.finditer(source_text):
+            if not any(start <= match.start() < end for start, end in accepted_spans):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported non-Node child-process executable"
+                )
+    child_process_namespace_pattern = _child_process_namespace_node_entrypoint_pattern(
+        child_process_namespace_names
+    )
+    if child_process_namespace_pattern is not None:
+        for match in child_process_namespace_pattern.finditer(source_text):
+            if not any(start <= match.start() < end for start, end in accepted_spans):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported non-Node child-process executable"
+                )
     for specifier in _native_addon_entrypoint_specifiers(source_text):
         specifiers.append((specifier, "require"))
 
@@ -3792,6 +3905,10 @@ def _resolve_package_import(
         ),
     )
     for target in targets:
+        if "%" in target:
+            raise RuntimeSourceContractError(
+                "runtime package import target contains an unsupported percent-encoded path"
+            )
         if not target.startswith("./"):
             raise RuntimeSourceContractError(
                 "runtime package import target is unsupported: "
