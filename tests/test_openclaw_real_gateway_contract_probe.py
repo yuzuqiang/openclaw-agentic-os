@@ -3299,13 +3299,30 @@ class RealGatewayProbeTests(unittest.TestCase):
                     "scripts/transitive.mjs": "export const real = true;\n",
                     "scripts/%68idden.mjs": "export const decoy = true;\n",
                 },
+        )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+            self.assertIn("scripts/hidden.mjs", paths)
+            self.assertIn("scripts/transitive.mjs", paths)
+            self.assertNotIn("scripts/%68idden.mjs", paths)
+
+    def test_persistent_runtime_source_closure_traverses_jsx_entrypoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import './bridge.jsx';\n",
+                    "scripts/bridge.jsx": "import './hidden.mjs';\n",
+                    "scripts/hidden.mjs": "export const hello = true;\n",
+                },
             )
 
             paths = MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/hidden.mjs", paths)
-        self.assertIn("scripts/transitive.mjs", paths)
-        self.assertNotIn("scripts/%68idden.mjs", paths)
+            self.assertIn("scripts/bridge.jsx", paths)
+            self.assertIn("scripts/hidden.mjs", paths)
 
     def test_persistent_runtime_source_closure_rejects_esm_encoded_separators(
         self,
@@ -9222,6 +9239,51 @@ class RealGatewayProbeTests(unittest.TestCase):
 
         self.assertIn(MODULE.PERSISTENT_LIFECYCLE_RUNNER, paths)
 
+    def test_persistent_runtime_source_closure_rejects_escaped_quote_string_with_child_process_entrypoint(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        'const x = "\\u0022//";\n'
+                        "import { spawnSync as go } from 'node:child_process';\n"
+                        "go('./hidden.sh');\n"
+                    ),
+                    "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported child-process Node entrypoint",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_combined_default_child_process_import(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import cp, { spawnSync as go } from 'node:child_process';\n"
+                        "cp.spawnSync('./hidden.sh');\n"
+                    ),
+                    "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported child-process Node entrypoint",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_named_non_node_child_process_executable(
         self,
     ) -> None:
@@ -9255,6 +9317,28 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                         "import { runMain } from 'node:module';\n"
                         "runMain('./hidden.cjs');\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported CommonJS runtime loader",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_combined_default_module_import_run_main(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import mod, { runMain } from 'node:module';\n"
+                        "mod.runMain('./hidden.cjs');\n"
                     ),
                     "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
                 },

@@ -23,7 +23,7 @@ PERSISTENT_RUNTIME_SOURCE_PATHS = (
 )
 PERSISTENT_RUNTIME_SOURCE_ENTRYPOINTS = PERSISTENT_RUNTIME_SOURCE_PATHS
 PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES = frozenset(
-    (".cjs", ".cts", ".js", ".mjs", ".mts", ".ts", ".tsx")
+    (".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx")
 )
 PERSISTENT_RUNTIME_RESOLUTION_SUFFIXES = (
     ".ts",
@@ -44,6 +44,10 @@ PERSISTENT_RUNTIME_IMPORT_SUFFIX_ALIASES = {
 }
 
 JS_IDENTIFIER = r"[A-Za-z_$][0-9A-Za-z_$]*"
+JS_IDENTIFIER_ESCAPE = r"\\u(?:[0-9A-Fa-f]{4}|\\{[0-9A-Fa-f]{1,6}\\})"
+JS_IDENTIFIER_WITH_ESCAPES = (
+    rf"(?:[A-Za-z_$]|{JS_IDENTIFIER_ESCAPE})(?:[0-9A-Za-z_$]|{JS_IDENTIFIER_ESCAPE})*"
+)
 NODE_BUILTIN_MODULES = frozenset(
     {
         "_http_agent",
@@ -198,7 +202,7 @@ WORKER_THREADS_DESTRUCTURED_REQUIRE = re.compile(
 )
 CHILD_PROCESS_IMPORT = re.compile(
     rf"""
-    \bimport\s*\{{(?P<body>.*?)\}}\s*
+    \bimport\s*(?: (?P<default>{JS_IDENTIFIER_WITH_ESCAPES})\s*,\s*)?\{{(?P<body>.*?)\}}\s*
     from\s*["'](?:node:)?child_process["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -219,7 +223,7 @@ CHILD_PROCESS_NAMESPACE_IMPORT = re.compile(
 )
 CHILD_PROCESS_DEFAULT_IMPORT = re.compile(
     rf"""
-    \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    \bimport\s+(?P<name>{JS_IDENTIFIER_WITH_ESCAPES})\s*
     from\s*["'](?:node:)?child_process["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -354,7 +358,14 @@ NODE_MODULE_NAMESPACE_IMPORT = re.compile(
 )
 NODE_MODULE_DEFAULT_IMPORT = re.compile(
     rf"""
-    \bimport\s+(?P<name>{JS_IDENTIFIER})\s*
+    \bimport\s+(?P<name>{JS_IDENTIFIER_WITH_ESCAPES})\s*
+    from\s*["'](?:node:)?module["']
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+NODE_MODULE_IMPORT = re.compile(
+    rf"""
+    \bimport\s*(?: (?P<default>{JS_IDENTIFIER_WITH_ESCAPES})\s*,\s*)?\{{(?P<body>.*?)\}}\s*
     from\s*["'](?:node:)?module["']
     """,
     re.VERBOSE | re.DOTALL,
@@ -616,6 +627,25 @@ def _parse_js_identifier(source_text: str, index: int) -> tuple[str, int] | None
         parts.append(character)
         first = False
     return ("".join(parts), index) if parts else None
+
+
+def _decode_js_identifier(source_text: str) -> str:
+    parsed = _parse_js_identifier(source_text, 0)
+    if parsed is None or parsed[1] != len(source_text):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported JavaScript identifier escape"
+        )
+    return parsed[0]
+
+
+def _identifier_pattern_with_escapes(identifier: str) -> str:
+    patterns: list[str] = []
+    for character in identifier:
+        codepoint = f"{ord(character):x}"
+        patterns.append(
+            rf"(?:{re.escape(character)}|\\u{codepoint:0>4}|\\u\\{{0*{codepoint}\\}})"
+        )
+    return "".join(patterns)
 
 
 def _skip_whitespace(source_text: str, index: int) -> int:
@@ -1770,16 +1800,20 @@ def _child_process_sync_alias_bindings(
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
                 imported = re.fullmatch(
-                    rf"\s*(?P<entrypoint>{entrypoint_alternatives})(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER}))?\s*",
+                    rf"""\s*(?P<entrypoint>{entrypoint_alternatives})(?:\s+(?:as\s+)?(?P<alias>{JS_IDENTIFIER_WITH_ESCAPES})|\s*:\s*(?P<prop_alias>{JS_IDENTIFIER_WITH_ESCAPES}))?\s*""",
                     part,
                 )
                 if imported is None:
                     continue
                 entrypoint = imported.group("entrypoint")
                 local_name = (
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or entrypoint
+                    _decode_js_identifier(imported.group("alias"))
+                    if imported.group("alias") is not None
+                    else (
+                        _decode_js_identifier(imported.group("prop_alias"))
+                        if imported.group("prop_alias") is not None
+                        else entrypoint
+                    )
                 )
                 if entrypoint in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
                     fork_entrypoint_names.add(local_name)
@@ -1787,6 +1821,12 @@ def _child_process_sync_alias_bindings(
                     node_entrypoint_names.add(local_name)
                 elif entrypoint in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
                     sync_shell_names.add(local_name)
+
+    for match in CHILD_PROCESS_IMPORT.finditer(stripped):
+        default_name = match.group("default")
+        if default_name is not None:
+            namespace_names.add(_decode_js_identifier(default_name))
+
     for pattern in (
         CHILD_PROCESS_NAMESPACE_IMPORT,
         CHILD_PROCESS_DEFAULT_IMPORT,
@@ -1808,7 +1848,8 @@ def _child_process_fork_entrypoint_pattern(
     if not fork_entrypoint_names:
         return None
     alternatives = "|".join(
-        re.escape(name) for name in sorted(fork_entrypoint_names, key=len, reverse=True)
+        _identifier_pattern_with_escapes(name)
+        for name in sorted(fork_entrypoint_names, key=len, reverse=True)
     )
     return re.compile(
         rf"""
@@ -1829,7 +1870,8 @@ def _child_process_alias_node_entrypoint_pattern(
     if not node_entrypoint_names:
         return None
     alternatives = "|".join(
-        re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
+        _identifier_pattern_with_escapes(name)
+        for name in sorted(node_entrypoint_names, key=len, reverse=True)
     )
     suffix = r"\s*(?:\?\.)?\s*\("
     if require_node_executable:
@@ -1869,7 +1911,8 @@ def _child_process_grouped_alias_node_entrypoint_pattern(
     if not node_entrypoint_names:
         return None
     alternatives = "|".join(
-        re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
+        _identifier_pattern_with_escapes(name)
+        for name in sorted(node_entrypoint_names, key=len, reverse=True)
     )
     return re.compile(
         rf"\(\s*(?:\(\s*)*(?:{alternatives})(?:\s*\))*\s*(?:\?\.)?\s*\(",
@@ -2118,16 +2161,28 @@ def _node_module_runtime_binding_names(
         namespace_names.add(match.group("name"))
     for match in NODE_MODULE_DEFAULT_IMPORT.finditer(stripped):
         name = match.group("name")
+        name = _decode_js_identifier(name)
         namespace_names.add(name)
         constructor_names.add(name)
+    for match in NODE_MODULE_IMPORT.finditer(stripped):
+        name = match.group("default")
+        if name is not None:
+            name = _decode_js_identifier(name)
+            namespace_names.add(name)
+            constructor_names.add(name)
     for match in NODE_MODULE_REQUIRE_ASSIGNMENT.finditer(stripped):
         name = match.group("name")
+        name = _decode_js_identifier(name)
         namespace_names.add(name)
         constructor_names.add(name)
     for match in NODE_MODULE_MEMBER_REQUIRE_ASSIGNMENT.finditer(stripped):
         constructor_names.add(match.group("name"))
 
-    for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
+    for pattern in (
+        CREATE_REQUIRE_IMPORT,
+        CREATE_REQUIRE_DESTRUCTURED_REQUIRE,
+        NODE_MODULE_IMPORT,
+    ):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
                 part = part.strip()
@@ -2143,7 +2198,11 @@ def _node_module_runtime_binding_names(
                     or "Module"
                 )
 
-    for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE):
+    for pattern in (
+        CREATE_REQUIRE_IMPORT,
+        CREATE_REQUIRE_DESTRUCTURED_REQUIRE,
+        NODE_MODULE_IMPORT,
+    ):
         for match in pattern.finditer(stripped):
             for part in match.group("body").split(","):
                 part = part.strip()
@@ -2154,9 +2213,13 @@ def _node_module_runtime_binding_names(
                 if imported is None:
                     continue
                 runtime_loader_names.add(
-                    imported.group("alias")
-                    or imported.group("prop_alias")
-                    or "runMain"
+                    _decode_js_identifier(
+                        imported.group("alias")
+                        if imported.group("alias") is not None
+                        else imported.group("prop_alias")
+                        if imported.group("prop_alias") is not None
+                        else "runMain"
+                    )
                 )
 
     return namespace_names, constructor_names, runtime_loader_names
@@ -2896,7 +2959,7 @@ def _validate_create_require_factory_calls(source_text: str) -> None:
                 )
         else:
             index += 1
-    
+
 
 def _create_require_specifiers(
     source_text: str,
@@ -3204,11 +3267,6 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
 def _runtime_execution_entrypoint_specifiers(
     source_text: str,
 ) -> list[tuple[str, str]]:
-    source_text = re.sub(
-        r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]{1,6})\})",
-        lambda match: chr(int(match.group(1) or match.group(2), 16)),
-        source_text,
-    )
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, str]] = []
     accepted_spans: list[tuple[int, int]] = []
