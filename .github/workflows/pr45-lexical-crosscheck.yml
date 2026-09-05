@@ -1,0 +1,27 @@
+name: PR45 lexical cross-check
+on:
+  push:
+    branches: [fix/pr45-crosscheck-lexical-20260905]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export reviewed source and reference parser
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-lexical"
+          git bundle create "$RUNNER_TEMP/pr45-lexical/source.bundle" HEAD refs/remotes/origin/main
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-lexical/head.txt"
+          node -p 'process.version' > "$RUNNER_TEMP/pr45-lexical/node.txt"
+          npm pack typescript@5.9.3 --pack-destination "$RUNNER_TEMP/pr45-lexical"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-lexical-source
+          path: ${{ runner.temp }}/pr45-lexical
+          retention-days: 3
