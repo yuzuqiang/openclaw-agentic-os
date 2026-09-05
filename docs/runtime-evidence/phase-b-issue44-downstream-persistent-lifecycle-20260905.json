@@ -1,6 +1,6 @@
 {
   "accepted_session_spawned": false,
-  "agentic_os_head_sha": "14c81287bfe949ed4a16663b4059b8e1b2457e26",
+  "agentic_os_head_sha": "c09e35701e6b362c2be00ea9570d1b5e9fec21ca",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",

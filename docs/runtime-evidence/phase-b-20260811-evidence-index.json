@@ -20,21 +20,21 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "2b43f843fbf096c2896e0660207c2f02bea1fd15",
+      "head_sha": "755e7756af0e6cf6f8931ffa85eb6a8fbac16b4e",
       "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "93c3c9790aab0b96018e123eb84656466e3b346f"
+      "tree_sha": "939d50f61f0c4c514279acae35af55e905596c01"
     },
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json",
     "raw_status": "fail",
     "reviewed_head_sha": null,
     "runtime_ready": false,
-    "sha256": "98fff50602043209e30adae8b5be1336fe68baf60dc2d1d48c3276d039cf7e8f",
+    "sha256": "e4e5538d5b334d217352b6da1122741ca3bfaf922a82d2155abeb6c541dfb64c",
     "status": "captured_from_clean_generator_revision",
     "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured from a clean post-PR45 generator revision with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "2b43f843fbf096c2896e0660207c2f02bea1fd15",
+    "agentic_os_head_sha": "c09e35701e6b362c2be00ea9570d1b5e9fec21ca",
     "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
     "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
     "db_authority_enabled": false,
@@ -62,7 +62,7 @@
     "production_authority_enabled": false,
     "runtime_ready": false,
     "runtime_ready_candidate_evidence": false,
-    "sha256": "7e4e9d9b29f323a9e29d1cb3b6790977d6c70ddc3d640932053422c6feba4318",
+    "sha256": "b431b87f6808d65fc99cb39e6919c8b72e94069aa2ef563749a1673b7a80c07b",
     "status": "fail_closed_runtime_source_closure_pending_phase_c",
     "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from a clean post-PR45 Agentic OS generator revision in an isolated non-production run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
     "validation_receipt_bound": false

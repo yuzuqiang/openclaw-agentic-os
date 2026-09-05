@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `fe7acda8cfd6adb32d3cf4fa42e86e8ace1ad5012ea6062a346c78b5f9a6eccc`
+- Current corrected design artifact SHA-256: `3d2af1054ddc26ec3c4ce0c20c5b2dd6fa331b21a18db51dd461bb1f62103198`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -28,9 +28,7 @@ not evidence of production OpenClaw authority.
   fail-closed, and the current downstream candidate evidence is fail-closed
   before launch on runtime source-closure rejection with
   `candidate_process_started=false`; no runtime-ready persistent-lifecycle
-  proof and no current-head GitHub Codex review binding exists, and historical
-  candidate invocations and reviews must not be counted as current exact-head
-  runtime evidence:
+  proof or current-head GitHub Codex review binding exists; no current-head GitHub Codex review binding exists, and historical candidate invocations and reviews must not be counted as current exact-head runtime evidence:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
   adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
@@ -489,7 +487,7 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`2b43f843fbf096c2896e0660207c2f02bea1fd15` in
+`755e7756af0e6cf6f8931ffa85eb6a8fbac16b4e` in
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
