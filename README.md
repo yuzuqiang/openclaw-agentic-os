@@ -524,6 +524,18 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+The source collector is a conservative manifest builder, not a JavaScript sandbox.
+It uses shared lexical boundaries for comments, literals, and template code, and
+requires every Worker/child-process capability reference to be a recognized
+binding or a fully bound direct call. Capability transfers, reflective calls,
+extra launch options, mutable launch defaults, and ambiguous syntax fail closed.
+Child-process script paths are relative to the candidate working directory;
+Worker URL paths remain relative to the importing module. The preload snapshot
+recursively includes sibling dependencies and nearest package-scope manifests,
+using plain Node resolution before the tsx hooks are installed. Unsupported
+preload closures are rejected, never downgraded to a package-only hash. These
+checks do not replace the external immutable-source or containment requirements.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must
