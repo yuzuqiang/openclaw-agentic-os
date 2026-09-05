@@ -1,35 +1,91 @@
-name: PR45 integration source collection
+name: PR45 package-scope integration verification
 on:
   push:
     branches: [fix/pr45-integration-c5d7a1d]
+    paths: [.github/workflows/pr45-integration.yml]
 permissions:
   contents: read
 jobs:
-  collect:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Collect only PR45 candidate and audit refs
-        shell: bash
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reconstruct exact code without auxiliary files
         run: |
-          mkdir -p "$RUNNER_TEMP/pr45-integration"
           python - <<'PY'
-          import json, os, pathlib, subprocess
-          dest = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-integration'
-          all_refs = subprocess.check_output(['git', 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin'], text=True).splitlines()
-          refs = [r for r in all_refs if r.startswith('refs/remotes/origin/fix/pr45-') or r in {'refs/remotes/origin/main', 'refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824'}]
-          assert any('phase-b/issue44-' in r for r in refs)
-          assert len(refs) >= 8, refs
-          subprocess.run(['git', 'bundle', 'create', str(dest / 'parallel-candidates.bundle'), *refs], check=True)
-          data = {r: subprocess.check_output(['git','rev-parse',r],text=True).strip() for r in refs}
-          (dest / 'refs.json').write_text(json.dumps(data, indent=2))
+          import base64, hashlib, json, os, pathlib, subprocess, zlib
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          data = (workspace / '.github/pr45-integration/package-scope.patch.zlib.b64').read_text().strip()
+          patch = zlib.decompress(base64.b64decode(data, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'c12472d2214c55826e4196a2a69c3e94f9636dbd478e45a4d851ea84548b0b8f'
+          parent = 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e'
+          tree = '5047ea5f43bef41efd0c5a9727d1cf8392bac796'
+          candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'scope-candidate'
+          subprocess.run(['git','worktree','add','--detach',str(candidate),parent],check=True)
+          subprocess.run(['git','apply','--index','-'],input=patch,cwd=candidate,check=True)
+          assert subprocess.check_output(['git','write-tree'],cwd=candidate,text=True).strip() == tree
+          subprocess.run(['git','-c','user.name=PR45 repair','-c','user.email=pr45-repair@users.noreply.github.com','commit','-m','fix: stop package lookup at controlling scope and validate metadata'],cwd=candidate,check=True)
+          paths = subprocess.check_output(['git','diff','--name-only',parent,'HEAD'],cwd=candidate,text=True).splitlines()
+          assert paths == ['scripts/agentic_os_runtime_source_contract.py','tests/test_runtime_package_scope_boundaries.py']
+          artifact = pathlib.Path(os.environ['RUNNER_TEMP']) / 'scope-artifact'
+          artifact.mkdir()
+          payload = {'base':parent,'tree':tree,'files':[{'path':p,'type':'blob','mode':subprocess.check_output(['git','ls-files','--stage','--',p],cwd=candidate,text=True).split()[0],'content':(candidate / p).read_text()} for p in paths]}
+          (artifact / 'publish.json').write_text(json.dumps(payload))
+          (artifact / 'scope.patch').write_bytes(patch)
+          with open(os.environ['GITHUB_ENV'],'a') as stream:
+              stream.write(f'CANDIDATE_DIR={candidate}\nARTIFACT_DIR={artifact}\n')
           PY
+      - name: Privacy and all affected regressions
+        run: |
+          cd "$CANDIDATE_DIR"
+          PYTHONPATH=src python -m agentic_os.cli preflight
+          PYTHONPATH=src python -m unittest tests.test_runtime_package_scope_boundaries tests.test_runtime_source_contract_regressions tests.test_openclaw_real_gateway_contract_probe -v 2>&1 | tee "$ARTIFACT_DIR/focused-tests.log"
+      - name: Compilation, migration, identity and clean worktree
+        run: |
+          cd "$CANDIDATE_DIR"
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^{tree})" = '5047ea5f43bef41efd0c5a9727d1cf8392bac796'
       - uses: actions/upload-artifact@v4
         with:
-          name: pr45-integration-sources
-          path: ${{ runner.temp }}/pr45-integration
+          name: pr45-package-scope-verified
+          path: ${{ runner.temp }}/scope-artifact
           retention-days: 3
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-package-scope-verified
+          path: scope-artifact
+      - name: Publish only isolated package-scope candidate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('scope-artifact/publish.json','utf8'));
+            const allowed = ['scripts/agentic_os_runtime_source_contract.py','tests/test_runtime_package_scope_boundaries.py'];
+            if (p.base !== 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e' || p.tree !== '5047ea5f43bef41efd0c5a9727d1cf8392bac796' || JSON.stringify(p.files.map(f=>f.path)) !== JSON.stringify(allowed)) throw new Error('Unexpected source payload');
+            const base = await github.rest.git.getCommit({...context.repo,commit_sha:p.base});
+            const tree = await github.rest.git.createTree({...context.repo,base_tree:base.data.tree.sha,tree:p.files});
+            if (tree.data.sha !== p.tree) throw new Error('Tested/published tree mismatch');
+            const commit = await github.rest.git.createCommit({...context.repo,message:'fix: stop package lookup at controlling scope and validate metadata',tree:p.tree,parents:[p.base]});
+            const branch = 'fix/pr45-package-scope-5047ea5f43be';
+            await github.rest.git.createRef({...context.repo,ref:'refs/heads/'+branch,sha:commit.data.sha});
+            core.notice('Verified package-scope candidate: '+commit.data.sha+' on '+branch);
+            await core.summary.addHeading('Isolated package-scope candidate').addRaw('Commit: `'+commit.data.sha+'`\n\nTree: `'+p.tree+'`\n\nFocused regressions only. PR HEAD was not moved. Full integrated CI and review remain required.').write();
