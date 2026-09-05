@@ -20,8 +20,10 @@ jobs:
           python - <<'PY'
           import json, os, pathlib, subprocess
           dest = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-integration'
-          refs = subprocess.check_output(['git', 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/fix/pr45-', 'refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824', 'refs/remotes/origin/main'], text=True).splitlines()
+          all_refs = subprocess.check_output(['git', 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin'], text=True).splitlines()
+          refs = [r for r in all_refs if r.startswith('refs/remotes/origin/fix/pr45-') or r in {'refs/remotes/origin/main', 'refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824'}]
           assert any('phase-b/issue44-' in r for r in refs)
+          assert len(refs) >= 8, refs
           subprocess.run(['git', 'bundle', 'create', str(dest / 'parallel-candidates.bundle'), *refs], check=True)
           data = {r: subprocess.check_output(['git','rev-parse',r],text=True).strip() for r in refs}
           (dest / 'refs.json').write_text(json.dumps(data, indent=2))
