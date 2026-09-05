@@ -1,25 +1,108 @@
-name: PR45 integration source snapshot
+name: PR45 exact integrated candidate verification
 on:
   push:
     branches: [fix/pr45-integration-recovery-20260905]
 permissions:
   contents: read
 jobs:
-  source:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 35
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          path: candidate
           fetch-depth: 0
           persist-credentials: false
-      - name: Package source history without executing candidate code
-        run: |
-          mkdir -p "$RUNNER_TEMP/pr45-integration"
-          git bundle create "$RUNNER_TEMP/pr45-integration/source.bundle" --all
-          git rev-parse HEAD > "$RUNNER_TEMP/pr45-integration/head.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: pr45-integration-source
-          path: ${{ runner.temp }}/pr45-integration
-          retention-days: 3
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Reproduce checksum-bound exact candidate
+        working-directory: candidate
+        env:
+          GIT_AUTHOR_DATE: '2026-09-05T05:08:00Z'
+          GIT_COMMITTER_DATE: '2026-09-05T05:08:00Z'
+        run: |
+          set -euo pipefail
+          cat ../transport/.github/pr45-integrated.patch.xz.b64.00{1,2,3} | base64 --decode | xz --decompress > "$RUNNER_TEMP/pr45.patch"
+          echo "4d480359ba930dfeb8a8d37451171b2dc7fd89fcc94355229fa89aee051312df  $RUNNER_TEMP/pr45.patch" | sha256sum --check
+          git apply --index "$RUNNER_TEMP/pr45.patch"
+          git -c user.name='OpenAI PR repair' -c user.email='pr45-repair@users.noreply.github.com' -c commit.gpgsign=false commit --no-gpg-sign -m 'fix: reconcile runtime scope, loader provenance and lexical boundaries'
+          test "$(git rev-parse HEAD)" = 2ece7aaaf9f4ddb213c778684962653fb6ac2b36
+          test "$(git rev-parse HEAD^{tree})" = aec52a44c425b6baac3c309fcd34cff900964a60
+          mkdir -p "$RUNNER_TEMP/pr45-results"
+          git show -s --format=fuller HEAD > "$RUNNER_TEMP/pr45-results/identity.txt"
+          python --version >> "$RUNNER_TEMP/pr45-results/identity.txt"
+          node --version >> "$RUNNER_TEMP/pr45-results/identity.txt"
+      - name: Privacy preflight
+        working-directory: candidate
+        run: PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full unittest discovery
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-results/unittest.log"
+      - name: Compile sources and tests
+        working-directory: candidate
+        run: PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pr45-pycache" PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration package parity
+        working-directory: candidate
+        run: |
+          PYTHONPATH=src python -m unittest -v tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations
+      - name: Diff and post-test cleanliness
+        working-directory: candidate
+        run: |
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-integrated-2ece7aa-verification
+          path: ${{ runner.temp }}/pr45-results
+          retention-days: 7
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce and publish verified tree without executing candidate code
+        working-directory: candidate
+        env:
+          GIT_AUTHOR_DATE: '2026-09-05T05:08:00Z'
+          GIT_COMMITTER_DATE: '2026-09-05T05:08:00Z'
+          GH_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat ../transport/.github/pr45-integrated.patch.xz.b64.00{1,2,3} | base64 --decode | xz --decompress > "$RUNNER_TEMP/pr45.patch"
+          echo "4d480359ba930dfeb8a8d37451171b2dc7fd89fcc94355229fa89aee051312df  $RUNNER_TEMP/pr45.patch" | sha256sum --check
+          git apply --index "$RUNNER_TEMP/pr45.patch"
+          git -c user.name='OpenAI PR repair' -c user.email='pr45-repair@users.noreply.github.com' -c commit.gpgsign=false commit --no-gpg-sign -m 'fix: reconcile runtime scope, loader provenance and lexical boundaries'
+          test "$(git rev-parse HEAD)" = 2ece7aaaf9f4ddb213c778684962653fb6ac2b36
+          test "$(git rev-parse HEAD^{tree})" = aec52a44c425b6baac3c309fcd34cff900964a60
+          test -z "$(git status --porcelain)"
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push "https://github.com/$GH_REPO.git" HEAD:refs/heads/fix/pr45-final-verified-2ece7aa
