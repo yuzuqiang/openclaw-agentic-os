@@ -1,0 +1,89 @@
+name: PR45 bounded capability crosscheck
+on:
+  push:
+    branches: [fix/pr45-closure-657526c2440f-audit]
+    paths: [.github/workflows/pr45-capability-crosscheck.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply byte-pinned bounded correction to exact bb160fb
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          encoded = (workspace / '.github/pr45-repair/bb160-capability-crosscheck.patch.gz.b64').read_text().strip()
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '7f41822d99726fc71fcd054f0b87699acdf2fed0fa7cc4b0dff4cb9bc0198323'
+          base = 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e'
+          candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'capability-candidate'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), base], check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, cwd=candidate, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
+          assert tree == 'ebb6d2975f6581c53f638eabc6f526e87c1314ad'
+          subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: account for module namespaces and spread capability transfers'], cwd=candidate, check=True)
+          files = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], cwd=candidate, text=True).splitlines()
+          assert files == ['scripts/agentic_os_runtime_source_contract.py', 'tests/test_runtime_capability_transfer_crosschecks.py']
+          artifact = pathlib.Path(os.environ['RUNNER_TEMP']) / 'capability-publish'
+          artifact.mkdir()
+          payload = {'base': base, 'tree': tree, 'files': [{'path': name, 'mode': '100644', 'type': 'blob', 'content': (candidate / name).read_text()} for name in files]}
+          (artifact / 'publish.json').write_text(json.dumps(payload))
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'CANDIDATE_DIR={candidate}\n')
+          PY
+      - name: Privacy preflight
+        run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full tests including real Node crosschecks
+        run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile and migration resource parity
+        run: |
+          cd "$CANDIDATE_DIR"
+          PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/capability-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-bounded-capability-candidate
+          path: ${{ runner.temp }}/capability-publish/publish.json
+          retention-days: 3
+  publish-isolated-candidate:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-bounded-capability-candidate
+          path: payload
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('payload/publish.json', 'utf8'));
+            const allowed = ['scripts/agentic_os_runtime_source_contract.py', 'tests/test_runtime_capability_transfer_crosschecks.py'];
+            if (p.base !== 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e' || p.tree !== 'ebb6d2975f6581c53f638eabc6f526e87c1314ad' || JSON.stringify(p.files.map(f => f.path)) !== JSON.stringify(allowed)) throw new Error('Unexpected payload');
+            const repo = context.repo;
+            const base = await github.rest.git.getCommit({...repo, commit_sha: p.base});
+            const tree = await github.rest.git.createTree({...repo, base_tree: base.data.tree.sha, tree: p.files});
+            if (tree.data.sha !== p.tree) throw new Error('Published source differs from tested source');
+            const commit = await github.rest.git.createCommit({...repo, message: 'fix: account for module namespaces and spread capability transfers', tree: tree.data.sha, parents: [p.base]});
+            const branch = 'fix/pr45-crosscheck-ebb6d2975f65';
+            await github.rest.git.createRef({...repo, ref: 'refs/heads/' + branch, sha: commit.data.sha});
+            core.notice('Validated isolated candidate: ' + commit.data.sha);
+            await core.summary.addHeading('Bounded capability crosscheck').addRaw('Commit: `' + commit.data.sha + '`\n\nTree: `' + p.tree + '`\n\nPR #45 is not moved or merged by this workflow.').write();
