@@ -3348,6 +3348,28 @@ def _create_require_specifiers(
 ) -> list[str]:
     specifiers: list[str] = []
     _validate_create_require_factory_calls(source_text)
+    # Account for direct calls of the returned loader as well as assignments.
+    # The factory-reference validator already accepts this literal signature;
+    # accepting it without recording its target would silently omit execution.
+    factories = _create_require_factory_names(source_text)
+    for kind, value, start, end in _source_tokens(source_text):
+        if kind != "identifier" or value not in factories:
+            continue
+        if _previous_non_trivia_character(source_text, start) == ".":
+            continue  # Existing inline namespace/member handling below.
+        opening = _skip_js_trivia(source_text, end)
+        if source_text[opening:opening + 1] != "(":
+            continue
+        base_end = _create_require_base_end(source_text, opening)
+        if base_end is None:
+            continue
+        call = _skip_js_trivia(source_text, base_end)
+        if source_text[call:call + 1] != "(":
+            continue
+        parsed = _parse_quoted_specifier(source_text, _skip_js_trivia(source_text, call + 1))
+        if parsed is None or source_text[_skip_js_trivia(source_text, parsed[1]):][:1] != ")":
+            raise RuntimeSourceContractError("runtime source contains an unsupported createRequire loader signature")
+        specifiers.append(parsed[0])
     for match in _executable_pattern_matches(
         source_text, INLINE_CREATE_REQUIRE_SPECIFIER
     ):
@@ -4080,6 +4102,154 @@ def _static_runtime_import_specifiers(source_text: str) -> list[str]:
     return specifiers
 
 
+def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+    """Account for the identities assumed by literal loader-base recognition.
+
+    ``import.meta`` and ``__filename`` are writable; ``URL`` can be shadowed or
+    its prototype acquired through node:url. A literal argument is insufficient
+    when any of those inputs escapes its audited position. Module-local bases
+    are checked locally; URL capability escapes are also combined across the
+    source closure because its constructor/prototype is shared between modules.
+    """
+    source_text = _source_scan_view(source_text)
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    allowed_bases: list[tuple[int, int]] = []
+    url_declarations: list[tuple[int, int]] = []
+    url_names = {"URL"}
+    url_origin_risk = False
+    recognized_url_requires = 0
+    required_filename = False
+    required_meta = False
+
+    def text(index: int) -> str:
+        return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    def literal(index: int) -> str | None:
+        if not 0 <= index < len(tokens) or tokens[index][0] != "string":
+            return None
+        parsed = _parse_quoted_specifier(source_text, tokens[index][2])
+        return parsed[0] if parsed is not None else None
+
+    def clause(start: int, end: int, *, commonjs: bool) -> bool:
+        index = start
+        # Erased type imports do not shadow the runtime global URL.
+        if not commonjs and text(index) == "type" and index + 1 < end and text(index + 1) != ",":
+            return True
+        if index < end and tokens[index][0] == "identifier":
+            url_names.add(text(index))  # Default import / CommonJS namespace.
+            index += 1
+            if text(index) == ",":
+                index += 1
+        if index == end:
+            return True
+        if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
+            url_names.add(text(index + 2))
+            return True
+        if text(index) != "{" or text(end - 1) != "}":
+            return False
+        index += 1
+        while index < end - 1:
+            if text(index) == ",":
+                index += 1
+                continue
+            type_only = not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}
+            if type_only:
+                index += 1
+            if tokens[index][0] not in {"identifier", "string"}:
+                return False
+            imported = literal(index) if tokens[index][0] == "string" else text(index)
+            local = imported
+            index += 1
+            if text(index) == (":" if commonjs else "as"):
+                index += 1
+                if index >= end - 1 or tokens[index][0] != "identifier":
+                    return False
+                local = text(index)
+                index += 1
+            if index < end - 1 and text(index) != ",":
+                return False
+            if not type_only and imported in {"URL", "default"} and local is not None:
+                url_names.add(local)
+        return True
+
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier" or value not in {"import", "export"} or text(index + 1) in {"(", "."}:
+            continue
+        cursor = index + 1
+        while cursor < len(tokens) and text(cursor) != ";":
+            if text(cursor) == "from" and literal(cursor + 1) is not None:
+                if literal(cursor + 1) in {"url", "node:url"}:
+                    if value != "import" or not clause(index + 1, cursor, commonjs=False):
+                        url_origin_risk = True
+                    else:
+                        url_declarations.append((start, tokens[cursor + 1][3]))
+                break
+            if cursor > index + 1 and text(cursor) in {"import", "export"}:
+                break
+            cursor += 1
+
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "require" or text(index + 1) != "(":
+            continue
+        if literal(index + 2) not in {"url", "node:url"} or text(index + 3) != ")" or text(index - 1) != "=":
+            continue
+        lhs = index - 2
+        if text(lhs) == "}":
+            while lhs >= 0 and text(lhs) != "{":
+                lhs -= 1
+        if lhs >= 1 and text(lhs - 1) in {"const", "let", "var"} and clause(lhs, index - 1, commonjs=True):
+            recognized_url_requires += 1
+            url_declarations.append((tokens[lhs - 1][2], tokens[index - 1][3]))
+    url_loads = sum(
+        specifier in {"url", "node:url"}
+        for specifier in (
+            _commonjs_require_specifiers(source_text)
+            + _create_require_specifiers(source_text)
+            + _dynamic_import_specifiers(source_text)
+        )
+    )
+    url_origin_risk |= url_loads != recognized_url_requires
+
+    factories = _create_require_factory_names(source_text)
+    for index, (kind, value, _start, end) in enumerate(tokens):
+        if kind != "identifier" or value not in factories:
+            continue
+        opening = _skip_js_trivia(source_text, end)
+        if source_text[opening:opening + 1] != "(":
+            continue
+        base_end = _create_require_base_end(source_text, opening)
+        if base_end is None:
+            continue  # The existing factory validator rejects unsupported bases.
+        allowed_bases.append((opening, base_end))
+        if text(index + 2) == "__filename":
+            required_filename = True
+        else:
+            required_meta = True
+
+    constructors, namespaces = _worker_thread_bindings(source_text)
+    worker_matches = _executable_pattern_matches(source_text, _worker_constructor_pattern(constructors, namespaces))
+    allowed_bases.extend(match.span() for match in worker_matches)
+    requires_url = bool(worker_matches)
+    required_meta |= requires_url
+
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier":
+            continue
+        allowed = any(left <= start < right for left, right in allowed_bases)
+        if required_filename and value == "__filename" and not allowed:
+            raise RuntimeSourceContractError("runtime source contains an unbound createRequire filename base")
+        if required_meta and value == "import" and text(index + 1) == "." and text(index + 2) == "meta" and not allowed:
+            raise RuntimeSourceContractError("runtime source contains an unbound import.meta loader base")
+        if value not in url_names or (index and text(index - 1) in {".", "?."}):
+            continue
+        if allowed or any(left <= start < right for left, right in url_declarations):
+            continue
+        url_origin_risk = True
+    if requires_url and url_origin_risk:
+        raise RuntimeSourceContractError("runtime source contains an unbound Worker URL constructor")
+    return requires_url, url_origin_risk
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     source_text = _source_scan_view(source_text)
     _reject_evaluated_runtime_loaders(source_text)
@@ -4134,6 +4304,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         ],
     )
     _reject_unaccounted_create_require_references(source_text)
+    _runtime_resolution_base_audit(source_text)
     module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
@@ -4770,6 +4941,8 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
         queue.append(path)
 
     seen: set[str] = set()
+    requires_url = False
+    url_origin_risk = False
     while queue:
         source_path = queue.pop(0).resolve()
         relative = source_relative_path(root, source_path)
@@ -4802,7 +4975,11 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
             raise RuntimeSourceContractError(
                 f"runtime source is not UTF-8: {relative}"
             ) from exc
-        for specifier, required, import_kind in import_specifiers(source_text):
+        specifiers = import_specifiers(source_text)
+        source_requires_url, source_url_risk = _runtime_resolution_base_audit(source_text)
+        requires_url |= source_requires_url
+        url_origin_risk |= source_url_risk
+        for specifier, required, import_kind in specifiers:
             for imported in resolve_import(
                 root=root,
                 importer=source_path,
@@ -4813,6 +4990,8 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
                 imported_relative = source_relative_path(root, imported)
                 if imported_relative not in seen:
                     queue.append(imported)
+    if requires_url and url_origin_risk:
+        raise RuntimeSourceContractError("runtime source closure contains an unbound Worker URL constructor")
     if not seen:
         raise RuntimeSourceContractError("persistent runtime source closure is empty")
     return tuple(sorted(seen))
