@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Retrieve content-addressed patch
+      - name: Retrieve content-addressed patches
         uses: actions/github-script@v7
         with:
           script: |
@@ -27,31 +27,35 @@ jobs:
             const path = require('path');
             const zlib = require('zlib');
             const crypto = require('crypto');
-            const shas = ['fad4bb18777bbdfb6229b7a602da6c2f6fbfbc02', '1cf4bc09c908f46e5564e5e9bc2891e72ac4156e', '3d194833cd3e1437c545d28805d4ea15bf95d3c6', 'cdd87b9e192843c2fd2046a408e7d09df0930b12'];
-            const chunks = [];
-            for (const sha of shas) {
+            async function blob(sha) {
               const {data} = await github.rest.git.getBlob({...context.repo, file_sha: sha});
               if (data.encoding !== 'base64') throw new Error('Unexpected blob encoding');
               const bytes = Buffer.from(data.content, 'base64');
               const identity = crypto.createHash('sha1').update(Buffer.from('blob ' + bytes.length + '\0')).update(bytes).digest('hex');
               if (identity !== sha) throw new Error('Blob identity mismatch');
-              chunks.push(bytes);
+              return bytes;
             }
+            const shas = ['fad4bb18777bbdfb6229b7a602da6c2f6fbfbc02', '1cf4bc09c908f46e5564e5e9bc2891e72ac4156e', '3d194833cd3e1437c545d28805d4ea15bf95d3c6', 'cdd87b9e192843c2fd2046a408e7d09df0930b12'];
+            const chunks = [];
+            for (const sha of shas) chunks.push(await blob(sha));
             const patch = zlib.inflateSync(Buffer.concat(chunks));
-            const digest = crypto.createHash('sha256').update(patch).digest('hex');
-            if (digest !== '68e3e46bb5a4e91a1467b688c69bcae45026505524dc2f3b81ba1b8af71a7ada') throw new Error('Patch identity mismatch');
+            if (crypto.createHash('sha256').update(patch).digest('hex') !== '68e3e46bb5a4e91a1467b688c69bcae45026505524dc2f3b81ba1b8af71a7ada') throw new Error('Patch identity mismatch');
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'lexical-type.patch'), patch);
+            const compatibility = await blob('e6dba0573a7bffab37cc435598916f8b88bcff93');
+            if (crypto.createHash('sha256').update(compatibility).digest('hex') !== '25b815ce37ec1828307fe21b2aa62dab8127c47ae586699e6f08ed70859ef195') throw new Error('Compatibility patch identity mismatch');
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'jsx-compatibility.patch'), compatibility);
       - name: Prepare exact candidate tree without audit infrastructure
         shell: bash
         run: |
           python - <<'PY'
           import json, os, pathlib, subprocess
           base = 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e'
-          expected_tree = '40e58aa79f68cf08892dbfb9961156f8dedf4537'
+          expected_tree = '0551d7edbe44af843a9a31fb991c776a5ac98e18'
           temp = pathlib.Path(os.environ['RUNNER_TEMP'])
           candidate = temp / 'lexical-type-candidate'
           subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), base], check=True)
-          subprocess.run(['git', 'apply', '--index', str(temp / 'lexical-type.patch')], cwd=candidate, check=True)
+          for name in ('lexical-type.patch', 'jsx-compatibility.patch'):
+              subprocess.run(['git', 'apply', '--index', str(temp / name)], cwd=candidate, check=True)
           tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
           assert tree == expected_tree, (tree, expected_tree)
           subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: close package-scope and lexical/type boundary gaps'], cwd=candidate, check=True)
@@ -62,7 +66,7 @@ jobs:
           output.mkdir()
           payload = {'base': base, 'tree': tree, 'files': [{'path': name, 'mode': '100644', 'type': 'blob', 'content': (candidate / name).read_text(encoding='utf-8')} for name in files]}
           (output / 'publish.json').write_text(json.dumps(payload), encoding='utf-8')
-          (output / 'repair.patch').write_bytes((temp / 'lexical-type.patch').read_bytes())
+          (output / 'repair.patch').write_bytes(subprocess.check_output(['git', 'diff', base, 'HEAD'], cwd=candidate))
           (output / 'identity.json').write_text(json.dumps({'base': base, 'tree': tree, 'infrastructure_commit': os.environ['GITHUB_SHA']}))
           with open(os.environ['GITHUB_ENV'], 'a') as handle:
               handle.write(f'CANDIDATE_DIR={candidate}\nVERIFIED_DIR={output}\n')
@@ -91,10 +95,10 @@ jobs:
           cd "$CANDIDATE_DIR"
           git diff --check bb160fb68ae5e7f0e7af26a3809323f3c9f6335e...HEAD
           test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD^{tree})" = '40e58aa79f68cf08892dbfb9961156f8dedf4537'
+          test "$(git rev-parse HEAD^{tree})" = '0551d7edbe44af843a9a31fb991c776a5ac98e18'
       - uses: actions/upload-artifact@v4
         with:
-          name: pr45-lexical-type-40e58aa79f68-verified
+          name: pr45-lexical-type-0551d7edbe44-verified
           path: ${{ runner.temp }}/lexical-type-verified
           retention-days: 3
   publish-isolated-candidate:
@@ -105,7 +109,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pr45-lexical-type-40e58aa79f68-verified
+          name: pr45-lexical-type-0551d7edbe44-verified
           path: verified
       - name: Publish validated candidate without moving PR or main
         uses: actions/github-script@v7
@@ -114,13 +118,13 @@ jobs:
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('verified/publish.json', 'utf8'));
             const allowed = ['scripts/agentic_os_runtime_source_contract.py', 'tests/test_runtime_lexical_type_boundaries.py', 'tests/test_runtime_package_scope_boundaries.py'];
-            if (p.base !== 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e' || p.tree !== '40e58aa79f68cf08892dbfb9961156f8dedf4537' || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected candidate');
+            if (p.base !== 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e' || p.tree !== '0551d7edbe44af843a9a31fb991c776a5ac98e18' || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected candidate');
             if (p.files.some(f => f.type !== 'blob' || f.mode !== '100644')) throw new Error('Unexpected file mode');
             const base = await github.rest.git.getCommit({...context.repo, commit_sha: p.base});
             const tree = await github.rest.git.createTree({...context.repo, base_tree: base.data.tree.sha, tree: p.files});
             if (tree.data.sha !== p.tree) throw new Error('Published tree differs from tested tree');
             const commit = await github.rest.git.createCommit({...context.repo, message: 'fix: close package-scope and lexical/type boundary gaps', tree: tree.data.sha, parents: [p.base]});
-            const ref = 'refs/heads/fix/pr45-lexical-type-40e58aa79f68';
+            const ref = 'refs/heads/fix/pr45-lexical-type-0551d7edbe44';
             await github.rest.git.createRef({...context.repo, ref, sha: commit.data.sha});
             core.notice('Isolated verified candidate: ' + commit.data.sha);
             await core.summary.addHeading('Isolated lexical/type repair').addRaw('Commit: `' + commit.data.sha + '`\n\nTree: `' + p.tree + '`\n\nPR #45 and main have NOT been moved or merged. Integrate against the current PR head and repeat exact-head verification before requesting review.').write();
