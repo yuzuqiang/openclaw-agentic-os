@@ -524,6 +524,24 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+Runtime-source validation accepts statically resolved imports and recognized direct
+Worker/child-process entrypoints; transferring their callable or namespace
+bindings through grouping, reflection, objects, arrays, or additional aliases is
+rejected unless the complete use is explicitly resolved. Comment recognition is
+shared across the scanners, including hashbangs, CommonJS HTML comments, all
+JavaScript line terminators, and template substitutions. Every parsed runtime
+module also binds its nearest controlling `package.json`.
+
+The launch-source record now requires four identities: the Node executable, the
+resolved `tsx` preload, the `tsx` package tree, and the complete candidate
+installation (`runtime-preload-installation:openclaw`). The installation digest
+includes file contents, package/configuration metadata, directory/file modes, and
+contained symlink topology, so sibling and nested preload dependencies cannot
+change invisibly. Escaping or broken symlinks and special files are rejected.
+Older three-record evidence is incomplete and must be recaptured. This digest is
+an identity check, not an immutable execution or isolation boundary; the trusted
+external-launcher requirement above remains mandatory.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must
