@@ -1690,24 +1690,6 @@ def _parse_parenthesized_require_invocation(
     return specifier, invocation_end + 1
 
 
-def _reject_indirect_parenthesized_commonjs_require_invocation(
-    source_text: str, index: int
-) -> None:
-    if index >= len(source_text) or source_text[index] != "(":
-        return
-    expression_end = _parenthesized_expression_end(source_text, index)
-    call_index = _skip_js_trivia(source_text, expression_end)
-    if source_text.startswith("?.", call_index):
-        call_index = _skip_js_trivia(source_text, call_index + 2)
-    if call_index >= len(source_text) or source_text[call_index] != "(":
-        return
-    expression = source_text[index + 1 : expression_end - 1]
-    if re.search(rf"(?<![\w$.]){COMMONJS_REQUIRE_TOKEN}(?![\w$])", expression):
-        raise RuntimeSourceContractError(
-            "runtime source contains an unsupported indirect CommonJS require invocation"
-        )
-
-
 def _template_expression_end(source_text: str, index: int) -> int:
     depth = 1
     state = "code"
@@ -2341,20 +2323,6 @@ def _child_process_namespace_node_entrypoint_pattern(
         (?:{members}|\[\s*["'](?:{members})["']\s*\])\s*(?:\?\.)?\s*\(
         """,
         re.VERBOSE | re.DOTALL,
-    )
-
-
-def _child_process_grouped_alias_node_entrypoint_pattern(
-    node_entrypoint_names: set[str],
-) -> re.Pattern[str] | None:
-    if not node_entrypoint_names:
-        return None
-    alternatives = "|".join(
-        re.escape(name) for name in sorted(node_entrypoint_names, key=len, reverse=True)
-    )
-    return re.compile(
-        rf"\(\s*(?:\(\s*)*(?:{alternatives})(?:\s*\))*\s*(?:\?\.)?\s*\(",
-        re.DOTALL,
     )
 
 
@@ -3551,9 +3519,9 @@ def _commonjs_require_specifiers(
                     specifier, index = parsed
                     specifiers.append(specifier)
                     continue
-                _reject_indirect_parenthesized_commonjs_require_invocation(
-                    source_text, index
-                )
+                # An invoked enclosing function can contain ordinary require
+                # calls. The reference audit, not enclosing parentheses,
+                # decides whether the require capability itself escapes.
             index += 1
             continue
         continue
@@ -3794,17 +3762,9 @@ def _runtime_execution_entrypoint_specifiers(
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
                 )
-    grouped_child_process_alias_pattern = (
-        _child_process_grouped_alias_node_entrypoint_pattern(
-            child_process_node_alias_names
-        )
-    )
-    if grouped_child_process_alias_pattern is not None and _executable_pattern_matches(
-        source_text, grouped_child_process_alias_pattern
-    ):
-        raise RuntimeSourceContractError(
-            "runtime source contains an unsupported child-process Node entrypoint"
-        )
+    # A call used as another call's argument is still a direct invocation.
+    # Grouped/transferred callables are rejected by the reference audit below;
+    # searching for "(alias(" would also reject valid "consume(alias(...))".
     child_process_namespace_pattern = _child_process_namespace_node_entrypoint_pattern(
         child_process_namespace_names
     )
