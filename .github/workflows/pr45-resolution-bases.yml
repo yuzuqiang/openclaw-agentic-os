@@ -19,10 +19,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Decode transport and require exact patch identity
+      - name: Decode transport and require exact patch identities
         run: |
           mkdir -p "$RUNNER_TEMP/pr45-base-results"
           cp .github/pr45-resolution-bases.patch.zlib.b64 "$RUNNER_TEMP/pr45-base-results/transport.txt"
+          cp .github/pr45-resolution-bases-spread.patch "$RUNNER_TEMP/pr45-base-results/spread.patch"
           python - <<'PY'
           import base64, hashlib, os, pathlib, zlib
           directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-base-results'
@@ -39,7 +40,9 @@ jobs:
           digest = hashlib.sha256(patch).hexdigest()
           assert digest == '987d67e390b9ee74e3de45b34a01401f9e3b2b038e10f5d5755354013f7ae645', digest
           (directory / 'verified.patch').write_bytes(patch)
-          (directory / 'patch.sha256').write_text(digest + '\n')
+          spread_digest = hashlib.sha256((directory / 'spread.patch').read_bytes()).hexdigest()
+          assert spread_digest == '1d64e9e6a7b0a09c7676804fb6a0904bc570bf070b3c214cad3e3cc21387083b', spread_digest
+          (directory / 'patch.sha256').write_text(digest + '\n' + spread_digest + '\n')
           PY
       - name: Prepare exact business-source candidate
         run: |
@@ -47,7 +50,9 @@ jobs:
           test -z "$(git status --porcelain)"
           git apply --index "$RUNNER_TEMP/pr45-base-results/verified.patch"
           test "$(git write-tree)" = 2f3ec8f218f566a87db1851984fe624fdda8b1a3
-          git -c user.name='PR45 source audit' -c user.email='pr45-audit@users.noreply.github.com' commit -m 'fix: bind runtime loader bases and account for URL capability escapes'
+          git apply --index "$RUNNER_TEMP/pr45-base-results/spread.patch"
+          test "$(git write-tree)" = 07afce438bb7a14645406556e5d73dee437cc8db
+          git -c user.name='PR45 source audit' -c user.email='pr45-audit@users.noreply.github.com' commit -m 'fix: bind loader bases and account for URL namespace transfers'
           git rev-parse HEAD HEAD^ HEAD^{tree} > "$RUNNER_TEMP/pr45-base-results/identity.txt"
           python --version >> "$RUNNER_TEMP/pr45-base-results/identity.txt"
           node --version >> "$RUNNER_TEMP/pr45-base-results/identity.txt"
@@ -69,8 +74,8 @@ jobs:
       - name: Publish only the independently checked candidate branch
         run: |
           test "$(git rev-parse HEAD^)" = bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
-          test "$(git rev-parse HEAD^{tree})" = 2f3ec8f218f566a87db1851984fe624fdda8b1a3
-          git push origin HEAD:refs/heads/fix/pr45-resolution-bases-2f3ec8f218f5
+          test "$(git rev-parse HEAD^{tree})" = 07afce438bb7a14645406556e5d73dee437cc8db
+          git push origin HEAD:refs/heads/fix/pr45-resolution-bases-07afce438bb7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
