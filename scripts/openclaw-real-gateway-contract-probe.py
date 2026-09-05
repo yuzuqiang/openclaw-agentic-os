@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-installation:node_modules",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1572,6 +1573,66 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_installation_binding(root: Path) -> dict[str, str]:
+    """Bind the whole installed dependency graph, not just tsx's package folder.
+
+    The preload is a transpiler/loader and cannot itself be treated as ordinary
+    application code by the restricted source scanner. Hash every installed
+    file (including native helpers and nested package metadata) plus symlink
+    topology. Targets must remain inside this installation; external stores and
+    workspace links require an independently bound launcher and fail closed here.
+    This is a binding, not a substitute for the trusted read-only launch boundary.
+    """
+    root = root.resolve()
+    if not root.is_dir():
+        raise ProbeError("runtime preload dependency installation is missing")
+    digest = hashlib.sha256()
+
+    def record(kind: str, relative: str, value: str) -> None:
+        digest.update(json.dumps([kind, relative, value], ensure_ascii=True,
+                                 separators=(",", ":")).encode("utf-8"))
+        digest.update(b"\0")
+
+    def visit(directory: Path) -> None:
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name)
+            for path in entries:
+                relative = path.relative_to(root).as_posix()
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    target = path.resolve(strict=True)
+                    if not target.is_relative_to(root):
+                        raise ProbeError("runtime preload dependency symlink escapes installation")
+                    if not (target.is_file() or target.is_dir()):
+                        raise ProbeError("runtime preload dependency symlink has unsupported target")
+                    record("symlink", relative, target.relative_to(root).as_posix())
+                    # Every contained target is also visited through its physical
+                    # path. Do not recurse through links (pnpm graphs have cycles).
+                elif stat.S_ISDIR(info.st_mode):
+                    record("directory", relative, str(stat.S_IMODE(info.st_mode)))
+                    visit(path)
+                elif stat.S_ISREG(info.st_mode):
+                    file_digest = hashlib.sha256()
+                    with path.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            file_digest.update(chunk)
+                    record("file", relative,
+                           f"{stat.S_IMODE(info.st_mode)}:{file_digest.hexdigest()}")
+                else:
+                    raise ProbeError("runtime preload dependency has unsupported file type")
+        except (OSError, RuntimeError) as exc:
+            if isinstance(exc, ProbeError):
+                raise
+            raise ProbeError("runtime preload dependency installation is unavailable") from exc
+
+    visit(root)
+    return {
+        "path": "runtime-preload-installation:node_modules",
+        "sha256": digest.hexdigest(),
+        "realpath_sha256": _text_sha256(str(root)),
+    }
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1586,7 +1647,15 @@ def _runtime_launch_bindings(
         specifier="tsx",
         label="tsx",
     )
+    installation_root = (openclaw_root / "node_modules").resolve()
+    if not installation_root.is_relative_to(openclaw_root.resolve()):
+        raise ProbeError("runtime preload dependency installation escapes candidate root")
+    if not tsx_preload.is_relative_to(installation_root):
+        raise ProbeError("tsx runtime preload is outside the bound dependency installation")
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    if not tsx_package_root.is_relative_to(installation_root):
+        raise ProbeError("tsx runtime preload is outside the bound dependency installation")
+    installation_binding = _runtime_installation_binding(installation_root)
     return (
         node_executable,
         tsx_preload.as_uri(),
@@ -1596,6 +1665,7 @@ def _runtime_launch_bindings(
             _runtime_directory_binding(
                 tsx_package_root, "runtime-preload-package:tsx"
             ),
+            installation_binding,
         ],
     )
 
@@ -1611,6 +1681,8 @@ def _validate_runtime_launch_sources(value: Any) -> list[dict[str, str]]:
     missing = sorted(set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS) - set(by_path))
     if missing:
         raise ProbeError("runtime launch source binding is incomplete")
+    if len(value) != len(by_path) or set(by_path) != set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS):
+        raise ProbeError("runtime launch source binding has duplicate or unexpected records")
     validated: list[dict[str, str]] = []
     for label in PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS:
         item = by_path[label]
