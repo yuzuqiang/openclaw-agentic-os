@@ -35,14 +35,17 @@ jobs:
           encoded = ''.join((workspace / f'.github/pr45-repair/part-{n}.txt').read_text().strip() for n in range(1, 5))
           patch = zlib.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(patch).hexdigest() == spec['patch_sha256']
+          extra = zlib.decompress(base64.b64decode((workspace / '.github/pr45-repair/extra.patch.b64').read_text().strip(), validate=True))
+          assert hashlib.sha256(extra).hexdigest() == spec['extra_sha256']
           candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-candidate'
           subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), spec['base']], check=True)
-          subprocess.run(['git', 'apply', '--index', '-'], input=patch, cwd=candidate, check=True)
+          for change in (patch, extra):
+              subprocess.run(['git', 'apply', '--index', '-'], input=change, cwd=candidate, check=True)
           tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
           assert tree == spec['tree'], (tree, spec['tree'])
           subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: unify execution capability, package scope and preload boundaries'], cwd=candidate, check=True)
           files = subprocess.check_output(['git', 'diff', '--name-only', spec['base'], 'HEAD'], cwd=candidate, text=True).splitlines()
-          allowed = ['scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_boundaries.py']
+          allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_boundaries.py']
           assert sorted(files) == allowed
           artifact = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-publish'
           artifact.mkdir()
@@ -92,7 +95,7 @@ jobs:
           script: |
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('pr45-publish/publish.json', 'utf8'));
-            const allowed = ['scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_boundaries.py'];
+            const allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_boundaries.py'];
             if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== process.env.EXPECTED_TREE || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected repair payload');
             const repo = context.repo;
             const base = await github.rest.git.getCommit({...repo, commit_sha: p.base});
