@@ -1,0 +1,63 @@
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index 2c2550f..2907a8f 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -4240,8 +4240,14 @@ def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+             raise RuntimeSourceContractError("runtime source contains an unbound createRequire filename base")
+         if required_meta and value == "import" and text(index + 1) == "." and text(index + 2) == "meta" and not allowed:
+             raise RuntimeSourceContractError("runtime source contains an unbound import.meta loader base")
+-        if value not in url_names or (index and text(index - 1) in {".", "?."}):
++        if value not in url_names:
+             continue
++        if index and text(index - 1) in {".", "?."}:
++            # Older lexical views emit three dots separately. An object spread
++            # copies the namespace's URL capability; it is not member access.
++            spread = index >= 3 and all(text(item) == "." for item in range(index - 3, index))
++            if not spread:
++                continue
+         if allowed or any(left <= start < right for left, right in url_declarations):
+             continue
+         url_origin_risk = True
+diff --git a/tests/test_runtime_resolution_bases.py b/tests/test_runtime_resolution_bases.py
+index 8054ce4..0cce3dc 100644
+--- a/tests/test_runtime_resolution_bases.py
++++ b/tests/test_runtime_resolution_bases.py
+@@ -158,6 +158,38 @@ class RuntimeResolutionBaseTests(unittest.TestCase):
+                 self.write("scripts/mutator.mjs", mutation)
+                 self.assert_closed("import './mutator.mjs';" + WORKER + LAUNCH)
+ 
++    def test_spread_url_namespace_is_a_capability_transfer_not_member_access(self) -> None:
++        for declaration in (
++            "import * as native from 'node:url';",
++            "import native from 'url';",
++            "const native=require('node:url');",
++        ):
++            for transfer in (
++                "const copy={...native}; change(copy.URL.prototype);",
++                "const copy={...native, marker:1}; change(copy.URL.prototype);",
++                "consume({...native});",
++            ):
++                with self.subTest(declaration=declaration, transfer=transfer):
++                    self.write("scripts/mutator.mjs", declaration + transfer)
++                    self.assert_closed("import './mutator.mjs';" + WORKER + LAUNCH)
++
++    @unittest.skipUnless(NODE, "Node is required for real execution witnesses")
++    def test_node_worker_redirected_by_spread_url_namespace_in_imported_module(self) -> None:
++        for declaration, suffix in (
++            ("import * as native from 'node:url';", "mjs"),
++            ("import native from 'url';", "mjs"),
++            ("const native=require('node:url');", "cjs"),
++        ):
++            with self.subTest(declaration=declaration):
++                mutation = (
++                    declaration + "const copy={...native};"
++                    "Object.defineProperty(copy.URL.prototype,'pathname',{get(){return process.cwd()+'/scripts/hidden.mjs';}});"
++                )
++                self.write("scripts/mutator." + suffix, mutation)
++                source = "import './mutator." + suffix + "';" + WORKER + LAUNCH
++                self.node_witness(source)
++                self.assert_closed(source)
++
+     def test_inline_factory_results_record_literal_target_for_named_and_aliased_factories(self) -> None:
+         for declaration, call in (
+             (FACTORY, "createRequire(import.meta.url)"),
