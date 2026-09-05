@@ -524,6 +524,27 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+The source contract supports statically bound calls, not arbitrary JavaScript
+capability flow. Worker, child-process, CommonJS and `createRequire` references
+that escape into aliases, containers, callbacks or re-exports without a supported
+binding fail closed. One lexical view handles comments, hashbangs, Annex B HTML
+comments, strings, regular expressions and nested template expressions. Relative
+modules bind their nearest package-scope manifest; child CLI scripts bind exact
+files relative to the launcher's candidate-root working directory, with `chdir`
+and unbound child options rejected.
+
+Launch receipts also require `runtime-preload-installation:tsx`: a conservative
+inventory of the entire candidate installation, without exclusions, covering
+sibling/transitive and native preload dependencies, configuration files,
+directory topology, file modes and in-root symbolic links. External, dangling,
+cyclic and special-file inputs fail closed; old receipts missing this binding
+are not current proof. The aggregate does not expose installation paths in the
+receipt. This inventory is not an atomic snapshot, execution isolation or proof
+that arbitrary loader code cannot reach outside the installation. Those remain
+requirements of the unavailable trusted external launcher above; this change
+does not enable candidate execution or production authority. The regression
+matrix is in `tests/test_runtime_source_contract_review.py`.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must

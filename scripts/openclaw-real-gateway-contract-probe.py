@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-installation:tsx",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1572,6 +1573,87 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_installation_binding(root: Path) -> dict[str, str]:
+    """Bind an over-approximation of preload inputs, not just declared imports.
+
+    tsx can execute sibling/optional packages, native helpers and loader hooks;
+    its manifest or a JS import scan is not a complete dependency boundary.
+    Inventory the entire candidate installation without exclusions, including
+    configs, directory topology, executable modes and in-root symlink targets.
+    This is a content binding, NOT an atomic snapshot or an isolation proof:
+    _require_trusted_persistent_lifecycle_boundary still blocks execution until
+    the external launcher supplies an immutable, alias-free source namespace.
+    """
+    root = root.resolve()
+    if not root.is_dir():
+        raise ProbeError("runtime preload installation root is missing")
+    records: list[dict[str, str | int]] = []
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)
+            for entry in children:
+                path = Path(entry.path)
+                relative = path.relative_to(root).as_posix()
+                info = path.lstat()
+                record: dict[str, str | int] = {
+                    "path": relative, "mode": stat.S_IMODE(info.st_mode),
+                }
+                if stat.S_ISLNK(info.st_mode):
+                    target = os.readlink(path)
+                    # Reject unbound intermediate aliases as well as a final
+                    # realpath outside the installation; do not follow cycles.
+                    lexical_target = Path(os.path.abspath(path.parent / target))
+                    lexical_target.relative_to(root)
+                    resolved = path.resolve(strict=True)
+                    resolved.relative_to(root)
+                    if not (resolved.is_file() or resolved.is_dir()):
+                        raise ProbeError("runtime preload symlink target is not a regular source")
+                    record.update({
+                        "kind": "symlink", "target": target,
+                        "resolved": resolved.relative_to(root).as_posix(),
+                    })
+                elif stat.S_ISDIR(info.st_mode):
+                    record["kind"] = "directory"
+                    pending.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    # Nonblocking/no-follow prevents a replacement FIFO/link
+                    # from turning inventory collection into a hang or escape.
+                    descriptor = os.open(
+                        path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                    )
+                    with os.fdopen(descriptor, "rb") as source:
+                        opened = os.fstat(source.fileno())
+                        if not stat.S_ISREG(opened.st_mode) or (
+                            opened.st_dev, opened.st_ino, opened.st_mode
+                        ) != (info.st_dev, info.st_ino, info.st_mode):
+                            raise ProbeError("runtime preload installation changed during binding")
+                        digest = hashlib.sha256()
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                        after = os.fstat(source.fileno())
+                        if (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                            after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                        ):
+                            raise ProbeError("runtime preload installation changed during binding")
+                    record.update({"kind": "file", "sha256": digest.hexdigest()})
+                else:
+                    raise ProbeError("runtime preload installation contains a non-regular source")
+                records.append(record)
+    except (OSError, ValueError, RuntimeError) as exc:
+        if isinstance(exc, ProbeError):
+            raise
+        raise ProbeError("runtime preload installation is unavailable or escapes its root") from exc
+    records.sort(key=lambda item: str(item["path"]))
+    return {
+        "path": "runtime-preload-installation:tsx",
+        "sha256": _canonical_sha256(records),
+        "realpath_sha256": _text_sha256(str(root)),
+    }
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1587,6 +1669,12 @@ def _runtime_launch_bindings(
         label="tsx",
     )
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    try:
+        tsx_package_root.relative_to(openclaw_root.resolve())
+        tsx_preload.resolve().relative_to(openclaw_root.resolve())
+    except ValueError as exc:
+        raise ProbeError("tsx preload escapes the bound candidate installation") from exc
+    installation = _runtime_installation_binding(openclaw_root)
     return (
         node_executable,
         tsx_preload.as_uri(),
@@ -1596,6 +1684,7 @@ def _runtime_launch_bindings(
             _runtime_directory_binding(
                 tsx_package_root, "runtime-preload-package:tsx"
             ),
+            installation,
         ],
     )
 
