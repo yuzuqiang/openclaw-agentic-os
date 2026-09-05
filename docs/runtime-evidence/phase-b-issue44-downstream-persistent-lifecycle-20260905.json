@@ -1,10 +1,10 @@
 {
   "accepted_session_spawned": false,
-  "agentic_os_head_sha": "2b43f843fbf096c2896e0660207c2f02bea1fd15",
+  "agentic_os_head_sha": "14c81287bfe949ed4a16663b4059b8e1b2457e26",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
-      "sha256": "87f198adf68d05ee7e5f2dc4c41b161949001afd9e2638af8214ce7ca55b8560"
+      "sha256": "fd2d7fe21650c700a773bca34fedcaece9237933089981616ee37c9b9c27c033"
     },
     {
       "path": "scripts/agentic_os_runtime_source_contract.py",
