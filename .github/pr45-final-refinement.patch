@@ -1,0 +1,169 @@
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index 2bb7572..2221951 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -592,7 +592,12 @@ def _javascript_lexical_items(source_text: str):
+                 previous = "literal"
+                 continue
+             if character == "/":
+-                if previous in {")", "}"}:
++                # Contextual keywords can be identifiers in CommonJS; keyword
++                # properties are values. TypeScript also has postfix ! and
++                # instantiation expressions ending in >. In these contexts a
++                # slash may be division whose RHS executes a loader. Reject the
++                # ambiguity rather than masking that RHS as a regex literal.
++                if previous in {")", "}", "!", ">", "of", "await", "yield"} or previous.startswith("property-keyword:"):
+                     raise RuntimeSourceContractError(
+                         "runtime source contains an ambiguous JavaScript slash token"
+                     )
+@@ -640,7 +645,10 @@ def _javascript_lexical_items(source_text: str):
+                 index += 2
+             else:
+                 index += 1
+-            previous = source_text[start:index]
++            token = source_text[start:index]
++            previous = ("property-keyword:" + token
++                        if previous in {".", "?.", "#"} and token in prefix_words
++                        else token)
+             yield "code", start, index
+         if template_expression:
+             raise RuntimeSourceContractError(
+@@ -3513,6 +3521,20 @@ def _module_loader_reference_specifiers(source_text: str) -> list[str]:
+     for kind, start, end in _javascript_lexical_items(source_text):
+         if kind != "code" or any(a <= start < b for a, b in bindings + consumed):
+             continue
++        # Inspect the complete receiver, including arbitrary balanced grouping,
++        # before inspecting identifiers. Looking only after the `module` token
++        # misses `(module)["require"]` and its optional/computed variants.
++        module_end = _parse_grouped_named_base(source_text, start, "module")
++        if module_end is not None:
++            member = _parse_process_member(source_text, module_end)
++            if member is not None and member[0] == "require":
++                call = _optional_call_tail_index(source_text, member[1])
++                if source_text[call:call + 1] != "(":
++                    raise RuntimeSourceContractError(
++                        "runtime source contains an unsupported CommonJS require capability transfer"
++                    )
++                consumed.append((start, consume_loader(call)))
++                continue
+         parsed = _parse_js_identifier(source_text, start)
+         if parsed is None:
+             continue
+@@ -3524,16 +3546,6 @@ def _module_loader_reference_specifiers(source_text: str) -> list[str]:
+         if name in factories:
+             consume_factory(start, end, local_binding=start in bound_factory_calls)
+             continue
+-        if name == "module":
+-            member = _parse_process_member(source_text, end)
+-            if member is not None and member[0] == "require":
+-                call = _optional_call_tail_index(source_text, member[1])
+-                if source_text[call:call + 1] != "(":
+-                    raise RuntimeSourceContractError(
+-                        "runtime source contains an unsupported CommonJS require capability transfer"
+-                    )
+-                consumed.append((start, consume_loader(call)))
+-                continue
+         namespace_end = None
+         if name in namespaces | constructors:
+             namespace_end = end
+diff --git a/tests/test_runtime_source_closure_regressions.py b/tests/test_runtime_source_closure_regressions.py
+index f5b73f7..ad51135 100644
+--- a/tests/test_runtime_source_closure_regressions.py
++++ b/tests/test_runtime_source_closure_regressions.py
+@@ -142,6 +142,51 @@ class RuntimeSourceClosureRegressionTests(unittest.TestCase):
+             with self.subTest(source=source), self.assertRaises(SOURCE.RuntimeSourceContractError):
+                 self.snapshot(source)
+ 
++    def test_grouped_module_require_calls_bind_the_actual_source(self) -> None:
++        self.write("scripts/hidden.cjs", "module.exports = 42;\n")
++        for depth in (0, 1, 2, 8, 32, 128):
++            base = "(" * depth + "module" + ")" * depth
++            for member in ('["require"]', "?.['require']"):
++                for call in ("(", "?.("):
++                    source = f"{base}{member}{call}'./hidden.cjs');"
++                    with self.subTest(source=source):
++                        self.assertIn("scripts/hidden.cjs", self.snapshot(source))
++
++    def test_grouped_module_require_value_transfers_fail_closed(self) -> None:
++        for depth in (0, 1, 2, 8, 32):
++            base = "(" * depth + "module" + ")" * depth
++            for member in ('["require"]', "?.['require']", ".require"):
++                for transfer in (
++                    "const r={ref}; r('./hidden.cjs');",
++                    "const r=({ref}); r('./hidden.cjs');",
++                    "consume({ref});",
++                    "const holder={{r:{ref}}}; holder.r('./hidden.cjs');",
++                    "const value=`${{consume({ref})}}`;",
++                    "const r={ref}.bind(module); r('./hidden.cjs');",
++                ):
++                    source = transfer.format(ref=base + member)
++                    with self.subTest(source=source), self.assertRaises(SOURCE.RuntimeSourceContractError):
++                        self.snapshot(source)
++
++    @unittest.skipUnless(shutil.which("node"), "requires Node for loader parity")
++    def test_node_grouped_module_require_is_bound_or_rejected(self) -> None:
++        self.write("scripts/hidden.cjs", "console.log('GROUPED_LOADER_EXECUTED');\n")
++        for source, transfer in (
++            ('((module))["require"]("./hidden.cjs");', False),
++            ('(module)?.["require"]?.("./hidden.cjs");', False),
++            ('const r=(module)["require"];r.call(module,"./hidden.cjs");', True),
++        ):
++            with self.subTest(source=source):
++                path = self.write("scripts/grouped.cjs", source)
++                result = subprocess.run([shutil.which("node"), str(path)], cwd=self.root,
++                                        text=True, capture_output=True, check=True, timeout=10)
++                self.assertEqual(result.stdout.strip(), "GROUPED_LOADER_EXECUTED")
++                if transfer:
++                    with self.assertRaises(SOURCE.RuntimeSourceContractError):
++                        self.snapshot(source)
++                else:
++                    self.assertIn("scripts/hidden.cjs", self.snapshot(source))
++
+     def test_all_line_comment_forms_preserve_following_loaders(self) -> None:
+         self.write("scripts/hidden.cjs", "module.exports = 42;\n")
+         for ending in ("\n", "\r", "\u2028", "\u2029"):
+@@ -151,6 +196,44 @@ class RuntimeSourceClosureRegressionTests(unittest.TestCase):
+                     with self.subTest(ending=repr(ending), opener=opener, quote=quote):
+                         self.assertIn("scripts/hidden.cjs", self.snapshot(source))
+ 
++    def test_ambiguous_division_cannot_mask_runtime_loaders(self) -> None:
++        sources = [
++            f"obj.{name} / require('hidden-package') / 2;"
++            for name in ("return", "throw", "new", "delete", "case", "else", "in",
++                         "instanceof", "typeof", "void", "of", "await", "yield")
++        ]
++        sources += [
++            "var of=2;of / require('hidden-package') / 2;",
++            "var await=2;await / require('hidden-package') / 2;",
++            "var yield=2;yield / require('hidden-package') / 2;",
++            "value! / require('hidden-package') / 2;",
++            "value<Type> / require('hidden-package') / 2;",
++            "obj?.return / require('hidden-package') / 2;",
++            "class C{#return=2;run(){this.#return / require('hidden-package') / 2;}}",
++            r"obj.re\u0074urn / require('hidden-package') / 2;",
++        ]
++        for source in sources:
++            with self.subTest(source=source), self.assertRaises(SOURCE.RuntimeSourceContractError):
++                self.snapshot(source)
++
++    @unittest.skipUnless(shutil.which("node"), "requires Node for lexical parity")
++    def test_node_executes_loaders_in_keyword_property_and_identifier_division(self) -> None:
++        self.write("node_modules/hidden-package/package.json", '{"main":"index.cjs"}')
++        self.write("node_modules/hidden-package/index.cjs",
++                   "console.log('DIVISION_LOADER_EXECUTED');module.exports=2;")
++        for source in (
++            "const obj={return:2};obj.return / require('hidden-package') / 2;",
++            "var of=2;of / require('hidden-package') / 2;",
++            "var await=2;await / require('hidden-package') / 2;",
++        ):
++            with self.subTest(source=source):
++                path = self.write("scripts/division.cjs", source)
++                result = subprocess.run([shutil.which("node"), str(path)], cwd=self.root,
++                                        text=True, capture_output=True, check=True, timeout=10)
++                self.assertEqual(result.stdout.strip(), "DIVISION_LOADER_EXECUTED")
++                with self.assertRaises(SOURCE.RuntimeSourceContractError):
++                    self.snapshot(source)
++
+     def test_html_comments_in_template_expressions_do_not_hide_loaders(self) -> None:
+         self.write("scripts/hidden.cjs", "module.exports = 42;\n")
+         source = "const value = `${<!-- \"\nrequire('./hidden.cjs')\n}`;"
