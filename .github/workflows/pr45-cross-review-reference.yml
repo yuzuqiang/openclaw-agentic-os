@@ -1,0 +1,25 @@
+name: PR45 candidate snapshots for cross-review
+on:
+  push:
+    branches: [fix/pr45-cross-review-reference-20260905]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Package source and candidate refs only
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-cross-review"
+          git bundle create "$RUNNER_TEMP/pr45-cross-review/sources.bundle" --all
+          git for-each-ref --format='%(refname) %(objectname)' > "$RUNNER_TEMP/pr45-cross-review/refs.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-candidate-sources-cross-review
+          path: ${{ runner.temp }}/pr45-cross-review
+          retention-days: 1
