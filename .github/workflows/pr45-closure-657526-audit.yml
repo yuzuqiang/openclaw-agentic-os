@@ -1,0 +1,106 @@
+name: PR45 pinned closure repair 657526
+on:
+  push:
+    branches: [fix/pr45-closure-657526c2440f-audit]
+    paths: [.github/pr45-repair/closure-ready.json]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      tree: ${{ steps.prepare.outputs.tree }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare and verify pinned repair tree
+        id: prepare
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          spec = json.loads((workspace / '.github/pr45-repair/closure-ready.json').read_text())
+          assert spec['base'] == '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          assert spec['tree'] == '657526c2440feb86b59a9f2253ce607e94030b78'
+          candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-candidate'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), spec['base']], check=True)
+          for filename, hashkey in [('repair.patch.gz.b64', 'patch_sha256'), ('followup.patch.gz.b64', 'followup_patch_sha256')]:
+              encoded = (workspace / '.github/pr45-repair' / filename).read_text().strip()
+              patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+              assert hashlib.sha256(patch).hexdigest() == spec[hashkey]
+              subprocess.run(['git', 'apply', '--index', '-'], input=patch, cwd=candidate, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
+          assert tree == spec['tree'], (tree, spec['tree'])
+          subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: bind execution capabilities, package scopes and preload installation'], cwd=candidate, check=True)
+          files = subprocess.check_output(['git', 'diff', '--name-only', spec['base'], 'HEAD'], cwd=candidate, text=True).splitlines()
+          allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py']
+          assert sorted(files) == allowed
+          artifact = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-publish'
+          artifact.mkdir()
+          payload = {'base': spec['base'], 'tree': tree, 'files': [{'path': name, 'mode': subprocess.check_output(['git', 'ls-files', '--stage', '--', name], cwd=candidate, text=True).split()[0], 'type': 'blob', 'content': (candidate / name).read_text()} for name in files]}
+          (artifact / 'publish.json').write_text(json.dumps(payload))
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'CANDIDATE_DIR={candidate}\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'tree={tree}\n')
+          PY
+      - name: Privacy preflight
+        run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full unittest discovery and real Node regression oracles
+        run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile sources
+        run: cd "$CANDIDATE_DIR" && PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration and package parity
+        run: |
+          cd "$CANDIDATE_DIR"
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Diff and worktree cleanliness
+        run: |
+          cd "$CANDIDATE_DIR"
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^{tree})" = '${{ steps.prepare.outputs.tree }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-pinned-657526-source
+          path: ${{ runner.temp }}/pr45-publish/publish.json
+          retention-days: 3
+  publish-candidate:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-pinned-657526-source
+          path: pr45-publish
+      - name: Publish tested tree without changing PR or merging
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_TREE: ${{ needs.validate.outputs.tree }}
+        with:
+          script: |
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('pr45-publish/publish.json', 'utf8'));
+            const allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py'];
+            if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== '657526c2440feb86b59a9f2253ce607e94030b78' || p.tree !== process.env.EXPECTED_TREE || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected repair payload');
+            const repo = context.repo;
+            const base = await github.rest.git.getCommit({...repo, commit_sha: p.base});
+            const tree = await github.rest.git.createTree({...repo, base_tree: base.data.tree.sha, tree: p.files});
+            if (tree.data.sha !== p.tree) throw new Error('Published tree differs from tested tree');
+            const commit = await github.rest.git.createCommit({...repo, message: 'fix: bind execution capabilities, package scopes and preload installation', tree: tree.data.sha, parents: [p.base]});
+            const branch = 'fix/pr45-verified-657526c2440f';
+            await github.rest.git.createRef({...repo, ref: 'refs/heads/' + branch, sha: commit.data.sha});
+            core.notice('Validated candidate ' + commit.data.sha + ' on ' + branch);
+            await core.summary.addHeading('Pinned PR45 validated candidate').addRaw('Commit: `' + commit.data.sha + '`\n\nTree: `' + p.tree + '`\n\nPR #45 has NOT been moved or merged by this workflow.').write();
