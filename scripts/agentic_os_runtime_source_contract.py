@@ -309,6 +309,7 @@ COMMONJS_RUNTIME_LOADER_MEMBER_NAMES = frozenset(
     ("register", "registerHooks", "runMain")
 )
 COMMONJS_MODULE_CONSTRUCTOR_MEMBER_NAMES = frozenset(("Module", "default"))
+COMMONJS_MODULE_INSTANCE_RUNTIME_LOADER_MEMBER_NAMES = frozenset(("load",))
 EVALUATED_RUNTIME_VM_MEMBER_NAMES = frozenset(
     (
         "compileFunction",
@@ -1897,12 +1898,76 @@ def _child_process_sync_alias_bindings(
     ):
         for match in pattern.finditer(stripped):
             namespace_names.add(match.group("name"))
+    _add_child_process_transferred_aliases(
+        stripped,
+        fork_entrypoint_names=fork_entrypoint_names,
+        node_entrypoint_names=node_entrypoint_names,
+        sync_shell_names=sync_shell_names,
+        namespace_names=namespace_names,
+    )
     return (
         fork_entrypoint_names,
         node_entrypoint_names,
         sync_shell_names,
         namespace_names,
     )
+
+
+def _add_child_process_transferred_aliases(
+    source_text: str,
+    *,
+    fork_entrypoint_names: set[str],
+    node_entrypoint_names: set[str],
+    sync_shell_names: set[str],
+    namespace_names: set[str],
+) -> None:
+    assignment_pattern = re.compile(
+        rf"""
+        \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+        (?:\(\s*)*(?P<source>{JS_IDENTIFIER})(?:\s*\))*\s*(?:;|,|\n|$)
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+    changed = True
+    while changed:
+        changed = False
+        for match in assignment_pattern.finditer(source_text):
+            name = match.group("name")
+            source = match.group("source")
+            if source in fork_entrypoint_names and name not in fork_entrypoint_names:
+                fork_entrypoint_names.add(name)
+                changed = True
+            elif source in node_entrypoint_names and name not in node_entrypoint_names:
+                node_entrypoint_names.add(name)
+                changed = True
+            elif source in sync_shell_names and name not in sync_shell_names:
+                sync_shell_names.add(name)
+                changed = True
+
+    if not namespace_names:
+        return
+    namespace_alternatives = "|".join(
+        re.escape(name) for name in sorted(namespace_names, key=len, reverse=True)
+    )
+    member_pattern = re.compile(
+        rf"""
+        \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+        (?:\(\s*)*
+        (?P<namespace>{namespace_alternatives})\s*(?:\.|\?\.)\s*
+        (?P<member>{JS_IDENTIFIER})
+        (?:\s*\))*\s*(?:;|,|\n|$)
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+    for match in member_pattern.finditer(source_text):
+        name = match.group("name")
+        member = match.group("member")
+        if member in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
+            fork_entrypoint_names.add(name)
+        elif member in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
+            node_entrypoint_names.add(name)
+        elif member in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
+            sync_shell_names.add(name)
 
 
 def _child_process_fork_entrypoint_pattern(
@@ -2021,6 +2086,26 @@ def _child_process_indirect_alias_node_entrypoint_pattern(
         [^()]*,\s*
         (?:{alternatives})\s*
         \)\s*\(\s*process\.execPath\s*,
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
+
+
+def _child_process_callable_indirect_entrypoint_pattern(
+    entrypoint_names: set[str],
+) -> re.Pattern[str] | None:
+    if not entrypoint_names:
+        return None
+    alternatives = "|".join(
+        re.escape(name) for name in sorted(entrypoint_names, key=len, reverse=True)
+    )
+    return re.compile(
+        rf"""
+        (?:
+            (?<![\w$.])(?:{alternatives})\s*(?:\.|\?\.)\s*(?:call|apply)\s*\(
+          |
+            (?<![\w$.])Reflect\s*(?:\.|\?\.)\s*apply\s*\(\s*(?:{alternatives})\s*,
+        )
         """,
         re.VERBOSE | re.DOTALL,
     )
@@ -2551,6 +2636,10 @@ def _commonjs_module_instance_access_end_or_fail(
     if member_name in COMMONJS_COMPILE_MEMBER_NAMES:
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported CommonJS runtime compiler"
+        )
+    if member_name in COMMONJS_MODULE_INSTANCE_RUNTIME_LOADER_MEMBER_NAMES:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported CommonJS runtime loader"
         )
     return member_end
 
@@ -3523,6 +3612,42 @@ def _runtime_execution_entrypoint_specifiers(
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
                 )
+    child_process_callable_indirect_alias_pattern = (
+        _child_process_callable_indirect_entrypoint_pattern(
+            child_process_node_alias_names
+        )
+    )
+    if (
+        child_process_callable_indirect_alias_pattern is not None
+        and child_process_callable_indirect_alias_pattern.search(source_text)
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported child-process Node entrypoint"
+        )
+    child_process_callable_indirect_shell_pattern = (
+        _child_process_callable_indirect_entrypoint_pattern(
+            child_process_sync_alias_names
+        )
+    )
+    if (
+        child_process_callable_indirect_shell_pattern is not None
+        and child_process_callable_indirect_shell_pattern.search(source_text)
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported shell child-process entrypoint"
+        )
+    child_process_callable_indirect_fork_pattern = (
+        _child_process_callable_indirect_entrypoint_pattern(
+            child_process_fork_alias_names
+        )
+    )
+    if (
+        child_process_callable_indirect_fork_pattern is not None
+        and child_process_callable_indirect_fork_pattern.search(source_text)
+    ):
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported indirect child-process fork entrypoint"
+        )
     for match in _child_process_indirect_namespace_node_entrypoint_pattern().finditer(
         source_text
     ):
@@ -3950,6 +4075,10 @@ def _package_entry_bases(
             raise RuntimeSourceContractError(
                 "runtime package export target contains an unsupported URL suffix"
             )
+        if any(not target.startswith("./") for target in targets):
+            raise RuntimeSourceContractError(
+                "runtime package export target is unsupported"
+            )
         return [((package_root / target).resolve(), "runtime") for target in targets], True
     if subpath:
         return [((package_root / subpath).resolve(), "node_legacy")], False
@@ -4233,7 +4362,16 @@ def resolve_import(
                     base,
                     suffixes=NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES,
                     suffix_aliases={},
+                    include_directory_index=import_kind != "require",
                 )
+                if resolved is None and import_kind == "require":
+                    resolved_package = _resolve_commonjs_directory_package(
+                        root,
+                        base,
+                        package_name=specifier,
+                    )
+                    if len(resolved_package) > 1:
+                        return ((package_root / "package.json").resolve(), *resolved_package)
             else:
                 resolved = _resolve_existing_candidate(root, base)
             if resolved is not None:
@@ -4271,7 +4409,16 @@ def resolve_import(
                     base,
                     suffixes=NODE_LEGACY_PACKAGE_RESOLUTION_SUFFIXES,
                     suffix_aliases={},
+                    include_directory_index=import_kind != "require",
                 )
+                if resolved is None and import_kind == "require":
+                    resolved_package = _resolve_commonjs_directory_package(
+                        root,
+                        base,
+                        package_name=specifier,
+                    )
+                    if len(resolved_package) > 1:
+                        return (package_json.resolve(), *resolved_package)
             else:
                 resolved = _resolve_existing_candidate(root, base)
             if resolved is not None:

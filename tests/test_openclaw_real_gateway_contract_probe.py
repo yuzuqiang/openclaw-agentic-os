@@ -9320,6 +9320,57 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_transferred_child_process_alias(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import { spawnSync } from 'node:child_process';\n"
+                        "const go = spawnSync;\n"
+                        "go('./hidden.sh');\n"
+                    ),
+                    "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "unsupported child-process Node entrypoint",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_indirect_child_process_alias_call(
+        self,
+    ) -> None:
+        cases = {
+            "call": "go.call(null, './hidden.sh');\n",
+            "apply": "go.apply(null, ['./hidden.sh']);\n",
+            "reflect_apply": "Reflect.apply(go, null, ['./hidden.sh']);\n",
+        }
+        for name, invocation in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            "import { spawnSync as go } from 'node:child_process';\n"
+                            + invocation
+                        ),
+                        "scripts/hidden.sh": "#!/bin/sh\nexit 0\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(
+                    MODULE.ProbeError,
+                    "unsupported child-process Node entrypoint",
+                ):
+                    MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_tracks_default_worker_threads_import(
         self,
     ) -> None:
@@ -9359,6 +9410,33 @@ class RealGatewayProbeTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(MODULE.ProbeError, "unsupported URL suffix"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_non_relative_package_export_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import 'fixture-runtime';\n",
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {
+                            "name": "fixture-runtime",
+                            "exports": ["not-relative", "./hidden.mjs"],
+                        }
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/not-relative": "export default 'decoy';\n",
+                    "node_modules/fixture-runtime/hidden.mjs": "export default 'real';\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "package export target is unsupported",
+            ):
                 MODULE._persistent_runtime_source_paths(root)
 
 
@@ -9520,6 +9598,28 @@ class RealGatewayProbeTests(unittest.TestCase):
                 ):
                     MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_module_instance_load(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "import M from 'node:module';\n"
+                        "new M().load('./hidden.cjs');\n"
+                    ),
+                    "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                },
+            )
+
+            with self.assertRaisesRegex(
+                MODULE.ProbeError,
+                "CommonJS runtime loader",
+            ):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_dynamic_execution_builtins(
         self,
     ) -> None:
@@ -9616,6 +9716,38 @@ class RealGatewayProbeTests(unittest.TestCase):
                 "unsupported percent-encoded path",
             ):
                 MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_resolves_commonjs_package_subdirectory_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: "require('fixture-runtime/subdir');\n",
+                    "node_modules/fixture-runtime/package.json": json.dumps(
+                        {"name": "fixture-runtime"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/subdir/package.json": json.dumps(
+                        {"main": "hidden.cjs"}
+                    )
+                    + "\n",
+                    "node_modules/fixture-runtime/subdir/index.js": (
+                        "module.exports = { decoy: true };\n"
+                    ),
+                    "node_modules/fixture-runtime/subdir/hidden.cjs": (
+                        "module.exports = { real: true };\n"
+                    ),
+                },
+            )
+
+            paths = MODULE._persistent_runtime_source_paths(root)
+
+        self.assertIn("node_modules/fixture-runtime/subdir/package.json", paths)
+        self.assertIn("node_modules/fixture-runtime/subdir/hidden.cjs", paths)
+        self.assertNotIn("node_modules/fixture-runtime/subdir/index.js", paths)
 
     def test_persistent_runtime_source_closure_recurses_into_jsx_dependencies(
         self,
