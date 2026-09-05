@@ -164,7 +164,8 @@ class CurrentStatusTests(unittest.TestCase):
 
         current_runtime_review_claims = (
             "Current installed-runtime evidence lineage and Issue #44 downstream persistent-lifecycle recapture",
-            "no runtime-ready persistent-lifecycle proof or current-head GitHub Codex review binding exists",
+            "no runtime-ready persistent-lifecycle proof exists",
+            "no current-head GitHub Codex review binding exists",
             "candidate_process_started=false",
             "historical candidate invocations and reviews must not be counted as current exact-head runtime evidence",
         )
