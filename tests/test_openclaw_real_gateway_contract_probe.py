@@ -401,8 +401,8 @@ class RealGatewayProbeTests(unittest.TestCase):
         return [
             {
                 "path": label,
-                "sha256": format(index + 10, "x") * 64,
-                "realpath_sha256": format(index + 13, "x") * 64,
+                "sha256": format(index + 10, "064x"),
+                "realpath_sha256": format(index + 13, "064x"),
             }
             for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
         ]

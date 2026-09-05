@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-installation:openclaw",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1539,35 +1540,91 @@ def _find_node_package_root(module_path: Path, package_name: str) -> Path:
             continue
         try:
             payload = json.loads(package_json.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProbeError(f"{package_name} runtime package metadata is invalid") from exc
         if isinstance(payload, dict) and payload.get("name") == package_name:
             return candidate.resolve()
     raise ProbeError(f"{package_name} runtime package root could not be resolved")
 
 
-def _directory_tree_sha256(root: Path) -> str:
+def _directory_tree_sha256(root: Path, *, allowed_root: Path | None = None) -> str:
+    """Inventory an immutable installation without executing its loader.
+
+    Include data, manifests, native binaries, modes and symlink topology, not just
+    a guessed JavaScript import graph. Symlink targets must remain in the bound
+    installation; directory links are recorded rather than recursively followed
+    (the full installation inventory visits their physical targets exactly once).
+    No rglob/is_file filtering: unreadable entries and special files fail closed.
+    """
     root = root.resolve()
-    if not root.is_dir():
-        raise ProbeError("runtime launch package root is missing")
+    boundary = (allowed_root or root).resolve()
     digest = hashlib.sha256()
-    files = sorted(path for path in root.rglob("*") if path.is_file())
-    if not files:
+    file_count = 0
+
+    def record(*parts: str) -> None:
+        digest.update(json.dumps(parts, ensure_ascii=True, separators=(",", ":")).encode())
+        digest.update(b"\n")
+
+    def fingerprint(info: os.stat_result) -> tuple[int, ...]:
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    try:
+        root.relative_to(boundary)
+        if not root.is_dir():
+            raise ProbeError("runtime launch package root is missing")
+        queue = [root]
+        while queue:
+            directory = queue.pop()
+            before = directory.stat()
+            names = sorted(os.listdir(directory))
+            record("directory", directory.relative_to(root).as_posix(), str(stat.S_IMODE(before.st_mode)))
+            for name in names:
+                path = directory / name
+                relative = path.relative_to(root).as_posix()
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    target = path.resolve(strict=True)
+                    target_relative = target.relative_to(boundary).as_posix()
+                    record("symlink", relative, os.readlink(path), target_relative)
+                    if not (target.is_dir() or target.is_file()):
+                        raise ProbeError("runtime launch installation contains a special symlink target")
+                elif stat.S_ISDIR(info.st_mode):
+                    queue.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    content = hashlib.sha256()
+                    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                    with os.fdopen(os.open(path, flags), "rb") as stream:
+                        opened = os.fstat(stream.fileno())
+                        if fingerprint(opened) != fingerprint(info):
+                            raise ProbeError("runtime launch installation changed while binding")
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            content.update(chunk)
+                        if fingerprint(os.fstat(stream.fileno())) != fingerprint(info):
+                            raise ProbeError("runtime launch installation changed while binding")
+                    if fingerprint(path.lstat()) != fingerprint(info):
+                        raise ProbeError("runtime launch installation changed while binding")
+                    record("file", relative, str(stat.S_IMODE(info.st_mode)), content.hexdigest())
+                    file_count += 1
+                else:
+                    raise ProbeError("runtime launch installation contains a special file")
+            if sorted(os.listdir(directory)) != names or fingerprint(directory.stat()) != fingerprint(before):
+                raise ProbeError("runtime launch installation changed while binding")
+    except (OSError, ValueError, RuntimeError) as exc:
+        if isinstance(exc, ProbeError):
+            raise
+        raise ProbeError("runtime launch installation is unavailable or escapes its bound root") from exc
+    if not file_count:
         raise ProbeError("runtime launch package root is empty")
-    for path in files:
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        digest.update(_sha256_bytes(path.read_bytes()).encode())
-        digest.update(b"\0")
     return digest.hexdigest()
 
 
-def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
+def _runtime_directory_binding(
+    path: Path, label: str, *, allowed_root: Path | None = None
+) -> dict[str, str]:
     resolved = path.resolve()
     return {
         "path": label,
-        "sha256": _directory_tree_sha256(resolved),
+        "sha256": _directory_tree_sha256(resolved, allowed_root=allowed_root),
         "realpath_sha256": _text_sha256(str(resolved)),
     }
 
@@ -1587,6 +1644,10 @@ def _runtime_launch_bindings(
         label="tsx",
     )
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    try:
+        tsx_package_root.relative_to(openclaw_root.resolve())
+    except ValueError as exc:
+        raise ProbeError("tsx preload escapes the bound OpenClaw installation") from exc
     return (
         node_executable,
         tsx_preload.as_uri(),
@@ -1594,7 +1655,13 @@ def _runtime_launch_bindings(
             _runtime_file_binding(node_executable, "runtime-launcher:node"),
             _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
             _runtime_directory_binding(
-                tsx_package_root, "runtime-preload-package:tsx"
+                tsx_package_root, "runtime-preload-package:tsx", allowed_root=openclaw_root
+            ),
+            # tsx can load hoisted/pnpm/workspace dependencies, native helpers,
+            # and root-level configuration. Binding only its own package (or
+            # only declared dependencies) leaves those startup bytes unbound.
+            _runtime_directory_binding(
+                openclaw_root, "runtime-preload-installation:openclaw"
             ),
         ],
     )
