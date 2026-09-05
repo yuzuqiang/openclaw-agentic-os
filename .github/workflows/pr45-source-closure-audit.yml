@@ -2,11 +2,11 @@ name: PR45 isolated source-closure audit
 on:
   push:
     branches:
-      - fix/pr45-source-closure-audit-20260904
+      - fix/pr45-audit-aa5ed6ca4f22
 permissions:
-  contents: read
+  contents: write
 jobs:
-  baseline:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -17,21 +17,63 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Package source and reachable history for isolated verification
-        run: |
-          mkdir -p "$RUNNER_TEMP/pr45-audit"
-          git bundle create "$RUNNER_TEMP/pr45-audit/source.bundle" HEAD refs/remotes/origin/main
-          git rev-parse HEAD > "$RUNNER_TEMP/pr45-audit/head.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: pr45-audit-source
-          path: ${{ runner.temp }}/pr45-audit
-          retention-days: 3
+          node-version: '22'
+      - name: Apply integrity-checked patch to frozen PR head
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-results"
+          python - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          text = ''.join(Path(f'.github/pr45-patch/part{i}.b64').read_text() for i in range(8))
+          patch = gzip.decompress(base64.b64decode(text, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'aa5ed6ca4f226f2b47a549f82e253353c757f3a92f7d2e4d8e9f3124a894f390'
+          Path(os.environ['RUNNER_TEMP'], 'pr45.patch').write_bytes(patch)
+          PY
+          test "$(git rev-parse refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824)" = 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          git switch --detach 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          git apply --check "$RUNNER_TEMP/pr45.patch"
+          git apply --index "$RUNNER_TEMP/pr45.patch"
+          python - <<'PY'
+          import subprocess
+          actual = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines())
+          assert actual == {'README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract.py'}, actual
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: close PR45 source closure review gaps with regression coverage'
+          test "$(git rev-parse HEAD^)" = 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          test "$(git rev-parse 'HEAD^{tree}')" = 9f408e0b8262f2ecfd2cb078e6b8f15c78765b95
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-results/head.txt"
+          git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/pr45-results/tree.txt"
+          node --version
+          python --version
       - name: Privacy preflight
-        run: PYTHONPATH=src python -m agentic_os.cli preflight
-      - name: Full unittest baseline
-        run: PYTHONPATH=src python -m unittest discover -s tests -v
+        run: PYTHONPATH=src python -m agentic_os.cli preflight | tee "$RUNNER_TEMP/pr45-results/privacy.txt"
+      - name: Full unittest discovery with Node runtime oracles
+        run: PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-results/unittest.txt"
       - name: Compile sources
         run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
-      - name: Verify tracked cleanliness
-        run: test -z "$(git status --porcelain)"
+      - name: Migration and package parity
+        run: PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Diff and tracked cleanliness
+        run: |
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - name: Publish verified candidate to isolated branch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$(git rev-parse 'HEAD^{tree}')" = 9f408e0b8262f2ecfd2cb078e6b8f15c78765b95
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/pr45-verified-aa5ed6ca4f22
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-verified-results
+          path: ${{ runner.temp }}/pr45-results
+          retention-days: 3
