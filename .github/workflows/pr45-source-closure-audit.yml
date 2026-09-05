@@ -1,8 +1,7 @@
-name: PR45 isolated source-closure audit
+name: PR45 isolated source-closure audit 50fd1ad
 on:
   push:
-    branches:
-      - fix/pr45-source-closure-audit-20260904
+    branches: [fix/pr45-source-closure-audit-50fd1ad]
 permissions:
   contents: read
 jobs:
@@ -32,13 +31,8 @@ jobs:
           import base64, hashlib, json, os, pathlib, zlib
           p = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'pr45-payload.json').read_text())
           assert p['base_sha'] == os.environ['BASE']
-          assert set(p['files']) == {
-              'scripts/agentic_os_runtime_source_contract.py',
-              'scripts/openclaw-real-gateway-contract-probe.py',
-              'tests/test_runtime_source_contract_regressions.py',
-          }
-          # Correct three transport transcription errors; the original patch
-          # hash and the exact independently tested Git tree remain mandatory.
+          assert set(p['files']) == {'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_regressions.py'}
+          # Correct transport transcription only; original patch and tree hashes remain mandatory.
           encoded = p['patch_zlib_base64']
           for old, new in [('Gz5TdHNz', 'GzTodHNz'), ('Mhu3sCJ', 'Mhu2sCJ'), ('bLRx5qPy', 'bLRnhqPy')]:
               encoded = encoded.replace(old, new)
@@ -94,13 +88,14 @@ jobs:
         with:
           name: pr45-validated-source
           path: ${{ runner.temp }}/pr45-validated
-      - name: Verify the immutable candidate and publish only an auxiliary ref
+      - name: Verify immutable candidate and publish only an auxiliary ref
         env:
           CANDIDATE: ${{ needs.validate.outputs.candidate }}
         run: |
           git fetch "$RUNNER_TEMP/pr45-validated/source.bundle" HEAD
           test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
           test "$(git rev-parse "$CANDIDATE^")" = '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          test "$(git rev-parse "$CANDIDATE^{tree}")" = 'b6c7b6d03ea5b59bb81c7abb2921e305a70853a2'
           python - <<'PY'
           import hashlib, json, os, pathlib, subprocess
           p = json.loads(pathlib.Path('audit/pr45-fix-payload.json').read_text())
