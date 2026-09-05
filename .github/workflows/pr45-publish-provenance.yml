@@ -1,0 +1,42 @@
+name: Publish validated PR45 provenance increment
+on:
+  push:
+    branches: [fix/pr45-audit-46cd0c788361]
+    paths: [.github/workflows/pr45-publish-provenance.yml]
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require successful independent verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: test "$(gh api repos/yuzuqiang/openclaw-agentic-os/actions/runs/33945117630 --jq .conclusion)" = success
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-bb-provenance-validated
+          run-id: 33945117630
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/provenance
+      - name: Publish checked candidate only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch "$RUNNER_TEMP/provenance/candidate.bundle" HEAD
+          sha="$(git rev-parse FETCH_HEAD)"
+          test "$sha" = "$(cat "$RUNNER_TEMP/provenance/head.txt")"
+          test "$(git rev-parse FETCH_HEAD^)" = bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          test "$(git rev-parse FETCH_HEAD^{tree})" = e8557e5b88c864dff15bed850aa4922b7742bd75
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/fix/pr45-provenance-e8557e5b"
+          echo "Published $sha on supplemental candidate branch. PR45 not moved or merged." >> "$GITHUB_STEP_SUMMARY"
