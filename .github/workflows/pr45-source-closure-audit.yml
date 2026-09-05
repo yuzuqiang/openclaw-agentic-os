@@ -6,9 +6,11 @@ on:
 permissions:
   contents: read
 jobs:
-  baseline:
+  validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      candidate: ${{ steps.candidate.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,21 +19,97 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Package source and reachable history for isolated verification
-        run: |
-          mkdir -p "$RUNNER_TEMP/pr45-audit"
-          git bundle create "$RUNNER_TEMP/pr45-audit/source.bundle" HEAD refs/remotes/origin/main
-          git rev-parse HEAD > "$RUNNER_TEMP/pr45-audit/head.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: pr45-audit-source
-          path: ${{ runner.temp }}/pr45-audit
-          retention-days: 3
+          node-version: '22'
+      - name: Construct exactly the reviewed three-file candidate
+        id: candidate
+        env:
+          BASE: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+        run: |
+          cp audit/pr45-fix-payload.json "$RUNNER_TEMP/pr45-payload.json"
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, zlib
+          p = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'pr45-payload.json').read_text())
+          assert p['base_sha'] == os.environ['BASE']
+          assert set(p['files']) == {
+              'scripts/agentic_os_runtime_source_contract.py',
+              'scripts/openclaw-real-gateway-contract-probe.py',
+              'tests/test_runtime_source_contract_regressions.py',
+          }
+          # Correct three transport transcription errors; the original patch
+          # hash and the exact independently tested Git tree remain mandatory.
+          encoded = p['patch_zlib_base64']
+          for old, new in [('Gz5TdHNz', 'GzTodHNz'), ('Mhu3sCJ', 'Mhu2sCJ'), ('bLRx5qPy', 'bLRnhqPy')]:
+              encoded = encoded.replace(old, new)
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == p['patch_sha256']
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'pr45.patch').write_bytes(patch)
+          PY
+          git checkout --detach "$BASE"
+          git apply --index --whitespace=error-all "$RUNNER_TEMP/pr45.patch"
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          p = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'pr45-payload.json').read_text())
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z']).decode().strip('\0').split('\0')
+          assert set(changed) == set(p['files'])
+          for path, expected in p['files'].items():
+              assert hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() == expected, path
+          PY
+          test "$(git write-tree)" = 'b6c7b6d03ea5b59bb81c7abb2921e305a70853a2'
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: close execution capability escapes and bind runtime preload inputs'
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Privacy preflight
         run: PYTHONPATH=src python -m agentic_os.cli preflight
-      - name: Full unittest baseline
+      - name: Full unittest discovery
         run: PYTHONPATH=src python -m unittest discover -s tests -v
-      - name: Compile sources
+      - name: Compile Python sources
         run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
-      - name: Verify tracked cleanliness
-        run: test -z "$(git status --porcelain)"
+      - name: Migration and package parity
+        run: PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Diff and tracked-worktree cleanliness
+        run: |
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - name: Package the validated commit, without test credentials
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-validated"
+          git bundle create "$RUNNER_TEMP/pr45-validated/source.bundle" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-validated/sha.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-validated-source
+          path: ${{ runner.temp }}/pr45-validated
+          retention-days: 3
+          if-no-files-found: error
+  publish-audit-ref:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-validated-source
+          path: ${{ runner.temp }}/pr45-validated
+      - name: Verify the immutable candidate and publish only an auxiliary ref
+        env:
+          CANDIDATE: ${{ needs.validate.outputs.candidate }}
+        run: |
+          git fetch "$RUNNER_TEMP/pr45-validated/source.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse "$CANDIDATE^")" = '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          p = json.loads(pathlib.Path('audit/pr45-fix-payload.json').read_text())
+          sha = os.environ['CANDIDATE']
+          changed = subprocess.check_output(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', sha]).decode().strip('\0').split('\0')
+          assert set(changed) == set(p['files'])
+          for path, expected in p['files'].items():
+              blob = subprocess.check_output(['git', 'show', f'{sha}:{path}'])
+              assert hashlib.sha256(blob).hexdigest() == expected, path
+          PY
+          git push origin "$CANDIDATE:refs/heads/fix/pr45-validated-${GITHUB_RUN_ID}"
+          echo "Validated candidate: $CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
