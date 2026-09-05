@@ -1,4 +1,4 @@
-name: PR45 pinned closure repair 657526
+name: PR45 pinned closure repair
 on:
   push:
     branches: [fix/pr45-closure-657526c2440f-audit]
@@ -31,10 +31,10 @@ jobs:
           workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
           spec = json.loads((workspace / '.github/pr45-repair/closure-ready.json').read_text())
           assert spec['base'] == '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
-          assert spec['tree'] == '657526c2440feb86b59a9f2253ce607e94030b78'
+          assert spec['tree'] == '323303352cf3c49386558a6e53e8eb992ecbc76c'
           candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-candidate'
           subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), spec['base']], check=True)
-          for filename, hashkey in [('repair.patch.gz.b64', 'patch_sha256'), ('followup.patch.gz.b64', 'followup_patch_sha256')]:
+          for filename, hashkey in [('repair.patch.gz.b64', 'patch_sha256'), ('followup.patch.gz.b64', 'followup_patch_sha256'), ('spread.patch.gz.b64', 'spread_patch_sha256')]:
               encoded = (workspace / '.github/pr45-repair' / filename).read_text().strip()
               patch = gzip.decompress(base64.b64decode(encoded, validate=True))
               assert hashlib.sha256(patch).hexdigest() == spec[hashkey]
@@ -72,7 +72,7 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = '${{ steps.prepare.outputs.tree }}'
       - uses: actions/upload-artifact@v4
         with:
-          name: pr45-pinned-657526-source
+          name: pr45-pinned-323303-source
           path: ${{ runner.temp }}/pr45-publish/publish.json
           retention-days: 3
   publish-candidate:
@@ -83,7 +83,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pr45-pinned-657526-source
+          name: pr45-pinned-323303-source
           path: pr45-publish
       - name: Publish tested tree without changing PR or merging
         uses: actions/github-script@v7
@@ -94,13 +94,13 @@ jobs:
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('pr45-publish/publish.json', 'utf8'));
             const allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py'];
-            if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== '657526c2440feb86b59a9f2253ce607e94030b78' || p.tree !== process.env.EXPECTED_TREE || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected repair payload');
+            if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== '323303352cf3c49386558a6e53e8eb992ecbc76c' || p.tree !== process.env.EXPECTED_TREE || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected repair payload');
             const repo = context.repo;
             const base = await github.rest.git.getCommit({...repo, commit_sha: p.base});
             const tree = await github.rest.git.createTree({...repo, base_tree: base.data.tree.sha, tree: p.files});
             if (tree.data.sha !== p.tree) throw new Error('Published tree differs from tested tree');
             const commit = await github.rest.git.createCommit({...repo, message: 'fix: bind execution capabilities, package scopes and preload installation', tree: tree.data.sha, parents: [p.base]});
-            const branch = 'fix/pr45-verified-657526c2440f';
+            const branch = 'fix/pr45-verified-323303352cf3';
             await github.rest.git.createRef({...repo, ref: 'refs/heads/' + branch, sha: commit.data.sha});
             core.notice('Validated candidate ' + commit.data.sha + ' on ' + branch);
             await core.summary.addHeading('Pinned PR45 validated candidate').addRaw('Commit: `' + commit.data.sha + '`\n\nTree: `' + p.tree + '`\n\nPR #45 has NOT been moved or merged by this workflow.').write();
