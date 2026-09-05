@@ -1,0 +1,86 @@
+name: PR45 isolated source-closure audit
+on:
+  push:
+    branches:
+      - fix/pr45-closure-verification-008e560
+permissions:
+  contents: write
+jobs:
+  verify-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reconstruct only the repair on the exact original head
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          encoded = ''.join(pathlib.Path(f'.audit/pr45-repair.{i:02}').read_text() for i in range(3))
+          archive = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(archive).hexdigest() == 'b1e4f10982fcca14c919a1835cc0eba3c1a904e08d060732bcce6c4eeb34f525'
+          patch = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-repair.patch'
+          patch.write_bytes(gzip.decompress(archive))
+          git('checkout', '--detach', '871b8242767192cdf2c9f8ba71724b9f346ccc1b')
+          git('apply', '--check', str(patch))
+          git('apply', '--index', str(patch))
+          expected = {'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py'}
+          assert set(git('diff', '--cached', '--name-only').splitlines()) == expected
+          assert git('write-tree') == '3185a5e71f41646594ea977c104065b90436f254'
+          git('config', 'user.name', 'OpenAI PR repair')
+          git('config', 'user.email', 'pr45-repair@users.noreply.github.com')
+          git('commit', '-m', 'fix: close runtime capability escapes and bind complete preload installation')
+          assert git('rev-parse', 'HEAD^') == '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          assert not git('status', '--porcelain')
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-verification'
+          output.mkdir()
+          (output / 'head.txt').write_text(git('rev-parse', 'HEAD') + '\n')
+          (output / 'tree.txt').write_text(git('rev-parse', 'HEAD^{tree}') + '\n')
+          print('Candidate head:', git('rev-parse', 'HEAD'))
+          print('Candidate tree:', git('rev-parse', 'HEAD^{tree}'))
+          PY
+      - name: Privacy preflight
+        run: PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full unittest discovery including Node differential regressions
+        run: |
+          node --version
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-verification/unittest.log"
+      - name: Compile all Python sources
+        run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration and package parity
+        run: PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Whitespace and tracked cleanliness
+        run: |
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - name: Publish verified candidate branch only, never merge or change PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, os, subprocess
+          env = os.environ.copy()
+          auth = base64.b64encode(('x-access-token:' + env.pop('GH_TOKEN')).encode()).decode()
+          env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader', GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + auth)
+          ref = 'refs/heads/phase-b/issue44-live-runtime-readiness-20260824'
+          current = subprocess.check_output(['git', 'ls-remote', 'origin', ref], env=env, text=True).split()
+          assert current == ['871b8242767192cdf2c9f8ba71724b9f346ccc1b', ref], 'PR head changed; refusing stale publication'
+          subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/fix/pr45-verified-008e560'], env=env, check=True)
+          print('Verified candidate:', subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-repair-verification
+          path: ${{ runner.temp }}/pr45-verification
+          retention-days: 3
