@@ -17,7 +17,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: e9799b2f49f7f2326f9bcbd6c55cc3bfb20a6b97
+          ref: 698cb655e04cc4e66140b850d573a228d1058011
           path: candidate
           fetch-depth: 0
           persist-credentials: false
@@ -57,14 +57,14 @@ jobs:
         working-directory: candidate
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 3f381d431442fb2e6d407fae89084ff62d149b33
-          test "$(git rev-parse HEAD^{tree})" = 04bf37044b7ae7e1f8ade261a786db9d900ac6dd
+          test "$(git rev-parse HEAD)" = 14c4897214c82bbf44af267607d4d5b320d685c8
+          test "$(git rev-parse HEAD^{tree})" = af7f2ba88f7e6a15308dcd0041de990e8dde38c7
           git diff --check origin/main...HEAD
           test -z "$(git status --porcelain)"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pr45-integrated-3f381d4-verification
+          name: pr45-integrated-14c4897-verification
           path: ${{ runner.temp }}/pr45-results
           retention-days: 7
   publish:
@@ -80,7 +80,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: e9799b2f49f7f2326f9bcbd6c55cc3bfb20a6b97
+          ref: 698cb655e04cc4e66140b850d573a228d1058011
           path: candidate
           fetch-depth: 0
           persist-credentials: false
@@ -97,9 +97,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 3f381d431442fb2e6d407fae89084ff62d149b33
-          test "$(git rev-parse HEAD^{tree})" = 04bf37044b7ae7e1f8ade261a786db9d900ac6dd
+          test "$(git rev-parse HEAD)" = 14c4897214c82bbf44af267607d4d5b320d685c8
+          test "$(git rev-parse HEAD^{tree})" = af7f2ba88f7e6a15308dcd0041de990e8dde38c7
           test -z "$(git status --porcelain)"
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
           echo "::add-mask::$auth"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push "https://github.com/$GH_REPO.git" HEAD:refs/heads/fix/pr45-final-verified-3f381d4
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push "https://github.com/$GH_REPO.git" HEAD:refs/heads/fix/pr45-final-verified-14c4897

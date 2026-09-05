@@ -8,11 +8,12 @@ import subprocess
 import sys
 
 BASE = "bb160fb68ae5e7f0e7af26a3809323f3c9f6335e"
-PARENT = "e9799b2f49f7f2326f9bcbd6c55cc3bfb20a6b97"
-HEAD = "3f381d431442fb2e6d407fae89084ff62d149b33"
-TREE = "04bf37044b7ae7e1f8ade261a786db9d900ac6dd"
+PARENT = "698cb655e04cc4e66140b850d573a228d1058011"
+HEAD = "14c4897214c82bbf44af267607d4d5b320d685c8"
+TREE = "af7f2ba88f7e6a15308dcd0041de990e8dde38c7"
+PREVIOUS_TREE = "04bf37044b7ae7e1f8ade261a786db9d900ac6dd"
 INTERMEDIATE_TREE = "aec52a44c425b6baac3c309fcd34cff900964a60"
-MESSAGE = "fix: reconcile runtime provenance and lexical review regressions"
+MESSAGE = "fix: integrate runtime provenance and lexical boundary regressions"
 
 
 def git(*arguments, data=None):
@@ -57,13 +58,20 @@ def main():
     if git("write-tree") != INTERMEDIATE_TREE:
         raise RuntimeError("intermediate tree mismatch")
     git("apply", "--index", "-", data=followups)
+    if git("write-tree") != PREVIOUS_TREE:
+        raise RuntimeError("previous verified tree mismatch")
+    encoded = (transport / "pr45-followups-after-698.patch.xz.b64").read_bytes()
+    final_delta = lzma.decompress(base64.b64decode(b"".join(encoded.splitlines()), validate=True))
+    if hashlib.sha256(final_delta).hexdigest() != "6059350b4eda7a1c72d99da952faa036a9ba8bd2135044d23f6255dd38872b35":
+        raise RuntimeError("latest-head integration patch checksum mismatch")
+    git("apply", "--index", "-", data=final_delta)
     if git("write-tree") != TREE:
         raise RuntimeError("final tree mismatch")
     git("reset", "--soft", PARENT)
     for role in ("AUTHOR", "COMMITTER"):
         os.environ[f"GIT_{role}_NAME"] = "OpenAI PR repair"
         os.environ[f"GIT_{role}_EMAIL"] = "pr45-repair@users.noreply.github.com"
-        os.environ[f"GIT_{role}_DATE"] = "2026-09-05T05:35:00Z"
+        os.environ[f"GIT_{role}_DATE"] = "2026-09-05T05:45:00Z"
     git("-c", "commit.gpgsign=false", "commit", "--no-gpg-sign", "-m", MESSAGE)
     if git("rev-parse", "HEAD") != HEAD or git("rev-parse", "HEAD^{tree}") != TREE:
         raise RuntimeError("final commit identity mismatch")
