@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-installation:tsx",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1572,6 +1573,57 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_installation_binding(root: Path) -> dict[str, str]:
+    """Bind the complete immutable installation, not just the tsx package.
+
+    tsx delegates to sibling packages, hooks and platform-specific helpers.  A
+    manifest-only or tsx-directory digest misses that executable state.  Snapshot
+    all installation entries without exclusions.  Record links but do not walk
+    them: every allowed target is already in this tree, including pnpm's store.
+    This identity snapshot does not replace the trusted-launcher boundary.
+    """
+    root = root.resolve()
+    if not root.is_dir():
+        raise ProbeError("runtime preload installation root is missing")
+    digest = hashlib.sha256(b"agentic-os.runtime-installation.v1\0")
+    pending = [root]
+    try:
+        while pending:
+            directory = pending.pop()
+            entries = sorted(directory.iterdir(), key=lambda path: path.name)
+            for path in entries:
+                metadata = path.lstat()
+                relative = path.relative_to(root).as_posix()
+                record: list[Any] = [relative, stat.S_IMODE(metadata.st_mode)]
+                if stat.S_ISLNK(metadata.st_mode):
+                    target = path.resolve(strict=True)
+                    if not target.is_relative_to(root):
+                        raise ProbeError("runtime preload installation symlink escapes its bound root")
+                    record += ["symlink", os.readlink(path), target.relative_to(root).as_posix()]
+                elif stat.S_ISDIR(metadata.st_mode):
+                    record.append("directory")
+                    pending.append(path)
+                elif stat.S_ISREG(metadata.st_mode):
+                    file_digest = hashlib.sha256()
+                    with path.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            file_digest.update(chunk)
+                    record += ["file", file_digest.hexdigest()]
+                else:
+                    raise ProbeError("runtime preload installation contains an unsupported file type")
+                digest.update(json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+                digest.update(b"\n")
+    except (OSError, RuntimeError) as exc:
+        if isinstance(exc, ProbeError):
+            raise
+        raise ProbeError("runtime preload installation could not be completely bound") from exc
+    return {
+        "path": "runtime-preload-installation:tsx",
+        "sha256": digest.hexdigest(),
+        "realpath_sha256": _text_sha256(str(root)),
+    }
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1587,6 +1639,12 @@ def _runtime_launch_bindings(
         label="tsx",
     )
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    installation_root = openclaw_root.resolve()
+    if not tsx_package_root.is_relative_to(installation_root):
+        raise ProbeError("runtime tsx preload escapes its bound installation root")
+    # Reject escaping/dangling installation links before any narrower package
+    # hasher follows file links.  The full-tree binding is mandatory evidence.
+    installation_binding = _runtime_installation_binding(installation_root)
     return (
         node_executable,
         tsx_preload.as_uri(),
@@ -1596,6 +1654,7 @@ def _runtime_launch_bindings(
             _runtime_directory_binding(
                 tsx_package_root, "runtime-preload-package:tsx"
             ),
+            installation_binding,
         ],
     )
 
@@ -1611,6 +1670,8 @@ def _validate_runtime_launch_sources(value: Any) -> list[dict[str, str]]:
     missing = sorted(set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS) - set(by_path))
     if missing:
         raise ProbeError("runtime launch source binding is incomplete")
+    if len(value) != len(by_path) or set(by_path) != set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS):
+        raise ProbeError("runtime launch source binding is ambiguous")
     validated: list[dict[str, str]] = []
     for label in PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS:
         item = by_path[label]

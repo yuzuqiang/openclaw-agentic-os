@@ -515,67 +515,232 @@ def import_candidates(
     return deduped
 
 
-def strip_source_comments(source_text: str) -> str:
-    output: list[str] = []
-    index = 0
-    state = "code"
-    quote = ""
-    while index < len(source_text):
-        character = source_text[index]
-        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
-        if state == "line_comment":
-            if _is_js_line_terminator(character):
-                output.append(character)
-                state = "code"
-            else:
-                output.append(" ")
-            index += 1
-            continue
-        if state == "block_comment":
-            if character == "*" and next_character == "/":
-                output.extend((" ", " "))
-                index += 2
-                state = "code"
-            else:
-                output.append("\n" if character == "\n" else " ")
-                index += 1
-            continue
-        if state == "string":
-            output.append(character)
-            if character == "\\" and index + 1 < len(source_text):
-                output.append(source_text[index + 1])
-                index += 2
-                continue
-            if character == quote:
-                state = "code"
-                quote = ""
-            index += 1
-            continue
-        if character == "/" and next_character == "/":
-            output.extend((" ", " "))
-            index += 2
-            state = "line_comment"
-            continue
-        if character == "/" and next_character == "*":
-            output.extend((" ", " "))
-            index += 2
-            state = "block_comment"
-            continue
-        if character == "/" and _is_regex_literal_start(source_text, index):
-            regex_end = _regex_literal_end(source_text, index)
-            output.append(source_text[index:regex_end])
-            index = regex_end
-            continue
-        if character in {"'", '"', "`"}:
-            state = "string"
-            quote = character
-        output.append(character)
+def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
+    """Lex code without interpreting it; retain offsets through template expressions.
+
+    This is deliberately not a permissive JavaScript parser.  Ambiguous slash
+    contexts fail closed.  Every consumer gets the same comment/string/regexp
+    boundaries, including Annex B script comments and nested template expressions.
+    """
+    tokens: list[tuple[str, str, int, int]] = []
+    size = len(source_text)
+
+    def token(kind: str, start: int, end: int, value: str | None = None) -> None:
+        tokens.append((kind, source_text[start:end] if value is None else value, start, end))
+
+    def template(index: int) -> int:
+        start = index
+        interpolated = False
         index += 1
+        while index < size:
+            if source_text[index] == "\\":
+                index += 2
+            elif source_text[index] == "`":
+                token("template" if interpolated else "static-template", start, index + 1)
+                return index + 1
+            elif source_text.startswith("${", index):
+                interpolated = True
+                token("template", start, index)
+                token("punctuation", index, index + 2, "${")
+                index = code(index + 2, expression=True)
+                start = index
+            else:
+                index += 1
+        raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript template literal")
+
+    def code(index: int, *, expression: bool = False) -> int:
+        depth = 0
+        previous: tuple[str, str] | None = None
+        before_previous: tuple[str, str] | None = None
+        line_has_code = False
+        while index < size:
+            start = index
+            character = source_text[index]
+            if character.isspace() or character == "\ufeff":
+                if _is_js_line_terminator(character):
+                    line_has_code = False
+                index += 1
+                continue
+            is_hashbang = (
+                source_text.startswith("#!", index)
+                and (index == 0 or (index == 1 and source_text[0] == "\ufeff"))
+            )
+            if (
+                source_text.startswith("//", index)
+                or source_text.startswith("<!--", index)
+                or (not line_has_code and source_text.startswith("-->", index))
+                or is_hashbang
+            ):
+                while index < size and not _is_js_line_terminator(source_text[index]):
+                    index += 1
+                token("comment", start, index)
+                continue
+            if source_text.startswith("/*", index):
+                end = source_text.find("*/", index + 2)
+                if end < 0:
+                    raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript comment")
+                index = end + 2
+                if any(_is_js_line_terminator(c) for c in source_text[start:index]):
+                    line_has_code = False
+                token("comment", start, index)
+                continue
+            if character in {"'", '"'}:
+                index += 1
+                while index < size:
+                    if source_text[index] == "\\":
+                        index += 2
+                        # A CRLF line continuation consumes both terminators.
+                        if index <= size and source_text[index - 1] == "\r" and source_text[index:index + 1] == "\n":
+                            index += 1
+                    elif source_text[index] == character:
+                        index += 1
+                        break
+                    elif source_text[index] in {"\r", "\n"}:
+                        raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript string")
+                    else:
+                        index += 1
+                else:
+                    raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript string")
+                token("string", start, index)
+                current = ("literal", "string")
+            elif character == "`":
+                index = template(index)
+                current = ("literal", "template")
+            elif character == "/":
+                previous_value = previous[1] if previous is not None else ""
+                if previous_value in {")", "}"}:
+                    raise RuntimeSourceContractError("runtime source contains an ambiguous JavaScript slash token")
+                regex_start = previous is None or (
+                    previous[0] == "punctuation"
+                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
+                ) or (
+                    previous[0] == "identifier"
+                    and previous_value in {"await", "case", "delete", "else", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
+                    and before_previous not in {("punctuation", "."), ("punctuation", "?.")}
+                )
+                if regex_start:
+                    index += 1
+                    in_class = False
+                    while index < size:
+                        c = source_text[index]
+                        if c == "\\":
+                            index += 2
+                            continue
+                        if _is_js_line_terminator(c):
+                            raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript regex literal")
+                        if c == "[":
+                            in_class = True
+                        elif c == "]":
+                            in_class = False
+                        elif c == "/" and not in_class:
+                            index += 1
+                            while index < size and _is_identifier_character(source_text[index]):
+                                index += 1
+                            break
+                        index += 1
+                    else:
+                        raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript regex literal")
+                    token("regex", start, index)
+                    current = ("literal", "regex")
+                else:
+                    index += 1
+                    token("punctuation", start, index)
+                    current = ("punctuation", "/")
+            elif _is_identifier_character(character) or character == "\\":
+                parsed = _parse_js_identifier(source_text, index)
+                if parsed is None:  # Numeric text cannot name a loader capability.
+                    index += 1
+                    while index < size and (source_text[index].isalnum() or source_text[index] in "._"):
+                        index += 1
+                    token("number", start, index)
+                    current = ("literal", "number")
+                else:
+                    name, index = parsed
+                    token("identifier", start, index, name)
+                    current = ("identifier", name)
+            else:
+                if not character.isascii():
+                    raise RuntimeSourceContractError("runtime source contains an unsupported JavaScript token")
+                if expression and character == "}" and depth == 0:
+                    token("template-expression-end", start, start + 1)
+                    return index + 1
+                if character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+                pair = source_text[index:index + 2]
+                value = pair if pair in {"?.", "++", "--", "=>"} else character
+                index += len(value)
+                token("punctuation", start, index)
+                current = ("punctuation", value)
+            before_previous, previous = previous, current
+            line_has_code = True
+        if expression:
+            raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript template expression")
+        return index
+
+    code(0)
+    return tokens
+
+
+def _source_scan_view(source_text: str) -> str:
+    """A shared lexical view for the legacy, non-evaluating recognizers.
+
+    Classify lexical boundaries exactly once.  Regex contents and template text
+    are inert; template expressions remain executable.  Replace division tokens
+    by a neutral binary operator so no later recognizer guesses whether a slash
+    starts a regexp.  Normalize escaped/non-ASCII identifiers consistently, using
+    collision-free local names where the recognizers need ASCII identifiers.
+    This view is never executed and never used for file hashes.
+    """
+    output = list(source_text)
+    tokens = _source_tokens(source_text)
+    identifiers = {value for kind, value, _start, _end in tokens if kind == "identifier"}
+    canonical_names: dict[str, str] = {}
+    counter = 0
+    for value in sorted(identifiers):
+        if value.isascii():
+            continue
+        while True:
+            name = f"__agentic_source_identifier_{counter}__"
+            counter += 1
+            if name not in identifiers:
+                break
+        canonical_names[value] = name
+    for kind, value, start, end in tokens:
+        if kind in {"comment", "regex", "template"}:
+            for index in range(start, end):
+                if not _is_js_line_terminator(source_text[index]):
+                    output[index] = " "
+            if kind == "regex":
+                output[start] = "0"
+        elif kind == "punctuation" and value == "/":
+            output[start] = "*"
+        elif kind == "punctuation" and value == "${":
+            output[start:end] = "( "
+        elif kind == "template-expression-end":
+            output[start] = ")"
+    for kind, value, start, end in reversed(tokens):
+        if kind == "identifier":
+            output[start:end] = canonical_names.get(value, value)
+    return "".join(output)
+
+
+def strip_source_comments(source_text: str) -> str:
+    """Blank comments, not their line terminators or offsets."""
+    output = list(source_text)
+    for kind, _value, start, end in _source_tokens(source_text):
+        if kind == "comment":
+            for index in range(start, end):
+                if not _is_js_line_terminator(source_text[index]):
+                    output[index] = " "
     return "".join(output)
 
 
 def _is_identifier_character(character: str) -> bool:
-    return character.isalnum() or character in {"_", "$"}
+    # ECMAScript identifier continuations also include combining marks and the
+    # two join controls.  Unsupported non-ASCII tokens are rejected by the lexer.
+    return ("_" + character).isidentifier() or character in {"$", "\u200c", "\u200d"}
 
 
 def _is_js_line_terminator(character: str) -> bool:
@@ -1099,6 +1264,8 @@ def _parse_safe_process_member_access(source_text: str, index: int) -> int | Non
     if member is None:
         return None
     property_name, property_end = member
+    if property_name == "chdir":
+        raise RuntimeSourceContractError("runtime source contains an unsupported runtime working-directory mutation")
     if property_name in {
         "_linkedBinding",
         "binding",
@@ -1845,129 +2012,275 @@ def _module_register_loader_bindings(
     return loaders, declaration_spans
 
 
-def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
-    stripped = strip_source_comments(source_text)
-    constructor_names = {"Worker"}
-    namespace_names: set[str] = set()
+def _execution_capability_bindings(
+    source_text: str,
+) -> tuple[dict[str, str], list[tuple[int, int]], list[str]]:
+    """Inventory capability origins, not spellings of subsequent alias assignments.
 
-    for pattern in (WORKER_THREADS_IMPORT, WORKER_THREADS_DESTRUCTURED_REQUIRE):
-        for match in pattern.finditer(stripped):
-            for part in match.group("body").split(","):
-                binding = _parse_named_binding_part(part)
-                if binding is None:
-                    continue
-                imported_name, local_name = binding
-                if imported_name == "Worker":
-                    constructor_names.add(local_name)
-    for pattern in (
-        WORKER_THREADS_NAMESPACE_IMPORT,
-        WORKER_THREADS_DEFAULT_IMPORT,
-        WORKER_THREADS_REQUIRE_ASSIGNMENT,
-    ):
-        for match in pattern.finditer(stripped):
-            namespace_names.add(match.group("name"))
-    return constructor_names, namespace_names
+    Binding an imported function is supported; transferring that function or its
+    namespace is not.  The usage audit below accounts for *every* reference, so a
+    new JavaScript assignment/call spelling cannot silently introduce an alias.
+    """
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    bindings = {"Worker": "worker", "child_process": "child-namespace"}
+    declarations: list[tuple[int, int]] = []
+    builtin_loads: list[str] = []
+
+    def text(index: int) -> str:
+        return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    def literal(index: int) -> str | None:
+        if not 0 <= index < len(tokens) or tokens[index][0] != "string":
+            return None
+        parsed = _parse_quoted_specifier(source_text, tokens[index][2])
+        return parsed[0] if parsed is not None else None
+
+    def bind(module: str, imported: str, local: str) -> None:
+        if module == "worker_threads":
+            if imported in {"*", "default"}:
+                bindings[local] = "worker-namespace"
+            elif imported == "Worker":
+                bindings[local] = "worker"
+        elif module == "child_process":
+            if imported in {"*", "default"}:
+                bindings[local] = "child-namespace"
+            elif imported in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
+                bindings[local] = "fork"
+            elif imported in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
+                bindings[local] = "child-node"
+            elif imported in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
+                bindings[local] = "child-shell"
+            else:
+                # ChildProcess/_forkChild can launch code too.  They are not safe
+                # merely because the older entrypoint allowlist omitted them.
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported child-process Node entrypoint binding"
+                )
+
+    def clause(start: int, end: int, module: str, *, commonjs: bool) -> None:
+        index = start
+        if not commonjs and text(index) == "type":
+            index += 1
+        if index < end and tokens[index][0] == "identifier" and text(index) not in {"{", "*"}:
+            bind(module, "default", text(index))
+            index += 1
+            if text(index) == ",":
+                index += 1
+        if index == end:
+            return
+        if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
+            bind(module, "*", text(index + 2))
+            return
+        if text(index) != "{" or text(end - 1) != "}":
+            raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
+        index += 1
+        while index < end - 1:
+            if text(index) == ",":
+                index += 1
+                continue
+            if not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}:
+                index += 1
+            imported = literal(index) if tokens[index][0] == "string" else text(index)
+            if tokens[index][0] not in {"string", "identifier"}:
+                raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
+            local = imported
+            index += 1
+            if text(index) == (":" if commonjs else "as"):
+                index += 1
+                if index >= end - 1 or tokens[index][0] != "identifier":
+                    raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
+                local = text(index)
+                index += 1
+            if index < end - 1 and text(index) != ",":
+                raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
+            assert imported is not None and local is not None
+            bind(module, imported, local)
+
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier" or value not in {"import", "export"}:
+            continue
+        if text(index + 1) in {"(", "."}:
+            continue
+        # Side-effect imports declare no local capabilities.
+        if value == "import" and index + 1 < len(tokens) and tokens[index + 1][0] == "string":
+            declarations.append((start, tokens[index + 1][3]))
+            continue
+        cursor = index + 1
+        depth = 0
+        while cursor < len(tokens) and text(cursor) != ";":
+            if depth == 0 and cursor > index + 1 and text(cursor) in {"import", "export"}:
+                break
+            if text(cursor) == "{":
+                depth += 1
+            elif text(cursor) == "}":
+                depth -= 1
+            if text(cursor) == "from" and literal(cursor + 1) is not None:
+                specifier = literal(cursor + 1)
+                assert specifier is not None
+                module = specifier.removeprefix("node:")
+                if module in {"worker_threads", "child_process", "module"} and value == "export":
+                    raise RuntimeSourceContractError("runtime source contains an unsupported execution capability re-export")
+                if module in {"worker_threads", "child_process"}:
+                    clause(index + 1, cursor, module, commonjs=False)
+                if value == "import":
+                    declarations.append((start, tokens[cursor + 1][3]))
+                break
+            # An export declaration without `from` is not an import clause.
+            if value == "export" and text(cursor) in {"=", "const", "let", "var", "function", "class", "default"}:
+                break
+            cursor += 1
+
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "require" or text(index + 1) != "(":
+            continue
+        specifier = literal(index + 2)
+        if specifier is None or text(index + 3) != ")":
+            continue
+        module = specifier.removeprefix("node:")
+        if module not in {"worker_threads", "child_process"}:
+            continue
+        # Only a direct require on a simple declaration RHS has a locally
+        # accounted-for returned namespace.  Inline/grouped/aliased factories
+        # are rejected by the origin count, rather than guessed at.
+        if text(index - 1) != "=":
+            continue
+        lhs = index - 2
+        if text(lhs) == "}":
+            while lhs >= 0 and text(lhs) != "{":
+                lhs -= 1
+        if lhs < 1 or text(lhs - 1) not in {"const", "let", "var"}:
+            continue
+        clause(lhs, index - 1, module, commonjs=True)
+        declarations.append((tokens[lhs - 1][2], tokens[index - 1][3]))
+        builtin_loads.append(module)
+    return bindings, declarations, builtin_loads
+
+
+def _reject_execution_capability_escapes(
+    source_text: str,
+    *,
+    accepted_spans: list[tuple[int, int]],
+    loaded_execution_modules: list[str],
+) -> None:
+    bindings, declarations, builtin_loads = _execution_capability_bindings(source_text)
+    expected = sorted(specifier.removeprefix("node:") for specifier in loaded_execution_modules)
+    if sorted(builtin_loads) != expected:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported Worker entrypoint or child-process Node entrypoint namespace origin"
+        )
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier" or value not in bindings:
+            continue
+        # Property names on unrelated objects are not references to a binding.
+        if index and tokens[index - 1][1] in {".", "?."}:
+            continue
+        if any(left <= start < right for left, right in declarations + accepted_spans):
+            continue
+        capability = bindings[value]
+        if capability.startswith("worker"):
+            description = "Worker entrypoint"
+        elif capability == "child-shell":
+            description = "shell child-process entrypoint"
+        elif capability == "fork":
+            description = "indirect child-process fork entrypoint"
+        else:
+            description = "child-process Node entrypoint"
+        raise RuntimeSourceContractError(
+            f"runtime source contains an unsupported {description} capability usage"
+        )
+
+
+def _reject_unaccounted_require_references(source_text: str) -> None:
+    """Require may be called or assigned to an audited simple alias, not escape."""
+    accepted: list[tuple[int, int]] = [
+        match.span() for match in _executable_pattern_matches(source_text, COMMONJS_REQUIRE_ALIAS_ASSIGNMENT)
+    ]
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    for kind, value, start, _end in tokens:
+        if kind == "punctuation" and value == "(":
+            parsed = _parse_parenthesized_require_invocation(source_text, start)
+            if parsed is not None:
+                accepted.append((start, parsed[1]))
+        elif kind == "identifier" and value == "require":
+            parsed = _parse_property_require_invocation(source_text, start)
+            if parsed is None:
+                parsed = _parse_require_invocation(source_text, start)
+            if parsed is not None:
+                accepted.append((start, parsed[1]))
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "require":
+            continue
+        if any(left <= start < right for left, right in accepted):
+            continue
+        if index and tokens[index - 1][1] == "typeof":
+            continue
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported indirect CommonJS require capability usage"
+        )
+
+
+def _reject_unaccounted_create_require_references(source_text: str) -> None:
+    """Account for the factory *and* its returned loader, not just factory calls."""
+    factories = _create_require_factory_names(source_text)
+    declarations = [
+        match.span()
+        for pattern in (CREATE_REQUIRE_IMPORT, CREATE_REQUIRE_DESTRUCTURED_REQUIRE)
+        for match in _executable_pattern_matches(source_text, pattern)
+    ]
+    assignments = [
+        match for match in _executable_pattern_matches(source_text, CREATE_REQUIRE_ASSIGNMENT)
+        if match.group("factory") in factories
+    ]
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    for index, (kind, value, start, end) in enumerate(tokens):
+        if any(left <= start < right for left, right in declarations):
+            continue
+        if kind in {"string", "static-template"} and index and tokens[index - 1][1] == "[":
+            if value[1:-1] == "createRequire":
+                raise RuntimeSourceContractError("runtime source contains an unsupported computed createRequire factory reference")
+        if kind != "identifier" or value not in factories:
+            continue
+        call_index = _skip_js_trivia(source_text, end)
+        if source_text[call_index:call_index + 1] != "(":
+            raise RuntimeSourceContractError("runtime source contains an unsupported indirect createRequire factory reference")
+        base_end = _create_require_base_end(source_text, call_index)
+        if base_end is None:
+            raise RuntimeSourceContractError("runtime source contains an unsupported non-local createRequire base")
+        after = _skip_js_trivia(source_text, base_end)
+        if source_text[after:after + 1] == "(":
+            parsed = _parse_quoted_specifier(source_text, _skip_js_trivia(source_text, after + 1))
+            if parsed is None or source_text[_skip_js_trivia(source_text, parsed[1]):][:1] != ")":
+                raise RuntimeSourceContractError("runtime source contains an unsupported createRequire loader signature")
+            continue
+        assigned = any(match.span("factory") == (start, end) for match in assignments)
+        delimiter = source_text[after:after + 1]
+        terminated = not delimiter or delimiter in {";", ","}
+        # ASI is only allowed when the next token cannot continue the initializer.
+        if not terminated and any(_is_js_line_terminator(c) for c in source_text[base_end:after]):
+            terminated = delimiter not in {"(", "[", ".", "?", "`", "+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "="}
+        if not assigned or not terminated:
+            raise RuntimeSourceContractError("runtime source contains an unsupported createRequire loader transfer")
+
+
+def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
+    bindings, _declarations, _loads = _execution_capability_bindings(source_text)
+    return (
+        {name for name, kind in bindings.items() if kind == "worker"},
+        {name for name, kind in bindings.items() if kind == "worker-namespace"},
+    )
 
 
 def _child_process_sync_alias_bindings(
     source_text: str,
 ) -> tuple[set[str], set[str], set[str], set[str]]:
-    stripped = strip_source_comments(source_text)
-    fork_entrypoint_names: set[str] = set()
-    node_entrypoint_names: set[str] = set()
-    sync_shell_names: set[str] = set()
-    namespace_names = {"child_process"}
-
-    for pattern in (CHILD_PROCESS_IMPORT, CHILD_PROCESS_DESTRUCTURED_REQUIRE):
-        for match in pattern.finditer(stripped):
-            for part in match.group("body").split(","):
-                binding = _parse_named_binding_part(part)
-                if binding is None:
-                    continue
-                entrypoint, local_name = binding
-                if entrypoint in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
-                    fork_entrypoint_names.add(local_name)
-                elif entrypoint in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
-                    node_entrypoint_names.add(local_name)
-                elif entrypoint in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
-                    sync_shell_names.add(local_name)
-    for pattern in (
-        CHILD_PROCESS_NAMESPACE_IMPORT,
-        CHILD_PROCESS_DEFAULT_IMPORT,
-        CHILD_PROCESS_REQUIRE_ASSIGNMENT,
-    ):
-        for match in pattern.finditer(stripped):
-            namespace_names.add(match.group("name"))
-    _add_child_process_transferred_aliases(
-        stripped,
-        fork_entrypoint_names=fork_entrypoint_names,
-        node_entrypoint_names=node_entrypoint_names,
-        sync_shell_names=sync_shell_names,
-        namespace_names=namespace_names,
-    )
+    bindings, _declarations, _loads = _execution_capability_bindings(source_text)
     return (
-        fork_entrypoint_names,
-        node_entrypoint_names,
-        sync_shell_names,
-        namespace_names,
+        {name for name, kind in bindings.items() if kind == "fork"},
+        {name for name, kind in bindings.items() if kind == "child-node"},
+        {name for name, kind in bindings.items() if kind == "child-shell"},
+        {name for name, kind in bindings.items() if kind == "child-namespace"},
     )
-
-
-def _add_child_process_transferred_aliases(
-    source_text: str,
-    *,
-    fork_entrypoint_names: set[str],
-    node_entrypoint_names: set[str],
-    sync_shell_names: set[str],
-    namespace_names: set[str],
-) -> None:
-    assignment_pattern = re.compile(
-        rf"""
-        \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
-        (?:\(\s*)*(?P<source>{JS_IDENTIFIER})(?:\s*\))*\s*(?:;|,|\n|$)
-        """,
-        re.VERBOSE | re.DOTALL,
-    )
-    changed = True
-    while changed:
-        changed = False
-        for match in assignment_pattern.finditer(source_text):
-            name = match.group("name")
-            source = match.group("source")
-            if source in fork_entrypoint_names and name not in fork_entrypoint_names:
-                fork_entrypoint_names.add(name)
-                changed = True
-            elif source in node_entrypoint_names and name not in node_entrypoint_names:
-                node_entrypoint_names.add(name)
-                changed = True
-            elif source in sync_shell_names and name not in sync_shell_names:
-                sync_shell_names.add(name)
-                changed = True
-
-    if not namespace_names:
-        return
-    namespace_alternatives = "|".join(
-        re.escape(name) for name in sorted(namespace_names, key=len, reverse=True)
-    )
-    member_pattern = re.compile(
-        rf"""
-        \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
-        (?:\(\s*)*
-        (?P<namespace>{namespace_alternatives})\s*(?:\.|\?\.)\s*
-        (?P<member>{JS_IDENTIFIER})
-        (?:\s*\))*\s*(?:;|,|\n|$)
-        """,
-        re.VERBOSE | re.DOTALL,
-    )
-    for match in member_pattern.finditer(source_text):
-        name = match.group("name")
-        member = match.group("member")
-        if member in CHILD_PROCESS_FORK_ENTRYPOINT_NAMES:
-            fork_entrypoint_names.add(name)
-        elif member in CHILD_PROCESS_NODE_ENTRYPOINT_NAMES:
-            node_entrypoint_names.add(name)
-        elif member in CHILD_PROCESS_SYNC_SHELL_ENTRYPOINT_NAMES:
-            sync_shell_names.add(name)
 
 
 def _child_process_fork_entrypoint_pattern(
@@ -2909,62 +3222,17 @@ def _regex_literal_end_or_fail_closed(source_text: str, index: int) -> int | Non
 def _executable_pattern_matches(
     source_text: str, pattern: re.Pattern[str]
 ) -> list[re.Match[str]]:
+    # Match only at actual code-token boundaries, including nested template
+    # expressions.  Offsets remain in the original string, never in a substring.
     matches: list[re.Match[str]] = []
-    index = 0
-    state = "code"
-    quote = ""
-    while index < len(source_text):
-        character = source_text[index]
-        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
-        if state == "line_comment":
-            if _is_js_line_terminator(character):
-                state = "code"
-            index += 1
+    consumed = 0
+    for kind, _value, start, _end in _source_tokens(source_text):
+        if kind not in {"identifier", "punctuation"} or start < consumed:
             continue
-        if state == "block_comment":
-            if character == "*" and next_character == "/":
-                index += 2
-                state = "code"
-            else:
-                index += 1
-            continue
-        if state == "string":
-            if character == "\\" and index + 1 < len(source_text):
-                index += 2
-                continue
-            if character == quote:
-                state = "code"
-                quote = ""
-            index += 1
-            continue
-        if character == "/" and next_character == "/":
-            index += 2
-            state = "line_comment"
-            continue
-        if character == "/" and next_character == "*":
-            index += 2
-            state = "block_comment"
-            continue
-        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
-        if regex_end is not None:
-            index = regex_end
-            continue
-        if character == "`":
-            chunks, index = _template_expression_chunks(source_text, index)
-            for chunk in chunks:
-                matches.extend(_executable_pattern_matches(chunk, pattern))
-            continue
-        if character in {"'", '"'}:
-            state = "string"
-            quote = character
-            index += 1
-            continue
-        match = pattern.match(source_text, index)
+        match = pattern.match(source_text, start)
         if match is not None:
             matches.append(match)
-            index = match.end()
-            continue
-        index += 1
+            consumed = match.end()
     return matches
 
 
@@ -3381,8 +3649,59 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
     return specifiers
 
 
+def _validate_execution_entrypoint_tail(source_text: str, start: int, end: int) -> None:
+    """Do not accept a matched literal prefix followed by executable options.
+
+    Explicit env/execArgv/execPath/cwd, shell mode, eval mode, spread arguments,
+    and computed suffixes can change which code runs.  Supported calls use only
+    the bound entrypoint and (for child processes) an optional literal argv list.
+    """
+    prefix = source_text[start:end]
+    is_worker = prefix.lstrip().startswith("new ")
+    is_node_argv = "process.execPath" in prefix
+    description = "Worker entrypoint" if is_worker else "child-process Node entrypoint"
+
+    def fail() -> None:
+        raise RuntimeSourceContractError(f"runtime source contains an unsupported {description} argument or option")
+
+    def literal_array(index: int, *, first_consumed: bool = False) -> int:
+        index = _skip_js_trivia(source_text, index)
+        if not first_consumed:
+            if source_text[index:index + 1] != "[":
+                fail()
+            index = _skip_js_trivia(source_text, index + 1)
+        elif source_text[index:index + 1] == ",":
+            index = _skip_js_trivia(source_text, index + 1)
+        elif source_text[index:index + 1] != "]":
+            fail()
+        while source_text[index:index + 1] != "]":
+            literal = _parse_quoted_specifier(source_text, index)
+            if literal is None:
+                fail()
+            index = _skip_js_trivia(source_text, literal[1])
+            if source_text[index:index + 1] == ",":
+                index = _skip_js_trivia(source_text, index + 1)
+            elif source_text[index:index + 1] != "]":
+                fail()
+        return _skip_js_trivia(source_text, index + 1)
+
+    index = _skip_js_trivia(source_text, end)
+    if is_node_argv:
+        index = literal_array(index, first_consumed=True)
+    elif not is_worker and source_text[index:index + 1] == ",":
+        next_index = _skip_js_trivia(source_text, index + 1)
+        if source_text[next_index:next_index + 1] == "[":
+            index = literal_array(next_index)
+    if source_text[index:index + 1] == ",":
+        index = _skip_js_trivia(source_text, index + 1)
+    if source_text[index:index + 1] != ")":
+        fail()
+
+
 def _runtime_execution_entrypoint_specifiers(
     source_text: str,
+    *,
+    loaded_execution_modules: list[str],
 ) -> list[tuple[str, str]]:
     source_text = _decode_js_identifier_escapes_in_executable_code(source_text)
     source_text = strip_source_comments(source_text)
@@ -3415,7 +3734,7 @@ def _runtime_execution_entrypoint_specifiers(
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported inline require child-process entrypoint"
         )
-    for match in worker_entrypoint_pattern.finditer(source_text):
+    for match in _executable_pattern_matches(source_text, worker_entrypoint_pattern):
         specifier = match.group("specifier")
         if "\\" in specifier:
             raise RuntimeSourceContractError(
@@ -3423,46 +3742,46 @@ def _runtime_execution_entrypoint_specifiers(
             )
         specifiers.append((specifier, "import"))
         accepted_spans.append(match.span())
-    for match in FORK_ENTRYPOINT_SPECIFIER.finditer(source_text):
+    for match in _executable_pattern_matches(source_text, FORK_ENTRYPOINT_SPECIFIER):
         specifier = match.group("specifier")
         if "\\" in specifier:
             raise RuntimeSourceContractError(
                 "runtime source fork entrypoint contains an unsupported JavaScript escape"
             )
-        specifiers.append((specifier, "require"))
+        specifiers.append((specifier, "process"))
         accepted_spans.append(match.span())
     child_process_fork_alias_pattern = _child_process_fork_entrypoint_pattern(
         child_process_fork_alias_names
     )
     if child_process_fork_alias_pattern is not None:
-        for match in child_process_fork_alias_pattern.finditer(source_text):
+        for match in _executable_pattern_matches(source_text, child_process_fork_alias_pattern):
             specifier = match.group("specifier")
             if "\\" in specifier:
                 raise RuntimeSourceContractError(
                     "runtime source fork entrypoint contains an unsupported JavaScript escape"
                 )
-            specifiers.append((specifier, "require"))
+            specifiers.append((specifier, "process"))
             accepted_spans.append(match.span())
-    for match in CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER.finditer(source_text):
+    for match in _executable_pattern_matches(source_text, CHILD_PROCESS_NODE_ENTRYPOINT_SPECIFIER):
         specifier = match.group("specifier")
         if "\\" in specifier:
             raise RuntimeSourceContractError(
                 "runtime source child-process entrypoint contains an unsupported JavaScript escape"
             )
-        specifiers.append((specifier, "import"))
+        specifiers.append((specifier, "process"))
         accepted_spans.append(match.span())
     child_process_alias_pattern = _child_process_alias_node_entrypoint_pattern(
         child_process_node_alias_names,
         require_literal_script_argument=True,
     )
     if child_process_alias_pattern is not None:
-        for match in child_process_alias_pattern.finditer(source_text):
+        for match in _executable_pattern_matches(source_text, child_process_alias_pattern):
             specifier = match.group("specifier")
             if "\\" in specifier:
                 raise RuntimeSourceContractError(
                     "runtime source child-process entrypoint contains an unsupported JavaScript escape"
                 )
-            specifiers.append((specifier, "import"))
+            specifiers.append((specifier, "process"))
             accepted_spans.append(match.span())
     child_process_alias_call_pattern = _child_process_alias_node_entrypoint_pattern(
         child_process_node_alias_names,
@@ -3470,7 +3789,7 @@ def _runtime_execution_entrypoint_specifiers(
         require_node_executable=False,
     )
     if child_process_alias_call_pattern is not None:
-        for match in child_process_alias_call_pattern.finditer(source_text):
+        for match in _executable_pattern_matches(source_text, child_process_alias_call_pattern):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
@@ -3490,7 +3809,7 @@ def _runtime_execution_entrypoint_specifiers(
         child_process_namespace_names
     )
     if child_process_namespace_pattern is not None:
-        for match in child_process_namespace_pattern.finditer(source_text):
+        for match in _executable_pattern_matches(source_text, child_process_namespace_pattern):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
@@ -3498,34 +3817,25 @@ def _runtime_execution_entrypoint_specifiers(
     for specifier in _native_addon_entrypoint_specifiers(source_text):
         specifiers.append((specifier, "require"))
 
-    if _child_process_sync_shell_call_pattern(child_process_sync_alias_names).search(
-        source_text
-    ) or _child_process_indirect_shell_call_pattern(
-        child_process_sync_alias_names
-    ).search(
-        source_text
-    ):
+    if _executable_pattern_matches(source_text, _child_process_sync_shell_call_pattern(child_process_sync_alias_names)) or _executable_pattern_matches(source_text, _child_process_indirect_shell_call_pattern(child_process_sync_alias_names)):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported shell child-process entrypoint"
         )
     indirect_fork_pattern = _child_process_indirect_fork_entrypoint_pattern(
         child_process_fork_alias_names
     )
-    if indirect_fork_pattern is not None and indirect_fork_pattern.search(source_text):
+    if indirect_fork_pattern is not None and _executable_pattern_matches(source_text, indirect_fork_pattern):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported indirect child-process fork entrypoint"
         )
 
     for constructor_name in sorted(worker_constructor_names, key=len, reverse=True):
-        for match in re.finditer(rf"\bnew\s+{re.escape(constructor_name)}\s*\(", source_text):
+        for match in _executable_pattern_matches(source_text, re.compile(f'\\bnew\\s+{re.escape(constructor_name)}\\s*\\(')):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported Worker entrypoint"
                 )
-        if re.search(
-            rf"\bnew\s*\(\s*[^()]*,\s*{re.escape(constructor_name)}\s*\)\s*\(",
-            source_text,
-        ):
+        if _executable_pattern_matches(source_text, re.compile(f'\\bnew\\s*\\(\\s*[^()]*,\\s*{re.escape(constructor_name)}\\s*\\)\\s*\\(')):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported indirect Worker entrypoint"
             )
@@ -3534,19 +3844,17 @@ def _runtime_execution_entrypoint_specifiers(
             rf"\bnew\s+{re.escape(namespace_name)}\s*(?:\.|\?\.)\s*Worker\s*\(",
             rf"\bnew\s+{re.escape(namespace_name)}\s*(?:\.|\?\.)?\s*\[\s*['\"]Worker['\"]\s*\]\s*\(",
         ):
-            for match in re.finditer(pattern, source_text):
+            for match in _executable_pattern_matches(source_text, re.compile(pattern)):
                 if not any(start <= match.start() < end for start, end in accepted_spans):
                     raise RuntimeSourceContractError(
                         "runtime source contains an unsupported Worker entrypoint"
                     )
-    for match in re.finditer(r"\bnew\s+Worker\s*\(", source_text):
+    for match in _executable_pattern_matches(source_text, re.compile('\\bnew\\s+Worker\\s*\\(')):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported Worker entrypoint"
             )
-    for match in re.finditer(
-        r"(?<![\w$])(?:fork|child_process\.fork)\s*\(", source_text
-    ):
+    for match in _executable_pattern_matches(source_text, re.compile('(?<![\\w$])(?:fork|child_process\\.fork)\\s*\\(')):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported fork entrypoint"
@@ -3556,36 +3864,22 @@ def _runtime_execution_entrypoint_specifiers(
             re.escape(name)
             for name in sorted(child_process_fork_alias_names, key=len, reverse=True)
         )
-        for match in re.finditer(
-            rf"(?<![\w$.])(?:{fork_alias_alternatives})\s*\(",
-            source_text,
-        ):
+        for match in _executable_pattern_matches(source_text, re.compile(f'(?<![\\w$.])(?:{fork_alias_alternatives})\\s*\\(')):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported fork entrypoint"
                 )
-    for match in re.finditer(
-        r"(?<![\w$])(?:spawn|spawnSync|execFile|execFileSync|child_process\.(?:spawn|spawnSync|execFile|execFileSync)|[A-Za-z_$][0-9A-Za-z_$]*\s*\.\s*(?:spawn|spawnSync|execFile|execFileSync))\s*\(\s*process\.execPath\s*,",
-        source_text,
-    ):
+    for match in _executable_pattern_matches(source_text, re.compile('(?<![\\w$])(?:spawn|spawnSync|execFile|execFileSync|child_process\\.(?:spawn|spawnSync|execFile|execFileSync)|[A-Za-z_$][0-9A-Za-z_$]*\\s*\\.\\s*(?:spawn|spawnSync|execFile|execFileSync))\\s*\\(\\s*process\\.execPath\\s*,')):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
             )
-    for match in re.finditer(
-        rf"(?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*(?:\?\.)?\s*\[\s*['\"](?:spawn|spawnSync|execFile|execFileSync)['\"]\s*\]\s*\(\s*process\.execPath\s*,",
-        source_text,
-        re.DOTALL,
-    ):
+    for match in _executable_pattern_matches(source_text, re.compile(f"""(?<![\\w$])(?:child_process|{JS_IDENTIFIER})\\s*(?:\\?\\.)?\\s*\\[\\s*['\\"](?:spawn|spawnSync|execFile|execFileSync)['\\"]\\s*\\]\\s*\\(\\s*process\\.execPath\\s*,""", re.DOTALL)):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
             )
-    if re.search(
-        rf"(?<![\w$])(?:child_process|{JS_IDENTIFIER})\s*(?:\?\.)?\s*\[\s*['\"](?:exec|execSync)['\"]\s*\]\s*\(",
-        source_text,
-        re.DOTALL,
-    ):
+    if _executable_pattern_matches(source_text, re.compile(f"""(?<![\\w$])(?:child_process|{JS_IDENTIFIER})\\s*(?:\\?\\.)?\\s*\\[\\s*['\\"](?:exec|execSync)['\\"]\\s*\\]\\s*\\(""", re.DOTALL)):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported shell child-process entrypoint"
         )
@@ -3594,9 +3888,7 @@ def _runtime_execution_entrypoint_specifiers(
         require_literal_script_argument=False,
     )
     if child_process_alias_process_execpath_pattern is not None:
-        for match in child_process_alias_process_execpath_pattern.finditer(
-            source_text
-        ):
+        for match in _executable_pattern_matches(source_text, child_process_alias_process_execpath_pattern):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
@@ -3607,7 +3899,7 @@ def _runtime_execution_entrypoint_specifiers(
         )
     )
     if child_process_indirect_alias_pattern is not None:
-        for match in child_process_indirect_alias_pattern.finditer(source_text):
+        for match in _executable_pattern_matches(source_text, child_process_indirect_alias_pattern):
             if not any(start <= match.start() < end for start, end in accepted_spans):
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported child-process Node entrypoint"
@@ -3619,7 +3911,7 @@ def _runtime_execution_entrypoint_specifiers(
     )
     if (
         child_process_callable_indirect_alias_pattern is not None
-        and child_process_callable_indirect_alias_pattern.search(source_text)
+        and _executable_pattern_matches(source_text, child_process_callable_indirect_alias_pattern)
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported child-process Node entrypoint"
@@ -3631,7 +3923,7 @@ def _runtime_execution_entrypoint_specifiers(
     )
     if (
         child_process_callable_indirect_shell_pattern is not None
-        and child_process_callable_indirect_shell_pattern.search(source_text)
+        and _executable_pattern_matches(source_text, child_process_callable_indirect_shell_pattern)
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported shell child-process entrypoint"
@@ -3643,18 +3935,23 @@ def _runtime_execution_entrypoint_specifiers(
     )
     if (
         child_process_callable_indirect_fork_pattern is not None
-        and child_process_callable_indirect_fork_pattern.search(source_text)
+        and _executable_pattern_matches(source_text, child_process_callable_indirect_fork_pattern)
     ):
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported indirect child-process fork entrypoint"
         )
-    for match in _child_process_indirect_namespace_node_entrypoint_pattern().finditer(
-        source_text
-    ):
+    for match in _executable_pattern_matches(source_text, _child_process_indirect_namespace_node_entrypoint_pattern()):
         if not any(start <= match.start() < end for start, end in accepted_spans):
             raise RuntimeSourceContractError(
                 "runtime source contains an unsupported child-process Node entrypoint"
             )
+    for start, end in accepted_spans:
+        _validate_execution_entrypoint_tail(source_text, start, end)
+    _reject_execution_capability_escapes(
+        source_text,
+        accepted_spans=accepted_spans,
+        loaded_execution_modules=loaded_execution_modules,
+    )
     return specifiers
 
 
@@ -3784,6 +4081,7 @@ def _static_runtime_import_specifiers(source_text: str) -> list[str]:
 
 
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
+    source_text = _source_scan_view(source_text)
     _reject_evaluated_runtime_loaders(source_text)
     commonjs_specifiers = _commonjs_require_specifiers(source_text)
     create_require_specifiers = _create_require_specifiers(source_text)
@@ -3825,7 +4123,17 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported unbound execution capability"
         )
-    execution_entrypoints = _runtime_execution_entrypoint_specifiers(source_text)
+    if any(specifier in {"worker_threads", "node:worker_threads"} for specifier in dynamic_specifiers):
+        raise RuntimeSourceContractError("runtime source contains an unsupported dynamic Worker entrypoint namespace")
+    _reject_unaccounted_require_references(source_text)
+    execution_entrypoints = _runtime_execution_entrypoint_specifiers(
+        source_text,
+        loaded_execution_modules=[
+            specifier for specifier in commonjs_specifiers + create_require_specifiers
+            if specifier.removeprefix("node:") in {"worker_threads", "child_process"}
+        ],
+    )
+    _reject_unaccounted_create_require_references(source_text)
     module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
@@ -4292,6 +4600,16 @@ def resolve_import(
     import_kind: str = "import",
 ) -> tuple[Path, ...]:
     root = root.resolve()
+    if import_kind == "process":
+        # The probe launches with cwd=root.  Node CLI/fork paths are not module
+        # specifiers and do not resolve relative to the JavaScript caller.
+        if not specifier or specifier.startswith("-"):
+            raise RuntimeSourceContractError("runtime process entrypoint is not a literal script path")
+        path = (root / specifier).resolve()
+        source_relative_path(root, path)
+        if not path.is_file() or path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
+            raise RuntimeSourceContractError("runtime process entrypoint could not be resolved to an in-root script")
+        return (path,)
     if specifier.startswith("#"):
         return _resolve_package_import(
             root=root,
@@ -4460,6 +4778,20 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
         seen.add(relative)
         if source_path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
             continue
+        # File contents alone do not determine Node's interpretation.  Bind the
+        # enclosing package scopes for every source, including direct relative
+        # imports and the initial entrypoints (not only bare package imports).
+        # Keep all in-root ancestors: this conservative superset also notices a
+        # newly added, removed, or retargeted nearer scope during revalidation.
+        for directory in (source_path.parent, *source_path.parent.parents):
+            if not directory.is_relative_to(root):
+                break
+            manifest = directory / "package.json"
+            if manifest.is_file():
+                source_relative_path(root, manifest)  # Reject escaping symlinks.
+                queue.append(manifest)
+            if directory == root:
+                break
         try:
             source_text = source_path.read_text(encoding="utf-8")
         except OSError as exc:
