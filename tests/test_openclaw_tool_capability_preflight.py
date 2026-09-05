@@ -172,7 +172,8 @@ def write_contract_candidate_dist(install_root):
     ) as handle:
         handle.write(
             'const REQUEST_FIELDS = ["challenge", "client_process_id", '
-            '"expected_executable_sha256", "expected_catalog_sha256"];'
+            '"expected_executable_sha256", "expected_catalog_sha256", '
+            '"expected_runtime_identity_token_sha256"];'
         )
 
 
@@ -246,6 +247,53 @@ def write_persistent_runtime_fixture(root):
     with open(launcher, "w", encoding="utf-8") as handle:
         handle.write("#!/usr/bin/env node\nconsole.log('fixture launcher');\n")
     os.chmod(launcher, 0o755)
+    runtime_sources = {
+        "src/gateway/agentic-os-runtime-attestation.ts": (
+            "import { resolveCommitHash } from '../infra/git-commit.js';\n"
+            "import { resolveOpenClawPackageRootSync } from '../infra/openclaw-root.js';\n"
+            "import { VERSION } from '../version.js';\n"
+            "import { canonicalJson } from './agentic-os-canonical-json.js';\n"
+            "export const attestation = [resolveCommitHash, resolveOpenClawPackageRootSync, VERSION, canonicalJson];\n"
+        ),
+        "src/gateway/agentic-os-runtime-contract-descriptors.ts": (
+            "export const descriptors = [];\n"
+        ),
+        "src/gateway/client.ts": (
+            "import { GatewayClient as BaseGatewayClient } "
+            "from '../../packages/gateway-client/src/index.js';\n"
+            "import { packageRuntime } from 'fixture-runtime';\n"
+            "export const GatewayClient = BaseGatewayClient;\n"
+            "export const runtimePackage = packageRuntime;\n"
+        ),
+        "src/utils/message-channel.ts": (
+            "export { normalizeMessageChannel } from './message-channel-normalize.js';\n"
+        ),
+        "src/gateway/agentic-os-canonical-json.ts": (
+            "export function canonicalJson(v: unknown) { return JSON.stringify(v); }\n"
+        ),
+        "src/infra/git-commit.ts": (
+            "export function resolveCommitHash() { return 'fixture-head'; }\n"
+        ),
+        "src/infra/openclaw-root.ts": (
+            "export function resolveOpenClawPackageRootSync() { return null; }\n"
+        ),
+        "src/version.ts": "export const VERSION = '2026.candidate';\n",
+        "packages/gateway-client/src/index.ts": "export class GatewayClient {}\n",
+        "src/utils/message-channel-normalize.ts": (
+            "export function normalizeMessageChannel() { return 'internal'; }\n"
+        ),
+        "node_modules/fixture-runtime/package.json": (
+            '{"name":"fixture-runtime","main":"index.js"}\n'
+        ),
+        "node_modules/fixture-runtime/index.js": (
+            "export function packageRuntime() { return true; }\n"
+        ),
+    }
+    for relative, content in runtime_sources.items():
+        path = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
     executable = os.path.join(bin_dir, "openclaw")
     with open(executable, "w", encoding="utf-8") as handle:
         handle.write("#!/usr/bin/env sh\nexit 97\n")
@@ -282,10 +330,7 @@ def persistent_status_receipt(signed_payload):
 
 def persistent_rpc_transcript_sha256(module, rpc_evidence):
     records = []
-    for key, method in (
-        ("tools_catalog", "tools.catalog"),
-        ("allow_lease_status", "subagents.allowLease.status"),
-    ):
+    for key, method in module.PERSISTENT_RPC_TRANSCRIPT_RECORDS:
         record = rpc_evidence[key]
         records.append(
             {
@@ -327,7 +372,9 @@ def build_persistent_evidence(
     launcher_sha = file_sha256(fixture["launcher"])
     sources = [
         {"path": path, "sha256": digest}
-        for path, digest in sorted(module._runtime_source_digest_snapshot(Path(root)).items())
+        for path, digest in sorted(
+            module._runtime_source_digest_snapshot(Path(root), persistent_contract=True).items()
+        )
     ]
     signed_payload = {
         "schema_version": "agentic-os.openclaw-attestation.v1",
@@ -388,6 +435,13 @@ def build_persistent_evidence(
         "leases": [],
         "runtime_attestation": persistent_status_receipt(signed_payload),
     }
+    negative_status_response = {
+        "ok": False,
+        "error": {
+            "code": "invalid_params",
+            "message": "unexpected params: requesterAgentId",
+        },
+    }
     if status_response_transform is not None:
         status_response_transform(status_response)
     rpc_evidence = {
@@ -402,6 +456,12 @@ def build_persistent_evidence(
             "request_params": {},
             "response": status_response,
             "raw_response_sha256": canonical_sha256(status_response),
+        },
+        "allow_lease_status_rejects_non_empty_params": {
+            "method": "subagents.allowLease.status",
+            "request_params": dict(module.STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+            "response": negative_status_response,
+            "raw_response_sha256": canonical_sha256(negative_status_response),
         },
     }
     signed_payload["rpc_transcript_sha256"] = persistent_rpc_transcript_sha256(
@@ -440,6 +500,9 @@ def build_persistent_evidence(
                 "client_process_id": "p03-persistent-runner:test",
                 "expected_executable_sha256": launcher_sha,
                 "expected_catalog_sha256": canonical_sha256(runtime_methods),
+                "expected_runtime_identity_token_sha256": signed_payload[
+                    "runtime_identity_token_sha256"
+                ],
             },
             "response": attestation_response,
             "response_sha256": canonical_sha256(attestation_response),
@@ -506,6 +569,10 @@ def add_fake_openclaw_to_env(
             f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+            "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
+            "    if params != '{}':\n"
+            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params: requesterAgentId'}}, sort_keys=True))\n"
+            "        raise SystemExit(1)\n"
             "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
@@ -538,6 +605,10 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
             "    print(json.dumps({'groups': [{'id': 'unit', 'tools': entries}]}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+            "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
+            "    if params != '{}':\n"
+            "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params: requesterAgentId'}}, sort_keys=True))\n"
+            "        raise SystemExit(1)\n"
             "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
             "    raise SystemExit(0)\n"
             "print(json.dumps({'ok': False, 'error': 'unexpected fake openclaw call'}))\n"
@@ -549,8 +620,160 @@ def add_env_sensitive_fake_openclaw_to_env(env, directory):
 
 
 class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
+    def _write_minimal_persistent_runtime(self, root: str, runner_source: str) -> None:
+        module = load_preflight_module()
+        files = {
+            "package.json": '{"name":"openclaw","version":"0.0.0-test"}\n',
+            "openclaw.mjs": "export const openclaw = true;\n",
+            module.runtime_source_contract.PERSISTENT_LIFECYCLE_RUNNER: runner_source,
+            "src/gateway/agentic-os-runtime-attestation.ts": "export const a = 1;\n",
+            "src/gateway/agentic-os-runtime-contract-descriptors.ts": "export const d = [];\n",
+            "src/gateway/client.ts": "export const c = 1;\n",
+            "src/utils/message-channel.ts": "export const m = 1;\n",
+        }
+        for relative, content in files.items():
+            path = os.path.join(root, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+
+    def test_evidence_lineage_includes_runtime_source_contract_helper(self) -> None:
+        module = load_preflight_module()
+
+        self.assertIn(
+            "scripts/agentic_os_runtime_source_contract.py",
+            module.EVIDENCE_CAPABILITY_SOURCE_PATHS,
+        )
+
     def test_documented_preflight_path_exists(self) -> None:
         self.assertTrue(SCRIPT.exists())
+
+    def test_status_negative_rejection_requires_structured_invalid_params(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        accepted_or_ambiguous = (
+            {"ok": True, "result": {"error": "parameter cache unavailable"}},
+            {"ok": False, "error": "parameter backend unavailable"},
+            {"ok": False, "error": {"code": "unavailable", "message": "param"}},
+            {"ok": False, "error": {"code": "invalid_params", "message": "param"}},
+        )
+        for payload in accepted_or_ambiguous:
+            with self.subTest(payload=payload), self.assertRaises(
+                module.AdapterContractError
+            ):
+                module._validate_status_non_empty_params_rejection_payload(payload)
+
+        module._validate_status_non_empty_params_rejection_payload(
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_params",
+                    "message": "unexpected params: requesterAgentId",
+                },
+            }
+        )
+
+    def test_persistent_contract_snapshot_binds_commonjs_require_closure(self) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "const runtime = require('fixture-runtime');\n"
+                "module.exports = runtime;\n",
+            )
+            files = {
+                "node_modules/fixture-runtime/package.json": (
+                    '{"name":"fixture-runtime","main":"index.cjs"}\n'
+                ),
+                "node_modules/fixture-runtime/index.cjs": (
+                    "require /* bound */ .resolve /* target */ ('./impl.cjs');\n"
+                    "const impl = require /* bound */ ('./impl.cjs');\n"
+                    "const dep = require('fixture-runtime-dep');\n"
+                    "module.exports = { runtime: impl.runtime && dep.ok };\n"
+                ),
+                "node_modules/fixture-runtime/impl.cjs": (
+                    "module.exports = { runtime: true };\n"
+                ),
+                "node_modules/fixture-runtime-dep/package.json": (
+                    '{"name":"fixture-runtime-dep","main":"index.js"}\n'
+                ),
+                "node_modules/fixture-runtime-dep/index.js": (
+                    "module.exports = { ok: true };\n"
+                ),
+            }
+            for relative, content in files.items():
+                path = os.path.join(root, relative)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+
+            snapshot = module._runtime_source_digest_snapshot(
+                Path(root), persistent_contract=True
+            )
+
+        self.assertIn("node_modules/fixture-runtime/index.cjs", snapshot)
+        self.assertIn("node_modules/fixture-runtime/impl.cjs", snapshot)
+        self.assertIn("node_modules/fixture-runtime-dep/package.json", snapshot)
+        self.assertIn("node_modules/fixture-runtime-dep/index.js", snapshot)
+
+    def test_persistent_contract_snapshot_rejects_dynamic_commonjs_require(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "const name = './impl.cjs';\nrequire/*hidden*/(name);\n",
+            )
+            with self.assertRaisesRegex(OSError, "dynamic CommonJS require"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
+
+    def test_persistent_contract_snapshot_rejects_node_module_extension_chain(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "require('node:module').Module['_ext' + 'ensions']['.foo'] = () => {};\n"
+                "require('./impl.foo');\n",
+            )
+            with self.assertRaisesRegex(OSError, "CommonJS extension"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
+
+    def test_persistent_contract_snapshot_rejects_constructed_module_compile_chain(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "(new (require('node:module').Module)(__filename))"
+                "['_com' + 'pile'](\"require('./hidden.cjs')\", __filename);\n",
+            )
+            with self.assertRaisesRegex(OSError, "runtime compiler"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
+
+    def test_persistent_contract_snapshot_rejects_unresolved_literal_dynamic_import(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as root:
+            self._write_minimal_persistent_runtime(
+                root,
+                "await import /* source closure */ ('./impl.mjs');\n",
+            )
+            with self.assertRaisesRegex(OSError, "could not be resolved"):
+                module._runtime_source_digest_snapshot(
+                    Path(root), persistent_contract=True
+                )
 
     def test_preflight_accepts_required_session_tool_catalog(self) -> None:
         result = subprocess.run(
@@ -865,6 +1088,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "client_process_id",
                     "expected_executable_sha256",
                     "expected_catalog_sha256",
+                    "expected_runtime_identity_token_sha256",
                 ],
                 "method": "agenticOs.runtime.attest",
                 "parameters": [
@@ -872,6 +1096,7 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "client_process_id",
                     "expected_catalog_sha256",
                     "expected_executable_sha256",
+                    "expected_runtime_identity_token_sha256",
                 ],
                 "status": "source_bound_exact",
             },
@@ -953,6 +1178,10 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "    print(json.dumps({'ok': False, 'error': 'catalog unavailable'}, sort_keys=True))\n"
                     "    raise SystemExit(1)\n"
                     "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    "    params = sys.argv[sys.argv.index('--params') + 1] if '--params' in sys.argv else '{}'\n"
+                    "    if params != '{}':\n"
+                    "        print(json.dumps({'ok': False, 'error': {'code': 'invalid_params', 'message': 'unexpected params: requesterAgentId'}}, sort_keys=True))\n"
+                    "        raise SystemExit(1)\n"
                     "    print(json.dumps({'ok': True, 'writeMode': 'memory', 'allowAgents': ['main', 'web'], 'leases': []}, sort_keys=True))\n"
                     "    raise SystemExit(0)\n"
                     "raise SystemExit(2)\n"
@@ -1100,6 +1329,128 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
                     "active OpenClaw Gateway status RPC leases must be an array",
                     payload["error"],
                 )
+
+    def test_live_installed_preflight_can_skip_status_rpc_for_no_mutation_boundary(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as install_root:
+            write_contract_candidate_dist(install_root)
+            bin_dir = os.path.join(install_root, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
+            executable = os.path.join(bin_dir, "openclaw")
+            catalog = {
+                "groups": [
+                    {
+                        "id": "unit",
+                        "tools": [
+                            active_tool_entry(tool_id, include_schema=True)
+                            for tool_id in ACTIVE_TOOL_IDS
+                        ],
+                    }
+                ]
+            }
+            with open(executable, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json\n"
+                    "import sys\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'tools.catalog']:\n"
+                    f"    print(json.dumps({catalog!r}, sort_keys=True))\n"
+                    "    raise SystemExit(0)\n"
+                    "if sys.argv[1:4] == ['gateway', 'call', 'subagents.allowLease.status']:\n"
+                    "    raise SystemExit(88)\n"
+                    "raise SystemExit(2)\n"
+                )
+            os.chmod(executable, 0o755)
+            env = dict(os.environ)
+            env["OPENCLAW_INSTALL_ROOT"] = install_root
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--live-installed-openclaw",
+                    "--skip-live-status-rpc",
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        payload = json.loads(result.stdout)
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+        rpc_evidence = {
+            item["name"]: item
+            for item in gateway_catalog["rpc_evidence"]
+        }
+        self.assertEqual(
+            rpc_evidence["subagents.allowLease.status"]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertIn("subagents.allowLease.status live reachability is unproven", payload["error"])
+        self.assertFalse(payload["runtime_ready"])
+
+    def test_installed_negative_baseline_can_skip_status_rpc_for_no_mutation_boundary(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        captured = {}
+
+        def fake_baseline_catalog(*, skip_status_rpc=False):
+            captured["skip_status_rpc"] = skip_status_rpc
+            raise module.RuntimeEvidenceError(
+                "subagents.allowLease.status live reachability is unproven",
+                catalog={
+                    "gateway_rpc_catalog": {
+                        "status_corroboration": {
+                            "status": "skipped_no_production_lease_mutation",
+                            "live_reachability": (
+                                "skipped_no_production_lease_mutation"
+                            ),
+                        },
+                    },
+                },
+            )
+
+        output = io.StringIO()
+        with mock.patch.object(
+            module,
+            "installed_negative_baseline_catalog",
+            side_effect=fake_baseline_catalog,
+        ), contextlib.redirect_stdout(output):
+            status = module.main(
+                [
+                    "--installed-openclaw-negative-baseline",
+                    "--skip-live-status-rpc",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertIs(captured["skip_status_rpc"], True)
+        payload = json.loads(output.getvalue())
+        gateway_catalog = payload["catalog"]["gateway_rpc_catalog"]
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["status"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertEqual(
+            gateway_catalog["status_corroboration"]["live_reachability"],
+            "skipped_no_production_lease_mutation",
+        )
+        self.assertIn("subagents.allowLease.status live reachability is unproven", payload["error"])
+        self.assertFalse(payload["runtime_ready"])
 
     def test_live_status_validates_each_returned_lease_item(self) -> None:
         status_payload = {
@@ -4065,6 +4416,25 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         self.assertEqual(payload["status"], "fail")
         self.assertIn("HMAC mismatch", payload["error"])
 
+    def test_persistent_attested_preflight_rejects_unbound_runtime_identity_digest(
+        self,
+    ) -> None:
+        module = load_preflight_module()
+        with tempfile.TemporaryDirectory() as install_root:
+            fixture = write_persistent_runtime_fixture(install_root)
+            key_path, key = write_attestation_key()
+            evidence = build_persistent_evidence(module, install_root, fixture, key)
+            evidence["attestation"]["request_params"][
+                "expected_runtime_identity_token_sha256"
+            ] = "0" * 64
+
+            result = run_persistent_preflight(evidence, install_root, key_path)
+
+        self.assertEqual(result.returncode, 1)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "fail")
+        self.assertIn("runtime identity token digest is not request-bound", payload["error"])
+
     def test_persistent_attested_preflight_rejects_stale_attestation(self) -> None:
         module = load_preflight_module()
         with tempfile.TemporaryDirectory() as install_root:
@@ -4372,6 +4742,40 @@ class OpenClawToolCapabilityPreflightTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["status"], "fail")
         self.assertIn("request params must be empty", payload["error"])
+
+    def test_persistent_attested_preflight_requires_status_negative_probe(self) -> None:
+        module = load_preflight_module()
+        cases = {
+            "missing": lambda evidence: evidence["rpc_evidence"].pop(
+                "allow_lease_status_rejects_non_empty_params"
+            ),
+            "accepted": lambda evidence: evidence["rpc_evidence"][
+                "allow_lease_status_rejects_non_empty_params"
+            ].update(
+                {
+                    "response": {"status": "ok", "leases": []},
+                    "raw_response_sha256": canonical_sha256(
+                        {"status": "ok", "leases": []}
+                    ),
+                }
+            ),
+        }
+        for name, transform in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as install_root:
+                fixture = write_persistent_runtime_fixture(install_root)
+                key_path, key = write_attestation_key()
+                evidence = build_persistent_evidence(module, install_root, fixture, key)
+                transform(evidence)
+
+                result = run_persistent_preflight(evidence, install_root, key_path)
+
+            self.assertEqual(result.returncode, 1)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "fail")
+            self.assertRegex(
+                payload["error"],
+                "allow_lease_status_rejects_non_empty_params|accepted non-empty parameters",
+            )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,255 @@
+{
+  "catalog": {
+    "active_catalog": {
+      "failure_payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
+      "method": "tools.catalog",
+      "status": "catalog_unavailable_before_contract_validation",
+      "validation_stage": "catalog_capture"
+    },
+    "active_executable_path_sha256": "b2902302738e9846a5f3343a4d004c3c50a0123cc07a12a61dbc9472f6da9d87",
+    "active_executable_sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188",
+    "attestation_rpc_catalog": {
+      "authority": "installed_runtime_sources",
+      "catalog_kind": "source_bound_runtime_attestation_rpc",
+      "expected_parameters": [
+        "challenge",
+        "client_process_id",
+        "expected_executable_sha256",
+        "expected_catalog_sha256"
+      ],
+      "method": "agenticOs.runtime.attest",
+      "parameters": [],
+      "status": "source_bound_mismatch"
+    },
+    "catalog_kind": "sanitized_openclaw_runtime",
+    "connected_gateway_build_identity": "unproven",
+    "future_db_authority_contract": {
+      "accepted_session_identity_requirement": "future_db_authority_requires_duplicate_spawn_to_return_the_same_non_empty_accepted_session_identity",
+      "allow_lease_acquire_required_metadata": [
+        "agent_id",
+        "client_lease_id",
+        "idempotency_key",
+        "phase",
+        "requester_agent_id",
+        "run_id",
+        "transition_id",
+        "ttl_ms"
+      ],
+      "allow_lease_release_required_metadata": [
+        "agent_id",
+        "client_lease_id",
+        "gateway_lease_id",
+        "phase",
+        "release_idempotency_key",
+        "requester_agent_id",
+        "run_id",
+        "transition_id"
+      ],
+      "canonical_status_method": "session_status",
+      "db_authority_enabled": false,
+      "db_authority_enabled_required_for_preflight": false,
+      "sessions_spawn_required_parameters": [
+        "task",
+        "taskName",
+        "runtime",
+        "mode",
+        "agentId",
+        "cleanup",
+        "context",
+        "lightContext",
+        "client_request_id",
+        "idempotency_key",
+        "gateway_lease_id",
+        "metadata"
+      ]
+    },
+    "gateway_rpc_catalog": {
+      "authority": "installed_runtime_sources",
+      "catalog_kind": "source_bound_gateway_rpc_catalog",
+      "rpc_evidence": [
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "unproven",
+          "name": "subagents.allowLease.acquire"
+        },
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "skipped_no_production_lease_mutation",
+          "name": "subagents.allowLease.status"
+        },
+        {
+          "disk_source_declaration": "observed",
+          "live_reachability": "unproven",
+          "name": "subagents.allowLease.release"
+        }
+      ],
+      "source_bound_rpc_names": [
+        "subagents.allowLease.acquire",
+        "subagents.allowLease.release",
+        "subagents.allowLease.status"
+      ],
+      "status": "disk_source_declarations_complete",
+      "status_corroboration": {
+        "incidental_mutations_possible": [
+          "expired_lease_cleanup",
+          "cli_bootstrap_state"
+        ],
+        "live_reachability": "skipped_no_production_lease_mutation",
+        "method": "subagents.allowLease.status",
+        "policy": "caller refused production allowLease.status because the installed runtime may perform incidental lease cleanup",
+        "request_semantics": "read_only_request",
+        "requested_mutation": false,
+        "status": "skipped_no_production_lease_mutation"
+      },
+      "tools": [
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.acquire",
+          "parameters": [
+            "agentId",
+            "requesterAgentId",
+            "ttlMs"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.status",
+          "parameters": [
+            "requesterAgentId"
+          ],
+          "schema_source": "gateway_server_method_params"
+        },
+        {
+          "catalog_surface": "gateway_rpc",
+          "name": "subagents.allowLease.release",
+          "parameters": [
+            "leaseId"
+          ],
+          "schema_source": "gateway_server_method_params"
+        }
+      ]
+    },
+    "install_root_basename": "openclaw",
+    "install_root_path_sha256": "da6bdffc3d964dca78e7c595469eaf47ee08d01855f6cfabd1d84477ff1be141",
+    "model_tool_catalog": {
+      "authority": "tools.catalog",
+      "catalog_kind": "model_callable_tools_catalog",
+      "failure_payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
+      "method": "tools.catalog",
+      "required_tool_names": [],
+      "source_declared_tool_names": [
+        "session_status",
+        "sessions_history",
+        "sessions_list",
+        "sessions_spawn"
+      ],
+      "status": "catalog_unavailable_before_contract_validation",
+      "validation_stage": "catalog_capture"
+    },
+    "openclaw_package_name": "openclaw",
+    "openclaw_version": "2026.7.1",
+    "package_json_sha256": "aa481474c58c5be5e14513e622d7720fd54f896d6c32da70250d8b6310586153",
+    "required_canonical_session_status_method": "session_status",
+    "runtime_process_binding_limit": "installed runtime source identity does not prove the connected Gateway process is executing that exact bundle",
+    "runtime_target": "live_installed_openclaw",
+    "sources": [
+      {
+        "path": "dist/core-descriptors-DRUtdasO.js",
+        "sha256": "d46b52766e66bef7995275c55a87a9971c906918bade604baa931bc62b20f419"
+      },
+      {
+        "path": "dist/openclaw-tools-CIBcX9Ku.js",
+        "sha256": "a2b93887aa43e263b978edcad73151092631cea74e977358f69c600c7b2f390c"
+      },
+      {
+        "path": "dist/server-methods-C4KugcqZ.js",
+        "sha256": "d597cfe0f30c5fff5b9be54cff0538bebce19e8729375b8d9a741a922ffc3be5"
+      }
+    ],
+    "status_alias_requirement": {
+      "canonical_status_method": "session_status",
+      "canonical_status_method_available": false,
+      "canonical_status_method_status": "unproven_model_catalog_unavailable",
+      "db_authority_requirement": "db_authority_requires_singular_session_status",
+      "observed_model_status_names": [
+        "session_status"
+      ],
+      "unsupported_plural_status_alias": "sessions_status"
+    },
+    "tools": [
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.acquire",
+        "parameters": [
+          "agentId",
+          "requesterAgentId",
+          "ttlMs"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.status",
+        "parameters": [
+          "requesterAgentId"
+        ],
+        "schema_source": "gateway_server_method_params"
+      },
+      {
+        "catalog_surface": "gateway_rpc",
+        "name": "subagents.allowLease.release",
+        "parameters": [
+          "leaseId"
+        ],
+        "schema_source": "gateway_server_method_params"
+      }
+    ]
+  },
+  "catalog_failure": {
+    "message": "active OpenClaw tool catalog failed before contract validation",
+    "payload_sha256": "7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf",
+    "returncode": 1,
+    "runtime_provenance_preserved": true,
+    "stderr": {
+      "bytes": 982,
+      "sha256": "99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d"
+    },
+    "stdout": {
+      "bytes": 363,
+      "sha256": "f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95"
+    }
+  },
+  "classification": "fail_closed_future_contract",
+  "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}; model-callable tools.catalog is unavailable, so future DB-authority metadata/idempotency/accepted-session/status-alias requirements remain unproven",
+  "preflight_evidence_binding": {
+    "agentic_os_head_sha": "754cdf022fcee10d0d3440d7250da0f05195187b",
+    "agentic_os_tree_sha": "2fd21066aed5840db161e0928185ac06f2de03fd",
+    "binding_kind": "generator_revision",
+    "capability_source_paths": [
+      "scripts/openclaw-tool-capability-preflight.py",
+      "scripts/openclaw-live-accepted-session-probe.py",
+      "scripts/openclaw-real-gateway-contract-probe.py",
+      "src/agentic_os/openclaw_adapter.py",
+      "src/agentic_os/runtime_attestation.py",
+      "src/agentic_os/metadata.py",
+      "src/agentic_os/heartbeat_shadow.py",
+      "src/agentic_os/__init__.py"
+    ],
+    "containing_commit_self_binding": false,
+    "generated_at_utc": "2026-08-24T19:23:49+00:00",
+    "invocation": {
+      "argv": [
+        "--live-installed-openclaw",
+        "--skip-live-status-rpc",
+        "--json",
+        "--write-evidence",
+        "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json"
+      ],
+      "script": "scripts/openclaw-tool-capability-preflight.py"
+    },
+    "preflight_script_sha256": "709ccdd93b9ae34909acb85521f0a64c357291db35d4ef69660eb93f5995ece9"
+  },
+  "runtime_ready": false,
+  "status": "fail"
+}

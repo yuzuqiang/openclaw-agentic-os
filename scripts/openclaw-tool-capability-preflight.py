@@ -18,9 +18,11 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import agentic_os
+import agentic_os_runtime_source_contract as runtime_source_contract
 from agentic_os.metadata import (
     MetadataContractError,
     validate_accepted_lease_identity,
@@ -55,6 +57,7 @@ ATTESTATION_REQUEST_PARAMETERS = (
     "client_process_id",
     "expected_executable_sha256",
     "expected_catalog_sha256",
+    "expected_runtime_identity_token_sha256",
 )
 MODEL_CALLABLE_TOOL_NAMES = (
     "sessions_spawn",
@@ -123,6 +126,17 @@ PERSISTENT_METHOD_BINDINGS: Mapping[str, tuple[str, tuple[str, ...]]] = {
         "sessions_history",
         ("sessionKey", "limit", "includeTools"),
     ),
+}
+PERSISTENT_RPC_TRANSCRIPT_RECORDS: tuple[tuple[str, str], ...] = (
+    ("tools_catalog", "tools.catalog"),
+    ("allow_lease_status", "subagents.allowLease.status"),
+    (
+        "allow_lease_status_rejects_non_empty_params",
+        "subagents.allowLease.status",
+    ),
+)
+STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST = {
+    "requesterAgentId": "agentic-os-negative-status-params-probe"
 }
 
 MODEL_TOOL_SCHEMA_MARKERS = {
@@ -194,6 +208,7 @@ STATUS_RPC_INCIDENTAL_MUTATIONS = (
 )
 EVIDENCE_CAPABILITY_SOURCE_PATHS = (
     "scripts/openclaw-tool-capability-preflight.py",
+    "scripts/agentic_os_runtime_source_contract.py",
     "scripts/openclaw-live-accepted-session-probe.py",
     "scripts/openclaw-real-gateway-contract-probe.py",
     "src/agentic_os/openclaw_adapter.py",
@@ -379,16 +394,23 @@ def _source_record_from_snapshot(
     return {"path": relative, "sha256": source_digest_snapshot[relative]}
 
 
-def _runtime_source_digest_snapshot(root: Path) -> dict[str, str]:
-    snapshot: dict[str, str] = {}
-    for pattern in RUNTIME_SOURCE_PATTERNS:
-        for path in sorted((root / "dist").glob(pattern)):
-            snapshot[_relative_source_path(root, path)] = _file_digest(path)
-    for relative in RUNTIME_SOURCE_FILES:
-        path = root / relative
-        if path.exists():
-            snapshot[_relative_source_path(root, path)] = _file_digest(path)
-    return snapshot
+def _runtime_source_digest_snapshot(
+    root: Path, *, persistent_contract: bool = False
+) -> dict[str, str]:
+    if not persistent_contract:
+        snapshot: dict[str, str] = {}
+        for pattern in RUNTIME_SOURCE_PATTERNS:
+            for path in sorted((root / "dist").glob(pattern)):
+                snapshot[_relative_source_path(root, path)] = _file_digest(path)
+        for relative in RUNTIME_SOURCE_FILES:
+            path = root / relative
+            if path.exists():
+                snapshot[_relative_source_path(root, path)] = _file_digest(path)
+        return snapshot
+    try:
+        return runtime_source_contract.runtime_source_digest_snapshot(root)
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise OSError(str(exc)) from exc
 
 
 def _source_records_from_snapshot(snapshot: Mapping[str, str]) -> list[dict[str, str]]:
@@ -975,6 +997,7 @@ def _run_gateway_tools_catalog(
     if scrub_env_override:
         env = dict(os.environ)
         env.pop("OPENCLAW_INSTALL_ROOT", None)
+
     try:
         proc = subprocess.run(
             [
@@ -1108,8 +1131,9 @@ def _run_gateway_allow_lease_status(
     if scrub_env_override:
         env = dict(os.environ)
         env.pop("OPENCLAW_INSTALL_ROOT", None)
-    try:
-        proc = subprocess.run(
+
+    def run_status_call(params: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [
                 str(executable),
                 "gateway",
@@ -1119,7 +1143,7 @@ def _run_gateway_allow_lease_status(
                 "--timeout",
                 str(timeout_ms),
                 "--params",
-                "{}",
+                params,
             ],
             text=True,
             stdout=subprocess.PIPE,
@@ -1128,6 +1152,9 @@ def _run_gateway_allow_lease_status(
             check=False,
             env=env,
         )
+
+    try:
+        proc = run_status_call("{}")
     except (OSError, subprocess.TimeoutExpired) as exc:
         catalog = _gateway_rpc_validation_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1248,7 +1275,96 @@ def _run_gateway_allow_lease_status(
             catalog=catalog,
         ) from exc
     corroboration["leases_count"] = len(leases)
+    negative_params = json.dumps(
+        STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST, sort_keys=True
+    )
+    try:
+        negative_proc = run_status_call(negative_params)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_negative_probe_unavailable",
+            error=type(exc).__name__,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status negative RPC unavailable",
+            catalog=catalog,
+        ) from exc
+    try:
+        negative_payload = json.loads((negative_proc.stdout or "").strip() or "{}")
+    except json.JSONDecodeError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_negative_probe_non_json",
+            stdout=negative_proc.stdout or "",
+            stderr=negative_proc.stderr or "",
+            returncode=negative_proc.returncode,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status negative RPC returned non-JSON output",
+            catalog=catalog,
+        ) from exc
+    negative_sha256 = _json_sha256(negative_payload)
+    try:
+        _validate_status_non_empty_params_rejection_payload(negative_payload)
+    except AdapterContractError as exc:
+        catalog = _gateway_rpc_validation_failure_catalog(
+            runtime_identity_catalog=runtime_identity_catalog,
+            active_catalog_sha256=active_catalog_sha256,
+            source_bound_rpc_names=source_bound_rpc_names,
+            status="status_rpc_negative_probe_failed",
+            error=str(exc),
+            response_sha256=negative_sha256,
+            stdout=negative_proc.stdout or "",
+            stderr=negative_proc.stderr or "",
+            returncode=negative_proc.returncode,
+        )
+        raise RuntimeEvidenceError(
+            "active OpenClaw Gateway status accepted or failed to prove rejection of non-empty params",
+            catalog=catalog,
+        ) from exc
+    corroboration["non_empty_params_rejection"] = {
+        "status": "rejected",
+        "request_params": dict(STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+        "raw_response_sha256": negative_sha256,
+        "returncode": negative_proc.returncode,
+    }
     return corroboration
+
+
+def _validate_status_non_empty_params_rejection_payload(payload: Any) -> None:
+    if not isinstance(payload, Mapping):
+        raise AdapterContractError("status negative RPC response must be a JSON object")
+    if payload.get("ok") is True or payload.get("status") == "ok":
+        raise AdapterContractError("status RPC accepted non-empty parameters")
+    result = payload.get("result")
+    status_payload = result if isinstance(result, Mapping) else payload
+    if not isinstance(status_payload, Mapping):
+        raise AdapterContractError("status negative RPC payload must be a JSON object")
+    if (
+        status_payload.get("ok") is True
+        or status_payload.get("status") == "ok"
+        or isinstance(status_payload.get("leases"), list)
+    ):
+        raise AdapterContractError("status RPC accepted non-empty parameters")
+    error = status_payload.get("error")
+    if not isinstance(error, Mapping):
+        raise AdapterContractError(
+            "status RPC rejection did not return structured invalid_params error"
+        )
+    if error.get("code") != "invalid_params":
+        raise AdapterContractError(
+            "status RPC rejection did not return structured invalid_params error"
+        )
+    response_text = json.dumps(error, sort_keys=True).lower()
+    if "requesteragentid" not in response_text:
+        raise AdapterContractError(
+            "status RPC rejection is not bound to unexpected requesterAgentId"
+        )
 
 
 def _validate_status_lease_items(leases: Iterable[Any], *, label: str) -> None:
@@ -1641,9 +1757,12 @@ def _require_runtime_sources_unchanged_after_scan(
     active_catalog_sha256: str | None,
     source_digest_snapshot: Mapping[str, str],
     root: Path,
+    persistent_contract: bool = False,
 ) -> None:
     try:
-        observed_sources = _runtime_source_digest_snapshot(root)
+        observed_sources = _runtime_source_digest_snapshot(
+            root, persistent_contract=persistent_contract
+        )
     except OSError as exc:
         catalog = _runtime_source_binding_failure_catalog(
             runtime_identity_catalog=runtime_identity_catalog,
@@ -1742,6 +1861,7 @@ def _gateway_status_for_source_bound_names(
     active_catalog_sha256: str | None,
     source_bound_rpc_names: set[str],
     scrub_env_override: bool,
+    skip_status_rpc: bool = False,
 ) -> dict[str, Any]:
     if "subagents.allowLease.status" not in source_bound_rpc_names:
         return {
@@ -1751,6 +1871,19 @@ def _gateway_status_for_source_bound_names(
             "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
             "live_reachability": "unproven",
             "status": "disk_source_declaration_missing",
+        }
+    if skip_status_rpc:
+        return {
+            "method": "subagents.allowLease.status",
+            "request_semantics": "read_only_request",
+            "requested_mutation": False,
+            "incidental_mutations_possible": list(STATUS_RPC_INCIDENTAL_MUTATIONS),
+            "live_reachability": "skipped_no_production_lease_mutation",
+            "status": "skipped_no_production_lease_mutation",
+            "policy": (
+                "caller refused production allowLease.status because the installed "
+                "runtime may perform incidental lease cleanup"
+            ),
         }
     return _run_gateway_allow_lease_status(
         executable,
@@ -1775,6 +1908,7 @@ def _gateway_rpc_evidence(
     gateway_status: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     status_reachable = gateway_status.get("status") == "ok"
+    status_live_reachability = gateway_status.get("live_reachability", "unproven")
     evidence: list[dict[str, Any]] = []
     for name in GATEWAY_RPC_METHOD_NAMES:
         record: dict[str, Any] = {
@@ -1787,6 +1921,8 @@ def _gateway_rpc_evidence(
             "live_reachability": (
                 "reachable"
                 if name == "subagents.allowLease.status" and status_reachable
+                else status_live_reachability
+                if name == "subagents.allowLease.status"
                 else "unproven"
             ),
         }
@@ -2039,13 +2175,48 @@ def _require_persistent_rpc_record(
     return record
 
 
+def _require_persistent_status_negative_rpc_record(
+    evidence: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    rpc_evidence = _require_record(
+        evidence.get("rpc_evidence"), "persistent rpc_evidence"
+    )
+    key = "allow_lease_status_rejects_non_empty_params"
+    method = "subagents.allowLease.status"
+    record = _require_record(rpc_evidence.get(key), f"persistent rpc_evidence.{key}")
+    _require_exact_keys(
+        record,
+        ("method", "request_params", "response", "raw_response_sha256"),
+        f"persistent rpc_evidence.{key}",
+    )
+    if record.get("method") != method:
+        raise AdapterContractError(f"persistent RPC evidence method mismatch for {method}")
+    request_params = _require_record(
+        record.get("request_params"), f"persistent {method} negative request_params"
+    )
+    if dict(request_params) != STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST:
+        raise AdapterContractError(
+            "persistent subagents.allowLease.status negative request params mismatch"
+        )
+    response = _require_record(
+        record.get("response"), f"persistent {method} negative response"
+    )
+    digest = _canonical_json_sha256(response)
+    if record.get("raw_response_sha256") != digest:
+        raise AdapterContractError(
+            f"persistent {method} negative raw response digest mismatch"
+        )
+    _validate_status_non_empty_params_rejection_payload(response)
+    return record
+
+
 def _persistent_rpc_transcript_sha256(evidence: Mapping[str, Any]) -> str:
     records = []
-    for key, method in (
-        ("tools_catalog", "tools.catalog"),
-        ("allow_lease_status", "subagents.allowLease.status"),
-    ):
-        record = _require_persistent_rpc_record(evidence, key, method)
+    for key, method in PERSISTENT_RPC_TRANSCRIPT_RECORDS:
+        if key == "allow_lease_status_rejects_non_empty_params":
+            record = _require_persistent_status_negative_rpc_record(evidence)
+        else:
+            record = _require_persistent_rpc_record(evidence, key, method)
         records.append(
             {
                 "key": key,
@@ -2185,6 +2356,12 @@ def _validate_persistent_attestation(
         != signed_payload.get("runtime_identity_token_sha256")
     ):
         raise AdapterContractError("persistent runtime identity token digest mismatch")
+    if request_params.get("expected_runtime_identity_token_sha256") != signed_payload.get(
+        "runtime_identity_token_sha256"
+    ):
+        raise AdapterContractError(
+            "persistent runtime identity token digest is not request-bound"
+        )
     _require_sha256(
         signed_payload.get("runtime_identity_token_sha256"),
         "persistent runtime identity token digest",
@@ -2313,6 +2490,7 @@ def _persistent_gateway_status_from_evidence(
     if not isinstance(leases, list):
         raise AdapterContractError("persistent status RPC leases must be an array")
     _validate_status_lease_items(leases, label="persistent status RPC")
+    negative_record = _require_persistent_status_negative_rpc_record(evidence)
     corroboration: dict[str, Any] = {
         "method": "subagents.allowLease.status",
         "request_semantics": "read_only_request",
@@ -2324,6 +2502,11 @@ def _persistent_gateway_status_from_evidence(
         "ok": True,
         "runtime_attestation": dict(receipt),
         "leases_count": len(leases),
+        "non_empty_params_rejection": {
+            "status": "rejected",
+            "request_params": dict(STATUS_NON_EMPTY_PARAMS_REJECTION_REQUEST),
+            "raw_response_sha256": negative_record.get("raw_response_sha256"),
+        },
     }
     return corroboration
 
@@ -2494,6 +2677,7 @@ def live_installed_openclaw_catalog(
     include_env_override: bool = True,
     require_env_override: bool = False,
     scrub_env_override: bool = False,
+    skip_status_rpc: bool = False,
 ) -> dict[str, Any]:
     root, executable, package, runtime_identity_catalog, failure_catalog = _runtime_identity_snapshot(
         runtime_target=runtime_target,
@@ -2553,6 +2737,7 @@ def live_installed_openclaw_catalog(
                 active_catalog_sha256=active_catalog_sha256,
                 source_bound_rpc_names=source_bound_rpc_names,
                 scrub_env_override=scrub_env_override,
+                skip_status_rpc=skip_status_rpc,
             )
         except RuntimeEvidenceError as status_exc:
             status_catalog = status_exc.catalog or {}
@@ -2697,6 +2882,7 @@ def live_installed_openclaw_catalog(
         active_catalog_sha256=active_catalog_sha256,
         source_bound_rpc_names=source_bound_rpc_names,
         scrub_env_override=scrub_env_override,
+        skip_status_rpc=skip_status_rpc,
     )
     _require_runtime_identity_unchanged_after_catalog(
         runtime_identity_catalog=runtime_identity_catalog,
@@ -2896,11 +3082,12 @@ def isolated_candidate_openclaw_catalog() -> dict[str, Any]:
     )
 
 
-def installed_negative_baseline_catalog() -> dict[str, Any]:
+def installed_negative_baseline_catalog(*, skip_status_rpc: bool = False) -> dict[str, Any]:
     return live_installed_openclaw_catalog(
         runtime_target="installed_openclaw_negative_baseline",
         include_env_override=False,
         scrub_env_override=True,
+        skip_status_rpc=skip_status_rpc,
     )
 
 
@@ -2943,7 +3130,9 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
         raise RuntimeEvidenceError("persistent runtime expected catalog digest mismatch")
 
     try:
-        source_digest_snapshot = _runtime_source_digest_snapshot(root)
+        source_digest_snapshot = _runtime_source_digest_snapshot(
+            root, persistent_contract=True
+        )
     except OSError as exc:
         raise RuntimeEvidenceError(
             "persistent runtime sources could not be snapshotted"
@@ -3004,6 +3193,7 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
         active_catalog_sha256=active_catalog_sha256,
         source_digest_snapshot=source_digest_snapshot,
         root=root,
+        persistent_contract=True,
     )
     source_bound_rpc_names = _source_bound_gateway_rpc_names(
         gateway_params=gateway_params,
@@ -3158,10 +3348,7 @@ def persistent_attested_openclaw_catalog(evidence_file: str) -> dict[str, Any]:
             "status_response_sha256": gateway_status["raw_response_sha256"],
             "db_authority_enabled": bool(agentic_os.DB_AUTHORITY_ENABLED),
         },
-        "sources": [
-            _source_record_from_snapshot(root, path, source_digest_snapshot)
-            for path in source_paths
-        ],
+        "sources": _source_records_from_snapshot(source_digest_snapshot),
         "tools": tools,
     }
 
@@ -3518,6 +3705,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--skip-live-status-rpc",
+        action="store_true",
+        help=(
+            "For live installed OpenClaw catalog capture, do not call "
+            "subagents.allowLease.status. This preserves a no-production-lease-"
+            "mutation boundary and fails closed with live reachability unproven."
+        ),
+    )
+    parser.add_argument(
         "--write-evidence",
         help="Write the preflight result and sanitized catalog evidence to this JSON file.",
     )
@@ -3561,9 +3757,13 @@ def main(argv: list[str] | None = None) -> int:
             elif args.isolated_candidate_openclaw:
                 catalog = isolated_candidate_openclaw_catalog()
             elif args.installed_openclaw_negative_baseline:
-                catalog = installed_negative_baseline_catalog()
+                catalog = installed_negative_baseline_catalog(
+                    skip_status_rpc=args.skip_live_status_rpc
+                )
             else:
-                catalog = live_installed_openclaw_catalog()
+                catalog = live_installed_openclaw_catalog(
+                    skip_status_rpc=args.skip_live_status_rpc
+                )
         except RuntimeEvidenceError as exc:
             payload = {
                 "classification": "fail_closed_future_contract",

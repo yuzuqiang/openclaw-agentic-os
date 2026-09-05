@@ -23,6 +23,10 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-08-26: Recaptured the Issue #44 downstream candidate evidence after Phase B producer/validator contract remediation, then invalidated it after later validator hardening:
+  - Corrections: the local downstream OpenClaw candidate at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6` emitted persistent lifecycle evidence through `scripts/agentic-os-persistent-lifecycle-runner.mts` with runner SHA-256 `afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6`. That round-3 JSON remains byte-for-byte historical output, but it binds Agentic OS head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9`, records generator hashes that no longer match this reviewed tree, and predates the lifecycle-attestation evidence now required by the corrected validator. `docs/runtime-evidence/phase-b-20260811-evidence-index.json` now marks `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json` as `invalid_capability_source_drift_pending_recapture` with `runtime_ready_candidate_evidence=false`; a clean exact-head recapture plus different-agent exact-head Phase C PASS is required before review or promotion.
+- 2026-08-24: Added the Issue #44 live downstream runtime readiness gate:
+  - Corrections: installed OpenClaw 2026.7.1 was recaptured from a clean generator head with `--skip-live-status-rpc`, preserving a no-production-lease-mutation boundary and failing closed because catalog availability, connected build identity, live allowLease reachability, and `agenticOs.runtime.attest` readiness remain unproven. The local downstream OpenClaw candidate at exact head `06e6e3f424841d738ec18dbe6a1faac663fe2cb6` was exercised through its persistent lifecycle runner with isolated runner/Gateway state and token-authenticated loopback Gateway evidence, but that historical snapshot is now invalidated forward-only through `docs/runtime-evidence/phase-b-20260811-evidence-index.json` with `runtime_ready_candidate_evidence=false`. A corrected clean-head recapture plus different-agent exact-head Phase C is required before any candidate runtime-readiness evidence can be promoted; production authority and `agentic_os.DB_AUTHORITY_ENABLED` remain disabled.
 - 2026-08-13: Added the local-only P0.3 runtime-attestation and Heartbeat shadow batch:
   - Corrections: `agentic_os.runtime_attestation` defines a transport/object/process/expiry-bound attestor contract and rejects offline, unsigned, stale, drifted, cross-process, or wrong-digest signed attestations; `OpenClawAdapter` remains inert unless created through that fresh attestation and rejects missing or extra application RPC parameters before transport. The TypeScript runtime's `agenticOs.runtime.attest` response is the candidate provider surface and now includes `runtime_identity_token`, `runtime_identity_token_sha256`, `owner_scope_id`, and `catalog.contract_vector_sha256`; Python validates the token digest and contract vector digest over escaped canonical JSON. There is no `agenticOs.runtime.identity` RPC and Python no longer depends on one. Per-call CLI subprocess transport remains future-only and non-authoritative unless a persistent attested connection or follow-up token authorization is implemented, so no current live Gateway runtime identity proof is claimed. `agentic_os.runtime_dispatch` now persists ambiguous `sessions_spawn` transport outcomes as `human_review_required` with no automatic retry while retaining the owned lease for review. `agentic_os.heartbeat_shadow` adds a Heartbeat-only file-authority shadow/parity/forced-rollback/bounded-soak mechanism over ignored local `state/agentic-os/control.db`; no production authority, Gateway config, Cron, service, session, or lease state is changed, and `agentic_os.DB_AUTHORITY_ENABLED` remains `False`.
 - 2026-08-12: Recorded the PR #39 post-merge repository/design acceptance boundary:
@@ -125,24 +129,23 @@ Current-vs-proposed truth:
   `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks its stored
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
-- The 2026-08-11 split-catalog evidence path is named by that index but is
-  pending exact-lineage recapture before it can be current installed-runtime
-  authority. `tools.catalog` proves model-callable tool
-  names, but absent parameter schemas are not treated as empty schemas:
-  parameters are explicitly source-bound or marked unproven. Hashed installed
-  sources declare all three allowLease names; only
-  `subagents.allowLease.status` is live-reachable. Acquire/release reachability
-  and the connected Gateway build identity remain unproven, so source-only
-  declarations cannot make preflight pass. The status call is a read-only
-  request, not mutation-free: expired-lease cleanup and CLI bootstrap state
-  writes are possible. The evidence still has `runtime_ready=false` and fails
-  closed on the future contract. A plain catalog validates only an offline
-  declared schema; unsigned mappings cannot mint production adapter authority.
-  The production adapter is intentionally inert until a real transport-bound
-  attestor exists, and every RPC fails before transport today. Cross-process
-  release-probe input is also refused before transport. Future
-  runtime-evidence authority requires exact clean-head recapture and independent
-  validation before any production-runtime claim.
+- The 2026-08-24 Issue #44 installed-runtime evidence supersedes the pending
+  split-catalog capture state. It still has `runtime_ready=false`: the
+  installed 2026.7.1 catalog call failed, `subagents.allowLease.status` was
+  intentionally skipped to avoid possible production lease cleanup, and
+  connected Gateway build plus attestation readiness remain unproven. The
+  2026-08-26 downstream candidate snapshot at OpenClaw
+  `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic OS
+  `7332a7955fc51582d5314cf2637f0ff2a8a16dc9` passed its isolated persistent
+  lifecycle runner with authenticated validation and duplicate release identity
+  parity, but is now invalidated as current candidate evidence because its
+  generator hashes and lifecycle-attestation requirements drifted. A clean
+  exact-head recapture plus different-agent Phase C rerun is required before
+  any production-runtime claim. A plain catalog
+  validates only an offline declared schema; unsigned mappings cannot mint
+  production adapter authority. The production adapter remains inert until a
+  real transport-bound attestor exists. Cross-process release-probe input is
+  also refused before transport.
 - PR #37's real-Gateway evidence in
   `docs/runtime-evidence/openclaw-real-gateway-contract.json` remains useful as
   a historical isolated candidate snapshot, but it is explicitly

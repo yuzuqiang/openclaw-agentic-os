@@ -1,0 +1,224 @@
+{
+  "accepted_session_spawned": true,
+  "agentic_os_head_sha": "7332a7955fc51582d5314cf2637f0ff2a8a16dc9",
+  "agentic_sources": [
+    {
+      "path": "scripts/openclaw-real-gateway-contract-probe.py",
+      "sha256": "9054fe3fd1931f9c438ea22632aa5afb69b8d92215723e574f9850d5602b5890"
+    },
+    {
+      "path": "scripts/openclaw-live-accepted-session-probe.py",
+      "sha256": "f3ce272790217e37c4651ebe11a6f78171bcb0be1ef2b7ed9f216a8503a3d430"
+    },
+    {
+      "path": "scripts/openclaw-tool-capability-preflight.py",
+      "sha256": "0d787ac539153ef196ee735dfdbec4ca5e629b4a0ac6007682627b3709030ced"
+    },
+    {
+      "path": "src/agentic_os/__init__.py",
+      "sha256": "e461fba75f312d55353ff98cc7f0331cb5c01ef5ebf9dc73ec64a19098005c0e"
+    },
+    {
+      "path": "src/agentic_os/openclaw_adapter.py",
+      "sha256": "b08a8910f3e891d74b8cf9315d0a6d6c803dd935a62038ff92e737ebeb3a2389"
+    },
+    {
+      "path": "src/agentic_os/runtime_attestation.py",
+      "sha256": "e3c30d6054efe3698eddaab48bc64f9ad6b09216f0d5f7bd744ae13645b6ab46"
+    },
+    {
+      "path": "src/agentic_os/metadata.py",
+      "sha256": "8c429842eb17fafd0db30276b012103859167c7d231c99b8c41399bf553689c2"
+    }
+  ],
+  "attestation": {
+    "catalog_sha256": "4880ad7bb72fcd0ac3a90b6cf3fbe79b780bbaf5390e37b000e2231fc880f177",
+    "contract_vector_sha256": "8a8e637d1eb37dde1d65f493b8d6bac90be518a8d0ab93d8269ba90bdabedc74",
+    "executable_content_sha256": "0f6f5f70cfcfae01bda117d02139ed9159219659076d8d2eb0d005b266ffde7d",
+    "gateway_build_id": "602cc11",
+    "gateway_endpoint": "ws://127.0.0.1:20189",
+    "rpc_transcript_sha256": "0baee0d9418cc379bca16b01bc1a409a3fc5f4404736fba63455e08a1ca7d613",
+    "runtime_authored_rpc_evidence_sha256": "b92c79beeaa8b1f351cc69520e729ecbf878e8d65abf9ddcf3b32762b859ac9e",
+    "runtime_identity_token_sha256": "8113b1e63b3f28673bf080cc0a4cc1da1d92a48b7866d7081a7d20055d00a40c",
+    "signed_payload_sha256": "9f20971b043ae9b89c32972c122f0a7dc76ecc89013c57399b45d2f6f057ef6f",
+    "status": "pass"
+  },
+  "authenticated_gateway": true,
+  "capability_preflight": {
+    "evidence_sha256": "c5589c495962188b0c97bf852fadbb45dd931f4d239e78a1994b28b796104b27",
+    "hello_required_methods": [
+      "agenticOs.runtime.attest",
+      "subagents.allowLease.acquire",
+      "subagents.allowLease.status",
+      "subagents.allowLease.release",
+      "sessions_spawn",
+      "sessions_list",
+      "session_status",
+      "sessions_history"
+    ],
+    "persistent_evidence_sha256": "41f34003ea153f87be0abf1eccd83a27012c4cbdf2dd8efa36235940eb09d772",
+    "runtime_ready": true,
+    "status": "pass",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_sha256": "3311ccf0865fa82373721370d681e89d568a6e8315ec91460b1fbf5484aee5af"
+  },
+  "committed_snapshot_authority": "non_authoritative_phase_b_candidate_snapshot",
+  "current_head_evidence_required": true,
+  "db_authority_enabled": false,
+  "duplicate_acquire_identity_parity": true,
+  "duplicate_release_identity_parity": true,
+  "duplicate_release_observed": true,
+  "duplicate_spawn_identity_parity": true,
+  "effective_allow_lease": true,
+  "historical_probe_audit": {
+    "sha256": "f3ce272790217e37c4651ebe11a6f78171bcb0be1ef2b7ed9f216a8503a3d430",
+    "verdict": "not_authority_for_phase_b"
+  },
+  "isolated_non_production_gateway": {
+    "candidate_port_closed": true,
+    "db_authority_enabled": false,
+    "loopback": true,
+    "port": 20189,
+    "port_policy": "downstream runner validated its fixed non-production loopback port",
+    "production_config_hash_unchanged": true,
+    "provider_secret_env_count": 0,
+    "status": "pass",
+    "token_authenticated": true
+  },
+  "lease_release_cleanup_observed": true,
+  "lifecycle": {
+    "child_run_id_sha256": "b817a5e29c218000d1a5b475cbcd00e03254fb9e985e5fec56d198e966321e68",
+    "duplicate_release_gateway_lease_id_sha256": "24ac99c6dabc3eb4cfefc05a3d8d0f87eb7c9a679bbf54188867d55e428871ab",
+    "duplicate_release_idempotency_key_sha256": "05df7fc7f33920788f4395dfb1394e3c951b51d6ed6cfd97696990e782de12a0",
+    "duplicate_release_owner_metadata_sha256": "b6a25b8b4c38561e1180ca0a8261dbe1af87402f5b56d6e2dc908be42dbe5ed3",
+    "duplicate_release_sha256": "b17bb3975d3352d6275bbb9ccfb1a6cafef530028c18f0a86602a906a3007a15",
+    "duplicate_release_status": "released",
+    "first_spawn_status": "accepted",
+    "gateway_lease_id_sha256": "24ac99c6dabc3eb4cfefc05a3d8d0f87eb7c9a679bbf54188867d55e428871ab",
+    "matching_session_count": 1,
+    "post_release_lease_count": 0,
+    "primary_release_sha256": "b17bb3975d3352d6275bbb9ccfb1a6cafef530028c18f0a86602a906a3007a15",
+    "release_gateway_lease_id_sha256": "24ac99c6dabc3eb4cfefc05a3d8d0f87eb7c9a679bbf54188867d55e428871ab",
+    "release_idempotency_key_sha256": "05df7fc7f33920788f4395dfb1394e3c951b51d6ed6cfd97696990e782de12a0",
+    "release_owner_metadata_sha256": "b6a25b8b4c38561e1180ca0a8261dbe1af87402f5b56d6e2dc908be42dbe5ed3",
+    "release_status": "released",
+    "session_key_sha256": "4d70f884bc6b485c59a077feb9e3167a1228a9189ab6f15f11be1a7d248d38b9",
+    "session_status_sha256": "6fc0fecfc77bc0182d73a82e72c3a8a2afbd66b88638d2c83a5a9d8a11f1100f",
+    "sessions_history_sha256": "47aaffdc27b2c46b6ac361f2c895f2b135dee1bf2a4904f5a1843e42f7e93f5a",
+    "sessions_list_count": 1,
+    "status": "pass"
+  },
+  "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+  "persistent_attestation_validated": true,
+  "phase_c_exact_head_required_before_review": true,
+  "probe": "agentic-os-persistent-lifecycle-runner",
+  "production_authority_enabled": false,
+  "production_behavior_proven": false,
+  "production_snapshot": {
+    "after_config_sha256": "fa433142629c716179781d98657389ec2bdc3a1b5bc92bcbc470441c9aa4bcbf",
+    "after_health_sha256": "5dce52c10eb7a97b146518388273ca1998156f7c623abba67b1b764267172a2c",
+    "before_config_sha256": "fa433142629c716179781d98657389ec2bdc3a1b5bc92bcbc470441c9aa4bcbf",
+    "before_health_sha256": "5dce52c10eb7a97b146518388273ca1998156f7c623abba67b1b764267172a2c"
+  },
+  "required_tool_names": [
+    "agenticOs.runtime.attest",
+    "session_status",
+    "sessions_history",
+    "sessions_list",
+    "sessions_spawn",
+    "subagents.allowLease.acquire",
+    "subagents.allowLease.release",
+    "subagents.allowLease.status"
+  ],
+  "rollback": {
+    "candidate_port_closed": true,
+    "candidate_shutdown_sha256": "9a1b6c9402bcaf4e031a1ec54b93ea44f1b24be3b19af89f88cb17d9e4201a3f",
+    "db_authority_enabled": false,
+    "production_config_hash_unchanged": true,
+    "production_health_after_sha256": "5dce52c10eb7a97b146518388273ca1998156f7c623abba67b1b764267172a2c",
+    "production_health_before_sha256": "5dce52c10eb7a97b146518388273ca1998156f7c623abba67b1b764267172a2c",
+    "status": "pass"
+  },
+  "runner": {
+    "candidate_stderr_log_sha256": "67be9a02936e7691534d377e4f0ba7684dd422d677b855eff8137db619156060",
+    "candidate_stdout_log_sha256": "c347f590dab78558c29bbd9bc211fca9c5bbbc86f27281160bbcc00ad9de94d7",
+    "command_sha256": "7daa057b6b006f28c595d35b69bc09c5885e3e18a1ca75a86e20066134379b43",
+    "expected_run_id_sha256": "2ffb290a02dd7b9ca2d49bd4a61e728b6db854abf648e98546fb4b4e2d9108bd",
+    "expected_transition_id_sha256": "9ee02f22c35cf155df250bd7ca291344772115658d65c702c2abfe0f8dde03ff",
+    "path_receipts_sha256": {
+      "agent_dir": "6525ef8d35ecb9e60a0353f8720eb5ae06212cac68ede6875735716ad0a0701e",
+      "config_path": "2ba894ebe3fbe797372e5e8414527d34cb796ddb1aed6e88a14f11965c5801cc",
+      "evidence_dir": "0c7c7a34dc330abb7935b8029d74cc8f6046825b9ff8112b12868547b3debd20",
+      "home": "62b8cd6c66db530e8ead4cdae43022ea1ce2c89a47043e0450fbc0f5c10a946c",
+      "key_path": "befc120510cbbcfd9eadba6e3133682d68469ac5d7c5d13b65eb62e8e41141e3",
+      "run_root": "c3886c244ac5bac505e8590271d5c3e33993faca4ead2345386d3365ac360e94",
+      "state_dir": "0c2ac55a9cf5f01bae82e626ab077aa72329871b658b30a5b99958f5d0b90e98",
+      "workspace": "e5001f3881524e4f00fd04ba84b1c619e6c94b4330047482d8ebd1b92ebcec41"
+    },
+    "receipt_sha256": "14817f8dc40d0e372b7c96e4ccda0afaf0edbe6269c982091d0a8c066fe13b9e",
+    "run_root_sha256": "c3886c244ac5bac505e8590271d5c3e33993faca4ead2345386d3365ac360e94",
+    "runtime_launch_sha256": "cf231544eefd10f4f3723b95dd0dc8c92cf284f8fd26ebcf55341ec12660e6df",
+    "script": "scripts/agentic-os-persistent-lifecycle-runner.mts",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_sha256": "ae2fb53b98dca91433d3cd674460b46f8f3138690ab1687120a78ea5e89f261f",
+    "validation_receipt_sha256": "14817f8dc40d0e372b7c96e4ccda0afaf0edbe6269c982091d0a8c066fe13b9e",
+    "validation_sha256": "cfc24ceee8a84e4191f3ea19aff10a279701c0f86641eedce8906ab8983037f2"
+  },
+  "runtime_catalog_discovered": true,
+  "runtime_launch_sources": [
+    {
+      "path": "runtime-launcher:node",
+      "realpath_sha256": "43c1e5bd92d7c8b9a7994a7167944e97be2e25baae1d05c18d97c65b23562647",
+      "sha256": "883fe1b81091bea13a3bbdfdf7bdfc33b374a050c0fd07eccac53e470ec8f96a"
+    },
+    {
+      "path": "runtime-preload:tsx",
+      "realpath_sha256": "3fadb481bc6a20468063eaf15251e210006702a773d17e047bced49d2b618851",
+      "sha256": "274e965b148911ea8ccd08923aecf1b898e46db70c8c5a5071b1cc6035f5851d"
+    },
+    {
+      "path": "runtime-preload-package:tsx",
+      "realpath_sha256": "a485d13825df79ad34797338f6a18cdfcfefb92d9685c9085525736944c092d3",
+      "sha256": "23dd9357e204aa02660ec8726f977c5f4f874c5386afbb3cba2bfcee7731f0eb"
+    }
+  ],
+  "runtime_ready": false,
+  "runtime_ready_blocked_until_phase_c": true,
+  "runtime_ready_candidate_evidence": true,
+  "runtime_sources": [
+    {
+      "path": "package.json",
+      "sha256": "51c0a69bea92e8bf3f8db58b503e26343116b078f4821b2ebdfb83a70a51021c"
+    },
+    {
+      "path": "openclaw.mjs",
+      "sha256": "0f6f5f70cfcfae01bda117d02139ed9159219659076d8d2eb0d005b266ffde7d"
+    },
+    {
+      "path": "scripts/agentic-os-persistent-lifecycle-runner.mts",
+      "sha256": "afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6"
+    },
+    {
+      "path": "src/gateway/agentic-os-runtime-attestation.ts",
+      "sha256": "81fa0b9df42f3fa1ba9e821ad771e109591bd3ed7842be92ad43d8f979f30418"
+    },
+    {
+      "path": "src/gateway/agentic-os-runtime-contract-descriptors.ts",
+      "sha256": "83d8a73ff50894ed7254b79816d150800715ad1140c1900cdee8407517b7db50"
+    },
+    {
+      "path": "src/gateway/client.ts",
+      "sha256": "7190487964e41237e059b96cf786783589e804b9c8dee3755e8de5af7245d978"
+    },
+    {
+      "path": "src/utils/message-channel.ts",
+      "sha256": "41fbf00d6e70c154b1e14ee442d383333f8bc4ffa357efc5415d4758fff7ffd1"
+    }
+  ],
+  "session_list_status_history_observed": true,
+  "soak": {
+    "started": false,
+    "status": "prepared_not_started"
+  },
+  "status": "pass"
+}

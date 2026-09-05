@@ -832,22 +832,21 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             repo_root,
             subject["excluded_paths"],
         )
-        if subject["tree_sha256"] == current_tree_sha256:
-            self.assertEqual(subject["tree_sha256"], current_tree_sha256)
-        else:
-            synthetic_commit = subject["reviewed_synthetic_commit"]
-            subprocess.run(
-                ["git", "cat-file", "-e", f"{synthetic_commit}^{{commit}}"],
-                cwd=repo_root,
-                check=True,
-            )
-            self.assertEqual(
-                subject["tree_sha256"],
-                _git_tree_subject_sha256_at_ref(
-                    repo_root,
-                    synthetic_commit,
-                    subject["excluded_paths"],
-                ),
+        self.assertNotEqual(subject["tree_sha256"], current_tree_sha256)
+        with self.assertRaisesRegex(
+            monitor.MonitorError,
+            "reviewed synthetic commit is unavailable|not an ancestor of the target|implementation subject mismatch",
+        ):
+            monitor._validate_independent_validation_implementation_subject(
+                {
+                    "repo_root": str(repo_root),
+                    "independent_validation_path": str(validation_path),
+                    "exact_heads": {
+                        "implementation_base": monitor.EXPECTED_IMPLEMENTATION_BASE,
+                        "monitor_implementation_head": current_head,
+                    },
+                },
+                validation,
             )
         self.assertEqual(
             len(monitor._sha256_file(validation_path)),
@@ -914,7 +913,7 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
             with mock.patch.object(monitor, "REPO_ROOT", repo_root):
                 with self.assertRaisesRegex(
                     monitor.MonitorError,
-                    "implementation subject mismatch|signature mismatch",
+                    "implementation subject mismatch|signature mismatch|reviewed synthetic commit is unavailable|not an ancestor of the target",
                 ):
                     monitor._build_config(args)
 
@@ -1044,8 +1043,17 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                     subject_exclusions,
                 ),
                 "excluded_paths": subject_exclusions,
-                "reviewed_synthetic_commit": "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+                "reviewed_head": base_head,
+                "reviewed_synthetic_commit": base_head,
             }
+            self.assertEqual(
+                subject["tree_sha256"],
+                _git_tree_subject_sha256_at_ref(
+                    repo_root,
+                    base_head,
+                    subject_exclusions,
+                ),
+            )
             anchor = _signed_anchor(
                 {
                     "schema_version": "agentic-os.independent-validation-anchor.v1",
@@ -1074,7 +1082,8 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
                 "invocation": {
                     "command": "Phase C synthetic squash validation",
                     "completed_at": "2026-08-23T19:22:37Z",
-                    "reviewed_synthetic_commit": "0f0b883ae41b0bb66ed022c98a950c42cb01f3c2",
+                    "reviewed_head": base_head,
+                    "reviewed_synthetic_commit": base_head,
                 },
                 "authenticated_record": {
                     "path": anchor_path.relative_to(repo_root).as_posix(),
@@ -1105,6 +1114,61 @@ class HeartbeatShadowSoakMonitorTests(unittest.TestCase):
 
             monitor._assert_start_git_contract(config)
             monitor._validate_independent_validation_provenance(config, validation)
+
+            forged_tree = copy.deepcopy(validation)
+            forged_tree["implementation_subject"] = {
+                **subject,
+                "tree_sha256": "0" * 64,
+            }
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed implementation subject mismatch",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    forged_tree,
+                )
+
+            unavailable_subject = copy.deepcopy(validation)
+            unavailable_subject["implementation_subject"] = {
+                **subject,
+                "reviewed_synthetic_commit": "f" * 40,
+            }
+            unavailable_subject["invocation"]["reviewed_synthetic_commit"] = "f" * 40
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed synthetic commit is unavailable",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    unavailable_subject,
+                )
+
+            unavailable_reviewed_head = copy.deepcopy(validation)
+            unavailable_reviewed_head["implementation_subject"] = {
+                **subject,
+                "reviewed_head": "e" * 40,
+            }
+            unavailable_reviewed_head["invocation"]["reviewed_head"] = "e" * 40
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed head is unavailable",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    unavailable_reviewed_head,
+                )
+
+            invocation_mismatch = copy.deepcopy(validation)
+            invocation_mismatch["invocation"]["reviewed_head"] = "e" * 40
+            with self.assertRaisesRegex(
+                monitor.MonitorError,
+                "reviewed head mismatch",
+            ):
+                monitor._validate_independent_validation_implementation_subject(
+                    config,
+                    invocation_mismatch,
+                )
 
             missing_anchor_exclusion = copy.deepcopy(validation)
             missing_anchor_exclusion["implementation_subject"] = {

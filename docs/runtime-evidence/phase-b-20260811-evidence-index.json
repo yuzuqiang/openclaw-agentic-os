@@ -1,7 +1,7 @@
 {
   "classification": "evidence_lineage_correction",
   "current_evidence": {
-    "classification": "pending_exact_head_capture",
+    "classification": "issue44_live_installed_fail_closed_no_production_lease_mutation",
     "generator_binding_requirements": {
       "bound_head_is_ancestor_of_containing_revision": true,
       "bound_tree_matches_bound_head_tree": true,
@@ -16,22 +16,54 @@
         "src/agentic_os/runtime_attestation.py",
         "src/agentic_os/__init__.py"
       ],
-      "no_capability_source_drift_after_bound_head": true,
+      "no_capability_source_drift_after_bound_head": false,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": null,
-      "script_sha256": null,
-      "tree_sha": null
+      "head_sha": "754cdf022fcee10d0d3440d7250da0f05195187b",
+      "script_sha256": "709ccdd93b9ae34909acb85521f0a64c357291db35d4ef69660eb93f5995ece9",
+      "tree_sha": "2fd21066aed5840db161e0928185ac06f2de03fd"
     },
-    "path": "docs/runtime-evidence/phase-b-20260811-dual-catalog-preflight.json",
-    "raw_status": null,
+    "no_production_lease_mutation": true,
+    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
+    "raw_status": "fail",
     "reviewed_head_sha": null,
-    "sha256": null,
-    "status": "pending_clean_generator_revision_capture",
-    "status_reason": "Previous current evidence was generated from a PR-internal revision that is not an ancestor of GitHub Codex's squash-style reviewed commit lineage. It is no longer advertised as current authority until recaptured from the exact reviewed lineage."
+    "runtime_ready": false,
+    "sha256": "5288657875ac2a92c9ca8dd6b4dbe4a7b6fffd90baf1ac87afefc251fdc59a01",
+    "status": "invalid_capability_source_drift_pending_recapture",
+    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 capture was generated before later changes to declared capability source paths, including scripts/openclaw-real-gateway-contract-probe.py. It remains immutable historical fail-closed output, but it is no longer current evidence until recaptured from the corrected exact head."
+  },
+  "downstream_candidate_evidence": {
+    "agentic_os_head_sha": "7332a7955fc51582d5314cf2637f0ff2a8a16dc9",
+    "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+    "canonical_payload_sha256": "f761f2af25e51b17ece53ae4ec3ed36acccdad0d38c31c8cf7db9980fe3daa64",
+    "classification": "issue44_phase_b_round3_downstream_candidate_evidence_pending_phase_c",
+    "db_authority_enabled": false,
+    "duplicate_release_identity_parity": true,
+    "isolated_non_production_gateway": true,
+    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json",
+    "phase_c_exact_head_required_before_review": true,
+    "production_authority_enabled": false,
+    "runner_sha256": "afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6",
+    "runtime_ready": false,
+    "runtime_ready_candidate_evidence": false,
+    "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
+    "status": "invalid_capability_source_drift_pending_recapture",
+    "status_reason": "Round 3 remains immutable historical output, but it binds Agentic OS head 7332a7955fc51582d5314cf2637f0ff2a8a16dc9, records generator hashes that no longer match the reviewed tree, and predates the lifecycle-attestation evidence now required by the corrected validator. It is not current candidate evidence until recaptured from a clean exact head.",
+    "validation_receipt_bound": true
   },
   "historical_artifacts": [
+    {
+      "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
+      "immutable_historical_bytes": true,
+      "interpretation": "superseded downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
+      "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
+      "raw_runtime_ready_candidate_evidence": true,
+      "raw_status": "pass",
+      "runtime_ready_candidate_evidence": false,
+      "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
+      "status": "invalidated_historical_downstream_snapshot"
+    },
     {
       "binding_assessment": {
         "actual_script_sha256_at_bound_head": "b975eafaa3b2769fd10b48a2dddabaec1b5129ba49792ad0a5a642b48fd5693a",
@@ -43,18 +75,18 @@
       "immutable_historical_bytes": true,
       "interpretation": "superseded false negative: tools.catalog was incorrectly treated as the Gateway RPC registry",
       "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342",
-      "raw_status": "fail"
+      "raw_status": "fail",
+      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342"
     },
     {
       "epoch_policy": "frozen historical record; current evidence is namespaced only in this sidecar",
       "immutable_historical_bytes": true,
       "interpretation": "historical revalidation only; not current-head authority",
       "path": "docs/runtime-evidence/phase-b-revalidation-20260809.json",
-      "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3",
-      "raw_status": "superseded"
+      "raw_status": "superseded",
+      "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3"
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "pending_current_evidence"
+  "status": "invalid_runtime_evidence_pending_clean_recapture"
 }
