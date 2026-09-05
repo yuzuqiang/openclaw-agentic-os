@@ -1,0 +1,89 @@
+name: PR45 final supplemental provenance verification
+on:
+  push:
+    branches: [fix/pr45-audit-46cd0c788361]
+    paths: [.github/workflows/pr45-provenance-final.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply and verify the final supplemental tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr45-provenance-final"
+          cp .github/audits/pr45-runmain.patch "$RUNNER_TEMP/pr45-provenance-final/repair.patch"
+          cp .github/audits/pr45-independent-crosscheck.py "$RUNNER_TEMP/pr45-provenance-final/crosscheck.py"
+          git checkout --detach d4f3193f40d18ced5f82de04a6b27058aa9bd47b
+          git apply --index "$RUNNER_TEMP/pr45-provenance-final/repair.patch"
+          test "$(git write-tree)" = 7ebac38d067aef8b7e8f5ecd9d71098480a3f2e6
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: reject unaccounted named Module runMain capabilities'
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-provenance-final/head.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/pr45-provenance-final/tree.txt"
+          git diff bb160fb68ae5e7f0e7af26a3809323f3c9f6335e HEAD > "$RUNNER_TEMP/pr45-provenance-final/combined.patch"
+      - name: Independent source-boundary matrix
+        run: PYTHONPATH=src python "$RUNNER_TEMP/pr45-provenance-final/crosscheck.py" > "$RUNNER_TEMP/pr45-provenance-final/crosscheck.json"
+      - name: Full unittest discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-provenance-final/unittest.log"
+      - name: Privacy, compile, migration and exact-tree verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m agentic_os.cli preflight | tee "$RUNNER_TEMP/pr45-provenance-final/privacy.log"
+          PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v 2>&1 | tee "$RUNNER_TEMP/pr45-provenance-final/migrations.log"
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^{tree})" = 7ebac38d067aef8b7e8f5ecd9d71098480a3f2e6
+          git bundle create "$RUNNER_TEMP/pr45-provenance-final/candidate.bundle" HEAD ^bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-final-provenance-7ebac38d
+          path: ${{ runner.temp }}/pr45-provenance-final
+          retention-days: 3
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-final-provenance-7ebac38d
+          path: ${{ runner.temp }}/provenance
+      - name: Publish supplemental candidate only; never move or merge PR45
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch "$RUNNER_TEMP/provenance/candidate.bundle" HEAD
+          sha="$(git rev-parse FETCH_HEAD)"
+          test "$sha" = "$(cat "$RUNNER_TEMP/provenance/head.txt")"
+          test "$(git rev-parse FETCH_HEAD^)" = d4f3193f40d18ced5f82de04a6b27058aa9bd47b
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 7ebac38d067aef8b7e8f5ecd9d71098480a3f2e6
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/fix/pr45-provenance-e8557e5b"
+          echo "Published full-suite-verified supplemental $sha. PR45 unchanged." >> "$GITHUB_STEP_SUMMARY"
