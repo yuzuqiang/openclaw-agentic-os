@@ -36,11 +36,14 @@ jobs:
           import ast, base64, hashlib, lzma, os, pathlib, subprocess
           base = 'bb160fb68ae5e7f0e7af26a3809323f3c9f6335e'
           parent = 'e9799b2f49f7f2326f9bcbd6c55cc3bfb20a6b97'
-          tree = 'a4776c5d9a6d9d65ae70ed5fcaffaa4bd722f959'
+          integration_tree = 'a4776c5d9a6d9d65ae70ed5fcaffaa4bd722f959'
+          tree = '6327d858f96fcd49caeb5e65031208aee7952d35'
           expected_patch = 'd555a1ec818f7af72939f125ef40c312d4033cec0b8175bf300e2b06c2866f1d'
+          expected_followup = '0961bfcf481a9b0351d67adbe1317196fd5e74b1361a884416bec4ee58acb628'
           encoded = ''.join(pathlib.Path(f'.github/pr45-x74-patch.{i}').read_text().strip() for i in range(1, 5))
           patch = lzma.decompress(base64.b64decode(encoded, validate=True))
-          if hashlib.sha256(patch).hexdigest() != expected_patch:
+          followup = lzma.decompress(base64.b64decode(pathlib.Path('.github/pr45-x74-followup.patch.xz.b64').read_text().strip(), validate=True))
+          if hashlib.sha256(patch).hexdigest() != expected_patch or hashlib.sha256(followup).hexdigest() != expected_followup:
               raise SystemExit('patch transport digest mismatch')
           changed = set(subprocess.check_output(['git', 'diff', '--name-only', base, parent], text=True).splitlines())
           if changed != {'scripts/agentic_os_runtime_source_contract.py', 'tests/test_runtime_source_contract_regressions.py'}:
@@ -49,9 +52,11 @@ jobs:
           previous_names = {n.name for n in ast.walk(ast.parse(previous_tests)) if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')}
           subprocess.run(['git', 'checkout', '--detach', base], check=True)
           subprocess.run(['git', 'apply', '--index', '--whitespace=error', '-'], input=patch, check=True)
-          actual_tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
-          if actual_tree != tree:
-              raise SystemExit('candidate differs from the locally validated exact tree')
+          if subprocess.check_output(['git', 'write-tree'], text=True).strip() != integration_tree:
+              raise SystemExit('integration differs from validated source tree')
+          subprocess.run(['git', 'apply', '--index', '--whitespace=error', '-'], input=followup, check=True)
+          if subprocess.check_output(['git', 'write-tree'], text=True).strip() != tree:
+              raise SystemExit('final candidate differs from locally validated exact tree')
           current_tests = pathlib.Path('tests/test_runtime_source_contract_regressions.py').read_text()
           current_names = {n.name for n in ast.walk(ast.parse(current_tests)) if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')}
           if not previous_names <= current_names:
@@ -128,4 +133,4 @@ jobs:
           git fetch "$RUNNER_TEMP/pr45-candidate/candidate.bundle" HEAD
           test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
           test "$(git rev-parse "$EXPECTED_HEAD^{tree}")" = "$EXPECTED_TREE"
-          git push origin "$EXPECTED_HEAD:refs/heads/fix/pr45-verified-integration-x74"
+          git push origin "$EXPECTED_HEAD:refs/heads/fix/pr45-verified-integration-x74-6327d858"
