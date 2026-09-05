@@ -2,13 +2,18 @@ name: PR45 isolated source-closure audit
 on:
   push:
     branches:
-      - fix/pr45-source-closure-audit-20260904
+      - fix/pr45-source-closure-matrix-f7b4010
 permissions:
   contents: read
 jobs:
-  baseline:
+  verify:
+    name: Full verification (Node ${{ matrix.node }}, Python 3.10)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,21 +22,66 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Package source and reachable history for isolated verification
-        run: |
-          mkdir -p "$RUNNER_TEMP/pr45-audit"
-          git bundle create "$RUNNER_TEMP/pr45-audit/source.bundle" HEAD refs/remotes/origin/main
-          git rev-parse HEAD > "$RUNNER_TEMP/pr45-audit/head.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: pr45-audit-source
-          path: ${{ runner.temp }}/pr45-audit
-          retention-days: 3
+          node-version: ${{ matrix.node }}
+      - name: Reconstruct exact repair commit without audit files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/pr45-repair.*.b64 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/pr45-repair.patch"
+          echo "eda17c265b69a634036549e1b2cbd7bd48060b0def3e117e8e6cd5069e972cc1  $RUNNER_TEMP/pr45-repair.patch" | sha256sum --check
+          git checkout --detach 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          git apply --index "$RUNNER_TEMP/pr45-repair.patch"
+          git diff --cached --check
+          test "$(git write-tree)" = 8b38e7e407610326305fb2532c77344f302395d1
+          git config user.name 'PR45 source-closure repair'
+          git config user.email 'pr45-repair@users.noreply.github.com'
+          GIT_AUTHOR_DATE='1788580829 +0000' GIT_COMMITTER_DATE='1788580829 +0000' git -c commit.gpgsign=false commit -m 'fix: close runtime capability transfers and bind preload source closure'
+          test "$(git rev-parse HEAD)" = f7b4010c3e5acbaa934e3bb8cc69ae58b0958072
+          mkdir -p "$RUNNER_TEMP/pr45-output"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr45-output/revision.txt"
+          python --version > "$RUNNER_TEMP/pr45-output/versions.txt"
+          node --version >> "$RUNNER_TEMP/pr45-output/versions.txt"
+          git bundle create "$RUNNER_TEMP/pr45-output/source.bundle" HEAD refs/remotes/origin/main
       - name: Privacy preflight
         run: PYTHONPATH=src python -m agentic_os.cli preflight
-      - name: Full unittest baseline
-        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Full unittest discovery including real Node counterexamples
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-output/unittest.log"
       - name: Compile sources
         run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
-      - name: Verify tracked cleanliness
-        run: test -z "$(git status --porcelain)"
+      - name: Migration/package parity
+        run: PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Whitespace diff and tracked cleanliness
+        run: |
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-verified-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/pr45-output
+          retention-days: 3
+  publish_verified_branch:
+    needs: verify
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-verified-node-22
+          path: ${{ runner.temp }}/pr45-verified
+      - name: Publish only the exact commit that passed every matrix job
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch "$RUNNER_TEMP/pr45-verified/source.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = f7b4010c3e5acbaa934e3bb8cc69ae58b0958072
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 8b38e7e407610326305fb2532c77344f302395d1
+          git push origin FETCH_HEAD:refs/heads/fix/pr45-source-closure-verified-20260904
