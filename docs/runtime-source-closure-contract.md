@@ -30,6 +30,31 @@ results hidden behind grouping, binding, or other result transformations are not
 accepted as ordinary direct assignments. The existing supported inline factory
 invocations still require a literal module specifier and a local factory base.
 
+Literal loader paths also require accounted-for resolution bases. A module using
+`createRequire(__filename)` or `import.meta.url` as a loader base may not rebind,
+shadow, destructure, mutate or pass that base through unaudited references. Worker
+URLs require the original URL constructor: constructor/namespace references from
+`node:url` are accounted for across the entire closure, not only in the module
+that starts the Worker. This catches prototype mutation in an imported module as
+well as local constructor shadowing. Direct builtin URL imports and erased type
+imports remain supported; ordinary URL/metadata usage in a closure without a
+corresponding loader assumption is unchanged. This is deliberately a supported
+syntax boundary, not whole-program JavaScript value analysis.
+
+The URL capability inventory includes `pathToFileURL`, which returns a native URL
+instance. A Worker-URL closure may not transfer the global `Object`/`Reflect`
+meta-object namespaces or use their prototype-discovery, symbol-enumeration, or
+property-mutation capabilities: native objects can expose URL instances without
+an explicit URL constructor reference. Statically named ordinary data utilities
+(such as `Object.keys`, `Object.fromEntries`, and `Object.freeze`) remain supported.
+This restriction is accumulated across modules and does not apply to closures
+without a URL-based Worker assumption. It is not a runtime sandbox or a claim
+that arbitrary reflection or TypeScript forms have been fully analyzed.
+
+Direct literal calls of a named `createRequire` factory's returned loader are
+recorded just like an assigned loader; accepting the call signature alone is not
+sufficient without recording the module it executes.
+
 Worker URLs constructed from `import.meta.url` resolve relative to the importing
 source. In contrast, the supported literal Node CLI and `fork` script paths
 resolve relative to the probe's launch working directory: the candidate root.
