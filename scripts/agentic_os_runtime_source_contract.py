@@ -2041,6 +2041,17 @@ def _execution_capability_bindings(
                 bindings[local] = "worker-namespace"
             elif imported == "Worker":
                 bindings[local] = "worker"
+        elif module == "module":
+            if imported in {"*", "default", "Module"}:
+                bindings[local] = "module-namespace"
+            elif imported == "register":
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported module.register hook"
+                )
+            elif imported not in {"createRequire", "builtinModules", "isBuiltin"}:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS runtime loader binding"
+                )
         elif module == "child_process":
             if imported in {"*", "default"}:
                 bindings[local] = "child-namespace"
@@ -2120,7 +2131,7 @@ def _execution_capability_bindings(
                 module = specifier.removeprefix("node:")
                 if module in {"worker_threads", "child_process", "module"} and value == "export":
                     raise RuntimeSourceContractError("runtime source contains an unsupported execution capability re-export")
-                if module in {"worker_threads", "child_process"}:
+                if module in {"worker_threads", "child_process", "module"}:
                     clause(index + 1, cursor, module, commonjs=False)
                 if value == "import":
                     declarations.append((start, tokens[cursor + 1][3]))
@@ -2137,8 +2148,18 @@ def _execution_capability_bindings(
         if specifier is None or text(index + 3) != ")":
             continue
         module = specifier.removeprefix("node:")
-        if module not in {"worker_threads", "child_process"}:
+        if module not in {"worker_threads", "child_process", "module"}:
             continue
+        if module == "module" and text(index + 4) == ".":
+            member = text(index + 5)
+            # These data exports cannot load executable code. createRequire is
+            # allowed only at a direct call, whose arguments and returned loader
+            # are independently checked by the factory/reference audit.
+            if member in {"builtinModules", "isBuiltin"} or (
+                member == "createRequire" and text(index + 6) == "("
+            ):
+                builtin_loads.append(module)
+                continue
         # Only a direct require on a simple declaration RHS has a locally
         # accounted-for returned namespace.  Inline/grouped/aliased factories
         # are rejected by the origin count, rather than guessed at.
@@ -2166,7 +2187,7 @@ def _reject_execution_capability_escapes(
     expected = sorted(specifier.removeprefix("node:") for specifier in loaded_execution_modules)
     if sorted(builtin_loads) != expected:
         raise RuntimeSourceContractError(
-            "runtime source contains an unsupported Worker entrypoint or child-process Node entrypoint namespace origin"
+            "runtime source contains an unsupported Worker entrypoint, child-process Node entrypoint, or CommonJS runtime loader namespace origin"
         )
     tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
     for index, (kind, value, start, _end) in enumerate(tokens):
@@ -2178,6 +2199,21 @@ def _reject_execution_capability_escapes(
         if any(left <= start < right for left, right in declarations + accepted_spans):
             continue
         capability = bindings[value]
+        if capability == "module-namespace":
+            # A module constructor/namespace is itself a loading capability.
+            # Never let it escape into an alias, object, callback or re-export.
+            # Supporting createRequire does not authorize arbitrary Module use.
+            member_index = index + 2
+            if (
+                member_index < len(tokens)
+                and tokens[index + 1][1] == "."
+                and tokens[member_index][0] == "identifier"
+                and tokens[member_index][1] in {"createRequire", "builtinModules", "isBuiltin"}
+            ):
+                continue
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported CommonJS runtime loader capability transfer"
+            )
         if capability.startswith("worker"):
             description = "Worker entrypoint"
         elif capability == "child-shell":
@@ -4130,7 +4166,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         source_text,
         loaded_execution_modules=[
             specifier for specifier in commonjs_specifiers + create_require_specifiers
-            if specifier.removeprefix("node:") in {"worker_threads", "child_process"}
+            if specifier.removeprefix("node:") in {"worker_threads", "child_process", "module"}
         ],
     )
     _reject_unaccounted_create_require_references(source_text)
