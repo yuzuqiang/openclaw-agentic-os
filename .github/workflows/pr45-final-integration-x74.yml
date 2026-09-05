@@ -1,0 +1,25 @@
+name: PR45 final integration source export
+on:
+  push:
+    branches: [fix/pr45-final-integration-20260905-x74]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export committed source and candidate history
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-source"
+          git bundle create "$RUNNER_TEMP/pr45-source/source.bundle" --all
+          git show-ref > "$RUNNER_TEMP/pr45-source/refs.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-final-integration-source-x74
+          path: ${{ runner.temp }}/pr45-source
+          retention-days: 3
