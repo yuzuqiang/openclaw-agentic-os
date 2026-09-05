@@ -1,0 +1,40 @@
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index b1f4a37..c95bcd1 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -2056,7 +2056,7 @@ def _execution_capability_bindings(
+         elif module == "module":
+             if imported in {"*", "default", "Module"}:
+                 bindings[local] = "module-namespace"
+-            elif imported not in {"createRequire", "register", "registerHooks", "runMain", "builtinModules", "isBuiltin", "findSourceMap", "SourceMap"}:
++            elif imported not in {"createRequire", "register", "registerHooks", "builtinModules", "isBuiltin", "findSourceMap", "SourceMap"}:
+                 raise RuntimeSourceContractError(
+                     "runtime source contains an unsupported CommonJS runtime loader binding"
+                 )
+diff --git a/tests/test_runtime_source_contract_crosscheck.py b/tests/test_runtime_source_contract_crosscheck.py
+index 83b9ff4..8ed595e 100644
+--- a/tests/test_runtime_source_contract_crosscheck.py
++++ b/tests/test_runtime_source_contract_crosscheck.py
+@@ -49,6 +49,14 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
+                 with self.subTest(declaration=declaration, expression=expression):
+                     self.assert_rejected(declaration + expression)
+ 
++    def test_run_main_aliases_cannot_bypass_module_capability_accounting(self) -> None:
++        for declaration in (
++            "import {runMain as go} from 'node:module';",
++            "const {runMain:go}=require('module');",
++        ):
++            with self.subTest(declaration=declaration):
++                self.assert_rejected(declaration + "const f=go;f('./hidden.cjs');")
++
+     def test_grouped_and_aliased_module_origins_cannot_escape_accounting(self) -> None:
+         for acquisition in (
+             "(require)('module')", "((require))('module')",
+@@ -107,6 +115,7 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
+             "const r=module['require'];r('./hidden.cjs');",
+             "const r=((module))?.['require'];r('./hidden.cjs');",
+             "const M=require('node:module');const C=M;new C().load('./hidden.cjs');",
++            "const {runMain:go}=require('node:module');const f=go;f('./hidden.cjs');",
+         ):
+             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                 root = Path(directory)
