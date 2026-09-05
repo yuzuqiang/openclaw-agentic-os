@@ -615,7 +615,7 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
                 ) or (
                     previous[0] == "identifier"
-                    and previous_value in {"await", "case", "delete", "else", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
+                    and previous_value in {"await", "case", "delete", "else", "extends", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
                     and before_previous not in {("punctuation", "."), ("punctuation", "?.")}
                 )
                 if regex_start:
@@ -2059,17 +2059,21 @@ def _execution_capability_bindings(
 
     def clause(start: int, end: int, module: str, *, commonjs: bool) -> None:
         index = start
+        declaration_type_only = False
         if not commonjs and text(index) == "type":
+            declaration_type_only = True
             index += 1
         if index < end and tokens[index][0] == "identifier" and text(index) not in {"{", "*"}:
-            bind(module, "default", text(index))
+            if not declaration_type_only:
+                bind(module, "default", text(index))
             index += 1
             if text(index) == ",":
                 index += 1
         if index == end:
             return
         if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
-            bind(module, "*", text(index + 2))
+            if not declaration_type_only:
+                bind(module, "*", text(index + 2))
             return
         if text(index) != "{" or text(end - 1) != "}":
             raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
@@ -2078,7 +2082,9 @@ def _execution_capability_bindings(
             if text(index) == ",":
                 index += 1
                 continue
+            specifier_type_only = declaration_type_only
             if not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}:
+                specifier_type_only = True
                 index += 1
             imported = literal(index) if tokens[index][0] == "string" else text(index)
             if tokens[index][0] not in {"string", "identifier"}:
@@ -2094,7 +2100,8 @@ def _execution_capability_bindings(
             if index < end - 1 and text(index) != ",":
                 raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
             assert imported is not None and local is not None
-            bind(module, imported, local)
+            if not specifier_type_only:
+                bind(module, imported, local)
 
     for index, (kind, value, start, _end) in enumerate(tokens):
         if kind != "identifier" or value not in {"import", "export"}:
@@ -2169,13 +2176,14 @@ def _reject_execution_capability_escapes(
             "runtime source contains an unsupported Worker entrypoint or child-process Node entrypoint namespace origin"
         )
     tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    type_spans = _type_only_declaration_spans(tokens)
     for index, (kind, value, start, _end) in enumerate(tokens):
         if kind != "identifier" or value not in bindings:
             continue
         # Property names on unrelated objects are not references to a binding.
         if index and tokens[index - 1][1] in {".", "?."}:
             continue
-        if any(left <= start < right for left, right in declarations + accepted_spans):
+        if any(left <= start < right for left, right in declarations + accepted_spans + type_spans):
             continue
         capability = bindings[value]
         if capability.startswith("worker"):
@@ -2189,6 +2197,29 @@ def _reject_execution_capability_escapes(
         raise RuntimeSourceContractError(
             f"runtime source contains an unsupported {description} capability usage"
         )
+
+
+def _type_only_declaration_spans(tokens: list[tuple[str, str, int, int]]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    statement_start = True
+    for index, (kind, value, start, end) in enumerate(tokens):
+        if (
+            statement_start
+            and kind == "identifier"
+            and value in {"type", "interface"}
+            and (index + 1) < len(tokens)
+            and tokens[index + 1][0] == "identifier"
+        ):
+            cursor = index + 1
+            while cursor < len(tokens) and tokens[cursor][1] != ";":
+                cursor += 1
+            span_end = tokens[cursor][3] if cursor < len(tokens) else end
+            spans.append((start, span_end))
+        if value in {";", "{", "}"}:
+            statement_start = True
+        elif kind not in {"comment"}:
+            statement_start = False
+    return spans
 
 
 def _reject_unaccounted_require_references(source_text: str) -> None:
@@ -4436,6 +4467,7 @@ def _nearest_package_self_reference(
             payload = _load_package_json(package_json, package_name)
             if payload.get("name") == package_name and payload.get("exports") is not None:
                 return current, payload
+            return None
         if current == root:
             return None
         current = current.parent
