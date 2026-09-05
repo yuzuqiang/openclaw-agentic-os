@@ -28,7 +28,7 @@ not evidence of production OpenClaw authority.
   fail-closed, and the current downstream candidate evidence is fail-closed
   before launch on runtime source-closure rejection with
   `candidate_process_started=false`; no runtime-ready persistent-lifecycle
-  proof or current-head GitHub Codex review binding exists, and historical
+  proof and no current-head GitHub Codex review binding exists, and historical
   candidate invocations and reviews must not be counted as current exact-head
   runtime evidence:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)

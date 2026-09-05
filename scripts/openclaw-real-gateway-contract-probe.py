@@ -26,7 +26,6 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agentic_os import DB_AUTHORITY_ENABLED
 import agentic_os_runtime_source_contract as runtime_source_contract
 
 
@@ -38,6 +37,28 @@ if _PROBE_ROOT_OVERRIDE is not None and Path(_PROBE_ROOT_OVERRIDE).resolve() != 
         f"{PROBE_ROOT_ENV} must match the executing probe script checkout"
     )
 ROOT = _SCRIPT_ROOT
+
+
+def _db_authority_enabled() -> bool:
+    """Read the local authority flag without making validator startup package-dependent."""
+    src_root = ROOT / "src"
+    inserted = False
+    if src_root.exists() and str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+        inserted = True
+    try:
+        from agentic_os import DB_AUTHORITY_ENABLED as enabled
+    except Exception:
+        return False
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(str(src_root))
+            except ValueError:
+                pass
+    return bool(enabled)
+
+
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
 PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
@@ -5701,7 +5722,7 @@ def _persistent_prelaunch_failure_summary(
         "runtime_ready_candidate_evidence": False,
         "production_behavior_proven": False,
         "production_authority_enabled": False,
-        "db_authority_enabled": DB_AUTHORITY_ENABLED,
+        "db_authority_enabled": _db_authority_enabled(),
         "persistent_attestation_validated": False,
         "accepted_session_spawned": False,
         "runtime_catalog_discovered": False,
@@ -5724,7 +5745,7 @@ def _persistent_prelaunch_failure_summary(
             "candidate_process_started": False,
             "candidate_port_opened": False,
             "candidate_port_closed": "not_required",
-            "db_authority_enabled": DB_AUTHORITY_ENABLED,
+            "db_authority_enabled": _db_authority_enabled(),
         },
     }
 
