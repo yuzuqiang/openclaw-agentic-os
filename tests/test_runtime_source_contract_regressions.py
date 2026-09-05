@@ -409,12 +409,12 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 self.assert_closed(source)
 
     def test_literal_process_arguments_remain_supported(self) -> None:
-        for source in (
-            "import {fork} from 'node:child_process'; fork('./bound.cjs', ['a','b',]);",
-            "import {spawnSync} from 'node:child_process'; spawnSync(process.execPath, ['./bound.cjs','a','b',]);",
+        for source, import_kind in (
+            ("import {fork} from 'node:child_process'; fork('./bound.cjs', ['a','b',]);", "fork"),
+            ("import {spawnSync} from 'node:child_process'; spawnSync(process.execPath, ['./bound.cjs','a','b',]);", "spawn"),
         ):
             with self.subTest(source=source):
-                self.assertIn(("./bound.cjs", True, "process"), CONTRACT.import_specifiers(source))
+                self.assertIn(("./bound.cjs", True, import_kind), CONTRACT.import_specifiers(source))
 
     def test_process_script_resolution_uses_launch_cwd_not_importer_directory(self) -> None:
         for launch in (
