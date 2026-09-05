@@ -266,6 +266,38 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 source = f"export const View = () => {tag}; require('./hidden.cjs');"
                 self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
 
+    def test_unresolved_computed_function_constructor_access_fails_closed(self) -> None:
+        for source in (
+            "const member='constructor'; const build=(()=>{})[member]; build(\"return import('./hidden.mjs')\")();",
+            "const member='constructor'; const build=(function(){})[member]; build(\"return require('./hidden.cjs')\")();",
+            "const member='constructor'; const build=(class {})[member]; build(\"return import('./hidden.mjs')\")();",
+            "const build=(()=>{})['constructor']; build(\"return import('./hidden.mjs')\")();",
+        ):
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_package_exports_reject_targets_that_escape_before_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "import 'pkg';", {
+                "decoy.mjs": "export const decoy = true;",
+                "node_modules/pkg/package.json": '{"name":"pkg","exports":["./../decoy.mjs","./hidden.mjs"]}',
+                "node_modules/pkg/hidden.mjs": "export const hidden = true;",
+            })
+            with self.assertRaisesRegex(CONTRACT.RuntimeSourceContractError, "unsupported path segment"):
+                CONTRACT.runtime_source_paths(root)
+
+    def test_package_imports_reject_targets_that_escape_before_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "import '#pkg';", {
+                "scripts/package.json": '{"imports":{"#pkg":["./../decoy.mjs","./hidden.mjs"]}}',
+                "decoy.mjs": "export const decoy = true;",
+                "scripts/hidden.mjs": "export const hidden = true;",
+            })
+            with self.assertRaisesRegex(CONTRACT.RuntimeSourceContractError, "unsupported path segment"):
+                CONTRACT.runtime_source_paths(root)
+
     def test_runtime_default_import_named_type_is_a_value_binding(self) -> None:
         for source in (
             "import type from 'node:worker_threads'; const W = type.Worker; new W('./hidden.mjs');",
@@ -573,6 +605,23 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             self.assertEqual("function", second.stdout.strip())
             self.assertNotEqual(before, CONTRACT.runtime_source_digest_snapshot(root))
 
+    @unittest.skipUnless(NODE, "Node is required for the independent execution witness")
+    def test_node_dynamic_function_constructor_executes_hidden_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = root / "entry.mjs"
+            entry.write_text(
+                "const member='constructor';\n"
+                "const build=(()=>{})[member];\n"
+                "await build(\"return import('./hidden.mjs')\")();\n",
+                encoding="utf-8",
+            )
+            (root / "hidden.mjs").write_text("console.log('executed');\n", encoding="utf-8")
+            env = {key: value for key, value in os.environ.items() if not key.startswith("NODE_")}
+            result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
+            self.assertEqual("executed", result.stdout.strip())
+            self.assert_closed(entry.read_text(encoding="utf-8"))
+
 
 class RuntimePreloadRegressionTests(unittest.TestCase):
     def fixture(self, root: Path) -> Path:
@@ -643,6 +692,15 @@ class RuntimePreloadRegressionTests(unittest.TestCase):
             root = Path(directory)
             os.mkfifo(root / "pipe")
             with self.assertRaisesRegex(PROBE.ProbeError, "file type"):
+                PROBE._runtime_installation_binding(root)
+
+    def test_hardlinked_installation_entries_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = root / "entry.mjs"
+            entry.write_text("export const n=1;\n")
+            os.link(entry, root / "entry-alias.mjs")
+            with self.assertRaisesRegex(PROBE.ProbeError, "hardlink"):
                 PROBE._runtime_installation_binding(root)
 
     def test_executable_mode_and_scope_metadata_are_in_installation_identity(self) -> None:

@@ -8280,6 +8280,45 @@ class RealGatewayProbeTests(unittest.TestCase):
             else:
                 sys.modules[module_name] = previous_module
 
+    def test_validator_python_runtime_binds_available_bytecode_cache(self) -> None:
+        previous_closure = MODULE._VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES
+        module_name = "validator_startup_cache_fixture"
+        previous_module = sys.modules.get(module_name)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source_path = root / "cached_dependency.py"
+                cache_path = root / "__pycache__" / "cached_dependency.cpython-test.pyc"
+                cache_path.parent.mkdir()
+                source_path.write_text("VALUE = 'source'\n", encoding="utf-8")
+                cache_path.write_bytes(b"bytecode-before")
+                module = types.ModuleType(module_name)
+                module.__file__ = str(source_path)
+                module.__cached__ = str(cache_path)
+                sys.modules[module_name] = module
+                MODULE._VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES = None
+
+                before = MODULE._validator_python_runtime_bindings()
+                by_path = {item["path"]: item["sha256"] for item in before}
+                self.assertIn(f"validator-runtime:module:{module_name}", by_path)
+                cache_label = f"validator-runtime:module:{module_name}:artifact:1"
+                self.assertIn(cache_label, by_path)
+
+                cache_path.write_bytes(b"bytecode-after")
+                after = MODULE._validator_python_runtime_bindings()
+                after_by_path = {item["path"]: item["sha256"] for item in after}
+                self.assertNotEqual(by_path[cache_label], after_by_path[cache_label])
+                self.assertEqual(
+                    by_path[f"validator-runtime:module:{module_name}"],
+                    after_by_path[f"validator-runtime:module:{module_name}"],
+                )
+        finally:
+            MODULE._VALIDATOR_PYTHON_RUNTIME_CLOSURE_MODULES = previous_closure
+            if previous_module is None:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous_module
+
     def test_persistent_runner_success_revalidates_validator_python_runtime_before_validator(
         self,
     ) -> None:
@@ -8729,6 +8768,19 @@ class RealGatewayProbeTests(unittest.TestCase):
             self.assertEqual(
                 (execution_root / "node_modules/pkg").resolve(), package_root.resolve()
             )
+
+    def test_immutable_runtime_source_root_rejects_hardlinked_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "main.mjs"
+            source.write_text("export const value = 1;\n", encoding="utf-8")
+            os.link(source, root / "outside-alias.mjs")
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "hardlink"):
+                MODULE._require_immutable_runtime_source_root(
+                    root,
+                    [{"path": "main.mjs", "sha256": "a" * 64}],
+                )
 
     def test_persistent_runtime_source_root_requires_external_read_only_mount(
         self,

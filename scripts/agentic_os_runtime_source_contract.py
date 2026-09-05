@@ -1612,6 +1612,23 @@ def _static_computed_member_name(
     return None
 
 
+def _computed_member_target_may_be_function_constructor(
+    source_text: str, bracket_index: int
+) -> bool:
+    if not _computed_member_bracket_has_target(source_text, bracket_index):
+        return False
+    cursor = bracket_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0:
+        return False
+    window_start = max(0, cursor - 240)
+    target_window = source_text[window_start : cursor + 1]
+    return "=>" in target_window or bool(
+        re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
+    )
+
+
 def _parse_process_dlopen_invocation(
     source_text: str, index: int
 ) -> tuple[str, int] | None:
@@ -3471,6 +3488,22 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
         if character == "[":
             computed_member = _static_computed_member_name(source_text, index)
             if (
+                computed_member is None
+                and _computed_member_target_may_be_function_constructor(
+                    source_text, index
+                )
+            ):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported evaluated loader reference"
+                )
+            if (
+                computed_member is not None
+                and computed_member[0] in EVALUATED_RUNTIME_LOADER_TOKENS
+            ):
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported evaluated loader reference"
+                )
+            if (
                 computed_member is not None
                 and computed_member[0] in EVALUATED_RUNTIME_VM_MEMBER_NAMES
             ):
@@ -5043,6 +5076,26 @@ def _export_condition_targets(
     return []
 
 
+def _validate_package_map_target(target: str, label: str) -> None:
+    if "%" in target:
+        raise RuntimeSourceContractError(
+            f"runtime package {label} target contains an unsupported percent-encoded path"
+        )
+    if "?" in target or "#" in target:
+        raise RuntimeSourceContractError(
+            f"runtime package {label} target contains an unsupported URL suffix"
+        )
+    if not target.startswith("./"):
+        raise RuntimeSourceContractError(
+            f"runtime package {label} target is unsupported"
+        )
+    segments = target[2:].split("/")
+    if any(segment in {"", ".", "..", "node_modules"} for segment in segments):
+        raise RuntimeSourceContractError(
+            f"runtime package {label} target contains an unsupported path segment"
+        )
+
+
 def _substitute_export_target(target: Any, replacement: str) -> Any:
     if isinstance(target, str):
         return target.replace("*", replacement)
@@ -5131,18 +5184,8 @@ def _package_entry_bases(
     if exports is not None:
         export_target = _exports_map_target(exports, subpath)
         targets = _export_condition_targets(export_target, conditions)
-        if any("%" in target for target in targets):
-            raise RuntimeSourceContractError(
-                "runtime package export target contains an unsupported percent-encoded path"
-            )
-        if any("?" in target or "#" in target for target in targets):
-            raise RuntimeSourceContractError(
-                "runtime package export target contains an unsupported URL suffix"
-            )
-        if any(not target.startswith("./") for target in targets):
-            raise RuntimeSourceContractError(
-                "runtime package export target is unsupported"
-            )
+        for target in targets:
+            _validate_package_map_target(target, "export")
         return [((package_root / target).resolve(), "runtime") for target in targets], True
     if subpath:
         return [((package_root / subpath).resolve(), "node_legacy")], False
@@ -5256,19 +5299,7 @@ def _resolve_package_import(
         ),
     )
     for target in targets:
-        if "%" in target:
-            raise RuntimeSourceContractError(
-                "runtime package import target contains an unsupported percent-encoded path"
-            )
-        if "?" in target or "#" in target:
-            raise RuntimeSourceContractError(
-                "runtime package import target contains an unsupported URL suffix"
-            )
-        if not target.startswith("./"):
-            raise RuntimeSourceContractError(
-                "runtime package import target is unsupported: "
-                f"{specifier}"
-            )
+        _validate_package_map_target(target, "import")
         base = (package_root / target).resolve()
         resolved = _resolve_existing_candidate(
             root,

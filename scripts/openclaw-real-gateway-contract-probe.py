@@ -1361,6 +1361,37 @@ def _assert_runtime_sources_still_bound(
         raise ProbeError("persistent runtime source closure changed after candidate runner exit")
 
 
+def _assert_runtime_sources_have_no_external_hardlinks(
+    openclaw_root: Path,
+    runtime_sources: list[dict[str, str]],
+) -> None:
+    root = openclaw_root.resolve()
+    for source in runtime_sources:
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+            raise ProbeError("persistent runtime source binding is invalid")
+        relative = source["path"]
+        if relative.startswith("runtime-"):
+            continue
+        try:
+            path = runtime_source_contract.source_relative_path(
+                root,
+                (root / relative).resolve(),
+            )
+        except runtime_source_contract.RuntimeSourceContractError as exc:
+            raise ProbeError("persistent runtime source binding is unsafe") from exc
+        source_path = root / path
+        try:
+            info = source_path.stat()
+        except OSError as exc:
+            raise ProbeError("persistent runtime source binding is unavailable") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise ProbeError("persistent runtime source binding is not a regular file")
+        if info.st_nlink != 1:
+            raise ProbeError(
+                "persistent runtime source has an externally writable hardlink"
+            )
+
+
 def _require_immutable_runtime_source_root(
     openclaw_root: Path,
     runtime_sources: list[dict[str, str]],
@@ -1385,6 +1416,7 @@ def _require_immutable_runtime_source_root(
             "persistent runtime requires an externally enforced read-only "
             "runtime source mount"
         )
+    _assert_runtime_sources_have_no_external_hardlinks(openclaw_root, runtime_sources)
     _assert_runtime_sources_still_bound(openclaw_root, runtime_sources)
     return openclaw_root
 
@@ -1604,6 +1636,10 @@ def _runtime_installation_binding(root: Path) -> dict[str, str]:
                     record.append("directory")
                     pending.append(path)
                 elif stat.S_ISREG(metadata.st_mode):
+                    if metadata.st_nlink != 1:
+                        raise ProbeError(
+                            "runtime preload installation contains an externally writable hardlink"
+                        )
                     file_digest = hashlib.sha256()
                     with path.open("rb") as stream:
                         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -1709,24 +1745,35 @@ def _assert_runtime_launch_sources_still_bound(
         raise ProbeError("runtime launch source binding changed after candidate runner exit")
 
 
-def _python_module_runtime_file(module: Any) -> Path | None:
+def _python_module_runtime_files(module: Any) -> tuple[Path, ...]:
     origin = getattr(module, "__file__", None)
     if not isinstance(origin, str):
         spec = getattr(module, "__spec__", None)
         origin = getattr(spec, "origin", None)
     if not isinstance(origin, str) or origin in {"built-in", "frozen"}:
-        return None
+        return ()
     path = Path(origin)
+    paths: list[Path] = []
+    if path.exists() and path.is_file():
+        paths.append(path)
+    cached = getattr(module, "__cached__", None)
+    if isinstance(cached, str):
+        cached_path = Path(cached)
+        if cached_path.exists() and cached_path.is_file() and cached_path not in paths:
+            paths.append(cached_path)
     if path.suffix == ".pyc":
         try:
             source_path = Path(importlib.util.source_from_cache(str(path)))
         except ValueError:
-            source_path = path
-        if source_path.exists():
-            path = source_path
-    if not path.exists() or not path.is_file():
-        return None
-    return path
+            source_path = None
+        if (
+            source_path is not None
+            and source_path.exists()
+            and source_path.is_file()
+            and source_path not in paths
+        ):
+            paths.append(source_path)
+    return tuple(paths)
 
 
 def _validator_python_runtime_bindings() -> list[dict[str, str]]:
@@ -1736,7 +1783,7 @@ def _validator_python_runtime_bindings() -> list[dict[str, str]]:
             sorted(
                 module_name
                 for module_name, module in sys.modules.items()
-                if module_name and _python_module_runtime_file(module) is not None
+                if module_name and _python_module_runtime_files(module)
             )
         )
     sources = [
@@ -1748,15 +1795,11 @@ def _validator_python_runtime_bindings() -> list[dict[str, str]]:
             raise ProbeError(
                 f"validator Python runtime module disappeared: {module_name}"
             )
-        source_path = _python_module_runtime_file(module)
-        if source_path is None:
-            continue
-        sources.append(
-            _runtime_file_binding(
-                source_path,
-                f"validator-runtime:module:{module_name}",
-            )
-        )
+        for index, source_path in enumerate(_python_module_runtime_files(module)):
+            label = f"validator-runtime:module:{module_name}"
+            if index:
+                label = f"{label}:artifact:{index}"
+            sources.append(_runtime_file_binding(source_path, label))
     return sources
 
 
