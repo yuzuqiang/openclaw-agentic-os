@@ -515,6 +515,12 @@ def import_candidates(
     return deduped
 
 
+_REGEXP_PREFIX_KEYWORDS = frozenset({
+    "case", "debugger", "default", "delete", "do", "else", "extends", "in",
+    "instanceof", "new", "return", "throw", "typeof", "void",
+})
+
+
 def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
     """Lex code without interpreting it; retain offsets through template expressions.
 
@@ -547,6 +553,21 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
             else:
                 index += 1
         raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript template literal")
+
+    def within_for_header() -> bool:
+        significant = [item for item in tokens if item[0] != "comment"]
+        depth = 0
+        for cursor in range(len(significant) - 1, -1, -1):
+            value = significant[cursor][1]
+            if value == ")":
+                depth += 1
+            elif value == "(":
+                if depth:
+                    depth -= 1
+                else:
+                    words = [item[1] for item in significant[max(0, cursor - 2):cursor]]
+                    return bool(words and (words[-1] == "for" or words == ["for", "await"]))
+        return False
 
     def code(index: int, *, expression: bool = False) -> int:
         depth = 0
@@ -584,6 +605,41 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     line_has_code = False
                 token("comment", start, index)
                 continue
+            if character == "<":
+                following = index + 1
+                while following < size and source_text[following].isspace():
+                    following += 1
+                tag_like = following < size and (
+                    source_text[following] == ">"
+                    or _is_identifier_character(source_text[following])
+                )
+                preceding = next((item for item in reversed(tokens) if item[0] != "comment"), None)
+                line_break = preceding is not None and any(
+                    _is_js_line_terminator(c) for c in source_text[preceding[3]:index]
+                )
+                expression_prefix = previous is None or (
+                    previous[0] == "punctuation" and previous[1] in
+                    {"(", "[", "{", "=", ",", ":", ";", "?", "!", "&", "|", "+", "-", "*", "%", "^", "~", "<", ">", "@", "=>"}
+                ) or (
+                    previous[0] == "identifier"
+                    and previous[1] in _REGEXP_PREFIX_KEYWORDS | {"await", "yield", "of"}
+                )
+                # JSX child text is not a JS string. Do not let a quote in that
+                # text swallow a {require(...)} expression or the closing tag.
+                # Keep the established attribute-free self-closing intrinsic
+                # element subset: it contains no child text, attribute strings,
+                # expression containers, or component constructor. Lowercase
+                # intrinsic tag names are data, not JavaScript value references.
+                # Other JSX/angle assertions need a TSX-aware lexical goal.
+                if tag_like and (expression_prefix or line_break):
+                    intrinsic = re.match(r"<[a-z][A-Za-z0-9_-]*\s*/>", source_text[index:])
+                    if intrinsic is None:
+                        raise RuntimeSourceContractError("runtime source contains an unsupported JSX/angle-assertion lexical context")
+                    index += intrinsic.end()
+                    token("jsx-intrinsic", start, index)
+                    before_previous, previous = previous, ("literal", "jsx-intrinsic")
+                    line_has_code = True
+                    continue
             if character in {"'", '"'}:
                 index += 1
                 while index < size:
@@ -608,14 +664,38 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                 current = ("literal", "template")
             elif character == "/":
                 previous_value = previous[1] if previous is not None else ""
-                if previous_value in {")", "}"}:
+                # Some lexical goals require syntactic context, not merely the
+                # preceding spelling: await/yield/of can be ordinary identifiers;
+                # TS ! and > can end an expression; a declaration can end at ASI.
+                # Reject those cases instead of letting a guessed regexp swallow
+                # executable code (or a guessed division expose regexp quotes).
+                member_keyword = before_previous in {("punctuation", "."), ("punctuation", "?.")}
+                ambiguous_keyword = (
+                    previous is not None and previous[0] == "identifier"
+                    and (previous_value in {"await", "yield", "break", "continue"}
+                         or (previous_value == "of" and within_for_header()))
+                    and not member_keyword
+                )
+                postfix_assertion = (
+                    previous_value == "!" and before_previous is not None
+                    and (before_previous[0] in {"identifier", "literal"}
+                         or before_previous[1] in {")", "]", "}", "!", ">"})
+                )
+                preceding = next((item for item in reversed(tokens) if item[0] != "comment"), None)
+                after_line_break = (
+                    previous is not None and previous[0] in {"identifier", "literal"}
+                    and preceding is not None
+                    and not (previous_value in _REGEXP_PREFIX_KEYWORDS and not member_keyword)
+                    and any(_is_js_line_terminator(c) for c in source_text[preceding[3]:index])
+                )
+                if previous_value in {")", "}", ">", "<"} or ambiguous_keyword or postfix_assertion or after_line_break:
                     raise RuntimeSourceContractError("runtime source contains an ambiguous JavaScript slash token")
                 regex_start = previous is None or (
                     previous[0] == "punctuation"
-                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
+                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "@", "=>"}
                 ) or (
                     previous[0] == "identifier"
-                    and previous_value in {"await", "case", "delete", "else", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
+                    and previous_value in _REGEXP_PREFIX_KEYWORDS
                     and before_previous not in {("punctuation", "."), ("punctuation", "?.")}
                 )
                 if regex_start:
@@ -708,11 +788,11 @@ def _source_scan_view(source_text: str) -> str:
                 break
         canonical_names[value] = name
     for kind, value, start, end in tokens:
-        if kind in {"comment", "regex", "template"}:
+        if kind in {"comment", "regex", "template", "jsx-intrinsic"}:
             for index in range(start, end):
                 if not _is_js_line_terminator(source_text[index]):
                     output[index] = " "
-            if kind == "regex":
+            if kind in {"regex", "jsx-intrinsic"}:
                 output[start] = "0"
         elif kind == "punctuation" and value == "/":
             output[start] = "*"
@@ -2022,7 +2102,9 @@ def _execution_capability_bindings(
     new JavaScript assignment/call spelling cannot silently introduce an alias.
     """
     tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
-    bindings = {"Worker": "worker", "child_process": "child-namespace"}
+    # This inventory describes real value bindings only. Implicit Node-style
+    # spellings are audited separately, never conflated with a type import.
+    bindings: dict[str, str] = {}
     declarations: list[tuple[int, int]] = []
     builtin_loads: list[str] = []
 
@@ -2057,20 +2139,36 @@ def _execution_capability_bindings(
                     "runtime source contains an unsupported child-process Node entrypoint binding"
                 )
 
-    def clause(start: int, end: int, module: str, *, commonjs: bool) -> None:
+    def clause(start: int, end: int, module: str, *, commonjs: bool, reexport: bool = False) -> None:
         index = start
-        if not commonjs and text(index) == "type":
+        whole_type = (
+            not commonjs and text(index) == "type"
+            and index + 1 < end and text(index + 1) != ","
+        )
+        if whole_type:
             index += 1
-        if index < end and tokens[index][0] == "identifier" and text(index) not in {"{", "*"}:
-            bind(module, "default", text(index))
+
+        def value_binding(imported: str, local: str, *, type_only: bool = False) -> None:
+            if whole_type or type_only:
+                return
+            if reexport:
+                raise RuntimeSourceContractError("runtime source contains an unsupported execution capability re-export")
+            bind(module, imported, local)
+
+        if index < end and tokens[index][0] == "identifier":
+            value_binding("default", text(index))
             index += 1
             if text(index) == ",":
                 index += 1
         if index == end:
             return
-        if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
-            bind(module, "*", text(index + 2))
-            return
+        if not commonjs and text(index) == "*":
+            if reexport and index + 1 == end:
+                value_binding("*", "*")
+                return
+            if text(index + 1) == "as" and index + 3 == end:
+                value_binding("*", text(index + 2))
+                return
         if text(index) != "{" or text(end - 1) != "}":
             raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
         index += 1
@@ -2078,7 +2176,18 @@ def _execution_capability_bindings(
             if text(index) == ",":
                 index += 1
                 continue
-            if not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}:
+            part_end = index
+            while part_end < end - 1 and text(part_end) != ",":
+                part_end += 1
+            # `type as Local` imports the VALUE named type. `type as` and
+            # `type as as Local` instead import the TYPE named as. A quoted
+            # "type" export name is never a TypeScript modifier.
+            type_only = (
+                not commonjs and tokens[index][0] == "identifier"
+                and text(index) == "type" and part_end - index >= 2
+                and not (part_end - index == 3 and text(index + 1) == "as")
+            )
+            if type_only:
                 index += 1
             imported = literal(index) if tokens[index][0] == "string" else text(index)
             if tokens[index][0] not in {"string", "identifier"}:
@@ -2087,20 +2196,42 @@ def _execution_capability_bindings(
             index += 1
             if text(index) == (":" if commonjs else "as"):
                 index += 1
-                if index >= end - 1 or tokens[index][0] != "identifier":
+                if index >= part_end or tokens[index][0] != "identifier":
                     raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
                 local = text(index)
                 index += 1
-            if index < end - 1 and text(index) != ",":
+            if index != part_end:
                 raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
             assert imported is not None and local is not None
-            bind(module, imported, local)
+            value_binding(imported, local, type_only=type_only)
 
     for index, (kind, value, start, _end) in enumerate(tokens):
         if kind != "identifier" or value not in {"import", "export"}:
             continue
         if text(index + 1) in {"(", "."}:
             continue
+        # Local type-only exports are erased too. Exempt just those specifiers,
+        # not an entire mixed export: a neighbouring value export must still be
+        # audited as a capability transfer.
+        if value == "export":
+            whole_type = text(index + 1) == "type" and text(index + 2) == "{"
+            opening = index + 2 if whole_type else index + 1
+            if text(opening) == "{":
+                closing = opening + 1
+                while closing < len(tokens) and text(closing) not in {"}", ";"}:
+                    closing += 1
+                if text(closing) == "}" and text(closing + 1) != "from":
+                    if whole_type:
+                        declarations.append((start, tokens[closing][3]))
+                    else:
+                        part = opening + 1
+                        for end in range(part, closing + 1):
+                            if end == closing or text(end) == ",":
+                                if (end - part >= 2 and tokens[part][0] == "identifier"
+                                        and text(part) == "type"
+                                        and not (end - part == 3 and text(part + 1) == "as")):
+                                    declarations.append((tokens[part][2], tokens[end - 1][3]))
+                                part = end + 1
         # Side-effect imports declare no local capabilities.
         if value == "import" and index + 1 < len(tokens) and tokens[index + 1][0] == "string":
             declarations.append((start, tokens[index + 1][3]))
@@ -2118,12 +2249,9 @@ def _execution_capability_bindings(
                 specifier = literal(cursor + 1)
                 assert specifier is not None
                 module = specifier.removeprefix("node:")
-                if module in {"worker_threads", "child_process", "module"} and value == "export":
-                    raise RuntimeSourceContractError("runtime source contains an unsupported execution capability re-export")
-                if module in {"worker_threads", "child_process"}:
-                    clause(index + 1, cursor, module, commonjs=False)
-                if value == "import":
-                    declarations.append((start, tokens[cursor + 1][3]))
+                if module in {"worker_threads", "child_process"} or (module == "module" and value == "export"):
+                    clause(index + 1, cursor, module, commonjs=False, reexport=value == "export")
+                declarations.append((start, tokens[cursor + 1][3]))
                 break
             # An export declaration without `from` is not an import clause.
             if value == "export" and text(cursor) in {"=", "const", "let", "var", "function", "class", "default"}:
@@ -2156,13 +2284,176 @@ def _execution_capability_bindings(
     return bindings, declarations, builtin_loads
 
 
+def _typescript_type_reference_spans(source_text: str) -> list[tuple[int, int]]:
+    """Recognize type positions, without declaring any value name harmless.
+
+    Type-only imports do not shadow globals at runtime. In particular, a type
+    named Worker must not disable the implicit Worker value audit. Exempt only
+    references in unambiguous type aliases/annotations/assertions. This small
+    type grammar never consumes a value call, initializer, or function body;
+    unfamiliar syntax remains subject to the normal fail-closed usage audit.
+    """
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    size = len(tokens)
+    spans: list[tuple[int, int]] = []
+
+    def text(index: int) -> str:
+        return tokens[index][1] if 0 <= index < size else ""
+
+    def same_line(left: int, right: int) -> bool:
+        return not any(_is_js_line_terminator(c) for c in source_text[tokens[left][3]:tokens[right][2]])
+
+    def balanced(index: int, opener: str, closer: str) -> int | None:
+        stack = [closer]
+        index += 1
+        pairs = {"(": ")", "[": "]", "{": "}", "<": ">"}
+        while index < size:
+            value = text(index)
+            if value in pairs:
+                stack.append(pairs[value])
+            elif value in {")", "]", "}", ">"}:
+                if value != stack.pop():
+                    return None
+                if not stack:
+                    return index + 1
+            index += 1
+        return None
+
+    def parse_type(index: int, depth: int = 0) -> int | None:
+        if depth > 64 or index >= size:
+            return None
+        start = index
+        value = text(index)
+        if value in {"keyof", "readonly", "unique", "typeof", "infer"}:
+            return parse_type(index + 1, depth + 1)
+        if value == "abstract" and text(index + 1) == "new":
+            index += 1
+            value = "new"
+        if value == "new":
+            index += 1
+            if text(index) != "(":
+                return None
+            end = balanced(index, "(", ")")
+            if end is None or text(end) != "=>":
+                return None
+            return parse_type(end + 1, depth + 1)
+        if value in {"{", "["}:
+            index = balanced(index, value, "}" if value == "{" else "]")
+            if index is None:
+                return None
+        elif value == "(":
+            end = balanced(index, "(", ")")
+            if end is None:
+                return None
+            if text(end) == "=>":
+                return parse_type(end + 1, depth + 1)
+            inner = parse_type(index + 1, depth + 1)
+            if inner != end - 1:
+                return None
+            index = end
+        elif tokens[index][0] in {"identifier", "string", "number", "static-template"}:
+            # An import type query is not a value import() expression here.
+            if value == "import" and text(index + 1) == "(":
+                if index + 3 >= size or tokens[index + 2][0] != "string" or text(index + 3) != ")":
+                    return None
+                index += 4
+            else:
+                index += 1
+            while text(index) == "." and index + 1 < size and tokens[index + 1][0] == "identifier":
+                index += 2
+            if text(index) == "<":
+                index = balanced(index, "<", ">")
+                if index is None:
+                    return None
+        else:
+            return None
+        while text(index) == "[":
+            end = balanced(index, "[", "]")
+            if end is None:
+                return None
+            index = end
+        if text(index) in {"|", "&"}:
+            return parse_type(index + 1, depth + 1)
+        if text(index) == "extends":
+            constraint = parse_type(index + 1, depth + 1)
+            if constraint is None or text(constraint) != "?":
+                return None
+            positive = parse_type(constraint + 1, depth + 1)
+            if positive is None or text(positive) != ":":
+                return None
+            return parse_type(positive + 1, depth + 1)
+        return index if index > start else None
+
+    def add(start: int, type_start: int) -> int | None:
+        end = parse_type(type_start)
+        if end is not None:
+            # Never exempt a putative type followed by a same-line value call.
+            # ASI may end a real alias before a next-line executable expression.
+            if text(end) == "(" and same_line(end - 1, end):
+                return None
+            spans.append((tokens[start][2], tokens[end - 1][3]))
+        return end
+
+    # Delimiter-local ternary state keeps value arguments such as
+    # f(flag ? first, last : Worker) distinct from parameter type annotations.
+    stack: list[tuple[str, int]] = []
+    questions = [0]
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind == "identifier" and value == "type" and index + 2 < size:
+            if tokens[index + 1][0] == "identifier" and same_line(index, index + 1) and text(index - 1) not in {".", "?."}:
+                cursor = index + 2
+                if text(cursor) == "<":
+                    cursor = balanced(cursor, "<", ">")
+                if cursor is not None and text(cursor) == "=":
+                    add(index, cursor + 1)
+        if kind == "identifier" and value in {"as", "satisfies"} and index + 1 < size:
+            previous = tokens[index - 1] if index > 0 else None
+            operand = previous is not None and (
+                previous[0] in {"string", "number", "static-template"}
+                or previous[1] in {")", "]", "}"}
+                or (previous[0] == "identifier" and previous[1] not in
+                    _REGEXP_PREFIX_KEYWORDS | {"await", "yield", "of", "const", "let", "var", "export", "import"})
+            )
+            # `if (ok) as(Worker)` and `as[Worker]` are real value uses of
+            # functions/objects named as, not assertions. Only a named/literal
+            # or object type makes this spelling unambiguous without a full
+            # statement parser. Parenthesized/tuple assertions remain closed.
+            type_prefix = tokens[index + 1][0] in {"identifier", "string", "number"} or text(index + 1) == "{"
+            if operand and type_prefix and same_line(index - 1, index) and same_line(index, index + 1):
+                add(index + 1, index + 1)
+        if value in {"(", "[", "{"}:
+            stack.append((value, index))
+            questions.append(0)
+        elif value in {")", "]", "}"}:
+            if stack:
+                stack.pop()
+                questions.pop()
+        elif value == "?" and text(index + 1) != ":":
+            questions[-1] += 1
+        elif value == ":":
+            if questions[-1]:
+                questions[-1] -= 1
+                continue
+            name_index = index - 2 if text(index - 1) == "?" else index - 1
+            if name_index < 0 or tokens[name_index][0] != "identifier":
+                continue
+            previous = text(name_index - 1)
+            variable = previous in {"const", "let", "var"} and same_line(name_index - 1, name_index)
+            parameter = bool(stack and stack[-1][0] == "(" and previous in {"(", ","})
+            if variable or parameter:
+                add(index + 1, index + 1)
+    return spans
+
+
 def _reject_execution_capability_escapes(
     source_text: str,
     *,
     accepted_spans: list[tuple[int, int]],
     loaded_execution_modules: list[str],
 ) -> None:
-    bindings, declarations, builtin_loads = _execution_capability_bindings(source_text)
+    explicit_bindings, declarations, builtin_loads = _execution_capability_bindings(source_text)
+    bindings = {"Worker": "worker", "child_process": "child-namespace", **explicit_bindings}
+    type_spans = _typescript_type_reference_spans(source_text)
     expected = sorted(specifier.removeprefix("node:") for specifier in loaded_execution_modules)
     if sorted(builtin_loads) != expected:
         raise RuntimeSourceContractError(
@@ -2175,7 +2466,7 @@ def _reject_execution_capability_escapes(
         # Property names on unrelated objects are not references to a binding.
         if index and tokens[index - 1][1] in {".", "?."}:
             continue
-        if any(left <= start < right for left, right in declarations + accepted_spans):
+        if any(left <= start < right for left, right in declarations + accepted_spans + type_spans):
             continue
         capability = bindings[value]
         if capability.startswith("worker"):
@@ -2266,7 +2557,7 @@ def _reject_unaccounted_create_require_references(source_text: str) -> None:
 def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
     bindings, _declarations, _loads = _execution_capability_bindings(source_text)
     return (
-        {name for name, kind in bindings.items() if kind == "worker"},
+        {"Worker"} | {name for name, kind in bindings.items() if kind == "worker"},
         {name for name, kind in bindings.items() if kind == "worker-namespace"},
     )
 
@@ -2279,7 +2570,7 @@ def _child_process_sync_alias_bindings(
         {name for name, kind in bindings.items() if kind == "fork"},
         {name for name, kind in bindings.items() if kind == "child-node"},
         {name for name, kind in bindings.items() if kind == "child-shell"},
-        {name for name, kind in bindings.items() if kind == "child-namespace"},
+        {"child_process"} | {name for name, kind in bindings.items() if kind == "child-namespace"},
     )
 
 
@@ -4254,9 +4545,15 @@ def _normalize_import_specifier_for_resolution(
 
 
 def _load_package_json(package_json: Path, package_name: str) -> dict[str, Any]:
+    def reject_non_json_constant(value: str) -> None:
+        raise ValueError(f"non-JSON constant: {value}")
+
     try:
-        payload = json.loads(package_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = json.loads(
+            package_json.read_text(encoding="utf-8"),
+            parse_constant=reject_non_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         raise RuntimeSourceContractError(
             f"{package_name} runtime package metadata is invalid"
         ) from exc
@@ -4421,44 +4718,62 @@ def _package_root_candidates(root: Path, importer: Path, package_name: str) -> l
     return deduped
 
 
+
+def _nearest_controlling_package_scope(
+    root: Path, importer: Path
+) -> tuple[Path, dict[str, Any]] | None:
+    """Read the first scope, even when it has no imports/name/exports fields.
+
+    A node_modules directory terminates scope lookup. A manifest symlink may
+    point within the bound installation, but its physical target is not the
+    base directory used by Node to resolve package maps.
+    """
+    root = root.resolve()
+    current = importer.resolve().parent
+    while current.is_relative_to(root) and current.name != "node_modules":
+        manifest = current / "package.json"
+        try:
+            # lexists semantics are important: a dangling/cyclic scope must not
+            # disappear from the lookup and silently expose its parent scope.
+            present = manifest.is_symlink() or manifest.exists()
+            if present:
+                target = manifest.resolve(strict=True)
+                source_relative_path(root, target)
+                if not target.is_file():
+                    raise RuntimeSourceContractError(
+                        "runtime package scope metadata is not a regular file"
+                    )
+                return current, _load_package_json(manifest, "package scope")
+        except RuntimeSourceContractError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeSourceContractError(
+                "runtime package scope metadata is unavailable"
+            ) from exc
+        if current == root:
+            break
+        current = current.parent
+    return None
+
+
 def _nearest_package_self_reference(
     root: Path, importer: Path, package_name: str
 ) -> tuple[Path, dict[str, Any]] | None:
-    root = root.resolve()
-    current = importer.resolve().parent
-    while True:
-        try:
-            current.relative_to(root)
-        except ValueError:
-            return None
-        package_json = current / "package.json"
-        if package_json.is_file():
-            payload = _load_package_json(package_json, package_name)
-            if payload.get("name") == package_name and payload.get("exports") is not None:
-                return current, payload
-        if current == root:
-            return None
-        current = current.parent
+    scope = _nearest_controlling_package_scope(root, importer)
+    if scope is not None:
+        _directory, payload = scope
+        if payload.get("name") == package_name and payload.get("exports") is not None:
+            return scope
+    return None
 
 
 def _nearest_package_imports_scope(
     root: Path, importer: Path
 ) -> tuple[Path, dict[str, Any]] | None:
-    root = root.resolve()
-    current = importer.resolve().parent
-    while True:
-        try:
-            current.relative_to(root)
-        except ValueError:
-            return None
-        package_json = current / "package.json"
-        if package_json.is_file():
-            payload = _load_package_json(package_json, "package imports")
-            if payload.get("imports") is not None:
-                return current, payload
-        if current == root:
-            return None
-        current = current.parent
+    scope = _nearest_controlling_package_scope(root, importer)
+    if scope is not None and scope[1].get("imports") is not None:
+        return scope
+    return None
 
 
 def _resolve_package_import(
@@ -4778,6 +5093,10 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
         seen.add(relative)
         if source_path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
             continue
+        # Validate the controlling scope even for files without package imports.
+        # Keep the conservative ancestor snapshot below, but never treat it as
+        # permission to inherit maps across a nearer scope or node_modules.
+        _nearest_controlling_package_scope(root, source_path)
         # File contents alone do not determine Node's interpretation.  Bind the
         # enclosing package scopes for every source, including direct relative
         # imports and the initial entrypoints (not only bare package imports).
