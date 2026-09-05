@@ -1,0 +1,108 @@
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index d2b7e8f..29f39b7 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -3770,6 +3770,15 @@ def _reject_runtime_capability_escapes(source_text: str) -> None:
+     def covered(index: int, spans: list[tuple[int, int]]) -> bool:
+         return any(left <= index < right for left, right in spans)
+ 
++    # Every way to acquire an execution module must be recognized, not only
++    # reads of names the binding regexes happened to understand. Re-exports and
++    # unsupported binding syntax otherwise forward an untracked capability.
++    for match in _executable_pattern_matches(source_text, STATIC_RUNTIME_IMPORT_SPECIFIER):
++        if match.group("specifier") in sensitive_modules and not covered(match.start(), acquisitions):
++            raise RuntimeSourceContractError(
++                "runtime source contains an unsupported execution capability import or re-export"
++            )
++
+     for name, start, end in identifiers:
+         previous = _previous_non_trivia_character(source_text, start)
+         if previous == ".":
+@@ -3777,19 +3786,27 @@ def _reject_runtime_capability_escapes(source_text: str) -> None:
+         if covered(start, declarations):
+             continue
+         if name == "require" or name in aliases or name in create_loaders:
+-            parsed = (_parse_require_invocation(source_text, start) if name == "require"
+-                      else _parse_named_loader_invocation(source_text, start, name, loader_description="CommonJS require alias"))
+-            if parsed is not None:
+-                if parsed[0] in sensitive_modules and not covered(start, acquisitions):
+-                    raise RuntimeSourceContractError("runtime source contains an unsupported unbound execution capability import")
+-                continue
+-            if name == "require" and previous == "(":
++            parsed = (
++                _parse_require_invocation(source_text, start)
++                if name == "require"
++                else _parse_named_loader_invocation(
++                    source_text, start, name, loader_description="CommonJS require alias"
++                )
++            )
++            if parsed is None and name == "require" and previous == "(":
+                 opening = start - 1
+                 while opening >= 0 and source_text[opening].isspace():
+                     opening -= 1
+-                if _parse_parenthesized_require_invocation(source_text, opening) is not None:
+-                    continue
+-            raise RuntimeSourceContractError("runtime source contains an unsupported indirect CommonJS require invocation")
++                parsed = _parse_parenthesized_require_invocation(source_text, opening)
++            if parsed is None:
++                raise RuntimeSourceContractError(
++                    "runtime source contains an unsupported indirect CommonJS require invocation"
++                )
++            if parsed[0] in sensitive_modules and not covered(start, acquisitions):
++                raise RuntimeSourceContractError(
++                    "runtime source contains an unsupported unbound execution capability import"
++                )
++            continue
+         if name in factories:
+             if covered(start, factory_calls) or covered(start, inline_factories):
+                 continue
+@@ -3824,10 +3841,16 @@ def _reject_runtime_capability_escapes(source_text: str) -> None:
+                 "markAsUntransferable", "moveMessagePortToContext", "getEnvironmentData", "setEnvironmentData",
+             }:
+                 continue
+-            raise RuntimeSourceContractError("runtime source contains an unsupported Worker or child-process Node entrypoint capability transfer")
++            kind = "child-process Node" if name in child_namespaces else "Worker"
++            raise RuntimeSourceContractError(
++                f"runtime source contains an unsupported {kind} entrypoint capability transfer"
++            )
+         if name in worker_names | fork_names | node_names | shell_names:
+             if not covered(start, calls):
+-                raise RuntimeSourceContractError("runtime source contains an unsupported Worker or child-process Node entrypoint capability transfer")
++                kind = "Worker" if name in worker_names else "child-process Node"
++                raise RuntimeSourceContractError(
++                    f"runtime source contains an unsupported {kind} entrypoint capability transfer"
++                )
+ 
+ 
+ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
+diff --git a/tests/test_runtime_source_contract_review_regressions.py b/tests/test_runtime_source_contract_review_regressions.py
+index 541e191..ae47c0a 100644
+--- a/tests/test_runtime_source_contract_review_regressions.py
++++ b/tests/test_runtime_source_contract_review_regressions.py
+@@ -186,6 +186,26 @@ class SourceClosureReviewTests(unittest.TestCase):
+                 with self.subTest(source=source):
+                     self.assert_bound_or_rejected(source)
+ 
++    def test_all_execution_module_acquisitions_require_recognized_bindings(self) -> None:
++        for module in ("child_process", "worker_threads", "module"):
++            for source in (
++                f"const ns = (require)('node:{module}');",
++                f"const {{default: ns}} = (require)('node:{module}');",
++                f"import * as 工人 from 'node:{module}';",
++                f"import 工人 from 'node:{module}';",
++                f"export * from 'node:{module}';",
++                f"export * as ns from 'node:{module}';",
++                f"export {{default as ns}} from 'node:{module}';",
++            ):
++                with self.subTest(source=source), self.assertRaises(CONTRACT.RuntimeSourceContractError):
++                    CONTRACT.import_specifiers(source)
++
++    def test_direct_literal_require_still_works_when_parenthesized(self) -> None:
++        self.assertIn(
++            ("./hidden.cjs", True, "require"),
++            CONTRACT.import_specifiers("(require)('./hidden.cjs');"),
++        )
++
+     def test_module_and_factory_capabilities_cannot_escape(self) -> None:
+         sources = (
+             "import m from 'node:module'; const other = m; other._load('./hidden.cjs');",
