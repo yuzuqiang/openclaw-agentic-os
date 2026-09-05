@@ -5553,6 +5553,52 @@ class RealGatewayProbeTests(unittest.TestCase):
                 evidence["isolated_non_production_gateway"]["candidate_process_started"]
             )
 
+    def test_persistent_runner_writes_fail_closed_evidence_on_source_closure_rejection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_persistent_runtime_source_bindings = (
+                MODULE._persistent_runtime_source_bindings
+            )
+            original_run_persistent = MODULE._run_persistent_lifecycle_probe
+            launched = False
+
+            def fake_source_bindings(*_args, **_kwargs):
+                raise MODULE.ProbeError("runtime source contains an unsupported dynamic import")
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            try:
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
+                MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
+                MODULE._persistent_runtime_source_bindings = fake_source_bindings
+                MODULE._run_persistent_lifecycle_probe = fake_run_persistent
+                with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+            finally:
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._persistent_runtime_source_bindings = (
+                    original_persistent_runtime_source_bindings
+                )
+                MODULE._run_persistent_lifecycle_probe = original_run_persistent
+
+            self.assertFalse(launched)
+            evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "fail_closed")
+            self.assertEqual(evidence["reason"], "runtime_source_closure_failed")
+            self.assertFalse(evidence["runtime_ready_candidate_evidence"])
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"]["candidate_process_started"]
+            )
+
     def test_persistent_runner_accepts_boundary_env_only_as_launch_request(self) -> None:
         with mock.patch.dict(
             os.environ,

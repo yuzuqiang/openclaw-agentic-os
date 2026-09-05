@@ -284,6 +284,32 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         )
         self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
 
+    def test_array_destructuring_after_declaration_is_not_computed_member_access(self) -> None:
+        source = (
+            "const parse = (raw) => {\n"
+            "  const [major = '0', minor = '0'] = raw.split('.');\n"
+            "  return major + minor;\n"
+            "};\n"
+            "await import('./entry.mjs');\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_numeric_computed_index_does_not_inherit_function_window_risk(self) -> None:
+        source = (
+            "const isRelay = (argv) => argv[2] === 'hooks' && argv[3] === 'relay';\n"
+            "if (isRelay(process.argv)) { await import('./entry.mjs'); }\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_array_literal_after_for_of_is_not_computed_member_access(self) -> None:
+        source = (
+            "const install = async () => {\n"
+            "  for (const specifier of ['./a.mjs', './b.mjs']) { await import(specifier); }\n"
+            "};\n"
+            "await import('./entry.mjs');\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
     def test_package_exports_reject_targets_that_escape_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

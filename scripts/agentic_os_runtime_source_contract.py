@@ -1546,7 +1546,12 @@ def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bo
     while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
         token_start -= 1
     token = source_text[token_start:token_end]
-    return token not in {"await", "case", "return", "throw", "yield"}
+    if token in {"await", "case", "const", "let", "of", "return", "throw", "var", "yield"}:
+        before_token = token_start - 1
+        while before_token >= 0 and source_text[before_token].isspace():
+            before_token -= 1
+        return before_token >= 0 and source_text[before_token] == "."
+    return True
 
 
 def _computed_member_bracket_has_target(source_text: str, bracket_index: int) -> bool:
@@ -1565,7 +1570,12 @@ def _computed_member_bracket_has_target(source_text: str, bracket_index: int) ->
     while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
         token_start -= 1
     token = source_text[token_start:token_end]
-    return token not in {"await", "case", "return", "throw", "yield"}
+    if token in {"await", "case", "const", "let", "of", "return", "throw", "var", "yield"}:
+        before_token = token_start - 1
+        while before_token >= 0 and source_text[before_token].isspace():
+            before_token -= 1
+        return before_token >= 0 and source_text[before_token] == "."
+    return True
 
 
 def _parse_static_template_member(
@@ -1588,6 +1598,21 @@ def _parse_static_template_member(
     )
 
 
+def _parse_static_numeric_member(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    start = index
+    if index >= len(source_text) or not source_text[index].isdigit():
+        return None
+    while index < len(source_text) and source_text[index].isdigit():
+        index += 1
+    if index < len(source_text) and source_text[index] == ".":
+        index += 1
+        while index < len(source_text) and source_text[index].isdigit():
+            index += 1
+    return source_text[start:index], index
+
+
 def _static_computed_member_name(
     source_text: str, bracket_index: int
 ) -> tuple[str, int] | None:
@@ -1599,6 +1624,8 @@ def _static_computed_member_name(
         parsed = _parse_quoted_specifier(source_text, index)
         if parsed is None:
             parsed = _parse_static_template_member(source_text, index)
+        if parsed is None:
+            parsed = _parse_static_numeric_member(source_text, index)
         if parsed is None:
             return None
         piece, index = parsed

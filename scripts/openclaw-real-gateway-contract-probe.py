@@ -5680,12 +5680,13 @@ def _persistent_prelaunch_failure_summary(
     port: int,
     run_id: str,
     transition_id: str,
+    reason: str,
     error: ProbeError,
 ) -> dict[str, Any]:
     return {
         "status": "fail_closed",
         "classification": "persistent_lifecycle_prelaunch_blocked",
-        "reason": "process_containment_boundary_required",
+        "reason": reason,
         "error": str(error),
         "probe": "agentic-os-persistent-lifecycle-runner",
         "openclaw_head_sha": head,
@@ -6178,11 +6179,28 @@ def run_probe(
             head=head,
             agentic_sources=agentic_sources,
         )
-    runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
     selected_port = port or PERSISTENT_LIFECYCLE_DEFAULT_PORT
     selected_run_id = run_id or "agentic-os-real-gateway-contract-probe"
     selected_transition_id = transition_id or "persistent-lifecycle-runtime-readiness"
+    try:
+        runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
+    except ProbeError as exc:
+        _write_validated_payload(
+            evidence_file,
+            _persistent_prelaunch_failure_summary(
+                head=head,
+                agentic_sources=agentic_sources,
+                runtime_sources=[],
+                run_root=selected_run_root,
+                port=selected_port,
+                run_id=selected_run_id,
+                transition_id=selected_transition_id,
+                reason="runtime_source_closure_failed",
+                error=exc,
+            ),
+        )
+        raise
     try:
         requested_process_boundary = _require_process_containment_boundary_request()
     except ProbeError as exc:
@@ -6196,6 +6214,7 @@ def run_probe(
                 port=selected_port,
                 run_id=selected_run_id,
                 transition_id=selected_transition_id,
+                reason="process_containment_boundary_required",
                 error=exc,
             ),
         )
