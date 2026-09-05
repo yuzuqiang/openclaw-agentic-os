@@ -224,8 +224,8 @@
   "classification": "fail_closed_future_contract",
   "error": "active OpenClaw tool catalog failed returncode=1 payload_sha256=7f533ba421f38256f7a9501cf59225bf97b4f436bbaaaa030a18e1ca99782baf stdout={'bytes': 363, 'sha256': 'f6d15f2b374b26179c1d255f40ec9d838a0cc43bf0946d5d91beba0d91395f95'} stderr={'bytes': 982, 'sha256': '99e6a12c80f6554e2ff90502b7de77338769ffba1ae139bf534badb9a077653d'}; model-callable tools.catalog is unavailable, so future DB-authority metadata/idempotency/accepted-session/status-alias requirements remain unproven",
   "preflight_evidence_binding": {
-    "agentic_os_head_sha": "2b43f843fbf096c2896e0660207c2f02bea1fd15",
-    "agentic_os_tree_sha": "93c3c9790aab0b96018e123eb84656466e3b346f",
+    "agentic_os_head_sha": "755e7756af0e6cf6f8931ffa85eb6a8fbac16b4e",
+    "agentic_os_tree_sha": "939d50f61f0c4c514279acae35af55e905596c01",
     "binding_kind": "generator_revision",
     "capability_source_paths": [
       "scripts/openclaw-tool-capability-preflight.py",
@@ -239,7 +239,7 @@
       "src/agentic_os/__init__.py"
     ],
     "containing_commit_self_binding": false,
-    "generated_at_utc": "2026-09-05T15:49:39+00:00",
+    "generated_at_utc": "2026-09-05T16:06:12+00:00",
     "invocation": {
       "argv": [
         "--live-installed-openclaw",
