@@ -10,7 +10,6 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONPATH: src
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,7 +58,7 @@ jobs:
         run: python -m unittest discover -s tests -v > "$RUNNER_TEMP/pr45-lexical-validation/full.log" 2>&1
       - name: Compile and verify unchanged boundaries
         run: |
-          python -m compileall -q scripts src tests
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q scripts src tests
           python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v > "$RUNNER_TEMP/pr45-lexical-validation/migrations.log" 2>&1
           git diff --check refs/remotes/origin/main...HEAD
           test -z "$(git status --porcelain)"
