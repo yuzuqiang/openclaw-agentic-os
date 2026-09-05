@@ -1,0 +1,110 @@
+diff --git a/docs/runtime-source-closure-contract.md b/docs/runtime-source-closure-contract.md
+index f884777..c7d3e6b 100644
+--- a/docs/runtime-source-closure-contract.md
++++ b/docs/runtime-source-closure-contract.md
+@@ -23,6 +23,11 @@ implicit dependency-free operation: unsupported transfers are rejected at the
+ original reference. This avoids enumerating another set of alias spellings for
+ each subsequent call.
+ 
++CommonJS `module.parent`, `module.children`, and `module.paths` are also
++unsupported capabilities: the first two expose other modules' loaders, while
++changing the search paths can redirect an otherwise literal require. Ordinary
++`module.exports` and read-only scalar metadata remain supported.
++
+ Supported loader forms include literal static/dynamic imports, direct literal
+ CommonJS calls, the existing simple `require` alias form, and directly assigned
+ `createRequire(import.meta.url)` / `createRequire(__filename)` loaders. Factory
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index 652da6b..d822af1 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -1308,7 +1308,9 @@ def _capability_member_end_or_fail(source_text: str, index: int) -> int | None:
+     forbidden_by_base = {
+         "Module": {"_load", "constructor", "process"},
+         "Reflect": {"constructor", "get", "process"},
+-        "module": {"_load", "constructor", "process"},
++        # Module graph references expose additional require functions; paths can
++        # redirect even a literal require before Node resolves its argument.
++        "module": {"_load", "constructor", "process", "parent", "children", "paths"},
+         "this": {"constructor", "process"},
+     }
+     for base_name, forbidden_members in forbidden_by_base.items():
+diff --git a/tests/test_runtime_module_graph_capabilities.py b/tests/test_runtime_module_graph_capabilities.py
+new file mode 100644
+index 0000000..4a2ac2c
+--- /dev/null
++++ b/tests/test_runtime_module_graph_capabilities.py
+@@ -0,0 +1,73 @@
++"""CommonJS module graph/search-path capabilities must not bypass provenance."""
++from __future__ import annotations
++
++import shutil
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++from tests.test_openclaw_real_gateway_contract_probe import MODULE
++
++SOURCE = MODULE.runtime_source_contract
++
++
++class RuntimeModuleGraphCapabilityTests(unittest.TestCase):
++    def test_module_graph_and_search_path_references_fail_closed(self) -> None:
++        for base in ("module", "(module)", "((module))"):
++            for member in ("parent", "children", "paths"):
++                for accessor in (f".{member}", f"['{member}']", f"?.['{member}']"):
++                    source = f"const ref={base}{accessor};consume(ref);"
++                    with self.subTest(source=source):
++                        with self.assertRaises(SOURCE.RuntimeSourceContractError):
++                            SOURCE.import_specifiers(source)
++        for source in (
++            "const r=module['parent']['require'];r('./hidden.cjs');",
++            "require('./bound.cjs');const r=module['children'][0]['require'];r('./hidden.cjs');",
++            "module['paths'].unshift('./alternate');require('fixture');",
++        ):
++            with self.subTest(source=source):
++                with self.assertRaises(SOURCE.RuntimeSourceContractError):
++                    SOURCE.import_specifiers(source)
++
++    def test_module_exports_metadata_and_unrelated_properties_remain_supported(self) -> None:
++        for source in (
++            "module.exports={ok:true};",
++            "module['exports']={ok:true};",
++            "const id=module.id;const filename=module.filename;const loaded=module.loaded;",
++            "const object={parent:1,children:[],paths:[]};console.log(object.parent);",
++            "const text=\"module['parent']['require']('./hidden.cjs')\";",
++            "// module.paths.push('./hidden');\nmodule.exports=1;",
++        ):
++            with self.subTest(source=source):
++                self.assertEqual(SOURCE.import_specifiers(source), [])
++
++    @unittest.skipUnless(shutil.which("node"), "Node is required for execution witnesses")
++    def test_real_node_module_graph_and_paths_can_execute_unbound_source(self) -> None:
++        cases = {
++            "parent": "const r=module['parent']['require'];r('./hidden.cjs');",
++            "children": "require('./bound.cjs');const r=module['children'][0]['require'];r('./hidden.cjs');",
++            "paths": "module['paths'].unshift('./alternate');require('fixture');",
++        }
++        for name, source in cases.items():
++            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
++                root = Path(directory)
++                (root / "main.cjs").write_text("require('./middle.cjs');", encoding="utf-8")
++                (root / "middle.cjs").write_text(source, encoding="utf-8")
++                (root / "bound.cjs").write_text("module.exports=1;", encoding="utf-8")
++                (root / "hidden.cjs").write_text("console.log('GRAPH_SOURCE_EXECUTED');", encoding="utf-8")
++                for folder, content in (
++                    ("alternate/fixture", "console.log('GRAPH_SOURCE_EXECUTED');"),
++                    ("node_modules/fixture", "console.log('DECOY_SOURCE_EXECUTED');"),
++                ):
++                    target = root / folder
++                    target.mkdir(parents=True)
++                    (target / "index.js").write_text(content, encoding="utf-8")
++                completed = subprocess.run(
++                    [shutil.which("node"), str(root / "main.cjs")], cwd=root,
++                    capture_output=True, text=True, check=True, timeout=15,
++                )
++                self.assertIn("GRAPH_SOURCE_EXECUTED", completed.stdout)
++                self.assertNotIn("DECOY_SOURCE_EXECUTED", completed.stdout)
++                with self.assertRaises(SOURCE.RuntimeSourceContractError):
++                    SOURCE.import_specifiers(source)
