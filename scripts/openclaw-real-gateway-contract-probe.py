@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-installation:tsx",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1264,57 +1265,7 @@ def _runtime_source_import_specifiers(source_text: str) -> list[tuple[str, bool]
 
 
 def _strip_runtime_source_comments(source_text: str) -> str:
-    output: list[str] = []
-    index = 0
-    state = "code"
-    quote = ""
-    while index < len(source_text):
-        character = source_text[index]
-        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
-        if state == "line_comment":
-            if character == "\n":
-                output.append(character)
-                state = "code"
-            else:
-                output.append(" ")
-            index += 1
-            continue
-        if state == "block_comment":
-            if character == "*" and next_character == "/":
-                output.extend((" ", " "))
-                index += 2
-                state = "code"
-            else:
-                output.append("\n" if character == "\n" else " ")
-                index += 1
-            continue
-        if state == "string":
-            output.append(character)
-            if character == "\\" and index + 1 < len(source_text):
-                output.append(source_text[index + 1])
-                index += 2
-                continue
-            if character == quote:
-                state = "code"
-                quote = ""
-            index += 1
-            continue
-        if character == "/" and next_character == "/":
-            output.extend((" ", " "))
-            index += 2
-            state = "line_comment"
-            continue
-        if character == "/" and next_character == "*":
-            output.extend((" ", " "))
-            index += 2
-            state = "block_comment"
-            continue
-        if character in {"'", '"', "`"}:
-            state = "string"
-            quote = character
-        output.append(character)
-        index += 1
-    return "".join(output)
+    return runtime_source_contract.strip_source_comments(source_text)
 
 
 def _persistent_runtime_source_paths(root: Path) -> tuple[str, ...]:
@@ -1546,28 +1497,66 @@ def _find_node_package_root(module_path: Path, package_name: str) -> Path:
     raise ProbeError(f"{package_name} runtime package root could not be resolved")
 
 
-def _directory_tree_sha256(root: Path) -> str:
+def _directory_tree_sha256(root: Path, *, confinement_root: Path | None = None) -> str:
+    """Bind an installation inventory without executing its package loaders.
+
+    Walking the physical tree is a conservative superset of the preload's
+    transitive dependency graph, including hoisted/pnpm packages, native tools,
+    package scopes and configuration. Symlinks are recorded, not traversed;
+    their targets must belong to the separately bound confinement tree.
+    """
     root = root.resolve()
+    confinement_root = (confinement_root or root).resolve()
+    try:
+        root.relative_to(confinement_root)
+    except ValueError as exc:
+        raise ProbeError("runtime launch package escapes the bound installation") from exc
     if not root.is_dir():
         raise ProbeError("runtime launch package root is missing")
     digest = hashlib.sha256()
-    files = sorted(path for path in root.rglob("*") if path.is_file())
-    if not files:
-        raise ProbeError("runtime launch package root is empty")
-    for path in files:
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        digest.update(_sha256_bytes(path.read_bytes()).encode())
-        digest.update(b"\0")
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda path: path.name)
+            for path in entries:
+                info = path.lstat()
+                record: dict[str, Any] = {
+                    "path": path.relative_to(root).as_posix(),
+                    "mode": stat.S_IMODE(info.st_mode),
+                }
+                if stat.S_ISLNK(info.st_mode):
+                    try:
+                        target = path.resolve(strict=True)
+                        target_relative = target.relative_to(confinement_root).as_posix()
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        raise ProbeError(
+                            "runtime launch symlink escapes or is absent from the bound installation"
+                        ) from exc
+                    if not target.is_file() and not target.is_dir():
+                        raise ProbeError("runtime launch symlink target is not a regular file or directory")
+                    record.update(kind="symlink", link=os.readlink(path), target=target_relative)
+                elif stat.S_ISDIR(info.st_mode):
+                    record["kind"] = "directory"
+                    pending.append(path)
+                elif stat.S_ISREG(info.st_mode):
+                    record.update(kind="file", sha256=_sha256_bytes(path.read_bytes()))
+                else:
+                    raise ProbeError("runtime launch installation contains a non-regular file")
+                digest.update(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+                digest.update(b"\n")
+        except OSError as exc:
+            raise ProbeError("runtime launch installation could not be completely inventoried") from exc
     return digest.hexdigest()
 
 
-def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
+def _runtime_directory_binding(
+    path: Path, label: str, *, confinement_root: Path | None = None
+) -> dict[str, str]:
     resolved = path.resolve()
     return {
         "path": label,
-        "sha256": _directory_tree_sha256(resolved),
+        "sha256": _directory_tree_sha256(resolved, confinement_root=confinement_root),
         "realpath_sha256": _text_sha256(str(resolved)),
     }
 
@@ -1587,6 +1576,12 @@ def _runtime_launch_bindings(
         label="tsx",
     )
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    installation_root = openclaw_root.resolve()
+    try:
+        tsx_preload.relative_to(installation_root)
+        tsx_package_root.relative_to(installation_root)
+    except ValueError as exc:
+        raise ProbeError("tsx preload escapes the bound OpenClaw installation") from exc
     return (
         node_executable,
         tsx_preload.as_uri(),
@@ -1594,7 +1589,11 @@ def _runtime_launch_bindings(
             _runtime_file_binding(node_executable, "runtime-launcher:node"),
             _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
             _runtime_directory_binding(
-                tsx_package_root, "runtime-preload-package:tsx"
+                tsx_package_root, "runtime-preload-package:tsx",
+                confinement_root=installation_root,
+            ),
+            _runtime_directory_binding(
+                installation_root, "runtime-preload-installation:tsx"
             ),
         ],
     )
@@ -1608,9 +1607,9 @@ def _validate_runtime_launch_sources(value: Any) -> list[dict[str, str]]:
         for item in value
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
-    missing = sorted(set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS) - set(by_path))
-    if missing:
-        raise ProbeError("runtime launch source binding is incomplete")
+    required = set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
+    if set(by_path) != required or len(value) != len(required):
+        raise ProbeError("runtime launch source binding is incomplete or ambiguous")
     validated: list[dict[str, str]] = []
     for label in PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS:
         item = by_path[label]
