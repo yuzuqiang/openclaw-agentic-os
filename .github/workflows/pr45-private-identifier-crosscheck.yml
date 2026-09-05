@@ -5,6 +5,12 @@ on:
     paths: [.github/workflows/pr45-private-identifier-crosscheck.yml]
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: pr45-private-identifier-verification
+  cancel-in-progress: true
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -34,7 +40,6 @@ jobs:
             if (blob.data.encoding !== 'base64') throw new Error('Unexpected blob encoding');
             fs.writeFileSync(process.env.RUNNER_TEMP + '/private-identifiers.patch', Buffer.from(blob.data.content, 'base64'));
       - name: Validate base and patch, then commit isolated tested tree
-        shell: bash
         run: |
           python - <<'PY'
           import hashlib, json, os, pathlib, subprocess
