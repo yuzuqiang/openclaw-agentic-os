@@ -5693,7 +5693,7 @@ def _persistent_prelaunch_failure_summary(
         "agentic_os_head_sha": _git(ROOT, "rev-parse", "HEAD"),
         "agentic_sources": agentic_sources,
         "runtime_sources": runtime_sources,
-        "required_tool_names": sorted(REQUIRED_METHODS),
+        "required_tool_names": sorted(PERSISTENT_REQUIRED_TOOL_NAMES),
         "current_head_evidence_required": True,
         "phase_c_exact_head_required_before_review": True,
         "runtime_ready": False,
