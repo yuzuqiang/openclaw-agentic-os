@@ -26,6 +26,7 @@ from typing import Any, Mapping
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agentic_os import DB_AUTHORITY_ENABLED
 import agentic_os_runtime_source_contract as runtime_source_contract
 
 
