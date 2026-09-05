@@ -1622,6 +1622,12 @@ def _computed_member_target_may_be_function_constructor(
         cursor -= 1
     if cursor < 0:
         return False
+    process_env_target = "process.env"
+    start = cursor - len(process_env_target) + 1
+    if start >= 0 and source_text[start : cursor + 1] == process_env_target:
+        before = source_text[start - 1] if start > 0 else ""
+        if not before or (not _is_identifier_character(before) and before not in "."):
+            return False
     window_start = max(0, cursor - 240)
     target_window = source_text[window_start : cursor + 1]
     return "=>" in target_window or bool(

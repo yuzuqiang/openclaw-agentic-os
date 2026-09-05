@@ -276,6 +276,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_process_env_computed_lookup_does_not_inherit_function_window_risk(self) -> None:
+        source = (
+            "const f = () => true;\n"
+            "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
     def test_package_exports_reject_targets_that_escape_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
