@@ -1572,6 +1572,26 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_preload_package_binding(
+    root: Path, package_root: Path, preload: Path
+) -> dict[str, str]:
+    """Bind package assets plus transitive imports, including hoisted siblings.
+
+    Unsupported or out-of-root dependencies must fail, not degrade to the old
+    package-only digest. This snapshot is not an immutable-launcher substitute.
+    """
+    root = root.resolve()
+    try:
+        entrypoint = runtime_source_contract.source_relative_path(root, preload)
+        closure = runtime_source_contract.runtime_source_digest_snapshot(root, entrypoints=(entrypoint,))
+        binding = _runtime_directory_binding(package_root, "runtime-preload-package:tsx")
+        payload = {"schema": "runtime-preload-closure.v1", "package_sha256": binding["sha256"], "sources": closure}
+        binding["sha256"] = _sha256_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        return binding
+    except (runtime_source_contract.RuntimeSourceContractError, OSError) as exc:
+        raise ProbeError("runtime preload dependency closure could not be bound") from exc
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1593,8 +1613,8 @@ def _runtime_launch_bindings(
         [
             _runtime_file_binding(node_executable, "runtime-launcher:node"),
             _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
-            _runtime_directory_binding(
-                tsx_package_root, "runtime-preload-package:tsx"
+            _runtime_preload_package_binding(
+                openclaw_root, tsx_package_root, tsx_preload
             ),
         ],
     )

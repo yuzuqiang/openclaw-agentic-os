@@ -524,6 +524,27 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+Source-closure validation is a restricted, fail-closed input contract, not a
+JavaScript sandbox. Its shared lexical view preserves executable template
+interpolations and source offsets while excluding comments and literal data.
+Hashbangs are handled before quotes; executable HTML-comment tokens are rejected
+rather than guessing Script versus Module semantics. Balanced direct `require`
+aliases are supported, but unaccounted transfers of Worker constructors,
+child-process capabilities, and `createRequire` factories or results are rejected.
+Only the supported complete launch signatures are accepted: unbound launch
+options such as `execArgv`, `NODE_OPTIONS`, or a different `cwd` cannot be hidden
+behind an otherwise valid entrypoint prefix.
+
+Every reached executable file binds its nearest controlling `package.json`,
+including entrypoints and relative imports. Package imports and self-reference
+lookup stop at that nearest scope rather than inheriting an outer package map.
+The `runtime-preload-package:tsx` fingerprint commits to both the package tree and
+the resolved transitive preload-source closure, including hoisted and pnpm
+sibling dependencies. Revalidation recomputes that closure; unsupported, missing,
+or out-of-root preload dependencies fail instead of falling back to a
+package-only hash. The new regression fixtures and bounded Node syntax oracles
+do not constitute a real OpenClaw runtime attestation or enable persistent mode.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must
