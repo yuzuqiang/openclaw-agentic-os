@@ -22,12 +22,15 @@ jobs:
           set -euo pipefail
           base64 --decode .github/pr45-source-closure.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/pr45-repair.patch"
           echo "d6e3694d66f3b2f0e64ae9f28b8d108ca7dc71d4c648452a331e542b42629191  $RUNNER_TEMP/pr45-repair.patch" | sha256sum --check
+          base64 --decode .github/pr45-native-launch.patch.xz.b64 | xz --decompress > "$RUNNER_TEMP/pr45-native.patch"
+          echo "392454ea54aee1e0c62119e72428b93fcd31819a7f0cfcee91586acba24689b2  $RUNNER_TEMP/pr45-native.patch" | sha256sum --check
           git worktree add --detach "$RUNNER_TEMP/pr45-repaired" 871b8242767192cdf2c9f8ba71724b9f346ccc1b
           cd "$RUNNER_TEMP/pr45-repaired"
-          git apply --check "$RUNNER_TEMP/pr45-repair.patch"
           git apply --index "$RUNNER_TEMP/pr45-repair.patch"
           test "$(git write-tree)" = b751a64e754ef11fb99bcd16c521f6f51e1197b8
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: account for execution capability escapes and runtime dependency scopes'
+          git apply --index "$RUNNER_TEMP/pr45-native.patch"
+          test "$(git write-tree)" = ae9959eb7a5c23b5b0d131e85831f5981ae3f2fc
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: close execution capability escapes and bind native launch dependency scopes'
           test -z "$(git status --porcelain)"
       - name: Privacy preflight
         run: cd "$RUNNER_TEMP/pr45-repaired" && PYTHONPATH=src python -m agentic_os.cli preflight
@@ -45,7 +48,7 @@ jobs:
           cd "$RUNNER_TEMP/pr45-repaired"
           git diff --check origin/main...HEAD
           test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD^{tree})" = b751a64e754ef11fb99bcd16c521f6f51e1197b8
+          test "$(git rev-parse HEAD^{tree})" = ae9959eb7a5c23b5b0d131e85831f5981ae3f2fc
           python - <<'PY'
           import json, os, pathlib, subprocess
           files = sorted(subprocess.check_output(['git', 'diff', '--name-only', '871b8242767192cdf2c9f8ba71724b9f346ccc1b', 'HEAD'], text=True).splitlines())
@@ -53,12 +56,12 @@ jobs:
           assert files == allowed, files
           directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-publication'
           directory.mkdir()
-          payload = {'base': '871b8242767192cdf2c9f8ba71724b9f346ccc1b', 'tree': 'b751a64e754ef11fb99bcd16c521f6f51e1197b8', 'files': [{'path': path, 'mode': '100644', 'type': 'blob', 'content': pathlib.Path(path).read_text()} for path in files]}
+          payload = {'base': '871b8242767192cdf2c9f8ba71724b9f346ccc1b', 'tree': 'ae9959eb7a5c23b5b0d131e85831f5981ae3f2fc', 'files': [{'path': path, 'mode': '100644', 'type': 'blob', 'content': pathlib.Path(path).read_text()} for path in files]}
           (directory / 'source.json').write_text(json.dumps(payload))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: pr45-verified-b751a64e
+          name: pr45-verified-ae9959eb
           path: ${{ runner.temp }}/pr45-publication/source.json
           retention-days: 3
   publish:
@@ -69,7 +72,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pr45-verified-b751a64e
+          name: pr45-verified-ae9959eb
           path: pr45-publication
       - name: Publish validated tree to isolated candidate branch only
         uses: actions/github-script@v7
@@ -78,11 +81,11 @@ jobs:
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('pr45-publication/source.json', 'utf8'));
             const allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_closure_adversarial.py'];
-            if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== 'b751a64e754ef11fb99bcd16c521f6f51e1197b8' || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected publication payload');
+            if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== 'ae9959eb7a5c23b5b0d131e85831f5981ae3f2fc' || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected publication payload');
             const base = await github.rest.git.getCommit({...context.repo, commit_sha: p.base});
             const tree = await github.rest.git.createTree({...context.repo, base_tree: base.data.tree.sha, tree: p.files});
             if (tree.data.sha !== p.tree) throw new Error('Published tree differs from tested tree');
-            const commit = await github.rest.git.createCommit({...context.repo, message: 'fix: account for execution capability escapes and runtime dependency scopes', tree: tree.data.sha, parents: [p.base]});
-            await github.rest.git.createRef({...context.repo, ref: 'refs/heads/fix/pr45-verified-reference-b751a64e', sha: commit.data.sha});
+            const commit = await github.rest.git.createCommit({...context.repo, message: 'fix: close execution capability escapes and bind native launch dependency scopes', tree: tree.data.sha, parents: [p.base]});
+            await github.rest.git.createRef({...context.repo, ref: 'refs/heads/fix/pr45-verified-reference-ae9959eb', sha: commit.data.sha});
             core.notice('Verified candidate: ' + commit.data.sha);
             await core.summary.addHeading('PR45 verified reference-accounting repair').addRaw('Commit: `' + commit.data.sha + '`\n\nTree: `' + p.tree + '`\n\nThe original PR has NOT been moved or merged.').write();
