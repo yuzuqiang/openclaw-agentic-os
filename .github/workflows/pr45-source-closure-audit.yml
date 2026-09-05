@@ -31,17 +31,20 @@ jobs:
           set -euo pipefail
           cat .github/pr45-repair.*.b64 | base64 --decode | gzip --decompress > "$RUNNER_TEMP/pr45-repair.patch"
           cp .github/pr45-final.patch "$RUNNER_TEMP/pr45-final.patch"
+          base64 --decode .github/pr45-context.b64 | gzip --decompress > "$RUNNER_TEMP/pr45-context.patch"
           echo "eda17c265b69a634036549e1b2cbd7bd48060b0def3e117e8e6cd5069e972cc1  $RUNNER_TEMP/pr45-repair.patch" | sha256sum --check
           echo "1560f07e73dfa6b91b6725fb727b347c4fb57844fafff28b2bd65377b5116eb9  $RUNNER_TEMP/pr45-final.patch" | sha256sum --check
+          echo "bdf94c82f6f11fc73ae45400b85b0892e419cf82b5a5b55aeace40ab2b4e3515  $RUNNER_TEMP/pr45-context.patch" | sha256sum --check
           git checkout --detach 871b8242767192cdf2c9f8ba71724b9f346ccc1b
           git apply --index "$RUNNER_TEMP/pr45-repair.patch"
           git apply --index "$RUNNER_TEMP/pr45-final.patch"
+          git apply --index "$RUNNER_TEMP/pr45-context.patch"
           git diff --cached --check
-          test "$(git write-tree)" = ff764a875b78c387e4a80b9a44ffe6206b4ee0cf
+          test "$(git write-tree)" = 20c2e9efb9c08b7f5503fcb112eb10176857111e
           git config user.name 'PR45 source-closure repair'
           git config user.email 'pr45-repair@users.noreply.github.com'
-          GIT_AUTHOR_DATE='1788580829 +0000' GIT_COMMITTER_DATE='1788581509 +0000' git -c commit.gpgsign=false commit -m 'fix: close runtime capability transfers and bind preload source closure'
-          test "$(git rev-parse HEAD)" = 8aa111bd6428a051623b2335d19bed4d90888241
+          GIT_AUTHOR_DATE='1788580829 +0000' GIT_COMMITTER_DATE='1788582163 +0000' git -c commit.gpgsign=false commit -m 'fix: close runtime capability transfers and bind preload source closure'
+          test "$(git rev-parse HEAD)" = c78cc45d1a54f202efe8d9170135b503fc6a95b8
           mkdir -p "$RUNNER_TEMP/pr45-output"
           git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr45-output/revision.txt"
           python --version > "$RUNNER_TEMP/pr45-output/versions.txt"
@@ -85,6 +88,6 @@ jobs:
         run: |
           set -euo pipefail
           git fetch "$RUNNER_TEMP/pr45-verified/source.bundle" HEAD
-          test "$(git rev-parse FETCH_HEAD)" = 8aa111bd6428a051623b2335d19bed4d90888241
-          test "$(git rev-parse FETCH_HEAD^{tree})" = ff764a875b78c387e4a80b9a44ffe6206b4ee0cf
-          git push origin FETCH_HEAD:refs/heads/fix/pr45-source-closure-verified-8aa111b
+          test "$(git rev-parse FETCH_HEAD)" = c78cc45d1a54f202efe8d9170135b503fc6a95b8
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 20c2e9efb9c08b7f5503fcb112eb10176857111e
+          git push origin FETCH_HEAD:refs/heads/fix/pr45-source-closure-verified-c78cc45
