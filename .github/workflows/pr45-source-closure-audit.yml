@@ -1,12 +1,12 @@
-name: PR45 isolated source-closure audit
+name: PR45 exact-tree fix validation
 on:
   push:
     branches:
-      - fix/pr45-source-closure-audit-20260904
+      - fix/pr45-exact-tree-validation-83042208
 permissions:
   contents: read
 concurrency:
-  group: pr45-isolated-source-closure-audit
+  group: pr45-exact-tree-validation-83042208
   cancel-in-progress: false
 jobs:
   validate-fix:
