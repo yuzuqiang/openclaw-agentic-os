@@ -1,0 +1,75 @@
+name: PR45 resolution-base verification
+on:
+  push:
+    branches: [fix/pr45-source-closure-audit-20260904]
+    paths: [.github/workflows/pr45-resolution-bases.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Decode transport and require exact patch identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-base-results"
+          cp .github/pr45-resolution-bases.patch.zlib.b64 "$RUNNER_TEMP/pr45-base-results/transport.txt"
+          python - <<'PY'
+          import base64, hashlib, os, pathlib, zlib
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-base-results'
+          encoded = (directory / 'transport.txt').read_text().strip()
+          # Repair known transcription damage in the transport only; the
+          # complete decompressed patch digest below is the authority.
+          for old, new in (
+              ('muTMzzTMs3dOzzh', 'muTMzzh'),
+              ('XM5DYzYViV', 'XM5DYzYyViV'),
+              ('B1MRUKFUKFQw', 'B1MRUKFQw'),
+          ):
+              encoded = encoded.replace(old, new)
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
+          digest = hashlib.sha256(patch).hexdigest()
+          assert digest == '987d67e390b9ee74e3de45b34a01401f9e3b2b038e10f5d5755354013f7ae645', digest
+          (directory / 'verified.patch').write_bytes(patch)
+          (directory / 'patch.sha256').write_text(digest + '\n')
+          PY
+      - name: Prepare exact business-source candidate
+        run: |
+          git checkout --detach bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          test -z "$(git status --porcelain)"
+          git apply --index "$RUNNER_TEMP/pr45-base-results/verified.patch"
+          test "$(git write-tree)" = 2f3ec8f218f566a87db1851984fe624fdda8b1a3
+          git -c user.name='PR45 source audit' -c user.email='pr45-audit@users.noreply.github.com' commit -m 'fix: bind runtime loader bases and account for URL capability escapes'
+          git rev-parse HEAD HEAD^ HEAD^{tree} > "$RUNNER_TEMP/pr45-base-results/identity.txt"
+          python --version >> "$RUNNER_TEMP/pr45-base-results/identity.txt"
+          node --version >> "$RUNNER_TEMP/pr45-base-results/identity.txt"
+      - name: Focused original and new regressions
+        run: PYTHONPATH=src python -m unittest tests.test_runtime_resolution_bases tests.test_runtime_source_contract_regressions tests.test_openclaw_real_gateway_contract_probe -v > "$RUNNER_TEMP/pr45-base-results/focused.txt" 2>&1
+      - name: Full project suite
+        run: PYTHONPATH=src python -m unittest discover -s tests -v > "$RUNNER_TEMP/pr45-base-results/full-suite.txt" 2>&1
+      - name: Privacy, compilation, migration parity and worktree checks
+        run: |
+          PYTHONPATH=src python -m agentic_os.cli preflight | tee "$RUNNER_TEMP/pr45-base-results/privacy.txt"
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pr45-pycache" PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migration_package_parity -v > "$RUNNER_TEMP/pr45-base-results/parity.txt" 2>&1
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - name: Publish only the independently checked candidate branch
+        run: |
+          test "$(git rev-parse HEAD^)" = bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          test "$(git rev-parse HEAD^{tree})" = 2f3ec8f218f566a87db1851984fe624fdda8b1a3
+          git push origin HEAD:refs/heads/fix/pr45-resolution-bases-2f3ec8f218f5
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-resolution-base-verification
+          path: ${{ runner.temp }}/pr45-base-results
+          retention-days: 3
