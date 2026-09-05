@@ -1,0 +1,33 @@
+name: PR45 integration source collection
+on:
+  push:
+    branches: [fix/pr45-integration-c5d7a1d]
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Collect only PR45 candidate and audit refs
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-integration"
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          dest = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-integration'
+          refs = subprocess.check_output(['git', 'for-each-ref', '--format=%(refname)', 'refs/remotes/origin/fix/pr45-', 'refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824', 'refs/remotes/origin/main'], text=True).splitlines()
+          assert any('phase-b/issue44-' in r for r in refs)
+          subprocess.run(['git', 'bundle', 'create', str(dest / 'parallel-candidates.bundle'), *refs], check=True)
+          data = {r: subprocess.check_output(['git','rev-parse',r],text=True).strip() for r in refs}
+          (dest / 'refs.json').write_text(json.dumps(data, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-integration-sources
+          path: ${{ runner.temp }}/pr45-integration
+          retention-days: 3
