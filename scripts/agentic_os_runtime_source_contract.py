@@ -1548,7 +1548,7 @@ def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bo
     token = source_text[token_start:token_end]
     if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
         return False
-    if token in {"await", "case", "const", "let", "return", "throw", "var", "yield"}:
+    if token in {"await", "case", "const", "return", "throw", "var", "yield"}:
         before_token = token_start - 1
         while before_token >= 0 and source_text[before_token].isspace():
             before_token -= 1
@@ -1591,12 +1591,146 @@ def _token_is_contextual_for_of(source_text: str, token_start: int, token_end: i
         word = source_text[before_await + 1 : await_prefix_end]
     if word != "for":
         return False
+    header_close = _matching_for_header_close_index(source_text, opener)
+    if header_close < 0 or _for_header_has_top_level_semicolon(
+        source_text, opener + 1, header_close
+    ):
+        return False
     header_prefix = source_text[opener + 1 : token_start]
-    if ";" in header_prefix or not header_prefix.strip():
+    if not header_prefix.strip():
         return False
     previous = source_text[token_start - 1] if token_start > 0 else ""
     following = source_text[token_end] if token_end < len(source_text) else ""
     return not _is_identifier_character(previous) and not _is_identifier_character(following)
+
+
+def _matching_for_header_close_index(source_text: str, opener: int) -> int:
+    index = opener + 1
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if depth == 0:
+                return index if character == ")" else -1
+            depth -= 1
+            index += 1
+            continue
+        index += 1
+    return -1
+
+
+def _for_header_has_top_level_semicolon(
+    source_text: str, start_index: int, end_index: int
+) -> bool:
+    index = start_index
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < end_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < end_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < end_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= end_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if depth > 0:
+                depth -= 1
+            index += 1
+            continue
+        if character == ";" and depth == 0:
+            return True
+        index += 1
+    return False
 
 
 def _computed_member_bracket_has_target(source_text: str, bracket_index: int) -> bool:
@@ -1617,7 +1751,7 @@ def _computed_member_bracket_has_target(source_text: str, bracket_index: int) ->
     token = source_text[token_start:token_end]
     if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
         return False
-    if token in {"await", "case", "const", "let", "return", "throw", "var", "yield"}:
+    if token in {"await", "case", "const", "return", "throw", "var", "yield"}:
         before_token = token_start - 1
         while before_token >= 0 and source_text[before_token].isspace():
             before_token -= 1
@@ -1701,12 +1835,93 @@ def _computed_member_target_may_be_function_constructor(
     if start >= 0 and source_text[start : cursor + 1] == process_env_target:
         before = source_text[start - 1] if start > 0 else ""
         if not before or (not _is_identifier_character(before) and before not in "."):
-            return False
+            return _process_env_target_was_reassigned(source_text, start)
     window_start = max(0, cursor - 240)
     target_window = source_text[window_start : cursor + 1]
     return "=>" in target_window or bool(
         re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
     )
+
+
+def _process_env_target_was_reassigned(source_text: str, target_start: int) -> bool:
+    index = 0
+    state = "code"
+    quote = ""
+    while index < target_start:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < target_start else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < target_start:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= target_start:
+            index = regex_end
+            continue
+        if character == "`":
+            chunks, new_index = _template_expression_chunks(source_text, index)
+            if new_index <= target_start and any(
+                _process_env_target_was_reassigned(chunk, len(chunk)) for chunk in chunks
+            ):
+                return True
+            index = new_index
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        process_end = _parse_process_base(source_text, index)
+        if process_end is not None:
+            member = _parse_process_member(source_text, process_end)
+            if member is not None and member[0] == "env":
+                after_env = _skip_js_trivia(source_text, member[1])
+                if after_env < target_start and _starts_js_assignment_operator(
+                    source_text, after_env
+                ):
+                    return True
+                index = max(index + 1, member[1])
+                continue
+        index += 1
+    return False
+
+
+def _starts_js_assignment_operator(source_text: str, index: int) -> bool:
+    for operator in ("**=", ">>>=", "<<=", ">>=", "&&=", "||=", "??="):
+        if source_text.startswith(operator, index):
+            return True
+    if index >= len(source_text):
+        return False
+    character = source_text[index]
+    next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+    if character == "=":
+        return next_character not in {"=", ">"}
+    return character in {"+", "-", "*", "/", "%", "&", "|", "^"} and next_character == "="
 
 
 def _parse_process_dlopen_invocation(

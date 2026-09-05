@@ -157,6 +157,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "build(\"return import('./hidden.mjs')\")();"
         )
 
+    def test_for_initializer_identifier_named_of_is_still_a_computed_member_target(self) -> None:
+        self.assert_closed(
+            "const of=()=>{}; "
+            "for (const build=of['constructor']; false;) { "
+            "build(\"return import('./hidden.mjs')\")() "
+            "}"
+        )
+
     def test_contextual_for_of_array_literals_do_not_look_like_computed_members(self) -> None:
         source = "for (const value of ['constructor']) { void value; }"
         self.assertEqual(CONTRACT.import_specifiers(source), [])
@@ -282,6 +290,8 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "const member='constructor'; const build=(function(){})[member]; build(\"return require('./hidden.cjs')\")();",
             "const member='constructor'; const build=(class {})[member]; build(\"return import('./hidden.mjs')\")();",
             "const build=(()=>{})['constructor']; build(\"return import('./hidden.mjs')\")();",
+            "var let=()=>{}; const build=let['constructor']; build(\"return import('./hidden.mjs')\")();",
+            "process.env=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
         ):
             with self.subTest(source=source):
                 self.assert_closed(source)
