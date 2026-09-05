@@ -1587,15 +1587,39 @@ def _runtime_launch_bindings(
         label="tsx",
     )
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    # The preload runs before the candidate entrypoint. Its sibling/hoisted
+    # dependencies need their own closure, rooted at the resolved preload, not
+    # just a hash of node_modules/tsx. Unsupported dynamic/native loader paths
+    # fail closed; this does not assert that arbitrary tsx releases are trusted.
+    try:
+        if tsx_preload.suffix not in runtime_source_contract.PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
+            raise runtime_source_contract.RuntimeSourceContractError(
+                "runtime preload has an unsupported executable extension"
+            )
+        preload_relative = runtime_source_contract.source_relative_path(
+            openclaw_root, tsx_preload
+        )
+        preload_snapshot = runtime_source_contract.runtime_source_digest_snapshot(
+            openclaw_root, entrypoints=(preload_relative,)
+        )
+        package_binding = _runtime_directory_binding(
+            tsx_package_root, "runtime-preload-package:tsx"
+        )
+        package_binding["sha256"] = _canonical_sha256({
+            "package_tree_sha256": package_binding["sha256"],
+            "preload_dependency_sources": runtime_source_contract.source_records_from_snapshot(
+                preload_snapshot
+            ),
+        })
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise ProbeError(f"tsx runtime preload dependency closure is unbound: {exc}") from exc
     return (
         node_executable,
         tsx_preload.as_uri(),
         [
             _runtime_file_binding(node_executable, "runtime-launcher:node"),
             _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
-            _runtime_directory_binding(
-                tsx_package_root, "runtime-preload-package:tsx"
-            ),
+            package_binding,
         ],
     )
 

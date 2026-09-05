@@ -524,6 +524,20 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+The source-closure collector is a restricted static profile, not a JavaScript
+sandbox or proof of runtime isolation. Execution capabilities must be used in
+fully bound direct calls; unsupported alias transfers, reflective acquisition,
+re-exports, custom child/Worker launch options, and working-directory changes
+fail closed. Child script filenames are bound against the candidate launch
+working directory, while Worker URL imports remain importer-relative. The
+collector binds each executable source's controlling package scope and applies
+the same lexical rules to comments, escaped identifiers, and template
+interpolations. The tsx preload has a separate transitive dependency snapshot,
+including sibling packages and their metadata; an unprovable dynamic/native
+preload closure is rejected rather than reduced to the tsx package directory.
+These checks do not make arbitrary tsx versions supported or replace the
+external trusted-launcher requirements above.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must
