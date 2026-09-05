@@ -8,7 +8,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     outputs:
       tree: ${{ steps.prepare.outputs.tree }}
     steps:
@@ -19,6 +19,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Prepare and verify isolated repair tree
         id: prepare
         shell: bash
@@ -38,11 +41,11 @@ jobs:
           assert tree == spec['tree'], (tree, spec['tree'])
           subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: bind source capabilities, package scopes and preload installation'], cwd=candidate, check=True)
           files = subprocess.check_output(['git', 'diff', '--name-only', spec['base'], 'HEAD'], cwd=candidate, text=True).splitlines()
-          allowed = ['scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_regressions.py']
+          allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py']
           assert sorted(files) == allowed
           artifact = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-publish'
           artifact.mkdir()
-          payload = {'base': spec['base'], 'tree': tree, 'files': [{'path': name, 'mode': '100644', 'type': 'blob', 'content': (candidate / name).read_text()} for name in files]}
+          payload = {'base': spec['base'], 'tree': tree, 'files': [{'path': name, 'mode': subprocess.check_output(['git', 'ls-files', '--stage', '--', name], cwd=candidate, text=True).split()[0], 'type': 'blob', 'content': (candidate / name).read_text()} for name in files]}
           (artifact / 'publish.json').write_text(json.dumps(payload))
           with open(os.environ['GITHUB_ENV'], 'a') as out:
               out.write(f'CANDIDATE_DIR={candidate}\n')
@@ -88,7 +91,7 @@ jobs:
           script: |
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('pr45-publish/publish.json', 'utf8'));
-            const allowed = ['scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_regressions.py'];
+            const allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py'];
             if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== process.env.EXPECTED_TREE || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected repair payload');
             const repo = context.repo;
             const base = await github.rest.git.getCommit({...repo, commit_sha: p.base});
