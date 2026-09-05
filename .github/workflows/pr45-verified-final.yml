@@ -1,0 +1,80 @@
+name: PR45 verified final candidate
+on:
+  push:
+    branches:
+      - fix/pr45-final-integration-audit-20260905
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9ea45a8fcf2be432380c465eba1573d3010294d7
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Reconstruct and verify the exact integration tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, hashlib, json, pathlib, subprocess, zlib
+          blobs = [
+              'f0ce8898182eeb4fb561f92c079bc5d10d884464',
+              '3b722a3c6fc2ef8f2d1b07af2af4df7541f5c676',
+              '6b1a354a48e33f46c481d2b3b5b22e83aa4b8953',
+              'e50a838998c0051ba2ad52c86a5ef1eafc5e884a',
+          ]
+          chunks = []
+          for sha in blobs:
+              record = json.loads(subprocess.check_output([
+                  'gh', 'api', f'repos/yuzuqiang/openclaw-agentic-os/git/blobs/{sha}'
+              ]))
+              raw = base64.b64decode(record['content'])
+              identity = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+              if identity != sha:
+                  raise SystemExit('Patch transport identity mismatch')
+              chunks.append(raw.decode('ascii'))
+          patch = zlib.decompress(base64.b64decode(''.join(chunks), validate=True))
+          if hashlib.sha256(patch).hexdigest() != 'f1916b700f7e76d9b9199b654031b8f56bed738cd4c86e99d3f1ddc5a1b9f1c25':
+              raise SystemExit('Patch digest mismatch')
+          target = pathlib.Path('/tmp/pr45-final.patch')
+          target.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(target)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(target)], check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
+          if tree != 'acfc3644257229b652432b6f15e5fd0c047ea38e':
+              raise SystemExit(f'Unexpected reconstructed tree: {tree}')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git cat-file -e 698cb655e04cc4e66140b850d573a228d1058011^{commit}
+          candidate=$(printf '%s\n' 'fix: close PR45 source binding, resolution and lexical review gaps' '' 'Integrate source identity, module-origin, native-child and resolution-base audits.' 'Reject ASI slash ambiguity with Node-backed regression witnesses.' 'Preserve the disabled trusted-launcher authority boundary.' | git commit-tree acfc3644257229b652432b6f15e5fd0c047ea38e -p 698cb655e04cc4e66140b850d573a228d1058011)
+          git checkout --detach "$candidate"
+          git diff --check 698cb655e04cc4e66140b850d573a228d1058011..HEAD
+          git rev-parse HEAD HEAD^{tree}
+      - name: Privacy preflight
+        run: PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full Python 3.10 and Node 20 regression suite
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile sources and verify tracked cleanliness
+        run: |
+          PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/pr45-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+          test -z "$(git status --porcelain)"
+      - name: Publish only the verified isolated candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git push origin HEAD:refs/heads/fix/pr45-verified-final-20260905-ff9c02
+          printf 'Verified commit: %s\nVerified tree: %s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_STEP_SUMMARY"
