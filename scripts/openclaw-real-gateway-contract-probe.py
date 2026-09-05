@@ -1572,6 +1572,43 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_preload_package_binding(
+    openclaw_root: Path, package_root: Path, preload: Path
+) -> dict[str, str]:
+    """Bind package bytes AND the preload's resolved transitive input closure.
+
+    A package-tree hash alone misses hoisted/pnpm sibling dependencies and
+    relative imports outside that package. Use the same fail-closed resolver
+    as candidate sources. Unresolvable, dynamic or out-of-root preload inputs
+    are not silently accepted as a complete launcher binding.
+    """
+    root = openclaw_root.resolve()
+    try:
+        entrypoint = runtime_source_contract.source_relative_path(root, preload)
+        paths = runtime_source_contract.runtime_source_paths(
+            root, entrypoints=(entrypoint,)
+        )
+        closure = [
+            {
+                "path": relative,
+                "sha256": _sha256_bytes((root / relative).read_bytes()),
+                "realpath_sha256": runtime_source_contract.path_sha256(root / relative),
+            }
+            for relative in paths
+        ]
+    except (runtime_source_contract.RuntimeSourceContractError, OSError) as exc:
+        raise ProbeError("tsx runtime preload dependency closure could not be bound") from exc
+    package = _runtime_directory_binding(package_root, "runtime-preload-package:tsx")
+    payload = {"package": package, "closure": closure}
+    return {
+        "path": package["path"],
+        "sha256": _sha256_bytes(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ),
+        "realpath_sha256": package["realpath_sha256"],
+    }
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1593,8 +1630,8 @@ def _runtime_launch_bindings(
         [
             _runtime_file_binding(node_executable, "runtime-launcher:node"),
             _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
-            _runtime_directory_binding(
-                tsx_package_root, "runtime-preload-package:tsx"
+            _runtime_preload_package_binding(
+                openclaw_root, tsx_package_root, tsx_preload
             ),
         ],
     )
