@@ -1587,15 +1587,35 @@ def _runtime_launch_bindings(
         label="tsx",
     )
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    try:
+        preload_relative = runtime_source_contract.source_relative_path(
+            openclaw_root, tsx_preload
+        )
+        preload_sources = runtime_source_contract.runtime_source_digest_snapshot(
+            openclaw_root, entrypoints=(preload_relative,), node_resolution=True,
+        )
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise ProbeError(f"tsx runtime preload closure could not be bound: {exc}") from exc
+    # The package tree alone omits sibling/hoisted dependencies and their
+    # resolution metadata. Bind both it and the recursively resolved closure.
+    # Unsupported loaders or dependencies outside the candidate root fail closed;
+    # a successful import.meta.resolve is not evidence of a complete closure.
+    preload_package_binding = _runtime_directory_binding(
+        tsx_package_root, "runtime-preload-package:tsx"
+    )
+    preload_package_binding["sha256"] = _canonical_sha256({
+        "package_tree_sha256": preload_package_binding["sha256"],
+        "source_closure": runtime_source_contract.source_records_from_snapshot(
+            preload_sources
+        ),
+    })
     return (
         node_executable,
         tsx_preload.as_uri(),
         [
             _runtime_file_binding(node_executable, "runtime-launcher:node"),
             _runtime_file_binding(tsx_preload, "runtime-preload:tsx"),
-            _runtime_directory_binding(
-                tsx_package_root, "runtime-preload-package:tsx"
-            ),
+            preload_package_binding,
         ],
     )
 
