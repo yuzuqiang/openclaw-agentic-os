@@ -5,33 +5,94 @@ on:
       - fix/pr45-source-closure-audit-20260904
 permissions:
   contents: read
+concurrency:
+  group: pr45-isolated-source-closure-audit
+  cancel-in-progress: false
 jobs:
-  baseline:
+  validate-fix:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    env:
+      CANDIDATE_ROOT: ${{ runner.temp }}/pr45-validated
+      EXPECTED_PARENT: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+      EXPECTED_TREE: 83042208330f913ad48be5df255b524c9f0ca487
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Package source and reachable history for isolated verification
-        run: |
-          mkdir -p "$RUNNER_TEMP/pr45-audit"
-          git bundle create "$RUNNER_TEMP/pr45-audit/source.bundle" HEAD refs/remotes/origin/main
-          git rev-parse HEAD > "$RUNNER_TEMP/pr45-audit/head.txt"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: pr45-audit-source
-          path: ${{ runner.temp }}/pr45-audit
-          retention-days: 3
+          node-version: '22'
+      - name: Reconstruct and verify exact candidate tree
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          parts = [Path(f'.github/pr45-audit/patch-{i}.b64').read_text() for i in range(4)]
+          patch = gzip.decompress(base64.b64decode(''.join(parts), validate=True))
+          expected = '20a95385c04f8a7906229b599df809aea98c2a44aa25cebc726feca6974e8458'
+          if hashlib.sha256(patch).hexdigest() != expected:
+              raise SystemExit('Patch integrity mismatch')
+          Path(os.environ['RUNNER_TEMP'], 'pr45-fix.patch').write_bytes(patch)
+          PY
+          git worktree add --detach "$CANDIDATE_ROOT" "$EXPECTED_PARENT"
+          cd "$CANDIDATE_ROOT"
+          git apply --index --check "$RUNNER_TEMP/pr45-fix.patch"
+          git apply --index "$RUNNER_TEMP/pr45-fix.patch"
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: close runtime capability transfers and bind complete startup installation' -m 'Unify executable lexical regions, reject untracked Worker/child-process transfers, parse balanced require aliases, bind nearest package scopes, and inventory preload installation dependencies. Add 29 regression tests covering the six latest Codex findings and adjacent variants. Production authority and the trusted-launcher gate remain disabled.'
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-validated-head.txt"
       - name: Privacy preflight
-        run: PYTHONPATH=src python -m agentic_os.cli preflight
-      - name: Full unittest baseline
-        run: PYTHONPATH=src python -m unittest discover -s tests -v
-      - name: Compile sources
-        run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
-      - name: Verify tracked cleanliness
-        run: test -z "$(git status --porcelain)"
+        run: |
+          cd "$CANDIDATE_ROOT"
+          PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Focused source-closure regressions
+        run: |
+          cd "$CANDIDATE_ROOT"
+          PYTHONPATH=src python -m unittest tests.test_runtime_source_contract_regressions -v
+      - name: Full unittest discovery
+        run: |
+          set -euo pipefail
+          cd "$CANDIDATE_ROOT"
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-audit-full-tests.log"
+      - name: Compile all Python sources
+        run: |
+          cd "$CANDIDATE_ROOT"
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/agentic-os-pycache" PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration and package parity
+        run: |
+          cd "$CANDIDATE_ROOT"
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Whitespace and post-test cleanliness
+        run: |
+          cd "$CANDIDATE_ROOT"
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+      - name: Publish tested commit to validation branch only
+        run: |
+          set -euo pipefail
+          cd "$CANDIDATE_ROOT"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git push origin HEAD:refs/heads/fix/pr45-validated-source-closure-83042208
+          echo "Validated commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Validated tree: $EXPECTED_TREE" >> "$GITHUB_STEP_SUMMARY"
+          tail -5 "$RUNNER_TEMP/pr45-audit-full-tests.log" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve validation result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr45-validated-results
+          path: |
+            ${{ runner.temp }}/pr45-validated-head.txt
+            ${{ runner.temp }}/pr45-audit-full-tests.log
+          retention-days: 3
