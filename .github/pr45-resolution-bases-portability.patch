@@ -1,0 +1,61 @@
+diff --git a/tests/test_runtime_resolution_bases.py b/tests/test_runtime_resolution_bases.py
+index 6f9c2b9..01f13e5 100644
+--- a/tests/test_runtime_resolution_bases.py
++++ b/tests/test_runtime_resolution_bases.py
+@@ -46,7 +46,7 @@ class RuntimeResolutionBaseTests(unittest.TestCase):
+         with self.assertRaises(CONTRACT.RuntimeSourceContractError):
+             CONTRACT.runtime_source_paths(self.root)
+ 
+-    def node_witness(self, source: str, *, suffix: str = "mjs") -> None:
++    def node_witness(self, source: str, *, suffix: str = "mjs", request_state_optional: bool = False) -> None:
+         assert NODE is not None
+         marker = self.root / "marker"
+         marker.unlink(missing_ok=True)
+@@ -56,9 +56,30 @@ class RuntimeResolutionBaseTests(unittest.TestCase):
+             [NODE, f"scripts/witness.{suffix}"], cwd=self.root,
+             env=environment, text=True, capture_output=True, timeout=10,
+         )
++        if request_state_optional and result.returncode == 77:
++            # Newer Undici versions keep Request state in private fields instead
++            # of discoverable symbols. Only this exact feature outcome is valid;
++            # arbitrary execution errors are still failures. The source guard
++            # is asserted separately regardless of the runtime's representation.
++            self.assertEqual("REQUEST_URL_STATE_NOT_EXPOSED", result.stdout.strip())
++            self.assertFalse(marker.exists())
++            return
+         self.assertEqual(0, result.returncode, result.stderr)
+         self.assertEqual("hidden", marker.read_text(encoding="utf-8"))
+ 
++    @unittest.skipUnless(NODE, "Node is required to verify witness outcome handling")
++    def test_request_witness_feature_outcome_cannot_mask_execution_errors(self) -> None:
++        unavailable = "console.log('REQUEST_URL_STATE_NOT_EXPOSED');process.exit(77);"
++        self.node_witness(unavailable, request_state_optional=True)
++        for source, optional in (
++            (unavailable, False),
++            ("process.exit(77);", True),
++            ("console.log('REQUEST_URL_STATE_NOT_EXPOSED');process.exit(1);", True),
++        ):
++            with self.subTest(source=source, optional=optional):
++                with self.assertRaises(AssertionError):
++                    self.node_witness(source, request_state_optional=optional)
++
+     def test_worker_url_constructor_cannot_be_shadowed_or_transferred(self) -> None:
+         for declaration in (
+             "const URL=Fake;", "let URL; URL=Fake;", "var URL=Fake;",
+@@ -231,14 +252,15 @@ class RuntimeResolutionBaseTests(unittest.TestCase):
+             "file('/placeholder').__proto__.__defineGetter__('pathname',function(){return process.cwd()+'/scripts/hidden.mjs';});",
+             "const request=new Request('https://example.invalid/');"
+             "const state=request[Object.getOwnPropertySymbols(request).find(s=>s.description==='state')];"
++            "if(state===undefined){console.log('REQUEST_URL_STATE_NOT_EXPOSED');process.exit(77);}"
+             "Object.defineProperty(Object.getPrototypeOf(state.url),'pathname',{get(){return process.cwd()+'/scripts/hidden.mjs';}});",
+         )
+         for mutation in mutations:
+             with self.subTest(mutation=mutation):
+                 self.write("scripts/mutator.mjs", mutation)
+                 source = "import './mutator.mjs';" + WORKER + LAUNCH
+-                self.node_witness(source)
+                 self.assert_closed(source)
++                self.node_witness(source, request_state_optional=mutation.startswith("const request="))
+ 
+     def test_inline_factory_results_record_literal_target_for_named_and_aliased_factories(self) -> None:
+         for declaration, call in (
