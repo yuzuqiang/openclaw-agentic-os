@@ -401,10 +401,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         return [
             {
                 "path": label,
-                "sha256": format(index + 10, "x") * 64,
-                "realpath_sha256": format(index + 13, "x") * 64,
+                "sha256": hashlib.sha256(("content:" + label).encode()).hexdigest(),
+                "realpath_sha256": hashlib.sha256(("realpath:" + label).encode()).hexdigest(),
             }
-            for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
+            for label in MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS
         ]
 
     def _write_runtime_source_fixture(self, root: Path, files: dict[str, str]) -> None:
@@ -2139,15 +2139,15 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "spawn(process.execPath, ['./spawn-worker.mjs']);\n"
                         "execFile(process.execPath, ['./exec-worker.mjs']);\n"
                     ),
-                    "scripts/spawn-worker.mjs": "export const spawnWorker = true;\n",
-                    "scripts/exec-worker.mjs": "export const execWorker = true;\n",
+                    "spawn-worker.mjs": "export const spawnWorker = true;\n",
+                    "exec-worker.mjs": "export const execWorker = true;\n",
                 },
             )
 
             paths = MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/spawn-worker.mjs", paths)
-        self.assertIn("scripts/exec-worker.mjs", paths)
+        self.assertIn("spawn-worker.mjs", paths)
+        self.assertIn("exec-worker.mjs", paths)
 
     def test_persistent_runtime_source_closure_binds_sync_child_process_node_entrypoints(
         self,
@@ -2162,8 +2162,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "spawnSync(process.execPath, ['./spawn-sync-worker.mjs']);\n"
                         "execFileSync(process.execPath, ['./exec-file-sync-worker.mjs']);\n"
                     ),
-                    "scripts/spawn-sync-worker.mjs": "export const spawnSyncWorker = true;\n",
-                    "scripts/exec-file-sync-worker.mjs": (
+                    "spawn-sync-worker.mjs": "export const spawnSyncWorker = true;\n",
+                    "exec-file-sync-worker.mjs": (
                         "export const execFileSyncWorker = true;\n"
                     ),
                 },
@@ -2171,8 +2171,8 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             paths = MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/spawn-sync-worker.mjs", paths)
-        self.assertIn("scripts/exec-file-sync-worker.mjs", paths)
+        self.assertIn("spawn-sync-worker.mjs", paths)
+        self.assertIn("exec-file-sync-worker.mjs", paths)
 
     def test_persistent_runtime_source_closure_binds_aliased_sync_child_process_node_entrypoints(
         self,
@@ -2181,22 +2181,22 @@ class RealGatewayProbeTests(unittest.TestCase):
             "esm_renamed_spawn_sync": (
                 "import { spawnSync as launchNode } from 'node:child_process';\n"
                 "launchNode(process.execPath, ['./esm-spawn-alias.mjs']);\n",
-                "scripts/esm-spawn-alias.mjs",
+                "esm-spawn-alias.mjs",
             ),
             "esm_renamed_exec_file_sync": (
                 "import { execFileSync as launchFile } from 'child_process';\n"
                 "launchFile(process.execPath, ['./esm-exec-file-alias.mjs']);\n",
-                "scripts/esm-exec-file-alias.mjs",
+                "esm-exec-file-alias.mjs",
             ),
             "cjs_destructured_spawn_sync": (
                 "const { spawnSync: runNodeNow } = require('node:child_process');\n"
                 "runNodeNow(process.execPath, ['./cjs-spawn-alias.cjs']);\n",
-                "scripts/cjs-spawn-alias.cjs",
+                "cjs-spawn-alias.cjs",
             ),
             "cjs_destructured_exec_file_sync": (
                 "const { execFileSync: runFileNow } = require('child_process');\n"
                 "runFileNow(process.execPath, ['./cjs-exec-file-alias.cjs']);\n",
-                "scripts/cjs-exec-file-alias.cjs",
+                "cjs-exec-file-alias.cjs",
             ),
         }
         for name, (source, worker) in cases.items():
@@ -3421,14 +3421,14 @@ class RealGatewayProbeTests(unittest.TestCase):
                         'child_process.fork("./runner-child.cjs");\n'
                     ),
                     "scripts/runner-worker.mjs": "export const worker = true;\n",
-                    "scripts/runner-child.cjs": "module.exports = { child: true };\n",
+                    "runner-child.cjs": "module.exports = { child: true };\n",
                 },
             )
 
             paths = MODULE._persistent_runtime_source_paths(root)
 
         self.assertIn("scripts/runner-worker.mjs", paths)
-        self.assertIn("scripts/runner-child.cjs", paths)
+        self.assertIn("runner-child.cjs", paths)
 
     def test_persistent_runtime_source_closure_binds_aliased_fork_entrypoints(
         self,
@@ -3450,13 +3450,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                     root,
                     {
                         MODULE.PERSISTENT_LIFECYCLE_RUNNER: source,
-                        "scripts/hidden.cjs": "module.exports = { hidden: true };\n",
+                        "hidden.cjs": "module.exports = { hidden: true };\n",
                     },
                 )
 
                 paths = MODULE._persistent_runtime_source_paths(root)
 
-            self.assertIn("scripts/hidden.cjs", paths)
+            self.assertIn("hidden.cjs", paths)
 
     def test_persistent_runtime_source_closure_rejects_cluster_entrypoints(
         self,
@@ -9538,13 +9538,13 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "import cp, { spawnSync as runNode } from 'node:child_process';\n"
                         "runNode(process.execPath, ['./combined-child.mjs']);\n"
                     ),
-                    "scripts/combined-child.mjs": "export const child = true;\n",
+                    "combined-child.mjs": "export const child = true;\n",
                 },
             )
 
             paths = MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/combined-child.mjs", paths)
+        self.assertIn("combined-child.mjs", paths)
 
     def test_persistent_runtime_source_closure_rejects_combined_child_process_default(
         self,
@@ -9653,7 +9653,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                         "const { 'spawnSync': runNode } = require('node:child_process');\n"
                         "runNode(process.execPath, ['./string-named-child.cjs']);\n"
                     ),
-                    "scripts/string-named-child.cjs": (
+                    "string-named-child.cjs": (
                         "module.exports = { child: true };\n"
                     ),
                 },
@@ -9661,7 +9661,7 @@ class RealGatewayProbeTests(unittest.TestCase):
 
             paths = MODULE._persistent_runtime_source_paths(root)
 
-        self.assertIn("scripts/string-named-child.cjs", paths)
+        self.assertIn("string-named-child.cjs", paths)
 
     def test_persistent_runtime_source_closure_rejects_indirect_commonjs_require(
         self,
