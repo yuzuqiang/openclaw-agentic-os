@@ -1,0 +1,84 @@
+name: PR45 module origin incremental validation
+on:
+  push:
+    branches: [fix/pr45-module-origin-audit-7a96502]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reconstruct the two-file increment on bb160fb
+        run: |
+          python - <<'PY'
+          import base64,gzip,hashlib,os,pathlib,subprocess
+          def git(*args):
+              return subprocess.check_output(['git',*args],text=True).strip()
+          encoded=pathlib.Path('.github/pr45-module-origin.patch.gz.b64').read_text()
+          data=base64.b64decode(encoded,validate=True)
+          assert hashlib.sha256(data).hexdigest()=='3db4c9ead9dfb09e34413a4196f91ad879c99f39bbaee3b0042cf0bef4e21e87'
+          patch=pathlib.Path(os.environ['RUNNER_TEMP'])/'module-origin.patch'
+          patch.write_bytes(gzip.decompress(data))
+          git('checkout','--detach','bb160fb68ae5e7f0e7af26a3809323f3c9f6335e')
+          git('apply','--check',str(patch));git('apply','--index',str(patch))
+          assert git('write-tree')=='708d31a1acaaaaf7f68cc88f10212f2eed44865a'
+          assert set(git('diff','--cached','--name-only').splitlines())=={'scripts/agentic_os_runtime_source_contract.py','tests/test_runtime_module_origin_regressions.py'}
+          git('config','user.name','OpenAI PR repair');git('config','user.email','pr45-repair@users.noreply.github.com')
+          git('commit','-m','fix: account for node module namespace and constructor origins')
+          assert not git('status','--porcelain')
+          output=pathlib.Path(os.environ['RUNNER_TEMP'])/'module-verification';output.mkdir()
+          (output/'identity.txt').write_text(git('rev-parse','HEAD','HEAD^{tree}','HEAD^')+'\n')
+          print((output/'identity.txt').read_text())
+          PY
+      - name: Focused origin, source, and launch regressions
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import unittest
+          from tests import test_openclaw_real_gateway_contract_probe as module
+          suite=unittest.TestSuite()
+          for cls in vars(module).values():
+              if isinstance(cls,type) and issubclass(cls,unittest.TestCase):
+                  for name in unittest.defaultTestLoader.getTestCaseNames(cls):
+                      if 'source' in name or 'launch' in name:suite.addTest(cls(name))
+          suite.addTests(unittest.defaultTestLoader.loadTestsFromName('tests.test_runtime_module_origin_regressions'))
+          result=unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(not result.wasSuccessful())
+          PY
+      - name: Publish isolated integration candidate only, not PR or main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64,os,subprocess
+          env=os.environ.copy();token=env.pop('GH_TOKEN')
+          auth=base64.b64encode(('x-access-token:'+token).encode()).decode()
+          env.update(GIT_CONFIG_COUNT='1',GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',GIT_CONFIG_VALUE_0='AUTHORIZATION: basic '+auth)
+          subprocess.run(['git','push','origin','HEAD:refs/heads/fix/pr45-module-origin-candidate-7a96502'],env=env,check=True)
+          PY
+      - name: Privacy preflight
+        run: PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full unittest discovery on exact clean commit
+        run: PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/module-verification/unittest.log"
+      - name: Compilation and migration parity
+        run: |
+          PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-module-origin-verification
+          path: ${{ runner.temp }}/module-verification
+          retention-days: 3
