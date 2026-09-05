@@ -1,0 +1,25 @@
+name: PR45 integration source snapshot
+on:
+  push:
+    branches: [fix/pr45-integration-recovery-20260905]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Package source history without executing candidate code
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-integration"
+          git bundle create "$RUNNER_TEMP/pr45-integration/source.bundle" --all
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-integration/head.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-integration-source
+          path: ${{ runner.temp }}/pr45-integration
+          retention-days: 3
