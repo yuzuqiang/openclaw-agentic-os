@@ -162,10 +162,21 @@ class CurrentStatusTests(unittest.TestCase):
                 self.assertIn(claim, normalized_readme_status)
                 self.assertIn(claim, normalized_design_current_status)
 
+        current_runtime_review_claims = (
+            "there is no current Issue #44 persistent-lifecycle candidate proof",
+            "no current-head GitHub Codex review binding",
+            "historical candidate invocations and reviews must not be counted as current exact-head runtime evidence",
+            "fresh Codex review of that same head",
+        )
+        for claim in current_runtime_review_claims:
+            with self.subTest(claim=claim):
+                self.assertIn(claim, normalized_readme_status)
+
         stale_claims = (
             "Draft PR successor",
             "current Draft remediation",
             "current Draft successor head",
+            "The current Issue #44 persistent-lifecycle candidate proof is intentionally disabled",
             "final exact-head Phase C revalidation",
             "still required before it can be treated as independently accepted",
             "Phase C must replay against the exact PR head",

@@ -23,7 +23,11 @@ not evidence of production OpenClaw authority.
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
-- Current installed-runtime evidence lineage and Issue #44 candidate snapshot:
+- Current installed-runtime evidence lineage and invalidated Issue #44
+  candidate snapshots; there is no current Issue #44 persistent-lifecycle
+  candidate proof, no current-head GitHub Codex review binding for one, and
+  historical candidate invocations and reviews must not be counted as current
+  exact-head runtime evidence:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
   adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
@@ -46,7 +50,9 @@ not evidence of production OpenClaw authority.
   metadata/attestation contracts against the local downstream OpenClaw
   candidate, production `control.db` or daemon operation, real
   end-to-end session authority, workflow cutover drills, production smoke tests,
-  and steady DB-authority operation.
+  and steady DB-authority operation. A future runtime-evidence promotion
+  requires a published clean exact-head recapture, different-agent Phase C, and
+  a fresh Codex review of that same head.
 
 The current P0 foundation materializes the corrected schema and supplies
 fail-closed privacy and external-metadata probes. Database authority remains
@@ -517,13 +523,14 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-The current Issue #44 persistent-lifecycle candidate proof is intentionally
-disabled. The repository probe refuses to launch a candidate or write runtime
-evidence until a trusted external launcher supplies immutable runtime sources,
-parent-held attestation signing, direct Gateway RPC capture, and an
-OS-enforced process-containment receipt. No repository command currently
-provides that launcher integration, so the historical invocation must not be
-treated as runnable evidence collection.
+There is no current Issue #44 persistent-lifecycle candidate proof and no
+current-head GitHub Codex review binding for one. The repository probe refuses
+to launch a candidate or write runtime evidence until a trusted external
+launcher supplies immutable runtime sources, parent-held attestation signing,
+direct Gateway RPC capture, and an OS-enforced process-containment receipt. No
+repository command currently provides that launcher integration, so historical
+candidate invocations and reviews must not be counted as current exact-head
+runtime evidence.
 
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
@@ -552,10 +559,10 @@ head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9`, records generator hashes that
 do not match this reviewed tree, and predates the lifecycle-attestation
 evidence now required by the corrected validator. The forward evidence index
 therefore marks it `invalid_capability_source_drift_pending_recapture` with
-`runtime_ready_candidate_evidence=false`; a clean exact-head recapture plus
-different-agent Phase C is required before any downstream runtime evidence can
-be promoted. The 2026-08-24 JSON is also retained byte-for-byte as historical
-invalidated evidence.
+`runtime_ready_candidate_evidence=false`; a published clean exact-head recapture
+plus different-agent Phase C and a fresh Codex review of that same head are
+required before any downstream runtime evidence can be promoted. The 2026-08-24
+JSON is also retained byte-for-byte as historical invalidated evidence.
 
 The legacy probe path still exercises the runtime-discovered `tools.catalog`
 RPC methods, principal-bound allowLease acquire/duplicate/status/release,

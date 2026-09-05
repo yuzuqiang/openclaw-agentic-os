@@ -8011,10 +8011,19 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("accepted repository state", readme)
         self.assertIn("passed exact-head Phase C", readme)
         self.assertIn("clean Codex review", readme)
+        self.assertIn("no current-head GitHub Codex review binding", readme)
+        self.assertIn(
+            "historical candidate invocations and reviews must not be counted",
+            readme,
+        )
         self.assertIn(
             "docs/runtime-evidence/phase-b-revalidation-20260809.json", readme
         )
         self.assertIn("docs/project-status.json", readme)
+        self.assertNotIn(
+            "The current Issue #44 persistent-lifecycle candidate proof is intentionally disabled",
+            readme,
+        )
         self.assertNotIn("has **not** yet passed fresh independent", readme)
         self.assertNotIn("Draft PR successor", readme)
         self.assertNotIn("still required before it can be", readme)
