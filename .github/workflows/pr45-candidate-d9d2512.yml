@@ -1,0 +1,102 @@
+name: PR45 exact candidate d9d2512
+on:
+  push:
+    branches: [fix/pr45-audit-d9d2512]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      head: ${{ steps.prepare.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify transport and construct clean exact candidate
+        id: prepare
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-transport"
+          cp .github/pr45-patch-*.b64 "$RUNNER_TEMP/pr45-transport/"
+          python - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          folder = Path(os.environ['RUNNER_TEMP']) / 'pr45-transport'
+          parts = [p.read_text().strip() for p in sorted(folder.glob('pr45-patch-*.b64'))]
+          if len(parts) != 3:
+              raise SystemExit('Missing transport part')
+          # Known transport-only duplication; both patch and result are pinned.
+          parts[0] = parts[0].replace('Hkm/SSSiGT79', 'Hkm/SSiGT79')
+          patch = gzip.decompress(base64.b64decode(''.join(parts), validate=True))
+          if hashlib.sha256(patch).hexdigest() != 'df3222aaf42899efed061d10b1b7690e93e501cb006210bed0a2768b01aeaa24':
+              raise SystemExit('Patch digest mismatch')
+          (folder / 'candidate.patch').write_bytes(patch)
+          PY
+          git checkout --detach 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          git apply --check "$RUNNER_TEMP/pr45-transport/candidate.patch"
+          git apply --index "$RUNNER_TEMP/pr45-transport/candidate.patch"
+          test "$(git write-tree)" = 193ed2ddbe8ba2d37aa53f11e3b25a30a5f3724e
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: close runtime execution and preload source-binding gaps'
+          test "$(git rev-parse HEAD^)" = 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git show --stat --oneline HEAD
+      - name: Privacy preflight
+        run: PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full unittest discovery on exact candidate
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile Python sources
+        run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration and package parity
+        run: PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Diff and tracked-worktree cleanliness
+        run: |
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^{tree})" = 193ed2ddbe8ba2d37aa53f11e3b25a30a5f3724e
+          git bundle create "$RUNNER_TEMP/pr45-verified.bundle" HEAD ^871b8242767192cdf2c9f8ba71724b9f346ccc1b
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-exact-verified-d9d2512
+          path: ${{ runner.temp }}/pr45-verified.bundle
+          retention-days: 1
+      - name: Transport diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr45-transport-d9d2512
+          path: ${{ runner.temp }}/pr45-transport
+          retention-days: 1
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-exact-verified-d9d2512
+          path: ${{ runner.temp }}/pr45-verified
+      - name: Publish verified candidate branch without touching PR45
+        env:
+          EXPECTED_HEAD: ${{ needs.validate.outputs.head }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch "$RUNNER_TEMP/pr45-verified/pr45-verified.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse FETCH_HEAD^)" = 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 193ed2ddbe8ba2d37aa53f11e3b25a30a5f3724e
+          git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f' push origin "$EXPECTED_HEAD:refs/heads/fix/pr45-closure-verified-d9d2512"
+          echo "Verified candidate: $EXPECTED_HEAD"
