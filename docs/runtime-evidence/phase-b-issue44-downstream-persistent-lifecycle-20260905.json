@@ -41,7 +41,9 @@
   "duplicate_acquire_identity_parity": false,
   "duplicate_release_identity_parity": false,
   "duplicate_spawn_identity_parity": false,
-  "error": "runtime source contains an unsupported evaluated loader reference",
+  "error": "prelaunch validation failed",
+  "error_class": "ProbeError",
+  "error_message_sha256": "a7df6b6426392387f45053967af9577b82895a7c1473e2d48604e2b334d7cf13",
   "isolated_non_production_gateway": {
     "candidate_port_closed": "not_required",
     "candidate_port_opened": false,

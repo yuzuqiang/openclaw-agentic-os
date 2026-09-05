@@ -536,6 +536,38 @@ class CurrentStatusTests(unittest.TestCase):
                 "no_capability_source_drift_after_bound_head"
             ]
         )
+        reviewed_head = current["reviewed_head_sha"]
+        self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
+        self.assertEqual(
+            current["generator_binding_requirements"]["containing_revision_sha"],
+            reviewed_head,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                reviewed_head,
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                current["generator_revision"]["head_sha"],
+                reviewed_head,
+            ],
+            check=True,
+            capture_output=True,
+        )
         self.assertEqual(
             current["sha256"], hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         )
@@ -697,9 +729,36 @@ class CurrentStatusTests(unittest.TestCase):
         )
         bound_head = binding["agentic_os_head_sha"]
         self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
-        self.assertIsNone(current["reviewed_head_sha"])
+        reviewed_head = current["reviewed_head_sha"]
+        self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
+        self.assertEqual(current["reviewed_head_sha"], reviewed_head)
+        self.assertEqual(
+            current["generator_binding_requirements"]["containing_revision_sha"],
+            reviewed_head,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                reviewed_head,
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+        )
         ancestry_check = subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                bound_head,
+                reviewed_head,
+            ],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

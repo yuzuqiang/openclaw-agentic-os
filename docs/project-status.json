@@ -27,18 +27,18 @@
       "runtime_ready": false,
       "runtime_ready_blocked_until_phase_c": true,
       "runtime_ready_candidate_evidence": false,
-      "sha256": "b431b87f6808d65fc99cb39e6919c8b72e94069aa2ef563749a1673b7a80c07b",
+      "sha256": "36a57476627bbbde5752a7a0b7a61b5a98af107f55ef43f7b0337e334ecb35c1",
       "status": "fail_closed_runtime_source_closure_pending_phase_c",
       "validation_receipt_bound": false
     },
     "issue44_live_installed_preflight": {
-      "agentic_os_head_sha": "755e7756af0e6cf6f8931ffa85eb6a8fbac16b4e",
+      "agentic_os_head_sha": "bdf3e2c2985804f0078cc4017095bd2c483f8f3b",
       "no_production_lease_mutation": true,
       "openclaw_version": "2026.7.1",
       "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json",
       "production_authority_enabled": false,
       "runtime_ready": false,
-      "sha256": "e4e5538d5b334d217352b6da1122741ca3bfaf922a82d2155abeb6c541dfb64c",
+      "sha256": "b230c4eedf4721ae7230c4c1cd0b566a8feca02ab3fcc26cfb9b907a2fc91234",
       "status": "fail_closed_future_contract",
       "status_rpc_live_reachability": "skipped_no_production_lease_mutation"
     },
@@ -100,7 +100,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "3d2af1054ddc26ec3c4ce0c20c5b2dd6fa331b21a18db51dd461bb1f62103198",
+      "sha256": "2b954da1fefd250f6f78671165d5d4505fcc8d2c6f27a2e426e1f660a8fd3ccc",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",
