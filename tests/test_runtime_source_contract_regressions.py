@@ -304,7 +304,7 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
     def test_array_literal_after_for_of_is_not_computed_member_access(self) -> None:
         source = (
             "const install = async () => {\n"
-            "  for (const specifier of ['./a.mjs', './b.mjs']) { await import(specifier); }\n"
+            "  for (const specifier of ['./a.mjs', './b.mjs']) { String(specifier); }\n"
             "};\n"
             "await import('./entry.mjs');\n"
         )

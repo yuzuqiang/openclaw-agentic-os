@@ -26,8 +26,11 @@ not evidence of production OpenClaw authority.
 - Current installed-runtime evidence lineage and Issue #44 downstream
   persistent-lifecycle recapture. The current installed evidence remains
   fail-closed, and the current downstream candidate evidence is fail-closed
-  before launch on runtime source-closure rejection; no runtime-ready
-  persistent-lifecycle proof or current-head GitHub Codex review binding exists:
+  before launch on runtime source-closure rejection with
+  `candidate_process_started=false`; no runtime-ready persistent-lifecycle
+  proof or current-head GitHub Codex review binding exists, and historical
+  candidate invocations and reviews must not be counted as current exact-head
+  runtime evidence:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
   adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
