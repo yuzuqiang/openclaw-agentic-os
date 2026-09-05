@@ -27,21 +27,22 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import base64, gzip, hashlib, json, os, pathlib, subprocess
+          import base64, hashlib, json, os, pathlib, subprocess, zlib
           workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
           spec = json.loads((workspace / '.github/pr45-repair/ready.json').read_text())
           assert spec['base'] == '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
-          encoded = (workspace / '.github/pr45-repair/repair.patch.gz.b64').read_text().strip()
-          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert spec['parts'] == 4
+          encoded = ''.join((workspace / f'.github/pr45-repair/part-{n}.txt').read_text().strip() for n in range(1, 5))
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
           assert hashlib.sha256(patch).hexdigest() == spec['patch_sha256']
           candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-candidate'
           subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), spec['base']], check=True)
           subprocess.run(['git', 'apply', '--index', '-'], input=patch, cwd=candidate, check=True)
           tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
           assert tree == spec['tree'], (tree, spec['tree'])
-          subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: bind source capabilities, package scopes and preload installation'], cwd=candidate, check=True)
+          subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: unify execution capability, package scope and preload boundaries'], cwd=candidate, check=True)
           files = subprocess.check_output(['git', 'diff', '--name-only', spec['base'], 'HEAD'], cwd=candidate, text=True).splitlines()
-          allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py']
+          allowed = ['scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_boundaries.py']
           assert sorted(files) == allowed
           artifact = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-publish'
           artifact.mkdir()
@@ -54,7 +55,7 @@ jobs:
           PY
       - name: Privacy preflight
         run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m agentic_os.cli preflight
-      - name: Full unittest discovery including regression and Node oracle
+      - name: Full unittest discovery including Node differential regressions
         run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m unittest discover -s tests -v
       - name: Compile sources
         run: cd "$CANDIDATE_DIR" && PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
@@ -91,13 +92,13 @@ jobs:
           script: |
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('pr45-publish/publish.json', 'utf8'));
-            const allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_regressions.py'];
+            const allowed = ['scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_boundaries.py'];
             if (p.base !== '871b8242767192cdf2c9f8ba71724b9f346ccc1b' || p.tree !== process.env.EXPECTED_TREE || JSON.stringify(p.files.map(f => f.path).sort()) !== JSON.stringify(allowed)) throw new Error('Unexpected repair payload');
             const repo = context.repo;
             const base = await github.rest.git.getCommit({...repo, commit_sha: p.base});
             const tree = await github.rest.git.createTree({...repo, base_tree: base.data.tree.sha, tree: p.files});
             if (tree.data.sha !== p.tree) throw new Error('Published tree differs from tested tree');
-            const commit = await github.rest.git.createCommit({...repo, message: 'fix: bind source capabilities, package scopes and preload installation', tree: tree.data.sha, parents: [p.base]});
+            const commit = await github.rest.git.createCommit({...repo, message: 'fix: unify execution capability, package scope and preload boundaries', tree: tree.data.sha, parents: [p.base]});
             const branch = 'fix/pr45-validated-' + p.tree.slice(0, 12);
             await github.rest.git.createRef({...repo, ref: 'refs/heads/' + branch, sha: commit.data.sha});
             core.notice('Validated candidate ' + commit.data.sha + ' on ' + branch);
