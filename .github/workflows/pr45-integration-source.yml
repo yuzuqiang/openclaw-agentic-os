@@ -1,0 +1,28 @@
+name: PR45 integration source snapshot
+on:
+  push:
+    branches:
+      - fix/pr45-integration-snapshot-bb160fb
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Package exact current PR head for regression comparison
+        run: |
+          mkdir -p "$RUNNER_TEMP/snapshot"
+          git checkout --detach bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          test "$(git rev-parse HEAD^{tree})" = 4d35b31b3a0f3f5def0ed68afeb01f725389c263
+          git bundle create "$RUNNER_TEMP/snapshot/source.bundle" HEAD refs/remotes/origin/main
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/snapshot/identity.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-current-bb160fb-source
+          path: ${{ runner.temp }}/snapshot
+          retention-days: 3
