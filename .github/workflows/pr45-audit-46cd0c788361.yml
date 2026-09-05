@@ -1,0 +1,108 @@
+name: PR45 exact-tree repair audit 46cd0c788361
+on:
+  push:
+    branches: [fix/pr45-audit-46cd0c788361]
+    paths: [.github/audits/pr45-fix.patch.zlib.b64]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FIX_PARENT: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+      EXPECTED_TREE: 46cd0c78836162746cc16cbfbe4aa15e40c2cb8b
+      PATCH_SHA256: 014c896227e717d68c3a62384ee66b12324885fcb5079b2ae3bcef13555a84a3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Reconstruct the exact inspected repair tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr45-verification"
+          python - <<'PY'
+          import base64, hashlib, os, pathlib, zlib
+          encoded = pathlib.Path('.github/audits/pr45-fix.patch.zlib.b64').read_text().strip()
+          patch = zlib.decompress(base64.b64decode(encoded, validate=True))
+          if hashlib.sha256(patch).hexdigest() != os.environ['PATCH_SHA256']:
+              raise SystemExit('Repair patch digest mismatch')
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-repair.patch').write_bytes(patch)
+          PY
+          git checkout --detach "$FIX_PARENT"
+          git apply --index "$RUNNER_TEMP/pr45-repair.patch"
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: close PR45 runtime capability and source identity gaps' -m 'Bind or reject capability transfers, unify lexical boundaries, include package scopes and the full preload installation, and add adversarial regression coverage. Persistent authority remains disabled.'
+          test "$(git rev-parse HEAD^)" = "$FIX_PARENT"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-verification/head.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/pr45-verification/tree.txt"
+          python --version
+          node --version
+      - name: Privacy preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m agentic_os.cli preflight | tee "$RUNNER_TEMP/pr45-verification/privacy.log"
+      - name: Full unittest discovery including Node differential fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-verification/unittest.log"
+      - name: Compile all Python sources
+        run: PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration and packaged-schema parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v 2>&1 | tee "$RUNNER_TEMP/pr45-verification/migrations.log"
+      - name: Verify diff, exact tree, and worktree cleanliness
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check origin/main...HEAD
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain)"
+          git bundle create "$RUNNER_TEMP/pr45-verification/candidate.bundle" HEAD
+      - name: Retain exact-head verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr45-repair-46cd0c788361
+          path: ${{ runner.temp }}/pr45-verification
+          retention-days: 7
+  publish-candidate:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-repair-46cd0c788361
+          path: candidate-artifact
+      - name: Publish only the independently checked tree to a separate branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone candidate-artifact/candidate.bundle candidate
+          cd candidate
+          test "$(git rev-parse HEAD^)" = '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          test "$(git rev-parse HEAD^{tree})" = '46cd0c78836162746cc16cbfbe4aa15e40c2cb8b'
+          test "$(git rev-parse HEAD)" = "$(cat ../candidate-artifact/head.txt)"
+          git remote set-url origin https://github.com/yuzuqiang/openclaw-agentic-os.git
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/fix/pr45-candidate-46cd0c788361
+          echo "Verified candidate $(git rev-parse HEAD). PR45 has not been moved or merged." >> "$GITHUB_STEP_SUMMARY"
