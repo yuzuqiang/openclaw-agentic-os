@@ -615,7 +615,7 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
                 ) or (
                     previous[0] == "identifier"
-                    and previous_value in {"await", "case", "delete", "else", "extends", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
+                    and previous_value in {"await", "case", "default", "delete", "else", "extends", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
                     and before_previous not in {("punctuation", "."), ("punctuation", "?.")}
                 )
                 if regex_start:
@@ -2176,7 +2176,7 @@ def _reject_execution_capability_escapes(
             "runtime source contains an unsupported Worker entrypoint or child-process Node entrypoint namespace origin"
         )
     tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
-    type_spans = _type_only_declaration_spans(tokens)
+    type_spans = _type_only_declaration_spans(source_text, tokens)
     for index, (kind, value, start, _end) in enumerate(tokens):
         if kind != "identifier" or value not in bindings:
             continue
@@ -2199,7 +2199,14 @@ def _reject_execution_capability_escapes(
         )
 
 
-def _type_only_declaration_spans(tokens: list[tuple[str, str, int, int]]) -> list[tuple[int, int]]:
+def _has_js_line_terminator_between(source_text: str, left: int, right: int) -> bool:
+    return any(_is_js_line_terminator(character) for character in source_text[left:right])
+
+
+def _type_only_declaration_spans(
+    source_text: str,
+    tokens: list[tuple[str, str, int, int]],
+) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     statement_start = True
     for index, (kind, value, start, end) in enumerate(tokens):
@@ -2211,9 +2218,31 @@ def _type_only_declaration_spans(tokens: list[tuple[str, str, int, int]]) -> lis
             and tokens[index + 1][0] == "identifier"
         ):
             cursor = index + 1
-            while cursor < len(tokens) and tokens[cursor][1] != ";":
+            depth = 0
+            span_end = end
+            previous_value = value
+            continuation_tokens = {"=", "|", "&", "?", ":", ",", ".", "(", "[", "{", "<", "=>", "extends"}
+            while cursor < len(tokens):
+                token_kind, token_value, token_start, token_end = tokens[cursor]
+                if (
+                    cursor > index + 1
+                    and depth == 0
+                    and _has_js_line_terminator_between(source_text, span_end, token_start)
+                    and previous_value not in continuation_tokens
+                    and token_value not in {"|", "&", ",", ".", "extends"}
+                ):
+                    break
+                if token_value == ";" and depth == 0:
+                    span_end = token_end
+                    cursor += 1
+                    break
+                if token_value in {"(", "[", "{", "<"}:
+                    depth += 1
+                elif token_value in {")", "]", "}", ">"} and depth > 0:
+                    depth -= 1
+                span_end = token_end
+                previous_value = token_value
                 cursor += 1
-            span_end = tokens[cursor][3] if cursor < len(tokens) else end
             spans.append((start, span_end))
         if value in {";", "{", "}"}:
             statement_start = True
@@ -3152,13 +3181,19 @@ def _previous_non_trivia_character(source_text: str, index: int) -> str:
 
 
 def _previous_code_word(source_text: str, index: int) -> str:
+    word, _start = _previous_code_word_and_start(source_text, index)
+    return word
+
+
+def _previous_code_word_and_start(source_text: str, index: int) -> tuple[str, int]:
     cursor = index - 1
     while cursor >= 0 and source_text[cursor].isspace():
         cursor -= 1
     end = cursor + 1
     while cursor >= 0 and _is_identifier_character(source_text[cursor]):
         cursor -= 1
-    return source_text[cursor + 1 : end]
+    start = cursor + 1
+    return source_text[start:end], start
 
 
 def _is_regex_literal_start(source_text: str, index: int) -> bool:
@@ -3181,11 +3216,18 @@ def _is_regex_literal_start(source_text: str, index: int) -> bool:
         ):
             return False
         return True
-    return _previous_code_word(source_text, index) in {
+    previous_word, previous_word_start = _previous_code_word_and_start(source_text, index)
+    if previous_word_start > 0 and source_text[previous_word_start - 1] == ".":
+        return False
+    if previous_word_start > 1 and source_text[previous_word_start - 2:previous_word_start] == "?.":
+        return False
+    return previous_word in {
         "await",
         "case",
+        "default",
         "delete",
         "else",
+        "extends",
         "in",
         "instanceof",
         "new",

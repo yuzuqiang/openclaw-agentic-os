@@ -110,6 +110,23 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertIn(("node:worker_threads", True, "import"), CONTRACT.import_specifiers(source))
 
+    def test_semicolonless_type_declaration_does_not_hide_runtime_child_process_alias(self) -> None:
+        source = (
+            "import {spawnSync} from 'node:child_process';\n"
+            "type Foo = string\n"
+            "const go = spawnSync; go('./hidden.sh');"
+        )
+        self.assert_closed(source)
+
+    def test_multiline_type_declarations_remain_type_only_until_actual_boundary(self) -> None:
+        source = (
+            "import {type Worker, isMainThread} from 'node:worker_threads';\n"
+            "type Local =\n"
+            "  Worker | string\n"
+            "void isMainThread;"
+        )
+        self.assertIn(("node:worker_threads", True, "import"), CONTRACT.import_specifiers(source))
+
     def test_child_process_member_transfers_fail_closed_for_all_member_spellings(self) -> None:
         members = ("fork", "spawn", "spawnSync", "execFile", "execFileSync", "exec", "execSync")
         for member in members:
@@ -230,6 +247,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         with self.assertRaises(CONTRACT.RuntimeSourceContractError):
             CONTRACT.import_specifiers("class A extends /\"/.constructor {} require('./hidden.cjs'); // \"")
 
+    def test_regex_literal_after_export_default_does_not_hide_later_import(self) -> None:
+        source = "export default /\"/; await import('./hidden.mjs'); // \""
+        self.assertIn(("./hidden.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
     def test_nested_templates_and_regex_braces_do_not_hide_dependencies(self) -> None:
         sources = (
             "`${ /}/.test('}') && `${require('./hidden.cjs')}` }`;",
@@ -242,7 +263,7 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
 
     def test_division_after_identifiers_and_postfix_operators_is_not_a_regex(self) -> None:
-        for prefix in ("const of=1; of", "const x=1; x++", "const x=1; x--", "const x={of:1}; x.of"):
+        for prefix in ("const of=1; of", "const x=1; x++", "const x=1; x--", "const x={of:1}; x.of", "const x={default:1}; x.default"):
             with self.subTest(prefix=prefix):
                 self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(prefix + " / require('./hidden.cjs');"))
 
