@@ -32,12 +32,15 @@ jobs:
           payload = ''.join((workspace / f'.github/pr45-final-repair/patch-{i}.b64').read_text().strip() for i in range(3))
           patch = lzma.decompress(base64.b64decode(payload, validate=True))
           assert hashlib.sha256(patch).hexdigest() == '30aadabf7e0e731cf6ca197900657227ff0a8821a8b98b95ade8b8cdc89f9903'
+          refinement = lzma.decompress(base64.b64decode((workspace / '.github/pr45-final-repair/refinement.b64').read_text().strip(), validate=True))
+          assert hashlib.sha256(refinement).hexdigest() == '94e91868024e57049f6e49ca4cc12c162b485b80aae49ccf8112ad4a872da272'
           base = '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
           candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-final-candidate'
           subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), base], check=True)
           subprocess.run(['git', 'apply', '--index', '-'], cwd=candidate, input=patch, check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], cwd=candidate, input=refinement, check=True)
           tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
-          assert tree == 'b9917a8db8cbc05e30305d1ec1403a424ef547ee', tree
+          assert tree == '3d5fd44abfebd5c14d89b5e791dc856557842133', tree
           allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_review.py']
           changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=candidate, text=True).splitlines()
           assert changed == allowed, changed
@@ -65,7 +68,7 @@ jobs:
           git diff --check origin/main...HEAD
           test -z "$(git status --porcelain)"
           test "$(git rev-parse HEAD)" = '${{ steps.prepare.outputs.head }}'
-          test "$(git rev-parse HEAD^{tree})" = b9917a8db8cbc05e30305d1ec1403a424ef547ee
+          test "$(git rev-parse HEAD^{tree})" = 3d5fd44abfebd5c14d89b5e791dc856557842133
       - name: Package only the exact tested commit
         run: |
           mkdir -p "$RUNNER_TEMP/pr45-verified"
@@ -102,7 +105,7 @@ jobs:
           git bundle verify "$RUNNER_TEMP/pr45-verified/candidate.bundle"
           git fetch --no-tags "$RUNNER_TEMP/pr45-verified/candidate.bundle" HEAD
           test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
-          test "$(git rev-parse FETCH_HEAD^{tree})" = b9917a8db8cbc05e30305d1ec1403a424ef547ee
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 3d5fd44abfebd5c14d89b5e791dc856557842133
           auth=$(printf 'x-access-token:%s' "$GH_PUSH_TOKEN" | base64 -w0)
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin FETCH_HEAD:refs/heads/fix/pr45-verified-b9917a8db8cb
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin FETCH_HEAD:refs/heads/fix/pr45-verified-3d5fd44abfeb
           printf 'Exact tested commit: `%s`\n\nPR45 has not been moved or merged.\n' "$EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
