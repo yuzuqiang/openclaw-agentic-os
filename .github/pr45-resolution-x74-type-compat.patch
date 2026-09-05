@@ -1,0 +1,66 @@
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index 1ebe84e..e5f2413 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -4318,6 +4318,27 @@ def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+     requires_url = bool(worker_matches)
+     required_meta |= requires_url
+ 
++    # Preserve the explicit type aliases supported by the integrated contract,
++    # but never erase arbitrary spans through a later semicolon. The complete
++    # ``type Name = URL;`` token shape is unambiguous only when there is no line
++    # terminator after ``type`` (otherwise ASI can leave a runtime assignment).
++    # Exempt only its type reference, not declarations or executable neighbours.
++    for index, (kind, value, _start, end) in enumerate(tokens):
++        if kind != "identifier" or value != "type" or index + 4 >= len(tokens):
++            continue
++        if text(index - 1) in {".", "?."}:
++            continue
++        if any(_is_js_line_terminator(character) for character in source_text[end:tokens[index + 1][2]]):
++            continue
++        if (
++            tokens[index + 1][0] == "identifier"
++            and text(index + 2) == "="
++            and tokens[index + 3][0] == "identifier"
++            and text(index + 3) in url_names
++            and text(index + 4) == ";"
++        ):
++            url_declarations.append((tokens[index + 3][2], tokens[index + 3][3]))
++
+     # URL instances can also be acquired from native APIs' internal objects.
+     # Do not infer that an unreferenced URL constructor implies an immutable
+     # prototype: meta-object capabilities can discover and modify that prototype.
+diff --git a/tests/test_runtime_resolution_bases.py b/tests/test_runtime_resolution_bases.py
+index 01f13e5..94c507f 100644
+--- a/tests/test_runtime_resolution_bases.py
++++ b/tests/test_runtime_resolution_bases.py
+@@ -121,6 +121,29 @@ class RuntimeResolutionBaseTests(unittest.TestCase):
+             with self.subTest(mutation=mutation):
+                 self.assert_closed(factory + mutation + load)
+ 
++    def test_exact_url_type_alias_preserves_runtime_constructor_binding(self) -> None:
++        for declaration in (
++            "import type {URL} from 'node:url';type Address=URL;",
++            "import {type URL} from 'node:url';type Address = URL;",
++            "type Address = URL;",
++        ):
++            with self.subTest(declaration=declaration):
++                self.write(CONTRACT.PERSISTENT_LIFECYCLE_RUNNER, declaration + WORKER + LAUNCH)
++                self.assertIn("scripts/bound.mjs", CONTRACT.runtime_source_paths(self.root))
++
++    def test_contextual_type_identifier_does_not_erase_url_capability_transfer(self) -> None:
++        for separator in ("\n", "\r", "\r\n", "\u2028", "\u2029", "/*\n*/"):
++            source = "let type=0;let Address;type" + separator + "Address=URL;"
++            with self.subTest(separator=separator):
++                self.assert_closed(source + WORKER + LAUNCH)
++        for source in (
++            "type Address=URL;const copy=URL;",
++            "type Address=URL;consume(URL);",
++            "type Address=URL;URL=Fake;",
++        ):
++            with self.subTest(source=source):
++                self.assert_closed(source + WORKER + LAUNCH)
++
+     def test_ordinary_non_loader_url_and_metadata_usage_is_unchanged(self) -> None:
+         for source in (
+             "const u=new URL('/health', 'https://example.invalid'); console.log(u.pathname);",
