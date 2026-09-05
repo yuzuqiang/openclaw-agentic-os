@@ -225,10 +225,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 self.assertEqual([], CONTRACT.import_specifiers("const inert=" + literal + ";"))
 
     def test_regex_literal_after_extends_does_not_hide_later_require(self) -> None:
-        source = "class A extends /\"/.source {} require('./hidden.cjs'); // \""
+        source = 'class A extends /"/.source {} require("./hidden.cjs"); // "'
         self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
         with self.assertRaises(CONTRACT.RuntimeSourceContractError):
-            CONTRACT.import_specifiers("class A extends /\"/.constructor {} require('./hidden.cjs'); // \"")
+            CONTRACT.import_specifiers('class A extends /"/.constructor {} require("./hidden.cjs"); // "')
 
     def test_nested_templates_and_regex_braces_do_not_hide_dependencies(self) -> None:
         sources = (
@@ -267,7 +267,7 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "import {spawnSync} from 'node:child_process'; spawnSync(process.execPath, ['./bound.cjs','a','b',]);",
         ):
             with self.subTest(source=source):
-                self.assertIn(("./bound.cjs", True, "process"), CONTRACT.import_specifiers(source))
+                self.assertIn(("./bound.cjs", True, "fork" if "fork" in source else "spawn"), CONTRACT.import_specifiers(source))
 
     def test_process_script_resolution_uses_launch_cwd_not_importer_directory(self) -> None:
         for launch in (
@@ -330,11 +330,30 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 "node_modules/outer/package.json": '{"name":"outer","type":"module","exports":"./actual.mjs"}',
                 "node_modules/outer/actual.mjs": "export const selected = 'installed-actual';",
             })
-
             paths = CONTRACT.runtime_source_paths(root)
-
         self.assertIn("node_modules/outer/actual.mjs", paths)
         self.assertNotIn("root-decoy.mjs", paths)
+
+    @unittest.skipUnless(NODE, "Node is required for the package self-reference witness")
+    def test_node_nested_scope_resolves_bare_package_from_node_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "import 'outer';", {
+                "package.json": '{"name":"outer","type":"module","exports":"./root-decoy.mjs"}',
+                "root-decoy.mjs": "console.log('root-decoy');",
+                "scripts/package.json": '{"name":"inner","type":"module"}',
+                "node_modules/outer/package.json": '{"name":"outer","type":"module","exports":"./actual.mjs"}',
+                "node_modules/outer/actual.mjs": "console.log('installed-actual');",
+            })
+            # Exercise Node's package scope, independently of TypeScript loading.
+            entry = (root / CONTRACT.PERSISTENT_LIFECYCLE_RUNNER).with_suffix(".mjs")
+            entry.write_text("import 'outer';", encoding="utf-8")
+            env = {key: value for key, value in os.environ.items() if not key.startswith("NODE_")}
+            result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
+            self.assertEqual("installed-actual", result.stdout.strip())
+            paths = CONTRACT.runtime_source_paths(root)
+            self.assertIn("node_modules/outer/actual.mjs", paths)
+            self.assertNotIn("root-decoy.mjs", paths)
 
     @unittest.skipUnless(NODE, "Node is required for independent execution witnesses")
     def test_node_reproduces_rejected_capability_transfers(self) -> None:
@@ -354,26 +373,6 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
                 self.assertEqual("executed", result.stdout.strip())
                 self.assert_closed(source)
-
-    @unittest.skipUnless(NODE, "Node is required for the package self-reference witness")
-    def test_node_nested_scope_resolves_bare_package_from_node_modules(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.fixture(root, "import 'outer';", {
-                "package.json": '{"name":"outer","type":"module","exports":"./root-decoy.mjs"}',
-                "root-decoy.mjs": "console.log('root-decoy');",
-                "scripts/package.json": '{"name":"inner","type":"module"}',
-                "node_modules/outer/package.json": '{"name":"outer","type":"module","exports":"./actual.mjs"}',
-                "node_modules/outer/actual.mjs": "console.log('installed-actual');",
-            })
-            entry = root / CONTRACT.PERSISTENT_LIFECYCLE_RUNNER
-            env = {key: value for key, value in os.environ.items() if not key.startswith("NODE_")}
-            result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
-
-            self.assertEqual("installed-actual", result.stdout.strip())
-            paths = CONTRACT.runtime_source_paths(root)
-            self.assertIn("node_modules/outer/actual.mjs", paths)
-            self.assertNotIn("root-decoy.mjs", paths)
 
     @unittest.skipUnless(NODE, "Node is required for the working-directory witness")
     def test_node_process_entrypoint_is_resolved_from_launch_working_directory(self) -> None:
