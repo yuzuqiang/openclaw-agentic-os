@@ -515,6 +515,12 @@ def import_candidates(
     return deduped
 
 
+_REGEXP_PREFIX_KEYWORDS = frozenset({
+    "case", "debugger", "default", "delete", "do", "else", "extends",
+    "in", "instanceof", "new", "return", "throw", "typeof", "void",
+})
+
+
 def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
     """Lex code without interpreting it; retain offsets through template expressions.
 
@@ -547,6 +553,21 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
             else:
                 index += 1
         raise RuntimeSourceContractError("runtime source contains an unterminated JavaScript template literal")
+
+    def within_for_header() -> bool:
+        significant = [item for item in tokens if item[0] != "comment"]
+        depth = 0
+        for cursor in range(len(significant) - 1, -1, -1):
+            value = significant[cursor][1]
+            if value == ")":
+                depth += 1
+            elif value == "(":
+                if depth:
+                    depth -= 1
+                else:
+                    words = [item[1] for item in significant[max(0, cursor - 2):cursor]]
+                    return bool(words and (words[-1] == "for" or words == ["for", "await"]))
+        return False
 
     def code(index: int, *, expression: bool = False) -> int:
         depth = 0
@@ -584,6 +605,37 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     line_has_code = False
                 token("comment", start, index)
                 continue
+            if character == "<":
+                following = index + 1
+                while following < size and source_text[following].isspace():
+                    following += 1
+                tag_like = following < size and (
+                    source_text[following] == ">"
+                    or _is_identifier_character(source_text[following])
+                )
+                preceding = next((item for item in reversed(tokens) if item[0] != "comment"), None)
+                line_break = preceding is not None and any(
+                    _is_js_line_terminator(c) for c in source_text[preceding[3]:index]
+                )
+                expression_prefix = previous is None or (
+                    previous[0] == "punctuation" and previous[1] in
+                    {"(", "[", "{", "=", ",", ":", ";", "?", "!", "&", "|", "+", "-", "*", "%", "^", "~", "<", ">", "@", "=>"}
+                ) or (
+                    previous[0] == "identifier"
+                    and previous[1] in _REGEXP_PREFIX_KEYWORDS | {"await", "yield", "of"}
+                )
+                # Attribute-free lowercase JSX intrinsics are inert text for the
+                # source scan.  Other JSX/angle contexts need a TSX-aware lexer,
+                # so fail closed rather than treating child quotes as strings.
+                if tag_like and (expression_prefix or line_break):
+                    intrinsic = re.match(r"<[a-z][A-Za-z0-9_-]*\s*/>", source_text[index:])
+                    if intrinsic is None:
+                        raise RuntimeSourceContractError("runtime source contains an unsupported JSX/angle-assertion lexical context")
+                    index += intrinsic.end()
+                    token("jsx-intrinsic", start, index)
+                    before_previous, previous = previous, ("literal", "jsx-intrinsic")
+                    line_has_code = True
+                    continue
             if character in {"'", '"'}:
                 index += 1
                 while index < size:
@@ -608,15 +660,38 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                 current = ("literal", "template")
             elif character == "/":
                 previous_value = previous[1] if previous is not None else ""
-                if previous_value in {")", "}"}:
+                member_keyword = before_previous in {("punctuation", "."), ("punctuation", "?.")}
+                ambiguous_keyword = (
+                    previous is not None and previous[0] == "identifier"
+                    and (
+                        previous_value in {"await", "yield", "break", "continue"}
+                        or (previous_value == "of" and within_for_header())
+                    )
+                    and not member_keyword
+                )
+                postfix_assertion = (
+                    previous_value == "!" and before_previous is not None
+                    and (
+                        before_previous[0] in {"identifier", "literal"}
+                        or before_previous[1] in {")", "]", "}", "!", ">"}
+                    )
+                )
+                preceding = next((item for item in reversed(tokens) if item[0] != "comment"), None)
+                after_line_break = (
+                    previous is not None and previous[0] in {"identifier", "literal"}
+                    and preceding is not None
+                    and not (previous_value in _REGEXP_PREFIX_KEYWORDS and not member_keyword)
+                    and any(_is_js_line_terminator(c) for c in source_text[preceding[3]:index])
+                )
+                if previous_value in {")", "}", ">", "<"} or ambiguous_keyword or postfix_assertion or after_line_break:
                     raise RuntimeSourceContractError("runtime source contains an ambiguous JavaScript slash token")
                 regex_start = previous is None or (
                     previous[0] == "punctuation"
-                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
+                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "@", "=>"}
                 ) or (
                     previous[0] == "identifier"
-                    and previous_value in {"await", "case", "default", "delete", "else", "extends", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
-                    and before_previous not in {("punctuation", "."), ("punctuation", "?.")}
+                    and previous_value in _REGEXP_PREFIX_KEYWORDS
+                    and not member_keyword
                 )
                 if regex_start:
                     index += 1
@@ -646,6 +721,13 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     index += 1
                     token("punctuation", start, index)
                     current = ("punctuation", "/")
+            elif character == "#":
+                parsed = _parse_js_identifier(source_text, index + 1)
+                if parsed is None:
+                    raise RuntimeSourceContractError("runtime source contains an invalid JavaScript private identifier")
+                name, index = parsed
+                token("private-identifier", start, index, "#" + name)
+                current = ("literal", "private-identifier")
             elif _is_identifier_character(character) or character == "\\":
                 parsed = _parse_js_identifier(source_text, index)
                 if parsed is None:  # Numeric text cannot name a loader capability.
@@ -683,6 +765,90 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
     return tokens
 
 
+def _erased_type_alias_spans(
+    source_text: str, tokens: list[tuple[str, str, int, int]],
+) -> list[tuple[int, int]]:
+    """Recognize a bounded, non-evaluating subset of TS type aliases."""
+    code_tokens = [item for item in tokens if item[0] != "comment"]
+    size = len(code_tokens)
+
+    def text(index: int) -> str:
+        return code_tokens[index][1] if 0 <= index < size else ""
+
+    def identifier(index: int) -> bool:
+        return 0 <= index < size and code_tokens[index][0] == "identifier"
+
+    def type_expression(index: int, depth: int = 0) -> int | None:
+        if depth > 64:
+            return None
+        start = index
+        if text(index) in {"typeof", "keyof", "readonly", "unique"}:
+            index += 1
+        if identifier(index) or (index < size and code_tokens[index][0] in {"string", "number"}):
+            index += 1
+            while text(index) == "." and identifier(index + 1):
+                index += 2
+            if text(index) == "<":
+                index += 1
+                while True:
+                    end = type_expression(index, depth + 1)
+                    if end is None:
+                        return None
+                    index = end
+                    if text(index) != ",":
+                        break
+                    index += 1
+                if text(index) != ">":
+                    return None
+                index += 1
+        elif text(index) == "(":
+            end = type_expression(index + 1, depth + 1)
+            if end is None or text(end) != ")":
+                return None
+            index = end + 1
+        else:
+            return None
+        while text(index) == "[":
+            index += 1
+            if text(index) != "]":
+                end = type_expression(index, depth + 1)
+                if end is None:
+                    return None
+                index = end
+            if text(index) != "]":
+                return None
+            index += 1
+        if text(index) in {"|", "&"}:
+            end = type_expression(index + 1, depth + 1)
+            if end is None:
+                return None
+            index = end
+        return index if index > start else None
+
+    spans: list[tuple[int, int]] = []
+    for index, (kind, value, start, end) in enumerate(code_tokens):
+        if kind != "identifier" or value != "type" or not identifier(index + 1):
+            continue
+        boundary = index - 1
+        if text(boundary) == "export":
+            boundary -= 1
+        if boundary >= 0 and text(boundary) not in {";", "{", "}"}:
+            continue
+        if any(_is_js_line_terminator(c) for c in source_text[end:code_tokens[index + 1][2]]):
+            continue
+        if text(index + 2) != "=":
+            continue
+        type_end = type_expression(index + 3)
+        if type_end is None:
+            continue
+        if text(type_end) not in {"", ";", "}"}:
+            gap = source_text[code_tokens[type_end - 1][3]:code_tokens[type_end][2]]
+            if not any(_is_js_line_terminator(c) for c in gap):
+                continue
+        spans.append((start, code_tokens[type_end - 1][3]))
+    return spans
+
+
 def _source_scan_view(source_text: str) -> str:
     """A shared lexical view for the legacy, non-evaluating recognizers.
 
@@ -695,6 +861,14 @@ def _source_scan_view(source_text: str) -> str:
     """
     output = list(source_text)
     tokens = _source_tokens(source_text)
+    erased_spans = _erased_type_alias_spans(source_text, tokens)
+    for start, end in erased_spans:
+        for index in range(start, end):
+            if not _is_js_line_terminator(source_text[index]):
+                output[index] = " "
+    tokens = [token for token in tokens if not any(
+        start <= token[2] < end for start, end in erased_spans
+    )]
     identifiers = {value for kind, value, _start, _end in tokens if kind == "identifier"}
     canonical_names: dict[str, str] = {}
     counter = 0
@@ -708,11 +882,11 @@ def _source_scan_view(source_text: str) -> str:
                 break
         canonical_names[value] = name
     for kind, value, start, end in tokens:
-        if kind in {"comment", "regex", "template"}:
+        if kind in {"comment", "regex", "template", "jsx-intrinsic"}:
             for index in range(start, end):
                 if not _is_js_line_terminator(source_text[index]):
                     output[index] = " "
-            if kind == "regex":
+            if kind in {"regex", "jsx-intrinsic"}:
                 output[start] = "0"
         elif kind == "punctuation" and value == "/":
             output[start] = "*"
@@ -2022,7 +2196,10 @@ def _execution_capability_bindings(
     new JavaScript assignment/call spelling cannot silently introduce an alias.
     """
     tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
-    bindings = {"Worker": "worker", "child_process": "child-namespace"}
+    # This inventory records explicit value origins. Ambient Node-compatible
+    # spellings are added by the usage audits so type-only imports cannot shadow
+    # an actually available Worker or child_process value.
+    bindings: dict[str, str] = {}
     declarations: list[tuple[int, int]] = []
     builtin_loads: list[str] = []
 
@@ -2035,12 +2212,43 @@ def _execution_capability_bindings(
         parsed = _parse_quoted_specifier(source_text, tokens[index][2])
         return parsed[0] if parsed is not None else None
 
+    def erased_clause(start: int, end: int) -> bool:
+        if text(start) == "type" and start + 1 < end and text(start + 1) != ",":
+            return True
+        if text(start) != "{" or text(end - 1) != "}":
+            return False
+        parts: list[list[tuple[str, str, int, int]]] = [[]]
+        for item in tokens[start + 1:end - 1]:
+            if item[1] == ",":
+                parts.append([])
+            else:
+                parts[-1].append(item)
+        return all(
+            not part or (
+                len(part) > 1
+                and part[0][0] == "identifier"
+                and part[0][1] == "type"
+                and part[1][1] != "as"
+            )
+            for part in parts
+        )
+
     def bind(module: str, imported: str, local: str) -> None:
         if module == "worker_threads":
             if imported in {"*", "default"}:
                 bindings[local] = "worker-namespace"
             elif imported == "Worker":
                 bindings[local] = "worker"
+        elif module == "module":
+            if imported in {"*", "default", "Module"}:
+                bindings[local] = "module-namespace"
+            elif imported not in {
+                "builtinModules", "createRequire", "findSourceMap",
+                "isBuiltin", "register", "registerHooks", "SourceMap",
+            }:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS runtime loader binding"
+                )
         elif module == "child_process":
             if imported in {"*", "default"}:
                 bindings[local] = "child-namespace"
@@ -2059,21 +2267,17 @@ def _execution_capability_bindings(
 
     def clause(start: int, end: int, module: str, *, commonjs: bool) -> None:
         index = start
-        declaration_type_only = False
-        if not commonjs and text(index) == "type":
-            declaration_type_only = True
-            index += 1
+        if not commonjs and text(index) == "type" and index + 1 < end and text(index + 1) != ",":
+            return
         if index < end and tokens[index][0] == "identifier" and text(index) not in {"{", "*"}:
-            if not declaration_type_only:
-                bind(module, "default", text(index))
+            bind(module, "default", text(index))
             index += 1
             if text(index) == ",":
                 index += 1
         if index == end:
             return
         if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
-            if not declaration_type_only:
-                bind(module, "*", text(index + 2))
+            bind(module, "*", text(index + 2))
             return
         if text(index) != "{" or text(end - 1) != "}":
             raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
@@ -2082,7 +2286,7 @@ def _execution_capability_bindings(
             if text(index) == ",":
                 index += 1
                 continue
-            specifier_type_only = declaration_type_only
+            specifier_type_only = False
             if not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}:
                 specifier_type_only = True
                 index += 1
@@ -2108,6 +2312,28 @@ def _execution_capability_bindings(
             continue
         if text(index + 1) in {"(", "."}:
             continue
+        if value == "export":
+            whole_type = text(index + 1) == "type" and text(index + 2) == "{"
+            opening = index + 2 if whole_type else index + 1
+            if text(opening) == "{":
+                closing = opening + 1
+                while closing < len(tokens) and text(closing) not in {"}", ";"}:
+                    closing += 1
+                if text(closing) == "}" and text(closing + 1) != "from":
+                    if whole_type:
+                        declarations.append((start, tokens[closing][3]))
+                    else:
+                        part = opening + 1
+                        for end in range(part, closing + 1):
+                            if end == closing or text(end) == ",":
+                                if (
+                                    end - part >= 2
+                                    and tokens[part][0] == "identifier"
+                                    and text(part) == "type"
+                                    and not (end - part == 3 and text(part + 1) == "as")
+                                ):
+                                    declarations.append((tokens[part][2], tokens[end - 1][3]))
+                                part = end + 1
         # Side-effect imports declare no local capabilities.
         if value == "import" and index + 1 < len(tokens) and tokens[index + 1][0] == "string":
             declarations.append((start, tokens[index + 1][3]))
@@ -2126,8 +2352,11 @@ def _execution_capability_bindings(
                 assert specifier is not None
                 module = specifier.removeprefix("node:")
                 if module in {"worker_threads", "child_process", "module"} and value == "export":
+                    if erased_clause(index + 1, cursor):
+                        declarations.append((start, tokens[cursor + 1][3]))
+                        break
                     raise RuntimeSourceContractError("runtime source contains an unsupported execution capability re-export")
-                if module in {"worker_threads", "child_process"}:
+                if module in {"worker_threads", "child_process", "module"}:
                     clause(index + 1, cursor, module, commonjs=False)
                 if value == "import":
                     declarations.append((start, tokens[cursor + 1][3]))
@@ -2144,12 +2373,14 @@ def _execution_capability_bindings(
         if specifier is None or text(index + 3) != ")":
             continue
         module = specifier.removeprefix("node:")
-        if module not in {"worker_threads", "child_process"}:
+        if module not in {"worker_threads", "child_process", "module"}:
             continue
         # Only a direct require on a simple declaration RHS has a locally
         # accounted-for returned namespace.  Inline/grouped/aliased factories
         # are rejected by the origin count, rather than guessed at.
         if text(index - 1) != "=":
+            if module == "module" and text(index + 4) == "." and text(index + 5) == "createRequire":
+                builtin_loads.append(module)
             continue
         lhs = index - 2
         if text(lhs) == "}":
@@ -2163,29 +2394,195 @@ def _execution_capability_bindings(
     return bindings, declarations, builtin_loads
 
 
+def _typescript_type_reference_spans(source_text: str) -> list[tuple[int, int]]:
+    """Recognize type positions without declaring value names harmless."""
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    size = len(tokens)
+    spans: list[tuple[int, int]] = []
+
+    def text(index: int) -> str:
+        return tokens[index][1] if 0 <= index < size else ""
+
+    def same_line(left: int, right: int) -> bool:
+        return not any(_is_js_line_terminator(c) for c in source_text[tokens[left][3]:tokens[right][2]])
+
+    def balanced(index: int, opener: str, closer: str) -> int | None:
+        stack = [closer]
+        index += 1
+        pairs = {"(": ")", "[": "]", "{": "}", "<": ">"}
+        while index < size:
+            value = text(index)
+            if value in pairs:
+                stack.append(pairs[value])
+            elif value in {")", "]", "}", ">"}:
+                if value != stack.pop():
+                    return None
+                if not stack:
+                    return index + 1
+            index += 1
+        return None
+
+    def parse_type(index: int, depth: int = 0) -> int | None:
+        if depth > 64 or index >= size:
+            return None
+        start = index
+        value = text(index)
+        if value in {"keyof", "readonly", "unique", "typeof", "infer"}:
+            return parse_type(index + 1, depth + 1)
+        if value == "abstract" and text(index + 1) == "new":
+            index += 1
+            value = "new"
+        if value == "new":
+            index += 1
+            if text(index) != "(":
+                return None
+            end = balanced(index, "(", ")")
+            if end is None or text(end) != "=>":
+                return None
+            return parse_type(end + 1, depth + 1)
+        if value in {"{", "["}:
+            index = balanced(index, value, "}" if value == "{" else "]")
+            if index is None:
+                return None
+        elif value == "(":
+            end = balanced(index, "(", ")")
+            if end is None:
+                return None
+            if text(end) == "=>":
+                return parse_type(end + 1, depth + 1)
+            inner = parse_type(index + 1, depth + 1)
+            if inner != end - 1:
+                return None
+            index = end
+        elif tokens[index][0] in {"identifier", "string", "number", "static-template"}:
+            if value == "import" and text(index + 1) == "(":
+                if index + 3 >= size or tokens[index + 2][0] != "string" or text(index + 3) != ")":
+                    return None
+                index += 4
+            else:
+                index += 1
+            while text(index) == "." and index + 1 < size and tokens[index + 1][0] == "identifier":
+                index += 2
+            if text(index) == "<":
+                index = balanced(index, "<", ">")
+                if index is None:
+                    return None
+        else:
+            return None
+        while text(index) == "[":
+            end = balanced(index, "[", "]")
+            if end is None:
+                return None
+            index = end
+        if text(index) in {"|", "&"}:
+            return parse_type(index + 1, depth + 1)
+        if text(index) == "extends":
+            constraint = parse_type(index + 1, depth + 1)
+            if constraint is None or text(constraint) != "?":
+                return None
+            positive = parse_type(constraint + 1, depth + 1)
+            if positive is None or text(positive) != ":":
+                return None
+            return parse_type(positive + 1, depth + 1)
+        return index if index > start else None
+
+    def add(start: int, type_start: int) -> int | None:
+        end = parse_type(type_start)
+        if end is not None:
+            if text(end) == "(" and same_line(end - 1, end):
+                return None
+            spans.append((tokens[start][2], tokens[end - 1][3]))
+        return end
+
+    stack: list[tuple[str, int]] = []
+    questions = [0]
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind == "identifier" and value == "type" and index + 2 < size:
+            if tokens[index + 1][0] == "identifier" and same_line(index, index + 1) and text(index - 1) not in {".", "?."}:
+                cursor = index + 2
+                if text(cursor) == "<":
+                    cursor = balanced(cursor, "<", ">")
+                if cursor is not None and text(cursor) == "=":
+                    add(index, cursor + 1)
+        if kind == "identifier" and value in {"as", "satisfies"} and index + 1 < size:
+            previous = tokens[index - 1] if index > 0 else None
+            operand = previous is not None and (
+                previous[0] in {"string", "number", "static-template"}
+                or previous[1] in {")", "]", "}"}
+                or (
+                    previous[0] == "identifier"
+                    and previous[1] not in _REGEXP_PREFIX_KEYWORDS | {"await", "yield", "of", "const", "let", "var", "export", "import"}
+                )
+            )
+            type_prefix = tokens[index + 1][0] in {"identifier", "string", "number"} or text(index + 1) == "{"
+            if operand and type_prefix and same_line(index - 1, index) and same_line(index, index + 1):
+                add(index + 1, index + 1)
+        if value in {"(", "[", "{"}:
+            stack.append((value, index))
+            questions.append(0)
+        elif value in {")", "]", "}"}:
+            if stack:
+                stack.pop()
+                questions.pop()
+        elif value == "?" and text(index + 1) != ":":
+            questions[-1] += 1
+        elif value == ":":
+            if questions[-1]:
+                questions[-1] -= 1
+                continue
+            name_index = index - 2 if text(index - 1) == "?" else index - 1
+            if name_index < 0 or tokens[name_index][0] != "identifier":
+                continue
+            previous = text(name_index - 1)
+            variable = previous in {"const", "let", "var"} and same_line(name_index - 1, name_index)
+            parameter = bool(stack and stack[-1][0] == "(" and previous in {"(", ","})
+            if variable or parameter:
+                add(index + 1, index + 1)
+    return spans
+
+
 def _reject_execution_capability_escapes(
     source_text: str,
     *,
     accepted_spans: list[tuple[int, int]],
     loaded_execution_modules: list[str],
 ) -> None:
-    bindings, declarations, builtin_loads = _execution_capability_bindings(source_text)
+    explicit_bindings, declarations, builtin_loads = _execution_capability_bindings(source_text)
+    bindings = {"Worker": "worker", "child_process": "child-namespace", **explicit_bindings}
     expected = sorted(specifier.removeprefix("node:") for specifier in loaded_execution_modules)
     if sorted(builtin_loads) != expected:
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported Worker entrypoint or child-process Node entrypoint namespace origin"
         )
     tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
-    type_spans = _type_only_declaration_spans(source_text, tokens)
+    type_spans = _typescript_type_reference_spans(source_text)
     for index, (kind, value, start, _end) in enumerate(tokens):
         if kind != "identifier" or value not in bindings:
             continue
         # Property names on unrelated objects are not references to a binding.
         if index and tokens[index - 1][1] in {".", "?."}:
-            continue
+            if not (
+                tokens[index - 1][1] == "."
+                and index >= 3
+                and all(t[1] == "." for t in tokens[index - 3:index])
+            ):
+                continue
         if any(left <= start < right for left, right in declarations + accepted_spans + type_spans):
             continue
         capability = bindings[value]
+        if capability == "module-namespace":
+            if (
+                index + 2 < len(tokens)
+                and tokens[index + 1][1] == "."
+                and tokens[index + 2][1] in {
+                    "builtinModules", "createRequire", "findSourceMap",
+                    "isBuiltin", "SourceMap",
+                }
+            ):
+                continue
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported CommonJS runtime loader namespace transfer"
+            )
         if capability.startswith("worker"):
             description = "Worker entrypoint"
         elif capability == "child-shell":
@@ -2197,58 +2594,6 @@ def _reject_execution_capability_escapes(
         raise RuntimeSourceContractError(
             f"runtime source contains an unsupported {description} capability usage"
         )
-
-
-def _has_js_line_terminator_between(source_text: str, left: int, right: int) -> bool:
-    return any(_is_js_line_terminator(character) for character in source_text[left:right])
-
-
-def _type_only_declaration_spans(
-    source_text: str,
-    tokens: list[tuple[str, str, int, int]],
-) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    statement_start = True
-    for index, (kind, value, start, end) in enumerate(tokens):
-        if (
-            statement_start
-            and kind == "identifier"
-            and value in {"type", "interface"}
-            and (index + 1) < len(tokens)
-            and tokens[index + 1][0] == "identifier"
-        ):
-            cursor = index + 1
-            depth = 0
-            span_end = end
-            previous_value = value
-            continuation_tokens = {"=", "|", "&", "?", ":", ",", ".", "(", "[", "{", "<", "=>", "extends"}
-            while cursor < len(tokens):
-                token_kind, token_value, token_start, token_end = tokens[cursor]
-                if (
-                    cursor > index + 1
-                    and depth == 0
-                    and _has_js_line_terminator_between(source_text, span_end, token_start)
-                    and previous_value not in continuation_tokens
-                    and token_value not in {"|", "&", ",", ".", "extends"}
-                ):
-                    break
-                if token_value == ";" and depth == 0:
-                    span_end = token_end
-                    cursor += 1
-                    break
-                if token_value in {"(", "[", "{", "<"}:
-                    depth += 1
-                elif token_value in {")", "]", "}", ">"} and depth > 0:
-                    depth -= 1
-                span_end = token_end
-                previous_value = token_value
-                cursor += 1
-            spans.append((start, span_end))
-        if value in {";", "{", "}"}:
-            statement_start = True
-        elif kind not in {"comment"}:
-            statement_start = False
-    return spans
 
 
 def _reject_unaccounted_require_references(source_text: str) -> None:
@@ -2326,7 +2671,7 @@ def _reject_unaccounted_create_require_references(source_text: str) -> None:
 def _worker_thread_bindings(source_text: str) -> tuple[set[str], set[str]]:
     bindings, _declarations, _loads = _execution_capability_bindings(source_text)
     return (
-        {name for name, kind in bindings.items() if kind == "worker"},
+        {"Worker"} | {name for name, kind in bindings.items() if kind == "worker"},
         {name for name, kind in bindings.items() if kind == "worker-namespace"},
     )
 
@@ -2339,7 +2684,7 @@ def _child_process_sync_alias_bindings(
         {name for name, kind in bindings.items() if kind == "fork"},
         {name for name, kind in bindings.items() if kind == "child-node"},
         {name for name, kind in bindings.items() if kind == "child-shell"},
-        {name for name, kind in bindings.items() if kind == "child-namespace"},
+        {"child_process"} | {name for name, kind in bindings.items() if kind == "child-namespace"},
     )
 
 
@@ -3421,6 +3766,27 @@ def _create_require_specifiers(
 ) -> list[str]:
     specifiers: list[str] = []
     _validate_create_require_factory_calls(source_text)
+    factories = _create_require_factory_names(source_text)
+    for kind, value, start, end in _source_tokens(source_text):
+        if kind != "identifier" or value not in factories:
+            continue
+        if _previous_non_trivia_character(source_text, start) == ".":
+            continue
+        opening = _skip_js_trivia(source_text, end)
+        if source_text[opening:opening + 1] != "(":
+            continue
+        base_end = _create_require_base_end(source_text, opening)
+        if base_end is None:
+            continue
+        call = _skip_js_trivia(source_text, base_end)
+        if source_text[call:call + 1] != "(":
+            continue
+        parsed = _parse_quoted_specifier(source_text, _skip_js_trivia(source_text, call + 1))
+        if parsed is None or source_text[_skip_js_trivia(source_text, parsed[1]):][:1] != ")":
+            raise RuntimeSourceContractError(
+                "runtime source contains an unsupported createRequire loader signature"
+            )
+        specifiers.append(parsed[0])
     for match in _executable_pattern_matches(
         source_text, INLINE_CREATE_REQUIRE_SPECIFIER
     ):
@@ -4153,6 +4519,275 @@ def _static_runtime_import_specifiers(source_text: str) -> list[str]:
     return specifiers
 
 
+def _reject_module_metadata_mutations(source_text: str) -> None:
+    """Do not let writes to a CommonJS module redirect later literal requires."""
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    pairs: dict[int, int] = {}
+    stack: list[int] = []
+    for index, token in enumerate(tokens):
+        if token[1] in {"(", "[", "{", "${"}:
+            stack.append(index)
+        elif token[1] in {")", "]", "}"} and stack:
+            opening = stack.pop()
+            pairs[index] = opening
+            pairs[opening] = index
+    protected: list[tuple[int, int]] = []
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if (kind, value) not in {("identifier", "module"), ("punctuation", "(")}:
+            continue
+        end = _parse_grouped_named_base(source_text, start, "module")
+        if end is None:
+            continue
+        member = _parse_process_member(source_text, end)
+        if member is None or member[0] not in {"filename", "id", "path", "loaded", "isPreloading"}:
+            continue
+        last = index
+        while last + 1 < len(tokens) and tokens[last + 1][3] <= member[1]:
+            last += 1
+        protected.append((index, last))
+    if not protected:
+        return
+
+    def target_start(end: int) -> int:
+        if end < 0:
+            return 0
+        start = pairs.get(end, end) if tokens[end][1] in {")", "]", "}"} else end
+        while start > 0:
+            if tokens[start - 1][1] in {".", "?."} and start > 1:
+                start = target_start(start - 2)
+            elif tokens[start][1] in {"(", "["} and (
+                tokens[start - 1][0] == "identifier" or tokens[start - 1][1] in {")", "]"}
+            ) and tokens[start - 1][1] not in {"for", "in", "of", "return", "throw", "delete", "typeof", "void"}:
+                start = target_start(start - 1)
+            else:
+                break
+        return start
+
+    def check_target(left: int, right: int) -> None:
+        for start, end in protected:
+            if not left <= start <= end <= right:
+                continue
+            readonly = False
+            for opening, closing in pairs.items():
+                if not left <= opening < start <= end < closing <= right:
+                    continue
+                preceding = tokens[opening - 1] if opening else ("", "", 0, 0)
+                if tokens[opening][1] in {"(", "["} and (
+                    preceding[0] == "identifier" or preceding[1] in {")", "]"}
+                ) and preceding[1] not in {"for", "in", "of", "return", "throw", "delete", "typeof", "void"}:
+                    readonly = True
+                if tokens[opening][1] == "[" and closing + 1 < len(tokens) and tokens[closing + 1][1] == ":":
+                    readonly = True
+            cursor = start - 1
+            while cursor >= left and tokens[cursor][1] not in {",", ":", "{", "[", "("}:
+                if tokens[cursor][1] == "=":
+                    readonly = True
+                cursor -= 1
+            if not readonly:
+                raise RuntimeSourceContractError(
+                    "runtime source contains an unsupported CommonJS module metadata mutation"
+                )
+
+    operators = {"=", "+=", "-=", "*=", "/=", "%=", "**=", "<<=", ">>=", ">>>=", "&=", "|=", "^=", "&&=", "||=", "??="}
+    index = 0
+    while index < len(tokens):
+        kind, value, start, end = tokens[index]
+        if kind == "punctuation" and set(value) <= set("=+-*/%<>!&|^?*"):
+            cursor = index + 1
+            while (
+                cursor < len(tokens)
+                and tokens[cursor][0] == "punctuation"
+                and tokens[cursor][2] == end
+                and set(tokens[cursor][1]) <= set("=+-*/%<>!&|^?*")
+            ):
+                end = tokens[cursor][3]
+                cursor += 1
+            operator = source_text[start:end]
+            if operator in operators:
+                check_target(target_start(index - 1), index - 1)
+            if operator in {"++", "--"}:
+                check_target(target_start(index - 1), index - 1)
+                for pstart, pend in protected:
+                    if index < pstart and all(t[1] == "(" for t in tokens[cursor:pstart]):
+                        check_target(pstart, pend)
+            index = cursor
+            continue
+        if kind == "identifier" and value == "delete":
+            for pstart, pend in protected:
+                if index < pstart and all(t[1] == "(" for t in tokens[index + 1:pstart]):
+                    check_target(pstart, pend)
+        if kind == "identifier" and value in {"in", "of"}:
+            for opening, closing in pairs.items():
+                if (
+                    opening < index < closing
+                    and tokens[opening][1] == "("
+                    and opening
+                    and tokens[opening - 1][1] in {"for", "await"}
+                ):
+                    if not any(t[1] == ";" for t in tokens[opening + 1:closing]):
+                        check_target(target_start(index - 1), index - 1)
+        index += 1
+
+
+def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+    """Account for the identities assumed by literal loader-base recognition."""
+    source_text = _source_scan_view(source_text)
+    tokens = [token for token in _source_tokens(source_text) if token[0] != "comment"]
+    allowed_bases: list[tuple[int, int]] = []
+    url_declarations: list[tuple[int, int]] = []
+    url_names = {"URL"}
+    url_origin_risk = False
+    recognized_url_requires = 0
+    required_filename = False
+    required_meta = False
+
+    def text(index: int) -> str:
+        return tokens[index][1] if 0 <= index < len(tokens) else ""
+
+    def literal(index: int) -> str | None:
+        if not 0 <= index < len(tokens) or tokens[index][0] != "string":
+            return None
+        parsed = _parse_quoted_specifier(source_text, tokens[index][2])
+        return parsed[0] if parsed is not None else None
+
+    def clause(start: int, end: int, *, commonjs: bool) -> bool:
+        index = start
+        if not commonjs and text(index) == "type" and index + 1 < end and text(index + 1) != ",":
+            return True
+        if index < end and tokens[index][0] == "identifier":
+            url_names.add(text(index))
+            index += 1
+            if text(index) == ",":
+                index += 1
+        if index == end:
+            return True
+        if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
+            url_names.add(text(index + 2))
+            return True
+        if text(index) != "{" or text(end - 1) != "}":
+            return False
+        index += 1
+        while index < end - 1:
+            if text(index) == ",":
+                index += 1
+                continue
+            type_only = not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}
+            if type_only:
+                index += 1
+            if tokens[index][0] not in {"identifier", "string"}:
+                return False
+            imported = literal(index) if tokens[index][0] == "string" else text(index)
+            local = imported
+            index += 1
+            if text(index) == (":" if commonjs else "as"):
+                index += 1
+                if index >= end - 1 or tokens[index][0] != "identifier":
+                    return False
+                local = text(index)
+                index += 1
+            if index < end - 1 and text(index) != ",":
+                return False
+            if not type_only and imported in {"URL", "default", "pathToFileURL"} and local is not None:
+                url_names.add(local)
+        return True
+
+    for index, (kind, value, start, _end) in enumerate(tokens):
+        if kind != "identifier" or value not in {"import", "export"} or text(index + 1) in {"(", "."}:
+            continue
+        cursor = index + 1
+        while cursor < len(tokens) and text(cursor) != ";":
+            if text(cursor) == "from" and literal(cursor + 1) is not None:
+                if literal(cursor + 1) in {"url", "node:url"}:
+                    if value != "import" or not clause(index + 1, cursor, commonjs=False):
+                        url_origin_risk = True
+                    else:
+                        url_declarations.append((start, tokens[cursor + 1][3]))
+                break
+            if cursor > index + 1 and text(cursor) in {"import", "export"}:
+                break
+            cursor += 1
+
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "require" or text(index + 1) != "(":
+            continue
+        if literal(index + 2) not in {"url", "node:url"} or text(index + 3) != ")" or text(index - 1) != "=":
+            continue
+        lhs = index - 2
+        if text(lhs) == "}":
+            while lhs >= 0 and text(lhs) != "{":
+                lhs -= 1
+        if lhs >= 1 and text(lhs - 1) in {"const", "let", "var"} and clause(lhs, index - 1, commonjs=True):
+            recognized_url_requires += 1
+            url_declarations.append((tokens[lhs - 1][2], tokens[index - 1][3]))
+    url_loads = sum(
+        specifier in {"url", "node:url"}
+        for specifier in (
+            _commonjs_require_specifiers(source_text)
+            + _create_require_specifiers(source_text)
+            + _dynamic_import_specifiers(source_text)
+        )
+    )
+    url_origin_risk |= url_loads != recognized_url_requires
+
+    factories = _create_require_factory_names(source_text)
+    for index, (kind, value, _start, end) in enumerate(tokens):
+        if kind != "identifier" or value not in factories:
+            continue
+        opening = _skip_js_trivia(source_text, end)
+        if source_text[opening:opening + 1] != "(":
+            continue
+        base_end = _create_require_base_end(source_text, opening)
+        if base_end is None:
+            continue
+        allowed_bases.append((opening, base_end))
+        if text(index + 2) == "__filename":
+            required_filename = True
+        else:
+            required_meta = True
+
+    constructors, namespaces = _worker_thread_bindings(source_text)
+    worker_matches = _executable_pattern_matches(source_text, _worker_constructor_pattern(constructors, namespaces))
+    allowed_bases.extend(match.span() for match in worker_matches)
+    requires_url = bool(worker_matches)
+    required_meta |= requires_url
+
+    safe_meta_members = {
+        "Object": {
+            "create", "entries", "freeze", "fromEntries", "hasOwn", "is",
+            "isExtensible", "isFrozen", "isSealed", "keys",
+            "preventExtensions", "seal", "values",
+        },
+        "Reflect": {"has", "isExtensible", "preventExtensions"},
+    }
+    for index, (kind, value, start, end) in enumerate(tokens):
+        if kind != "identifier":
+            continue
+        spread = index >= 3 and all(text(item) == "." for item in range(index - 3, index))
+        member_reference = index > 0 and text(index - 1) in {".", "?."} and not spread
+        if value in safe_meta_members and not member_reference:
+            try:
+                member = _parse_process_member(source_text, end)
+            except RuntimeSourceContractError:
+                member = None
+            if member is None or member[0] not in safe_meta_members[value]:
+                url_origin_risk = True
+        allowed = any(left <= start < right for left, right in allowed_bases)
+        if required_filename and value == "__filename" and not allowed:
+            raise RuntimeSourceContractError("runtime source contains an unbound createRequire filename base")
+        if required_meta and value == "import" and text(index + 1) == "." and text(index + 2) == "meta" and not allowed:
+            raise RuntimeSourceContractError("runtime source contains an unbound import.meta loader base")
+        if value not in url_names:
+            continue
+        if member_reference:
+            continue
+        if allowed or any(left <= start < right for left, right in url_declarations):
+            continue
+        url_origin_risk = True
+    if requires_url and url_origin_risk:
+        raise RuntimeSourceContractError("runtime source contains an unbound Worker URL constructor")
+    return requires_url, url_origin_risk
+
+
 def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
     source_text = _source_scan_view(source_text)
     _reject_evaluated_runtime_loaders(source_text)
@@ -4203,10 +4838,12 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         source_text,
         loaded_execution_modules=[
             specifier for specifier in commonjs_specifiers + create_require_specifiers
-            if specifier.removeprefix("node:") in {"worker_threads", "child_process"}
+            if specifier.removeprefix("node:") in {"worker_threads", "child_process", "module"}
         ],
     )
     _reject_unaccounted_create_require_references(source_text)
+    _reject_module_metadata_mutations(source_text)
+    _runtime_resolution_base_audit(source_text)
     module_register_hooks = _module_register_hook_specifiers(source_text)
     source_text = strip_source_comments(source_text)
     specifiers: list[tuple[str, bool, str]] = []
@@ -4327,9 +4964,15 @@ def _normalize_import_specifier_for_resolution(
 
 
 def _load_package_json(package_json: Path, package_name: str) -> dict[str, Any]:
+    def reject_non_json_constant(value: str) -> None:
+        raise ValueError(f"non-JSON constant: {value}")
+
     try:
-        payload = json.loads(package_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = json.loads(
+            package_json.read_text(encoding="utf-8"),
+            parse_constant=reject_non_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         raise RuntimeSourceContractError(
             f"{package_name} runtime package metadata is invalid"
         ) from exc
@@ -4480,7 +5123,8 @@ def _package_root_candidates(root: Path, importer: Path, package_name: str) -> l
             current.relative_to(root)
         except ValueError:
             break
-        candidates.append((current / "node_modules" / package_name).resolve())
+        if current.name != "node_modules":
+            candidates.append((current / "node_modules" / package_name).resolve())
         if current == root:
             break
         current = current.parent
@@ -4494,45 +5138,54 @@ def _package_root_candidates(root: Path, importer: Path, package_name: str) -> l
     return deduped
 
 
+def _nearest_controlling_package_scope(
+    root: Path, importer: Path
+) -> tuple[Path, dict[str, Any]] | None:
+    """Read the first scope, even when it has no imports/name/exports fields."""
+    root = root.resolve()
+    current = importer.resolve().parent
+    while current.is_relative_to(root) and current.name != "node_modules":
+        manifest = current / "package.json"
+        try:
+            present = manifest.is_symlink() or manifest.exists()
+            if present:
+                target = manifest.resolve(strict=True)
+                source_relative_path(root, target)
+                if not target.is_file():
+                    raise RuntimeSourceContractError(
+                        "runtime package scope metadata is not a regular file"
+                    )
+                return current, _load_package_json(manifest, "package scope")
+        except RuntimeSourceContractError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeSourceContractError(
+                "runtime package scope metadata is unavailable"
+            ) from exc
+        if current == root:
+            break
+        current = current.parent
+    return None
+
+
 def _nearest_package_self_reference(
     root: Path, importer: Path, package_name: str
 ) -> tuple[Path, dict[str, Any]] | None:
-    root = root.resolve()
-    current = importer.resolve().parent
-    while True:
-        try:
-            current.relative_to(root)
-        except ValueError:
-            return None
-        package_json = current / "package.json"
-        if package_json.is_file():
-            payload = _load_package_json(package_json, package_name)
-            if payload.get("name") == package_name and payload.get("exports") is not None:
-                return current, payload
-            return None
-        if current == root:
-            return None
-        current = current.parent
+    scope = _nearest_controlling_package_scope(root, importer)
+    if scope is not None:
+        _directory, payload = scope
+        if payload.get("name") == package_name and payload.get("exports") is not None:
+            return scope
+    return None
 
 
 def _nearest_package_imports_scope(
     root: Path, importer: Path
 ) -> tuple[Path, dict[str, Any]] | None:
-    root = root.resolve()
-    current = importer.resolve().parent
-    while True:
-        try:
-            current.relative_to(root)
-        except ValueError:
-            return None
-        package_json = current / "package.json"
-        if package_json.is_file():
-            payload = _load_package_json(package_json, "package imports")
-            if payload.get("imports") is not None:
-                return current, payload
-        if current == root:
-            return None
-        current = current.parent
+    scope = _nearest_controlling_package_scope(root, importer)
+    if scope is not None and scope[1].get("imports") is not None:
+        return scope
+    return None
 
 
 def _resolve_package_import(
@@ -4844,6 +5497,8 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
         queue.append(path)
 
     seen: set[str] = set()
+    requires_url = False
+    url_origin_risk = False
     while queue:
         source_path = queue.pop(0).resolve()
         relative = source_relative_path(root, source_path)
@@ -4852,6 +5507,7 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
         seen.add(relative)
         if source_path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
             continue
+        _nearest_controlling_package_scope(root, source_path)
         # File contents alone do not determine Node's interpretation.  Bind the
         # enclosing package scopes for every source, including direct relative
         # imports and the initial entrypoints (not only bare package imports).
@@ -4876,7 +5532,11 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
             raise RuntimeSourceContractError(
                 f"runtime source is not UTF-8: {relative}"
             ) from exc
-        for specifier, required, import_kind in import_specifiers(source_text):
+        specifiers = import_specifiers(source_text)
+        source_requires_url, source_url_risk = _runtime_resolution_base_audit(source_text)
+        requires_url |= source_requires_url
+        url_origin_risk |= source_url_risk
+        for specifier, required, import_kind in specifiers:
             for imported in resolve_import(
                 root=root,
                 importer=source_path,
@@ -4887,6 +5547,8 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
                 imported_relative = source_relative_path(root, imported)
                 if imported_relative not in seen:
                     queue.append(imported)
+    if requires_url and url_origin_risk:
+        raise RuntimeSourceContractError("runtime source closure contains an unbound Worker URL constructor")
     if not seen:
         raise RuntimeSourceContractError("persistent runtime source closure is empty")
     return tuple(sorted(seen))

@@ -251,6 +251,132 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         source = "export default /\"/; await import('./hidden.mjs'); // \""
         self.assertIn(("./hidden.mjs", True, "import"), CONTRACT.import_specifiers(source))
 
+    def test_jsx_text_quotes_fail_closed_instead_of_hiding_imports(self) -> None:
+        for source in (
+            'const view = <div>"</div>; await import("./hidden.mjs"); // "',
+            'const view = <><p>"</p>{require("./hidden.cjs")}</>; // "',
+            'let value\n<div>"{require("./hidden.cjs")}</div>; // "',
+        ):
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_attribute_free_intrinsic_jsx_still_preserves_following_imports(self) -> None:
+        for tag in ("<div/>", "<div />", "<span\n/>", "<custom-element />"):
+            with self.subTest(tag=tag):
+                source = f"export const View = () => {tag}; require('./hidden.cjs');"
+                self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
+
+    def test_runtime_default_import_named_type_is_a_value_binding(self) -> None:
+        for source in (
+            "import type from 'node:worker_threads'; const W = type.Worker; new W('./hidden.mjs');",
+            "import type, {isMainThread} from 'node:worker_threads'; const W = type.Worker; void isMainThread;",
+        ):
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_type_references_do_not_create_capability_false_positives(self) -> None:
+        for use in (
+            "let worker:Worker;",
+            "const worker:Worker|null=null;",
+            "function f(worker:Worker){}",
+            "const f=(worker:Worker)=>{};",
+            "const worker=other as Worker;",
+            "type W=Array<Worker>;",
+            "type W={worker:Worker};",
+            "type W=(worker:Worker)=>void;",
+        ):
+            with self.subTest(use=use):
+                CONTRACT.import_specifiers("import {type Worker} from 'node:worker_threads';" + use)
+
+    def test_declaration_asi_before_slash_fails_closed_or_binds_following_load(self) -> None:
+        for prefix in ("var value\n", "let value\n", "type Value=string\n"):
+            with self.subTest(prefix=prefix):
+                try:
+                    imports = CONTRACT.import_specifiers(prefix + '/"/;require("./hidden.cjs"); // "')
+                except CONTRACT.RuntimeSourceContractError:
+                    continue
+                self.assertIn(("./hidden.cjs", True, "require"), imports)
+
+    def test_private_identifier_keyword_does_not_hide_division_dependency(self) -> None:
+        source = (
+            "class Box { #return = 1; get(other) { "
+            "return other.#return / require('./hidden.cjs'); } }"
+        )
+        self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
+
+    def test_module_namespace_and_runtime_loader_origins_cannot_transfer(self) -> None:
+        for source in (
+            "import * as M from 'node:module'; const C = M; new C().load('./hidden.cjs');",
+            "import M from 'node:module'; const box = {M}; new box.M().load('./hidden.cjs');",
+            "const M = require('node:module'); const C = M; new C().load('./hidden.cjs');",
+            "import {runMain as go} from 'node:module'; const f = go; f('./hidden.cjs');",
+        ):
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_node_modules_package_lookup_skips_node_modules_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "import '../node_modules/host/main.cjs';", {
+                "node_modules/host/main.cjs": "module.exports = require('p');",
+                "node_modules/node_modules/p/package.json": '{"name":"p","main":"decoy.cjs"}',
+                "node_modules/node_modules/p/decoy.cjs": "module.exports = 'decoy';",
+                "node_modules/p/package.json": '{"name":"p","main":"real.cjs"}',
+                "node_modules/p/real.cjs": "module.exports = 'real';",
+            })
+            paths = CONTRACT.runtime_source_paths(root)
+
+        self.assertIn("node_modules/p/real.cjs", paths)
+        self.assertNotIn("node_modules/node_modules/p/decoy.cjs", paths)
+
+    def test_nearest_manifest_without_imports_does_not_inherit_outer_imports_map(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "import '#hidden';", {
+                "package.json": '{"imports":{"#hidden":"./decoy.mjs"}}',
+                "decoy.mjs": "export {};",
+                "scripts/package.json": '{"name":"inner"}',
+            })
+            with self.assertRaises(CONTRACT.RuntimeSourceContractError):
+                CONTRACT.runtime_source_paths(root)
+
+    def test_invalid_controlling_manifest_fails_even_without_package_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, "export const ok = 1;", {
+                "scripts/package.json": '{"name":NaN}',
+            })
+            with self.assertRaises(CONTRACT.RuntimeSourceContractError):
+                CONTRACT.runtime_source_paths(root)
+
+    def test_url_metaobject_mutation_in_transitive_module_closes_worker_url(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, (
+                "import './mutator.mjs';"
+                "import {Worker} from 'node:worker_threads';"
+                "new Worker(new URL('./bound.mjs', import.meta.url));"
+            ), {
+                "scripts/bound.mjs": "export {};",
+                "scripts/mutator.mjs": (
+                    "import {pathToFileURL as file} from 'node:url';"
+                    "Object.setPrototypeOf(file('/tmp/x'), URL.prototype);"
+                ),
+            })
+            with self.assertRaises(CONTRACT.RuntimeSourceContractError):
+                CONTRACT.runtime_source_paths(root)
+
+    def test_supported_url_bases_still_bind_runtime_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, (
+                "import {Worker} from 'node:worker_threads';"
+                "new Worker(new URL('./bound.mjs', import.meta.url));"
+            ), {
+                "scripts/bound.mjs": "export {};",
+            })
+            self.assertIn("scripts/bound.mjs", CONTRACT.runtime_source_paths(root))
+
     def test_nested_templates_and_regex_braces_do_not_hide_dependencies(self) -> None:
         sources = (
             "`${ /}/.test('}') && `${require('./hidden.cjs')}` }`;",
