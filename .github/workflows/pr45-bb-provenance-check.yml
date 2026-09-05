@@ -1,0 +1,65 @@
+name: PR45 minimal bb160fb provenance cross-check
+on:
+  push:
+    branches: [fix/pr45-audit-46cd0c788361]
+    paths: [.github/workflows/pr45-bb-provenance-check.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify and apply exact minimal repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/provenance-evidence"
+          cp .github/audits/pr45-independent-crosscheck.py "$RUNNER_TEMP/provenance-evidence/crosscheck.py"
+          python - <<'PY'
+          import base64, hashlib, os, pathlib, zlib
+          data = ''.join(pathlib.Path(f'.github/audits/pr45-bb-provenance-{i}.b64').read_text().strip() for i in range(4))
+          patch = zlib.decompress(base64.b64decode(data, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'b770fc02b3d491581c88443d4df85249e8f09d1d010435a5b402359d5f7fd6c0'
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'provenance-evidence/repair.patch').write_bytes(patch)
+          PY
+          git checkout --detach bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          git apply --index "$RUNNER_TEMP/provenance-evidence/repair.patch"
+          test "$(git write-tree)" = e8557e5b88c864dff15bed850aa4922b7742bd75
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: close independently reproduced loader provenance gaps'
+          git rev-parse HEAD > "$RUNNER_TEMP/provenance-evidence/head.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/provenance-evidence/tree.txt"
+          git bundle create "$RUNNER_TEMP/provenance-evidence/candidate.bundle" HEAD ^bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+      - name: Independent 370-case matrix
+        run: PYTHONPATH=src python "$RUNNER_TEMP/provenance-evidence/crosscheck.py" > "$RUNNER_TEMP/provenance-evidence/crosscheck.json"
+      - name: Existing focused regressions and new execution witnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest tests.test_openclaw_real_gateway_contract_probe tests.test_runtime_source_contract_regressions tests.test_runtime_source_contract_crosscheck -v 2>&1 | tee "$RUNNER_TEMP/provenance-evidence/focused.log"
+      - name: Privacy, compile and migration verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m agentic_os.cli preflight
+          PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+          git diff --check HEAD^ HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD^{tree})" = e8557e5b88c864dff15bed850aa4922b7742bd75
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-bb-provenance-validated
+          path: ${{ runner.temp }}/provenance-evidence
+          retention-days: 3
