@@ -401,10 +401,10 @@ class RealGatewayProbeTests(unittest.TestCase):
         return [
             {
                 "path": label,
-                "sha256": format(index + 10, "x") * 64,
-                "realpath_sha256": format(index + 13, "x") * 64,
+                "sha256": hashlib.sha256(f"source:{label}".encode()).hexdigest(),
+                "realpath_sha256": hashlib.sha256(f"path:{label}".encode()).hexdigest(),
             }
-            for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
+            for label in MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS
         ]
 
     def _write_runtime_source_fixture(self, root: Path, files: dict[str, str]) -> None:
@@ -2136,8 +2136,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 {
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                         "import { spawn, execFile } from 'node:child_process';\n"
-                        "spawn(process.execPath, ['./spawn-worker.mjs']);\n"
-                        "execFile(process.execPath, ['./exec-worker.mjs']);\n"
+                        "spawn(process.execPath, ['./scripts/spawn-worker.mjs']);\n"
+                        "execFile(process.execPath, ['./scripts/exec-worker.mjs']);\n"
                     ),
                     "scripts/spawn-worker.mjs": "export const spawnWorker = true;\n",
                     "scripts/exec-worker.mjs": "export const execWorker = true;\n",
@@ -2159,8 +2159,8 @@ class RealGatewayProbeTests(unittest.TestCase):
                 {
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                         "import { spawnSync, execFileSync } from 'node:child_process';\n"
-                        "spawnSync(process.execPath, ['./spawn-sync-worker.mjs']);\n"
-                        "execFileSync(process.execPath, ['./exec-file-sync-worker.mjs']);\n"
+                        "spawnSync(process.execPath, ['./scripts/spawn-sync-worker.mjs']);\n"
+                        "execFileSync(process.execPath, ['./scripts/exec-file-sync-worker.mjs']);\n"
                     ),
                     "scripts/spawn-sync-worker.mjs": "export const spawnSyncWorker = true;\n",
                     "scripts/exec-file-sync-worker.mjs": (
@@ -2180,22 +2180,22 @@ class RealGatewayProbeTests(unittest.TestCase):
         cases = {
             "esm_renamed_spawn_sync": (
                 "import { spawnSync as launchNode } from 'node:child_process';\n"
-                "launchNode(process.execPath, ['./esm-spawn-alias.mjs']);\n",
+                "launchNode(process.execPath, ['./scripts/esm-spawn-alias.mjs']);\n",
                 "scripts/esm-spawn-alias.mjs",
             ),
             "esm_renamed_exec_file_sync": (
                 "import { execFileSync as launchFile } from 'child_process';\n"
-                "launchFile(process.execPath, ['./esm-exec-file-alias.mjs']);\n",
+                "launchFile(process.execPath, ['./scripts/esm-exec-file-alias.mjs']);\n",
                 "scripts/esm-exec-file-alias.mjs",
             ),
             "cjs_destructured_spawn_sync": (
                 "const { spawnSync: runNodeNow } = require('node:child_process');\n"
-                "runNodeNow(process.execPath, ['./cjs-spawn-alias.cjs']);\n",
+                "runNodeNow(process.execPath, ['./scripts/cjs-spawn-alias.cjs']);\n",
                 "scripts/cjs-spawn-alias.cjs",
             ),
             "cjs_destructured_exec_file_sync": (
                 "const { execFileSync: runFileNow } = require('child_process');\n"
-                "runFileNow(process.execPath, ['./cjs-exec-file-alias.cjs']);\n",
+                "runFileNow(process.execPath, ['./scripts/cjs-exec-file-alias.cjs']);\n",
                 "scripts/cjs-exec-file-alias.cjs",
             ),
         }
@@ -3418,7 +3418,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 {
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                         'new Worker(new URL("./runner-worker.mjs", import.meta.url));\n'
-                        'child_process.fork("./runner-child.cjs");\n'
+                        'child_process.fork("./scripts/runner-child.cjs");\n'
                     ),
                     "scripts/runner-worker.mjs": "export const worker = true;\n",
                     "scripts/runner-child.cjs": "module.exports = { child: true };\n",
@@ -3436,11 +3436,11 @@ class RealGatewayProbeTests(unittest.TestCase):
         cases = {
             "esm_renamed_fork": (
                 "import { fork as launch } from 'node:child_process';\n"
-                "launch('./hidden.cjs');\n"
+                "launch('./scripts/hidden.cjs');\n"
             ),
             "cjs_destructured_fork": (
                 "const { fork: launch } = require('child_process');\n"
-                "launch('./hidden.cjs');\n"
+                "launch('./scripts/hidden.cjs');\n"
             ),
         }
         for name, source in cases.items():
@@ -9536,7 +9536,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 {
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                         "import cp, { spawnSync as runNode } from 'node:child_process';\n"
-                        "runNode(process.execPath, ['./combined-child.mjs']);\n"
+                        "runNode(process.execPath, ['./scripts/combined-child.mjs']);\n"
                     ),
                     "scripts/combined-child.mjs": "export const child = true;\n",
                 },
@@ -9651,7 +9651,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 {
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
                         "const { 'spawnSync': runNode } = require('node:child_process');\n"
-                        "runNode(process.execPath, ['./string-named-child.cjs']);\n"
+                        "runNode(process.execPath, ['./scripts/string-named-child.cjs']);\n"
                     ),
                     "scripts/string-named-child.cjs": (
                         "module.exports = { child: true };\n"
@@ -9760,7 +9760,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                     MODULE.PERSISTENT_LIFECYCLE_RUNNER: "import './view.jsx';\n",
                     "scripts/view.jsx": (
                         "import './view-model.mjs';\n"
-                        "export const View = () => <div />;\n"
+                        # Actual JSX transforms are separately rejected until their
+                        # implicit compiler/runtime imports can be bound.
+                        "export const View = () => null;\n"
                     ),
                     "scripts/view-model.mjs": "export const model = true;\n",
                 },
