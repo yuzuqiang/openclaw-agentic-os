@@ -19,15 +19,15 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `eb76b890358cbfa5dd9b75296149df515bf44e36cdbc03b6b0e3cf4b760ce64c`
+- Current corrected design artifact SHA-256: `fe7acda8cfd6adb32d3cf4fa42e86e8ace1ad5012ea6062a346c78b5f9a6eccc`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
-- Current installed-runtime evidence lineage and invalidated Issue #44
-  candidate snapshots; there is no current Issue #44 persistent-lifecycle
-  candidate proof, no current-head GitHub Codex review binding for one, and
-  historical candidate invocations and reviews must not be counted as current
-  exact-head runtime evidence:
+- Current installed-runtime evidence lineage and Issue #44 downstream
+  persistent-lifecycle recapture. The current installed evidence remains
+  fail-closed, and the current downstream candidate evidence is fail-closed
+  before launch on runtime source-closure rejection; no runtime-ready
+  persistent-lifecycle proof or current-head GitHub Codex review binding exists:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
   adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
@@ -486,8 +486,8 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`754cdf022fcee10d0d3440d7250da0f05195187b` in
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json`.
+`2b43f843fbf096c2896e0660207c2f02bea1fd15` in
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
 therefore a fail-closed, no-production-lease-mutation record: disk source
@@ -504,7 +504,7 @@ CLI subprocess transport remains non-authoritative unless it gains a persistent
 attested connection or a follow-up token authorization path; there is no
 `agenticOs.runtime.identity` RPC to refresh. That contract is covered only by
 synthetic local tests, installed fail-closed preflight, and the local downstream
-candidate proof below; it is still not production authority. The
+candidate recapture below; it is still not production authority. The
 cross-process release-probe entry point likewise rejects unsigned stdin before
 invoking transport. The bounded accepted-session
 probe in
@@ -523,14 +523,18 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-There is no current Issue #44 persistent-lifecycle candidate proof and no
-current-head GitHub Codex review binding for one. The repository probe refuses
-to launch a candidate or write runtime evidence until a trusted external
-launcher supplies immutable runtime sources, parent-held attestation signing,
-direct Gateway RPC capture, and an OS-enforced process-containment receipt. No
-repository command currently provides that launcher integration, so historical
-candidate invocations and reviews must not be counted as current exact-head
-runtime evidence.
+There is current Issue #44 downstream recapture evidence, but it is not a
+runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
+review binding. The local downstream OpenClaw candidate remains clean at
+`602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
+`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260905.json`
+and failed closed before starting the candidate because runtime source closure
+still rejects the downstream launcher as an unsupported evaluated-loader /
+dynamic-import pattern. That recapture used an isolated non-production run root
+and loopback port `51344`, recorded `candidate_process_started=false`, and
+records no production Gateway/config/Cron/session/lease mutation or restart.
+Historical candidate invocations and reviews must not be counted as current
+exact-head runtime evidence.
 
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
