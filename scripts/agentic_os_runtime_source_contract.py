@@ -4254,9 +4254,15 @@ def _normalize_import_specifier_for_resolution(
 
 
 def _load_package_json(package_json: Path, package_name: str) -> dict[str, Any]:
+    def reject_non_json_constant(value: str) -> None:
+        raise ValueError(f"non-JSON constant: {value}")
+
     try:
-        payload = json.loads(package_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = json.loads(
+            package_json.read_text(encoding="utf-8"),
+            parse_constant=reject_non_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         raise RuntimeSourceContractError(
             f"{package_name} runtime package metadata is invalid"
         ) from exc
@@ -4421,44 +4427,62 @@ def _package_root_candidates(root: Path, importer: Path, package_name: str) -> l
     return deduped
 
 
+
+def _nearest_controlling_package_scope(
+    root: Path, importer: Path
+) -> tuple[Path, dict[str, Any]] | None:
+    """Read the first scope, even when it has no imports/name/exports fields.
+
+    A node_modules directory terminates scope lookup. A manifest symlink may
+    point within the bound installation, but its physical target is not the
+    base directory used by Node to resolve package maps.
+    """
+    root = root.resolve()
+    current = importer.resolve().parent
+    while current.is_relative_to(root) and current.name != "node_modules":
+        manifest = current / "package.json"
+        try:
+            # lexists semantics are important: a dangling/cyclic scope must not
+            # disappear from the lookup and silently expose its parent scope.
+            present = manifest.is_symlink() or manifest.exists()
+            if present:
+                target = manifest.resolve(strict=True)
+                source_relative_path(root, target)
+                if not target.is_file():
+                    raise RuntimeSourceContractError(
+                        "runtime package scope metadata is not a regular file"
+                    )
+                return current, _load_package_json(manifest, "package scope")
+        except RuntimeSourceContractError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeSourceContractError(
+                "runtime package scope metadata is unavailable"
+            ) from exc
+        if current == root:
+            break
+        current = current.parent
+    return None
+
+
 def _nearest_package_self_reference(
     root: Path, importer: Path, package_name: str
 ) -> tuple[Path, dict[str, Any]] | None:
-    root = root.resolve()
-    current = importer.resolve().parent
-    while True:
-        try:
-            current.relative_to(root)
-        except ValueError:
-            return None
-        package_json = current / "package.json"
-        if package_json.is_file():
-            payload = _load_package_json(package_json, package_name)
-            if payload.get("name") == package_name and payload.get("exports") is not None:
-                return current, payload
-        if current == root:
-            return None
-        current = current.parent
+    scope = _nearest_controlling_package_scope(root, importer)
+    if scope is not None:
+        _directory, payload = scope
+        if payload.get("name") == package_name and payload.get("exports") is not None:
+            return scope
+    return None
 
 
 def _nearest_package_imports_scope(
     root: Path, importer: Path
 ) -> tuple[Path, dict[str, Any]] | None:
-    root = root.resolve()
-    current = importer.resolve().parent
-    while True:
-        try:
-            current.relative_to(root)
-        except ValueError:
-            return None
-        package_json = current / "package.json"
-        if package_json.is_file():
-            payload = _load_package_json(package_json, "package imports")
-            if payload.get("imports") is not None:
-                return current, payload
-        if current == root:
-            return None
-        current = current.parent
+    scope = _nearest_controlling_package_scope(root, importer)
+    if scope is not None and scope[1].get("imports") is not None:
+        return scope
+    return None
 
 
 def _resolve_package_import(
@@ -4778,6 +4802,10 @@ def runtime_source_paths(root: Path) -> tuple[str, ...]:
         seen.add(relative)
         if source_path.suffix not in PERSISTENT_RUNTIME_PARSEABLE_SUFFIXES:
             continue
+        # Validate the controlling scope even for files without package imports.
+        # Keep the conservative ancestor snapshot below, but never treat it as
+        # permission to inherit maps across a nearer scope or node_modules.
+        _nearest_controlling_package_scope(root, source_path)
         # File contents alone do not determine Node's interpretation.  Bind the
         # enclosing package scopes for every source, including direct relative
         # imports and the initial entrypoints (not only bare package imports).
