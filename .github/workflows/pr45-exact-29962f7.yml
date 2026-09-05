@@ -1,0 +1,101 @@
+name: PR45 exact repair 29962f7
+on:
+  push:
+    branches:
+      - fix/pr45-exact-verification-29962f7
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Reconstruct exact tested commit
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, os, pathlib, subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          base = '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          expected = '29962f7f9048ef928cf4245ec21b2ca95d4c1e27'
+          tree = '87bd58e3974412e22dc0cfb4549b4e36ccdd019a'
+          encoded = ''.join(pathlib.Path(f'.github/pr45-final/part-{i}.b64').read_text().strip() for i in range(9))
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '8ade508b4761c3548bbfaea19bcd7678a78812a5cb22da2aebd495d091ed6ca3', 'patch digest mismatch'
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          patch_file = temp / 'pr45-exact.patch'
+          patch_file.write_bytes(patch)
+          raw_commit = base64.b64decode('dHJlZSA4N2JkNThlMzk3NDQxMmUyMmRjMGNmYjQ1NDliNGUzNmNjZGQwMTlhCnBhcmVudCA4NzFiODI0Mjc2NzE5MmNkZjJjOWY4YmE3MTcyNGI5ZjM0NmNjYzFiCmF1dGhvciBPcGVuQUkgPG5vcmVwbHlAb3BlbmFpLmNvbT4gMTc4ODU4MDg3OSArMDAwMApjb21taXR0ZXIgT3BlbkFJIDxub3JlcGx5QG9wZW5haS5jb20+IDE3ODg1ODA4NzkgKzAwMDAKCmZpeDogY2xvc2UgcnVudGltZSBjYXBhYmlsaXR5IHRyYW5zZmVycyBhbmQgYmluZCBjb21wbGV0ZSBsYXVuY2hlciBpbnB1dHMK', validate=True)
+          commit_file = temp / 'pr45-exact.commit'
+          commit_file.write_bytes(raw_commit)
+          git('checkout', '--detach', base)
+          git('apply', '--check', str(patch_file))
+          git('apply', '--index', str(patch_file))
+          assert set(git('diff', '--cached', '--name-only').splitlines()) == {'README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_runtime_source_contract_review_regressions.py'}, 'unexpected changed paths'
+          assert git('write-tree') == tree, 'tree mismatch'
+          assert git('hash-object', '-t', 'commit', '-w', str(commit_file)) == expected, 'commit mismatch'
+          git('checkout', '--detach', expected)
+          assert not git('status', '--porcelain'), 'dirty checkout'
+          print('EXACT_VERIFIED_HEAD=' + expected)
+          print('EXACT_VERIFIED_TREE=' + tree)
+          PY
+      - name: Repository preflight
+        run: PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Complete unittest suite
+        shell: bash
+        run: PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/pr45-full.log"
+      - name: Validation entrypoints
+        run: PYTHONPATH=src python -m unittest tests.test_validation tests.test_validation_gate
+      - name: Compile sources
+        run: PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pr45-pycache" PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Verify clean tree and package tested commit
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 29962f7f9048ef928cf4245ec21b2ca95d4c1e27
+          test -z "$(git status --porcelain)"
+          git diff --check 871b8242767192cdf2c9f8ba71724b9f346ccc1b HEAD
+          mkdir -p "$RUNNER_TEMP/pr45-verified"
+          git update-ref refs/heads/pr45-verified-tree HEAD
+          git bundle create "$RUNNER_TEMP/pr45-verified/verified.bundle" refs/heads/pr45-verified-tree ^871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          cp "$RUNNER_TEMP/pr45-full.log" "$RUNNER_TEMP/pr45-verified/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-verified-29962f7
+          path: ${{ runner.temp }}/pr45-verified
+          retention-days: 3
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-verified-29962f7
+          path: ${{ runner.temp }}/pr45-verified
+      - name: Publish verified commit to isolated candidate branch only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch "$RUNNER_TEMP/pr45-verified/verified.bundle" refs/heads/pr45-verified-tree
+          test "$(git rev-parse FETCH_HEAD)" = 29962f7f9048ef928cf4245ec21b2ca95d4c1e27
+          test "$(git rev-parse FETCH_HEAD^{tree})" = 87bd58e3974412e22dc0cfb4549b4e36ccdd019a
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c credential.helper= -c core.hooksPath=/dev/null -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin FETCH_HEAD:refs/heads/fix/pr45-verified-29962f7
