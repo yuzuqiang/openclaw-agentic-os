@@ -14,14 +14,21 @@ expressions share the same boundaries. Executable identifier escapes and Unicode
 local names are normalized consistently; literal data is not identifier-decoded.
 The scan view is never executed and is never the input to a source-file digest.
 Ambiguous JavaScript slash contexts and unsupported loader syntax fail closed.
+This includes contextual `await`/`yield` and TypeScript postfix/type-instantiation
+slash contexts; `extends` is recognized as a regular-expression prefix without
+confusing a property named `extends` with that keyword. Spread is a single token,
+not three property-access dots. Type-only import specifiers do not grant runtime
+capabilities; a real default binding named `type` is not erased.
 
 Every recognized execution capability must remain in an accounted-for import,
 CommonJS binding, or supported direct invocation. Moving a Worker constructor,
 child-process callable, namespace, or loader factory into another variable,
 container, callback, return value, re-export, or reflective invocation is not an
 implicit dependency-free operation: unsupported transfers are rejected at the
-original reference. This avoids enumerating another set of alias spellings for
-each subsequent call.
+original reference. This also applies to the `node:module` namespace and Module
+constructor. CommonJS `parent`, `children`, and `paths` are not treated as harmless
+metadata that may transfer loading authority. This avoids enumerating another set
+of alias spellings for each subsequent call.
 
 Supported loader forms include literal static/dynamic imports, direct literal
 CommonJS calls, the existing simple `require` alias form, and directly assigned
@@ -39,10 +46,32 @@ processes may have literal string argument lists, but computed suffixes, spread
 arguments and explicit startup options are rejected: `env`, `execArgv`, `execPath`,
 `cwd`, `shell` and `eval` can change which code executes.
 
+A plain Node child does not inherit the parent tsx preload. The closure therefore
+tracks both source path and loader mode: plain Node children use native suffix
+resolution, fork inherits its parent's mode, and a file reached under both modes
+contributes both dependency closures. Calls continue to require explicit in-root
+script files; this does not add CLI flags or directory fallback support.
+
+A child-launching closure also rejects access to ambient `process.env`,
+`process.execArgv`, `process.chdir`, and `process.loadEnvFile` capabilities, plus
+`process.execPath` outside the directly validated executable argument. These
+values can be changed or passed indirectly by an imported module before a child
+starts; an options-free call alone does not bind that child's startup state.
+Workers also inherit startup state, so the same closure-level check applies to
+them. Worker closures reject uncertain URL-constructor identity and mutable
+`import.meta` transfers: only the documented direct URL/factory inputs are
+accepted, not arbitrary expressions containing a metadata write. Ordinary
+environment reads in a closure without child execution retain their previous
+behavior. These conservative restrictions are not a general sandbox.
+
 Each parseable source contributes its existing in-root ancestor `package.json`
 files to the identity snapshot, including initial entrypoints and direct relative
 imports. This deliberately conservative superset detects changes to controlling
-package scopes as well as newly added or removed nearer manifests.
+package scopes as well as newly added or removed nearer manifests. Resolution,
+unlike identity overbinding, stops at the first controlling package scope and
+never crosses a `node_modules` boundary to inherit an outer self-reference or
+`imports` map. Package metadata must be a regular UTF-8 JSON object. An unknown
+executable suffix is rejected rather than treated as opaque non-executing data.
 
 ## Preload installation identity
 
@@ -69,14 +98,15 @@ execution or production evidence is claimed by the regression tests.
 
 ## Regression verification
 
-The focused suite includes the six latest PR45 Codex findings, capability-transfer
+The focused suite covers the original six PR45 findings and the subsequent
+nearest-scope, class-heritage-regexp, and type-only-import findings, plus capability-transfer
 matrices, loader-factory result transfers, Unicode aliases, lexical boundary
 variants, actual Node comment/package-scope/preload witnesses, and installation
 symlink/file-type checks. The Node witnesses use only temporary fixtures and are
 skipped explicitly when Node is unavailable; CI must report whether they ran.
 
 ```sh
-PYTHONPATH=src python -m unittest tests.test_runtime_source_contract_regressions -v
+PYTHONPATH=src python -m unittest tests.test_runtime_source_contract_regressions tests.test_runtime_source_native_children tests.test_runtime_module_origin_regressions tests.test_runtime_package_scope_boundaries tests.test_runtime_source_contract_crosscheck tests.test_runtime_review_completion -v
 PYTHONPATH=src python -m unittest tests.test_openclaw_real_gateway_contract_probe -k source_closure -v
 PYTHONPATH=src python -m unittest discover -s tests -v
 PYTHONPATH=src python -m agentic_os.cli preflight
