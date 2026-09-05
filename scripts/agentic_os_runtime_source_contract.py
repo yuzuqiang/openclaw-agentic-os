@@ -615,7 +615,7 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
                 ) or (
                     previous[0] == "identifier"
-                    and previous_value in {"await", "case", "delete", "else", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
+                    and previous_value in {"await", "case", "delete", "else", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do", "extends"}
                     and before_previous not in {("punctuation", "."), ("punctuation", "?.")}
                 )
                 if regex_start:
@@ -683,6 +683,92 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
     return tokens
 
 
+def _erased_type_alias_spans(
+    source_text: str, tokens: list[tuple[str, str, int, int]],
+) -> list[tuple[int, int]]:
+    """Recognize a bounded, non-evaluating subset of TS type aliases.
+
+    A type-only import does not shadow a runtime global of the same name.  Keep
+    auditing value references (notably global Worker) and ignore only references
+    inside proven erased syntax.  In particular, `type\nW = Worker` is two value
+    statements, not a type alias.  Unknown type syntax stays in the audit view.
+    """
+    code_tokens = [item for item in tokens if item[0] != "comment"]
+    size = len(code_tokens)
+
+    def text(index: int) -> str:
+        return code_tokens[index][1] if 0 <= index < size else ""
+
+    def identifier(index: int) -> bool:
+        return 0 <= index < size and code_tokens[index][0] == "identifier"
+
+    def type_expression(index: int, depth: int = 0) -> int | None:
+        if depth > 64:
+            return None
+        start = index
+        if text(index) in {"typeof", "keyof", "readonly", "unique"}:
+            index += 1
+        if identifier(index) or (index < size and code_tokens[index][0] in {"string", "number"}):
+            index += 1
+            while text(index) == "." and identifier(index + 1):
+                index += 2
+            if text(index) == "<":
+                index += 1
+                while True:
+                    end = type_expression(index, depth + 1)
+                    if end is None:
+                        return None
+                    index = end
+                    if text(index) != ",":
+                        break
+                    index += 1
+                if text(index) != ">":
+                    return None
+                index += 1
+        elif text(index) == "(":
+            end = type_expression(index + 1, depth + 1)
+            if end is None or text(end) != ")":
+                return None
+            index = end + 1
+        else:
+            return None
+        while text(index) == "[":
+            index += 1
+            if text(index) != "]":
+                end = type_expression(index, depth + 1)
+                if end is None:
+                    return None
+                index = end
+            if text(index) != "]":
+                return None
+            index += 1
+        if text(index) in {"|", "&"}:
+            end = type_expression(index + 1, depth + 1)
+            if end is None:
+                return None
+            index = end
+        return index if index > start else None
+
+    spans: list[tuple[int, int]] = []
+    for index, (kind, value, start, _end) in enumerate(code_tokens):
+        if kind != "identifier" or value != "type" or not identifier(index + 1):
+            continue
+        boundary = index - 1
+        if text(boundary) == "export":
+            boundary -= 1
+        if boundary >= 0 and text(boundary) not in {";", "{", "}"}:
+            continue
+        if any(_is_js_line_terminator(c) for c in source_text[_end:code_tokens[index + 1][2]]):
+            continue
+        if text(index + 2) != "=":
+            continue
+        end = type_expression(index + 3)
+        if end is None or text(end) not in {"", ";", "}"}:
+            continue
+        spans.append((start, code_tokens[end - 1][3]))
+    return spans
+
+
 def _source_scan_view(source_text: str) -> str:
     """A shared lexical view for the legacy, non-evaluating recognizers.
 
@@ -695,6 +781,14 @@ def _source_scan_view(source_text: str) -> str:
     """
     output = list(source_text)
     tokens = _source_tokens(source_text)
+    erased_spans = _erased_type_alias_spans(source_text, tokens)
+    for start, end in erased_spans:
+        for index in range(start, end):
+            if not _is_js_line_terminator(source_text[index]):
+                output[index] = " "
+    tokens = [token for token in tokens if not any(
+        start <= token[2] < end for start, end in erased_spans
+    )]
     identifiers = {value for kind, value, _start, _end in tokens if kind == "identifier"}
     canonical_names: dict[str, str] = {}
     counter = 0
@@ -2059,17 +2153,26 @@ def _execution_capability_bindings(
 
     def clause(start: int, end: int, module: str, *, commonjs: bool) -> None:
         index = start
-        if not commonjs and text(index) == "type":
+        # `import type from "..."` and `import type, {...} from "..."`
+        # import a VALUE named type.  Only a following binding/clause makes
+        # the leading contextual keyword a type-only declaration modifier.
+        type_only_clause = (
+            not commonjs and text(index) == "type" and index + 1 < end
+            and text(index + 1) != ","
+        )
+        if type_only_clause:
             index += 1
         if index < end and tokens[index][0] == "identifier" and text(index) not in {"{", "*"}:
-            bind(module, "default", text(index))
+            if not type_only_clause:
+                bind(module, "default", text(index))
             index += 1
             if text(index) == ",":
                 index += 1
         if index == end:
             return
         if not commonjs and text(index) == "*" and text(index + 1) == "as" and index + 3 == end:
-            bind(module, "*", text(index + 2))
+            if not type_only_clause:
+                bind(module, "*", text(index + 2))
             return
         if text(index) != "{" or text(end - 1) != "}":
             raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
@@ -2078,7 +2181,11 @@ def _execution_capability_bindings(
             if text(index) == ",":
                 index += 1
                 continue
-            if not commonjs and text(index) == "type" and text(index + 1) not in {",", "}", "as"}:
+            type_only_member = (
+                not commonjs and text(index) == "type"
+                and text(index + 1) not in {",", "}", "as"}
+            )
+            if type_only_member:
                 index += 1
             imported = literal(index) if tokens[index][0] == "string" else text(index)
             if tokens[index][0] not in {"string", "identifier"}:
@@ -2094,7 +2201,8 @@ def _execution_capability_bindings(
             if index < end - 1 and text(index) != ",":
                 raise RuntimeSourceContractError("runtime source contains an unsupported execution capability binding")
             assert imported is not None and local is not None
-            bind(module, imported, local)
+            if not (type_only_clause or type_only_member):
+                bind(module, imported, local)
 
     for index, (kind, value, start, _end) in enumerate(tokens):
         if kind != "identifier" or value not in {"import", "export"}:
