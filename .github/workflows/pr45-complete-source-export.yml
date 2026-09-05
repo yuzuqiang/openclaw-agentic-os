@@ -1,0 +1,25 @@
+name: PR45 current integration sources
+on:
+  push:
+    branches: [fix/pr45-integration-complete-sources-20260905]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export reachable repository objects only
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-current-sources"
+          git bundle create "$RUNNER_TEMP/pr45-current-sources/source.bundle" --all
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-current-sources/head.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-current-integration-sources
+          path: ${{ runner.temp }}/pr45-current-sources
+          retention-days: 3
