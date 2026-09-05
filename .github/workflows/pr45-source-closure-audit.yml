@@ -1,0 +1,26 @@
+name: PR45 integration source snapshot
+on:
+  push:
+    branches:
+      - fix/pr45-integration-snapshot-008e560
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive tracked Git history for candidate cross-verification
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-integration"
+          git bundle create "$RUNNER_TEMP/pr45-integration/candidates.bundle" --all
+          git for-each-ref --format='%(refname) %(objectname)' > "$RUNNER_TEMP/pr45-integration/refs.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-integration-sources
+          path: ${{ runner.temp }}/pr45-integration
+          retention-days: 3
