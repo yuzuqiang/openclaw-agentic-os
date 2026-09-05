@@ -1,4 +1,4 @@
-name: PR45 exact candidate d9d2512
+name: PR45 exact candidate 738abdf
 on:
   push:
     branches: [fix/pr45-audit-d9d2512]
@@ -25,7 +25,7 @@ jobs:
         id: prepare
         run: |
           mkdir -p "$RUNNER_TEMP/pr45-transport"
-          cp .github/pr45-patch-*.b64 "$RUNNER_TEMP/pr45-transport/"
+          cp .github/pr45-patch-*.b64 .github/pr45-lexer-refinement.patch "$RUNNER_TEMP/pr45-transport/"
           python - <<'PY'
           import base64, gzip, hashlib, os
           from pathlib import Path
@@ -33,17 +33,18 @@ jobs:
           parts = [p.read_text().strip() for p in sorted(folder.glob('pr45-patch-*.b64'))]
           if len(parts) != 3:
               raise SystemExit('Missing transport part')
-          # Known transport-only duplication; both patch and result are pinned.
           parts[0] = parts[0].replace('Hkm/SSSiGT79', 'Hkm/SSiGT79')
           patch = gzip.decompress(base64.b64decode(''.join(parts), validate=True))
           if hashlib.sha256(patch).hexdigest() != 'df3222aaf42899efed061d10b1b7690e93e501cb006210bed0a2768b01aeaa24':
               raise SystemExit('Patch digest mismatch')
+          if hashlib.sha256((folder / 'pr45-lexer-refinement.patch').read_bytes()).hexdigest() != 'a355cb9118c41f56d85c62fc27e97afcc546d266a56e10d0a87ed592cff6a8e7':
+              raise SystemExit('Refinement digest mismatch')
           (folder / 'candidate.patch').write_bytes(patch)
           PY
           git checkout --detach 871b8242767192cdf2c9f8ba71724b9f346ccc1b
-          git apply --check "$RUNNER_TEMP/pr45-transport/candidate.patch"
           git apply --index "$RUNNER_TEMP/pr45-transport/candidate.patch"
-          test "$(git write-tree)" = 193ed2ddbe8ba2d37aa53f11e3b25a30a5f3724e
+          git apply --index "$RUNNER_TEMP/pr45-transport/pr45-lexer-refinement.patch"
+          test "$(git write-tree)" = bcae56e09b90ac8d561598a4b91130bb0c5e24ea
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: close runtime execution and preload source-binding gaps'
           test "$(git rev-parse HEAD^)" = 871b8242767192cdf2c9f8ba71724b9f346ccc1b
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -60,18 +61,18 @@ jobs:
         run: |
           git diff --check origin/main...HEAD
           test -z "$(git status --porcelain)"
-          test "$(git rev-parse HEAD^{tree})" = 193ed2ddbe8ba2d37aa53f11e3b25a30a5f3724e
+          test "$(git rev-parse HEAD^{tree})" = bcae56e09b90ac8d561598a4b91130bb0c5e24ea
           git bundle create "$RUNNER_TEMP/pr45-verified.bundle" HEAD ^871b8242767192cdf2c9f8ba71724b9f346ccc1b
       - uses: actions/upload-artifact@v4
         with:
-          name: pr45-exact-verified-d9d2512
+          name: pr45-exact-verified-738abdf
           path: ${{ runner.temp }}/pr45-verified.bundle
           retention-days: 1
       - name: Transport diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: pr45-transport-d9d2512
+          name: pr45-transport-738abdf
           path: ${{ runner.temp }}/pr45-transport
           retention-days: 1
   publish:
@@ -87,7 +88,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: pr45-exact-verified-d9d2512
+          name: pr45-exact-verified-738abdf
           path: ${{ runner.temp }}/pr45-verified
       - name: Publish verified candidate branch without touching PR45
         env:
@@ -97,6 +98,6 @@ jobs:
           git fetch "$RUNNER_TEMP/pr45-verified/pr45-verified.bundle" HEAD
           test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
           test "$(git rev-parse FETCH_HEAD^)" = 871b8242767192cdf2c9f8ba71724b9f346ccc1b
-          test "$(git rev-parse FETCH_HEAD^{tree})" = 193ed2ddbe8ba2d37aa53f11e3b25a30a5f3724e
-          git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f' push origin "$EXPECTED_HEAD:refs/heads/fix/pr45-closure-verified-d9d2512"
+          test "$(git rev-parse FETCH_HEAD^{tree})" = bcae56e09b90ac8d561598a4b91130bb0c5e24ea
+          git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f' push origin "$EXPECTED_HEAD:refs/heads/fix/pr45-closure-verified-738abdf"
           echo "Verified candidate: $EXPECTED_HEAD"
