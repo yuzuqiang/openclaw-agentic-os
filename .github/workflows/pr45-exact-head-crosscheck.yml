@@ -1,0 +1,29 @@
+name: PR45 exact-head crosscheck source
+on:
+  push:
+    branches: [fix/pr45-source-closure-audit-20260904]
+    paths: [.github/workflows/pr45-exact-head-crosscheck.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record exact source and existing candidate refs
+        run: |
+          test "$(git rev-parse HEAD)" = bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          mkdir -p "$RUNNER_TEMP/pr45-source"
+          git bundle create "$RUNNER_TEMP/pr45-source/source.bundle" --all
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr45-source/identity.txt"
+          git for-each-ref --format='%(objectname) %(refname)' > "$RUNNER_TEMP/pr45-source/refs.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-exact-source-crosscheck
+          path: ${{ runner.temp }}/pr45-source
+          retention-days: 1
