@@ -1,0 +1,143 @@
+diff --git a/docs/runtime-source-closure-contract.md b/docs/runtime-source-closure-contract.md
+index f023d4d..c96630b 100644
+--- a/docs/runtime-source-closure-contract.md
++++ b/docs/runtime-source-closure-contract.md
+@@ -41,6 +41,16 @@ imports remain supported; ordinary URL/metadata usage in a closure without a
+ corresponding loader assumption is unchanged. This is deliberately a supported
+ syntax boundary, not whole-program JavaScript value analysis.
+ 
++The URL capability inventory includes `pathToFileURL`, which returns a native URL
++instance. A Worker-URL closure may not transfer the global `Object`/`Reflect`
++meta-object namespaces or use their prototype-discovery, symbol-enumeration, or
++property-mutation capabilities: native objects can expose URL instances without
++an explicit URL constructor reference. Statically named ordinary data utilities
++(such as `Object.keys`, `Object.fromEntries`, and `Object.freeze`) remain supported.
++This restriction is accumulated across modules and does not apply to closures
++without a URL-based Worker assumption. It is not a runtime sandbox or a claim
++that arbitrary reflection or TypeScript forms have been fully analyzed.
++
+ Direct literal calls of a named `createRequire` factory's returned loader are
+ recorded just like an assigned loader; accepting the call signature alone is not
+ sufficient without recording the module it executes.
+diff --git a/scripts/agentic_os_runtime_source_contract.py b/scripts/agentic_os_runtime_source_contract.py
+index 2907a8f..a26e355 100644
+--- a/scripts/agentic_os_runtime_source_contract.py
++++ b/scripts/agentic_os_runtime_source_contract.py
+@@ -4168,7 +4168,7 @@ def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+                 index += 1
+             if index < end - 1 and text(index) != ",":
+                 return False
+-            if not type_only and imported in {"URL", "default"} and local is not None:
++            if not type_only and imported in {"URL", "pathToFileURL", "default"} and local is not None:
+                 url_names.add(local)
+         return True
+ 
+@@ -4232,9 +4232,29 @@ def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+     requires_url = bool(worker_matches)
+     required_meta |= requires_url
+ 
+-    for index, (kind, value, start, _end) in enumerate(tokens):
++    # URL instances can also be acquired from native APIs' internal objects.
++    # Do not infer that an unreferenced URL constructor implies an immutable
++    # prototype: meta-object capabilities can discover and modify that prototype.
++    # Preserve ordinary data utilities, but do not let the intrinsic namespaces
++    # themselves escape through aliases, grouping, or computed members.
++    safe_meta_members = {
++        "Object": {"create", "entries", "freeze", "fromEntries", "hasOwn", "is",
++                   "isExtensible", "isFrozen", "isSealed", "keys",
++                   "preventExtensions", "seal", "values"},
++        "Reflect": {"has", "isExtensible", "preventExtensions"},
++    }
++    for index, (kind, value, start, end) in enumerate(tokens):
+         if kind != "identifier":
+             continue
++        spread = index >= 3 and all(text(item) == "." for item in range(index - 3, index))
++        member_reference = index > 0 and text(index - 1) in {".", "?."} and not spread
++        if value in safe_meta_members and not member_reference:
++            try:
++                member = _parse_process_member(source_text, end)
++            except RuntimeSourceContractError:
++                member = None
++            if member is None or member[0] not in safe_meta_members[value]:
++                url_origin_risk = True
+         allowed = any(left <= start < right for left, right in allowed_bases)
+         if required_filename and value == "__filename" and not allowed:
+             raise RuntimeSourceContractError("runtime source contains an unbound createRequire filename base")
+@@ -4242,12 +4262,10 @@ def _runtime_resolution_base_audit(source_text: str) -> tuple[bool, bool]:
+             raise RuntimeSourceContractError("runtime source contains an unbound import.meta loader base")
+         if value not in url_names:
+             continue
+-        if index and text(index - 1) in {".", "?."}:
+-            # Older lexical views emit three dots separately. An object spread
+-            # copies the namespace's URL capability; it is not member access.
+-            spread = index >= 3 and all(text(item) == "." for item in range(index - 3, index))
+-            if not spread:
+-                continue
++        # Older lexical views emit three dots separately; those references
++        # copy capabilities rather than reading an unrelated object's member.
++        if member_reference:
++            continue
+         if allowed or any(left <= start < right for left, right in url_declarations):
+             continue
+         url_origin_risk = True
+diff --git a/tests/test_runtime_resolution_bases.py b/tests/test_runtime_resolution_bases.py
+index 0cce3dc..6f9c2b9 100644
+--- a/tests/test_runtime_resolution_bases.py
++++ b/tests/test_runtime_resolution_bases.py
+@@ -190,6 +190,56 @@ class RuntimeResolutionBaseTests(unittest.TestCase):
+                 self.node_witness(source)
+                 self.assert_closed(source)
+ 
++    def test_url_value_factories_and_metaobject_capabilities_are_accounted_for(self) -> None:
++        mutations = (
++            "import {pathToFileURL as file} from 'node:url'; change(file('/placeholder'));",
++            "const {pathToFileURL: file}=require('url'); change(file('/placeholder'));",
++            "Object.getPrototypeOf(value);", "Object['getOwnPropertySymbols'](value);",
++            "Object.getOwnPropertyDescriptors(value);", "Object.defineProperty(value, key, descriptor);",
++            "Object.setPrototypeOf(value, prototype);", "Reflect.ownKeys(value);",
++            "Reflect.getPrototypeOf(value);", "Reflect.defineProperty(value, key, descriptor);",
++            "const meta=Object; use(meta);", "const meta=(Object); use(meta);",
++            "use(Object);", "Object[computed](value);",
++        )
++        for mutation in mutations:
++            with self.subTest(mutation=mutation):
++                self.write("scripts/mutator.mjs", mutation)
++                self.assert_closed("import './mutator.mjs';" + WORKER + LAUNCH)
++        for mutation in mutations:
++            if "Reflect" not in mutation:
++                # Without a URL-based loader there is no new immutability claim.
++                CONTRACT.import_specifiers(mutation)
++
++    def test_safe_metaobject_data_utilities_remain_supported_with_worker_urls(self) -> None:
++        for utility in (
++            "const keys=Object.keys({ok:1});",
++            "const record=Object.fromEntries([['ok',1]]);",
++            "const record=Object.freeze({ok:1});",
++            "const record=Object.create(null);",
++            "const present=Object['hasOwn']({ok:1},'ok');",
++            "const present=Reflect.has({ok:1},'ok');",
++            "const request=new Request('https://example.invalid/');",
++        ):
++            with self.subTest(utility=utility):
++                self.write(CONTRACT.PERSISTENT_LIFECYCLE_RUNNER, utility + WORKER + LAUNCH)
++                self.assertIn("scripts/bound.mjs", CONTRACT.runtime_source_paths(self.root))
++
++    @unittest.skipUnless(NODE, "Node is required for real execution witnesses")
++    def test_node_worker_redirected_through_url_values_and_runtime_metaobjects(self) -> None:
++        mutations = (
++            "import {pathToFileURL as file} from 'node:url';"
++            "file('/placeholder').__proto__.__defineGetter__('pathname',function(){return process.cwd()+'/scripts/hidden.mjs';});",
++            "const request=new Request('https://example.invalid/');"
++            "const state=request[Object.getOwnPropertySymbols(request).find(s=>s.description==='state')];"
++            "Object.defineProperty(Object.getPrototypeOf(state.url),'pathname',{get(){return process.cwd()+'/scripts/hidden.mjs';}});",
++        )
++        for mutation in mutations:
++            with self.subTest(mutation=mutation):
++                self.write("scripts/mutator.mjs", mutation)
++                source = "import './mutator.mjs';" + WORKER + LAUNCH
++                self.node_witness(source)
++                self.assert_closed(source)
++
+     def test_inline_factory_results_record_literal_target_for_named_and_aliased_factories(self) -> None:
+         for declaration, call in (
+             (FACTORY, "createRequire(import.meta.url)"),
