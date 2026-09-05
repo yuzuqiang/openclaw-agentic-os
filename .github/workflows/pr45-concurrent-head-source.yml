@@ -1,0 +1,28 @@
+name: PR45 concurrent head source
+on:
+  push:
+    branches: [fix/pr45-closure-657526c2440f-audit]
+    paths: [.github/workflows/pr45-concurrent-head-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle exact concurrent head
+        run: |
+          test "$(git rev-parse HEAD)" = bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+          mkdir -p "$RUNNER_TEMP/pr45-current"
+          git bundle create "$RUNNER_TEMP/pr45-current/source.bundle" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-current/head.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-concurrent-bb160-source
+          path: ${{ runner.temp }}/pr45-current
+          retention-days: 3
