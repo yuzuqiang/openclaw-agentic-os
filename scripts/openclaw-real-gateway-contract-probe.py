@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-closure:tsx",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1572,6 +1573,22 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_preload_closure_binding(root: Path, preload: Path) -> dict[str, str]:
+    try:
+        relative = runtime_source_contract.source_relative_path(root, preload)
+        snapshot = runtime_source_contract.runtime_source_digest_snapshot(
+            root, entrypoints=(relative,),
+        )
+    except runtime_source_contract.RuntimeSourceContractError as exc:
+        raise ProbeError(f"runtime preload closure could not be bound: {exc}") from exc
+    payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        "path": "runtime-preload-closure:tsx",
+        "sha256": _sha256_bytes(payload),
+        "realpath_sha256": _text_sha256(str(root.resolve())),
+    }
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1596,6 +1613,7 @@ def _runtime_launch_bindings(
             _runtime_directory_binding(
                 tsx_package_root, "runtime-preload-package:tsx"
             ),
+            _runtime_preload_closure_binding(openclaw_root, tsx_preload),
         ],
     )
 

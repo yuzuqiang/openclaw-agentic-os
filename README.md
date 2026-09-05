@@ -524,6 +524,17 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+The source-closure check is a fail-closed supported-syntax contract, not a general
+JavaScript sandbox. Execution capabilities must stay in recognized direct calls;
+value transfers, capability re-exports, and unbound child/Worker execution options
+are rejected. The `tsx` preload now has a separate transitive source-closure
+binding, including dependency package scopes, which is recomputed after execution.
+A preload using unsupported loader behavior cannot produce a launch binding.
+JavaScript dependencies stored in `.jsx`/`.tsx` files are traversed, but actual
+JSX markup is rejected until the compiler's implicit runtime imports are bound.
+These checks do not replace the missing trusted external launcher or authorize
+production execution.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must
