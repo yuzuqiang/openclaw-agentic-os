@@ -151,6 +151,16 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_standalone_identifier_named_of_is_still_a_computed_member_target(self) -> None:
+        self.assert_closed(
+            "const of=()=>{}; const build=of['constructor']; "
+            "build(\"return import('./hidden.mjs')\")();"
+        )
+
+    def test_contextual_for_of_array_literals_do_not_look_like_computed_members(self) -> None:
+        source = "for (const value of ['constructor']) { void value; }"
+        self.assertEqual(CONTRACT.import_specifiers(source), [])
+
     def test_require_non_call_references_fail_closed_regardless_of_grouping(self) -> None:
         for depth in (2, 3, 8, 32):
             source = "const r=" + "(" * depth + "require" + ")" * depth + ";r('./hidden.cjs');"

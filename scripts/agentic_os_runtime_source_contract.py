@@ -1546,12 +1546,57 @@ def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bo
     while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
         token_start -= 1
     token = source_text[token_start:token_end]
-    if token in {"await", "case", "const", "let", "of", "return", "throw", "var", "yield"}:
+    if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
+        return False
+    if token in {"await", "case", "const", "let", "return", "throw", "var", "yield"}:
         before_token = token_start - 1
         while before_token >= 0 and source_text[before_token].isspace():
             before_token -= 1
         return before_token >= 0 and source_text[before_token] == "."
     return True
+
+
+def _token_is_contextual_for_of(source_text: str, token_start: int, token_end: int) -> bool:
+    if source_text[token_start:token_end] != "of":
+        return False
+    cursor = token_start - 1
+    depth = 0
+    opener = -1
+    while cursor >= 0:
+        character = source_text[cursor]
+        if character == ")":
+            depth += 1
+        elif character == "(":
+            if depth == 0:
+                opener = cursor
+                break
+            depth -= 1
+        cursor -= 1
+    if opener < 0:
+        return False
+    before_opener = opener - 1
+    while before_opener >= 0 and source_text[before_opener].isspace():
+        before_opener -= 1
+    word_end = before_opener + 1
+    while before_opener >= 0 and _is_identifier_character(source_text[before_opener]):
+        before_opener -= 1
+    word = source_text[before_opener + 1 : word_end]
+    if word == "await":
+        before_await = before_opener
+        while before_await >= 0 and source_text[before_await].isspace():
+            before_await -= 1
+        await_prefix_end = before_await + 1
+        while before_await >= 0 and _is_identifier_character(source_text[before_await]):
+            before_await -= 1
+        word = source_text[before_await + 1 : await_prefix_end]
+    if word != "for":
+        return False
+    header_prefix = source_text[opener + 1 : token_start]
+    if ";" in header_prefix or not header_prefix.strip():
+        return False
+    previous = source_text[token_start - 1] if token_start > 0 else ""
+    following = source_text[token_end] if token_end < len(source_text) else ""
+    return not _is_identifier_character(previous) and not _is_identifier_character(following)
 
 
 def _computed_member_bracket_has_target(source_text: str, bracket_index: int) -> bool:
@@ -1570,7 +1615,9 @@ def _computed_member_bracket_has_target(source_text: str, bracket_index: int) ->
     while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
         token_start -= 1
     token = source_text[token_start:token_end]
-    if token in {"await", "case", "const", "let", "of", "return", "throw", "var", "yield"}:
+    if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
+        return False
+    if token in {"await", "case", "const", "let", "return", "throw", "var", "yield"}:
         before_token = token_start - 1
         while before_token >= 0 and source_text[before_token].isspace():
             before_token -= 1

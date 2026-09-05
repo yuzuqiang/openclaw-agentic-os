@@ -5559,16 +5559,23 @@ class RealGatewayProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
             original_validate_candidate_root = MODULE.validate_candidate_root
             original_candidate_probe_mode = MODULE._candidate_probe_mode
             original_persistent_runtime_source_bindings = (
                 MODULE._persistent_runtime_source_bindings
             )
             original_run_persistent = MODULE._run_persistent_lifecycle_probe
+            original_default_private_run_root = MODULE._default_private_run_root
             launched = False
+            private_error = "runtime source import escapes to /home/alice/private-secret.mjs"
 
             def fake_source_bindings(*_args, **_kwargs):
-                raise MODULE.ProbeError("runtime source contains an unsupported dynamic import")
+                raise MODULE.ProbeError(private_error)
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
 
             def fake_run_persistent(*_args, **_kwargs):
                 nonlocal launched
@@ -5579,8 +5586,9 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
                 MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
                 MODULE._persistent_runtime_source_bindings = fake_source_bindings
+                MODULE._default_private_run_root = fake_default_private_run_root
                 MODULE._run_persistent_lifecycle_probe = fake_run_persistent
-                with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                with self.assertRaisesRegex(MODULE.ProbeError, "private-secret"):
                     MODULE.run_probe(root, evidence_file, timeout=1)
             finally:
                 MODULE.validate_candidate_root = original_validate_candidate_root
@@ -5588,16 +5596,61 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._persistent_runtime_source_bindings = (
                     original_persistent_runtime_source_bindings
                 )
+                MODULE._default_private_run_root = original_default_private_run_root
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
             self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
             evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
             self.assertEqual(evidence["status"], "fail_closed")
             self.assertEqual(evidence["reason"], "runtime_source_closure_failed")
+            self.assertEqual(evidence["error"], "prelaunch validation failed")
+            self.assertEqual(evidence["error_class"], "ProbeError")
+            self.assertEqual(
+                evidence["error_message_sha256"],
+                MODULE._text_sha256(private_error),
+            )
+            self.assertNotIn("private-secret", evidence_file.read_text(encoding="utf-8"))
+            self.assertNotIn("/home/alice", evidence_file.read_text(encoding="utf-8"))
             self.assertFalse(evidence["runtime_ready_candidate_evidence"])
             self.assertFalse(
                 evidence["isolated_non_production_gateway"]["candidate_process_started"]
             )
+
+    def test_persistent_runner_preserves_explicit_run_root_on_prelaunch_rejection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            explicit_run_root = root / "explicit-run-root"
+            explicit_run_root.mkdir(mode=0o700)
+            evidence_file = root / "evidence.json"
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_persistent_runtime_source_bindings = (
+                MODULE._persistent_runtime_source_bindings
+            )
+            try:
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
+                MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
+                MODULE._persistent_runtime_source_bindings = lambda *_args, **_kwargs: (
+                    (_ for _ in ()).throw(MODULE.ProbeError("runtime source blocked"))
+                )
+                with self.assertRaisesRegex(MODULE.ProbeError, "runtime source blocked"):
+                    MODULE.run_probe(
+                        root,
+                        evidence_file,
+                        timeout=1,
+                        run_root=explicit_run_root,
+                    )
+            finally:
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._persistent_runtime_source_bindings = (
+                    original_persistent_runtime_source_bindings
+                )
+
+            self.assertTrue(explicit_run_root.is_dir())
 
     def test_persistent_runner_accepts_boundary_env_only_as_launch_request(self) -> None:
         with mock.patch.dict(

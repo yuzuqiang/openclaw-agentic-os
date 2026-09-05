@@ -5678,6 +5678,7 @@ def _persistent_failure_summary(
 
 
 def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> None:
+    _walk_evidence(payload)
     evidence_file = evidence_file.resolve()
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
     temporary_evidence_file = evidence_file.with_name(
@@ -5705,11 +5706,14 @@ def _persistent_prelaunch_failure_summary(
     reason: str,
     error: ProbeError,
 ) -> dict[str, Any]:
+    error_message = str(error)
     return {
         "status": "fail_closed",
         "classification": "persistent_lifecycle_prelaunch_blocked",
         "reason": reason,
-        "error": str(error),
+        "error": "prelaunch validation failed",
+        "error_class": type(error).__name__,
+        "error_message_sha256": _text_sha256(error_message),
         "probe": "agentic-os-persistent-lifecycle-runner",
         "openclaw_head_sha": head,
         "agentic_os_head_sha": _git(ROOT, "rev-parse", "HEAD"),
@@ -6201,6 +6205,7 @@ def run_probe(
             head=head,
             agentic_sources=agentic_sources,
         )
+    auto_created_run_root = run_root is None
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
     selected_port = port or PERSISTENT_LIFECYCLE_DEFAULT_PORT
     selected_run_id = run_id or "agentic-os-real-gateway-contract-probe"
@@ -6208,38 +6213,46 @@ def run_probe(
     try:
         runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
     except ProbeError as exc:
-        _write_validated_payload(
-            evidence_file,
-            _persistent_prelaunch_failure_summary(
-                head=head,
-                agentic_sources=agentic_sources,
-                runtime_sources=[],
-                run_root=selected_run_root,
-                port=selected_port,
-                run_id=selected_run_id,
-                transition_id=selected_transition_id,
-                reason="runtime_source_closure_failed",
-                error=exc,
-            ),
-        )
+        try:
+            _write_validated_payload(
+                evidence_file,
+                _persistent_prelaunch_failure_summary(
+                    head=head,
+                    agentic_sources=agentic_sources,
+                    runtime_sources=[],
+                    run_root=selected_run_root,
+                    port=selected_port,
+                    run_id=selected_run_id,
+                    transition_id=selected_transition_id,
+                    reason="runtime_source_closure_failed",
+                    error=exc,
+                ),
+            )
+        finally:
+            if auto_created_run_root:
+                shutil.rmtree(selected_run_root, ignore_errors=True)
         raise
     try:
         requested_process_boundary = _require_process_containment_boundary_request()
     except ProbeError as exc:
-        _write_validated_payload(
-            evidence_file,
-            _persistent_prelaunch_failure_summary(
-                head=head,
-                agentic_sources=agentic_sources,
-                runtime_sources=runtime_sources,
-                run_root=selected_run_root,
-                port=selected_port,
-                run_id=selected_run_id,
-                transition_id=selected_transition_id,
-                reason="process_containment_boundary_required",
-                error=exc,
-            ),
-        )
+        try:
+            _write_validated_payload(
+                evidence_file,
+                _persistent_prelaunch_failure_summary(
+                    head=head,
+                    agentic_sources=agentic_sources,
+                    runtime_sources=runtime_sources,
+                    run_root=selected_run_root,
+                    port=selected_port,
+                    run_id=selected_run_id,
+                    transition_id=selected_transition_id,
+                    reason="process_containment_boundary_required",
+                    error=exc,
+                ),
+            )
+        finally:
+            if auto_created_run_root:
+                shutil.rmtree(selected_run_root, ignore_errors=True)
         raise
     return _run_persistent_lifecycle_probe(
         openclaw_root,
