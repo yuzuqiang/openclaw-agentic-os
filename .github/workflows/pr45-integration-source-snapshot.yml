@@ -19,9 +19,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pr45-source-snapshot"
-          git for-each-ref --format='%(objectname) %(refname)' refs/remotes/origin/fix/pr45 refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824 > "$RUNNER_TEMP/pr45-source-snapshot/refs.txt"
+          git for-each-ref --format='%(objectname) %(refname)' 'refs/remotes/origin/fix/pr45*' refs/remotes/origin/phase-b/issue44-live-runtime-readiness-20260824 > "$RUNNER_TEMP/pr45-source-snapshot/refs.txt"
           mapfile -t refs < <(awk '{print $2}' "$RUNNER_TEMP/pr45-source-snapshot/refs.txt")
-          test "${#refs[@]}" -gt 0
+          test "${#refs[@]}" -gt 1
           git bundle create "$RUNNER_TEMP/pr45-source-snapshot/source.bundle" "${refs[@]}"
           sha256sum "$RUNNER_TEMP/pr45-source-snapshot/source.bundle" > "$RUNNER_TEMP/pr45-source-snapshot/bundle.sha256"
       - uses: actions/upload-artifact@v4
