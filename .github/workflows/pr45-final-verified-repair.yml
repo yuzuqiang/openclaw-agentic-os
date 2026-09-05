@@ -1,0 +1,108 @@
+name: PR45 final verified repair
+on:
+  push:
+    branches: [fix/pr45-final-audit-0cf396c]
+    paths: [.github/workflows/pr45-final-verified-repair.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      head: ${{ steps.prepare.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Reconstruct and verify frozen repair tree
+        id: prepare
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, hashlib, lzma, os, pathlib, subprocess
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          payload = ''.join((workspace / f'.github/pr45-final-repair/patch-{i}.b64').read_text().strip() for i in range(3))
+          patch = lzma.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '30aadabf7e0e731cf6ca197900657227ff0a8821a8b98b95ade8b8cdc89f9903'
+          base = '871b8242767192cdf2c9f8ba71724b9f346ccc1b'
+          candidate = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr45-final-candidate'
+          subprocess.run(['git', 'worktree', 'add', '--detach', str(candidate), base], check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], cwd=candidate, input=patch, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], cwd=candidate, text=True).strip()
+          assert tree == 'b9917a8db8cbc05e30305d1ec1403a424ef547ee', tree
+          allowed = ['README.md', 'scripts/agentic_os_runtime_source_contract.py', 'scripts/openclaw-real-gateway-contract-probe.py', 'tests/test_openclaw_real_gateway_contract_probe.py', 'tests/test_runtime_source_contract_review.py']
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], cwd=candidate, text=True).splitlines()
+          assert changed == allowed, changed
+          subprocess.run(['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit', '-m', 'fix: close source capability escapes and bind preload installation'], cwd=candidate, check=True)
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=candidate, text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'head={head}\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'CANDIDATE_DIR={candidate}\n')
+          print('Frozen candidate:', head, 'tree:', tree)
+          PY
+      - name: Privacy preflight
+        run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m agentic_os.cli preflight
+      - name: Full unittest discovery including regression and Node differential tests
+        run: cd "$CANDIDATE_DIR" && PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Compile source and test files
+        run: cd "$CANDIDATE_DIR" && PYTHONPYCACHEPREFIX=${RUNNER_TEMP}/agentic-os-pycache PYTHONPATH=src python -m compileall -q scripts src tests
+      - name: Migration and package parity
+        run: |
+          cd "$CANDIDATE_DIR"
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v
+      - name: Diff, exact head and worktree cleanliness
+        run: |
+          cd "$CANDIDATE_DIR"
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = '${{ steps.prepare.outputs.head }}'
+          test "$(git rev-parse HEAD^{tree})" = b9917a8db8cbc05e30305d1ec1403a424ef547ee
+      - name: Package only the exact tested commit
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr45-verified"
+          cd "$CANDIDATE_DIR"
+          git bundle create "$RUNNER_TEMP/pr45-verified/candidate.bundle" HEAD ^871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-verified/head.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr45-exact-tested-commit
+          path: ${{ runner.temp }}/pr45-verified
+          retention-days: 3
+  publish-candidate:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr45-exact-tested-commit
+          path: ${{ runner.temp }}/pr45-verified
+      - name: Publish tested commit without moving or merging PR45
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD: ${{ needs.validate.outputs.head }}
+        run: |
+          test "$(cat "$RUNNER_TEMP/pr45-verified/head.txt")" = "$EXPECTED_HEAD"
+          git bundle verify "$RUNNER_TEMP/pr45-verified/candidate.bundle"
+          git fetch --no-tags "$RUNNER_TEMP/pr45-verified/candidate.bundle" HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse FETCH_HEAD^{tree})" = b9917a8db8cbc05e30305d1ec1403a424ef547ee
+          auth=$(printf 'x-access-token:%s' "$GH_PUSH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin FETCH_HEAD:refs/heads/fix/pr45-verified-b9917a8db8cb
+          printf 'Exact tested commit: `%s`\n\nPR45 has not been moved or merged.\n' "$EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
