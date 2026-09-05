@@ -5521,6 +5521,37 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
             self.assertFalse(launched)
+            self.assertTrue(evidence_file.is_file())
+            evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "fail_closed")
+            self.assertEqual(
+                evidence["classification"],
+                "persistent_lifecycle_prelaunch_blocked",
+            )
+            self.assertEqual(
+                evidence["reason"], "process_containment_boundary_required"
+            )
+            self.assertEqual(evidence["openclaw_head_sha"], VALID_RUNTIME_HEAD)
+            self.assertFalse(evidence["runtime_ready_candidate_evidence"])
+            self.assertFalse(evidence["production_authority_enabled"])
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"][
+                    "production_gateway_restart_attempted"
+                ]
+            )
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"][
+                    "production_session_mutation_attempted"
+                ]
+            )
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"][
+                    "production_lease_mutation_attempted"
+                ]
+            )
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"]["candidate_process_started"]
+            )
 
     def test_persistent_runner_accepts_boundary_env_only_as_launch_request(self) -> None:
         with mock.patch.dict(

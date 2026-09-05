@@ -5671,6 +5671,62 @@ def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> No
             temporary_evidence_file.unlink()
 
 
+def _persistent_prelaunch_failure_summary(
+    *,
+    head: str,
+    agentic_sources: list[dict[str, str]],
+    runtime_sources: list[dict[str, str]],
+    run_root: Path,
+    port: int,
+    run_id: str,
+    transition_id: str,
+    error: ProbeError,
+) -> dict[str, Any]:
+    return {
+        "status": "fail_closed",
+        "classification": "persistent_lifecycle_prelaunch_blocked",
+        "reason": "process_containment_boundary_required",
+        "error": str(error),
+        "probe": "agentic-os-persistent-lifecycle-runner",
+        "openclaw_head_sha": head,
+        "agentic_os_head_sha": _git(ROOT, "rev-parse", "HEAD"),
+        "agentic_sources": agentic_sources,
+        "runtime_sources": runtime_sources,
+        "required_tool_names": sorted(REQUIRED_METHODS),
+        "current_head_evidence_required": True,
+        "phase_c_exact_head_required_before_review": True,
+        "runtime_ready": False,
+        "runtime_ready_candidate_evidence": False,
+        "production_behavior_proven": False,
+        "production_authority_enabled": False,
+        "db_authority_enabled": DB_AUTHORITY_ENABLED,
+        "persistent_attestation_validated": False,
+        "accepted_session_spawned": False,
+        "runtime_catalog_discovered": False,
+        "session_list_status_history_observed": False,
+        "lease_release_cleanup_observed": False,
+        "duplicate_acquire_identity_parity": False,
+        "duplicate_spawn_identity_parity": False,
+        "duplicate_release_identity_parity": False,
+        "isolated_non_production_gateway": {
+            "status": "not_started",
+            "loopback": True,
+            "port": port,
+            "run_root_sha256": runtime_source_contract.path_sha256(run_root.resolve()),
+            "run_id_sha256": _sha256_bytes(run_id.encode("utf-8")),
+            "transition_id_sha256": _sha256_bytes(transition_id.encode("utf-8")),
+            "production_config_mutation_attempted": False,
+            "production_gateway_restart_attempted": False,
+            "production_session_mutation_attempted": False,
+            "production_lease_mutation_attempted": False,
+            "candidate_process_started": False,
+            "candidate_port_opened": False,
+            "candidate_port_closed": "not_required",
+            "db_authority_enabled": DB_AUTHORITY_ENABLED,
+        },
+    }
+
+
 def _require_trusted_persistent_lifecycle_boundary() -> None:
     """Block authority until a parent-owned trusted launcher is available.
 
@@ -6122,9 +6178,28 @@ def run_probe(
             head=head,
             agentic_sources=agentic_sources,
         )
-    requested_process_boundary = _require_process_containment_boundary_request()
     runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
+    selected_port = port or PERSISTENT_LIFECYCLE_DEFAULT_PORT
+    selected_run_id = run_id or "agentic-os-real-gateway-contract-probe"
+    selected_transition_id = transition_id or "persistent-lifecycle-runtime-readiness"
+    try:
+        requested_process_boundary = _require_process_containment_boundary_request()
+    except ProbeError as exc:
+        _write_validated_payload(
+            evidence_file,
+            _persistent_prelaunch_failure_summary(
+                head=head,
+                agentic_sources=agentic_sources,
+                runtime_sources=runtime_sources,
+                run_root=selected_run_root,
+                port=selected_port,
+                run_id=selected_run_id,
+                transition_id=selected_transition_id,
+                error=exc,
+            ),
+        )
+        raise
     return _run_persistent_lifecycle_probe(
         openclaw_root,
         evidence_file,
@@ -6133,9 +6208,9 @@ def run_probe(
         agentic_sources=agentic_sources,
         runtime_sources=runtime_sources,
         run_root=selected_run_root,
-        port=port or PERSISTENT_LIFECYCLE_DEFAULT_PORT,
-        run_id=run_id or "agentic-os-real-gateway-contract-probe",
-        transition_id=transition_id or "persistent-lifecycle-runtime-readiness",
+        port=selected_port,
+        run_id=selected_run_id,
+        transition_id=selected_transition_id,
         requested_process_boundary=requested_process_boundary,
     )
 
