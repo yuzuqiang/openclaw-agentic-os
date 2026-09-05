@@ -2056,7 +2056,7 @@ def _execution_capability_bindings(
         elif module == "module":
             if imported in {"*", "default", "Module"}:
                 bindings[local] = "module-namespace"
-            elif imported not in {"createRequire", "register", "registerHooks", "runMain", "builtinModules", "isBuiltin", "findSourceMap", "SourceMap"}:
+            elif imported not in {"createRequire", "register", "registerHooks", "builtinModules", "isBuiltin", "findSourceMap", "SourceMap"}:
                 raise RuntimeSourceContractError(
                     "runtime source contains an unsupported CommonJS runtime loader binding"
                 )

@@ -49,6 +49,14 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
                 with self.subTest(declaration=declaration, expression=expression):
                     self.assert_rejected(declaration + expression)
 
+    def test_run_main_aliases_cannot_bypass_module_capability_accounting(self) -> None:
+        for declaration in (
+            "import {runMain as go} from 'node:module';",
+            "const {runMain:go}=require('module');",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assert_rejected(declaration + "const f=go;f('./hidden.cjs');")
+
     def test_grouped_and_aliased_module_origins_cannot_escape_accounting(self) -> None:
         for acquisition in (
             "(require)('module')", "((require))('module')",
@@ -107,6 +115,7 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
             "const r=module['require'];r('./hidden.cjs');",
             "const r=((module))?.['require'];r('./hidden.cjs');",
             "const M=require('node:module');const C=M;new C().load('./hidden.cjs');",
+            "const {runMain:go}=require('node:module');const f=go;f('./hidden.cjs');",
         ):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
