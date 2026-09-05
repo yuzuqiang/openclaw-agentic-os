@@ -524,6 +524,20 @@ OS-enforced process-containment receipt. No repository command currently
 provides that launcher integration, so the historical invocation must not be
 treated as runnable evidence collection.
 
+The static source-closure check is a deliberately restricted, fail-closed
+contract, not a general JavaScript security boundary. Loader, Worker and
+child-process capabilities must remain in recognized declarations and directly
+bound literal calls; unsupported transfers, reflection, launch options and
+ambiguous HTML-comment grammar are rejected. Hashbang comments and ordinary
+comments are normalized before all collectors, with executable template
+expressions kept separate from inert text. Every traversed source binds its
+nearest package-scope metadata. Launcher evidence additionally requires
+`runtime-preload-closure:tsx`, covering recursively loaded preload dependencies
+under unhooked Node resolution, rather than only the tsx package directory.
+Unsupported dynamic/native preload behavior fails closed and still requires the
+external trusted-launcher integration described above. Historical three-record
+launcher bindings are not complete evidence under this contract.
+
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
 detach and clear cooperative cleanup markers. A future external launcher must
