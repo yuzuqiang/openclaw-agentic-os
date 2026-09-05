@@ -401,8 +401,8 @@ class RealGatewayProbeTests(unittest.TestCase):
         return [
             {
                 "path": label,
-                "sha256": format(index + 10, "x") * 64,
-                "realpath_sha256": format(index + 13, "x") * 64,
+                "sha256": hashlib.sha256(f"launch-source:{label}".encode()).hexdigest(),
+                "realpath_sha256": hashlib.sha256(f"launch-realpath:{label}".encode()).hexdigest(),
             }
             for index, label in enumerate(MODULE.PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS)
         ]

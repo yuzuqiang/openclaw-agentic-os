@@ -80,6 +80,7 @@ PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS = (
     "runtime-launcher:node",
     "runtime-preload:tsx",
     "runtime-preload-package:tsx",
+    "runtime-preload-closure:tsx",
 )
 VALIDATOR_PYTHON_RUNTIME_MODULES = (
     "argparse",
@@ -1572,6 +1573,32 @@ def _runtime_directory_binding(path: Path, label: str) -> dict[str, str]:
     }
 
 
+def _runtime_preload_closure_binding(root: Path, preload: Path) -> dict[str, str]:
+    """Use the same fail-closed closure contract for the executable preload.
+
+    A digest of the tsx package alone does not bind sibling or nested packages.
+    Do not silently fall back to that incomplete digest when the preload uses
+    unsupported dynamic/native loaders: those require a trusted launch boundary.
+    """
+    root = root.resolve()
+    try:
+        relative = runtime_source_contract.source_relative_path(root, preload)
+        paths = runtime_source_contract.runtime_source_paths(
+            root, entrypoints=(relative,), node_only=True, bind_execution_context=True,
+        )
+        records = [
+            {"path": path, "sha256": _sha256_bytes((root / path).read_bytes())}
+            for path in paths
+        ]
+    except (OSError, runtime_source_contract.RuntimeSourceContractError) as exc:
+        raise ProbeError("runtime preload source closure cannot be bound") from exc
+    return {
+        "path": "runtime-preload-closure:tsx",
+        "sha256": _canonical_sha256(records),
+        "realpath_sha256": _text_sha256(str(root)),
+    }
+
+
 def _runtime_launch_bindings(
     openclaw_root: Path, runner_env: Mapping[str, str]
 ) -> tuple[Path, str, list[dict[str, str]]]:
@@ -1586,7 +1613,12 @@ def _runtime_launch_bindings(
         specifier="tsx",
         label="tsx",
     )
+    preload_closure = _runtime_preload_closure_binding(openclaw_root, tsx_preload)
     tsx_package_root = _find_node_package_root(tsx_preload, "tsx")
+    try:
+        tsx_package_root.relative_to(openclaw_root.resolve())
+    except ValueError as exc:
+        raise ProbeError("tsx runtime package escapes the candidate root") from exc
     return (
         node_executable,
         tsx_preload.as_uri(),
@@ -1596,6 +1628,7 @@ def _runtime_launch_bindings(
             _runtime_directory_binding(
                 tsx_package_root, "runtime-preload-package:tsx"
             ),
+            preload_closure,
         ],
     )
 
@@ -1603,13 +1636,15 @@ def _runtime_launch_bindings(
 def _validate_runtime_launch_sources(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, list):
         raise ProbeError("runtime launch source binding is missing")
+    if len(value) != len(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS):
+        raise ProbeError("runtime launch source binding is incomplete or ambiguous")
     by_path = {
         item.get("path"): item
         for item in value
         if isinstance(item, dict) and isinstance(item.get("path"), str)
     }
     missing = sorted(set(PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS) - set(by_path))
-    if missing:
+    if missing or len(by_path) != len(value):
         raise ProbeError("runtime launch source binding is incomplete")
     validated: list[dict[str, str]] = []
     for label in PERSISTENT_RUNTIME_LAUNCH_SOURCE_PATHS:
