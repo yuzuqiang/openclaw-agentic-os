@@ -1,0 +1,44 @@
+name: PR45 independent published-head cross-check
+on:
+  push:
+    branches: [fix/pr45-audit-46cd0c788361]
+    paths: [.github/workflows/pr45-crosscheck-published.yml]
+permissions:
+  contents: read
+jobs:
+  cross-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      REVIEW_HEAD: bb160fb68ae5e7f0e7af26a3809323f3c9f6335e
+      REVIEW_TREE: 4d35b31b3a0f3f5def0ed68afeb01f725389c263
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Prepare read-only target and retain exact source identity
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr45-independent"
+          cp .github/audits/pr45-independent-crosscheck.py "$RUNNER_TEMP/pr45-independent/crosscheck.py"
+          git checkout --detach "$REVIEW_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$REVIEW_TREE"
+          git rev-parse HEAD > "$RUNNER_TEMP/pr45-independent/head.txt"
+          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/pr45-independent/tree.txt"
+          git bundle create "$RUNNER_TEMP/pr45-independent/source.bundle" HEAD ^871b8242767192cdf2c9f8ba71724b9f346ccc1b
+      - name: Run independent capability and lexical matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python "$RUNNER_TEMP/pr45-independent/crosscheck.py" > "$RUNNER_TEMP/pr45-independent/crosscheck.json"
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr45-independent-bb160fb
+          path: ${{ runner.temp }}/pr45-independent
+          retention-days: 3
