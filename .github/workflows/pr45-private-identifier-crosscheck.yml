@@ -1,0 +1,94 @@
+name: PR45 private identifier integration crosscheck
+on:
+  push:
+    branches: [fix/pr45-source-closure-audit-20260904]
+    paths: [.github/workflows/pr45-private-identifier-crosscheck.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3f381d431442fb2e6d407fae89084ff62d149b33
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Read exact audited patch blob
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const blob = await github.rest.git.getBlob({...context.repo, file_sha: '036dc7e7b56085981a9ab6decd6f94625afc3bb3'});
+            if (blob.data.encoding !== 'base64') throw new Error('Unexpected blob encoding');
+            fs.writeFileSync(process.env.RUNNER_TEMP + '/private-identifiers.patch', Buffer.from(blob.data.content, 'base64'));
+      - name: Validate base and patch, then commit isolated tested tree
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          patch = pathlib.Path(os.environ['RUNNER_TEMP']) / 'private-identifiers.patch'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          assert git('rev-parse', 'HEAD') == '3f381d431442fb2e6d407fae89084ff62d149b33'
+          assert git('rev-parse', 'HEAD^{tree}') == '04bf37044b7ae7e1f8ade261a786db9d900ac6dd'
+          assert not git('status', '--porcelain')
+          assert hashlib.sha256(patch.read_bytes()).hexdigest() == '1ce9cba30e00eddea3463cc2b00335bd346f3621e5f554cfed78d8281ff7b7b3'
+          subprocess.run(['git', 'apply', '--index', str(patch)], check=True)
+          assert git('diff', '--cached', '--name-only').splitlines() == ['scripts/agentic_os_runtime_source_contract.py', 'tests/test_runtime_private_identifiers.py']
+          subprocess.run(['git', '-c', 'user.name=Runtime source audit', '-c', 'user.email=audit@localhost', 'commit', '-m', 'test: isolated private identifier verification on 3f381d4'], check=True)
+          assert not git('status', '--porcelain')
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'private-verification'
+          out.mkdir()
+          identity = {'base': '3f381d431442fb2e6d407fae89084ff62d149b33', 'head': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}'), 'patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(), 'python': subprocess.check_output(['python', '--version'], text=True).strip(), 'node': subprocess.check_output(['node', '--version'], text=True).strip()}
+          (out / 'identity.json').write_text(json.dumps(identity, indent=2) + '\n')
+          subprocess.run(['git', 'bundle', 'create', str(out / 'candidate.bundle'), 'HEAD', 'refs/remotes/origin/main'], check=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'VERIFICATION_DIR={out}\n')
+              env.write(f'EXPECTED_HEAD={identity["head"]}\nEXPECTED_TREE={identity["tree"]}\n')
+          PY
+      - name: Preserve exact candidate before long-running tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr45-private-candidate-node${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/private-verification/identity.json
+            ${{ runner.temp }}/private-verification/candidate.bundle
+          retention-days: 7
+      - name: Run new regression tests including real Node witnesses
+        run: PYTHONPATH=src python -m unittest tests.test_runtime_private_identifiers -v 2>&1 | tee "$VERIFICATION_DIR/focused.log"
+      - name: Privacy preflight
+        run: PYTHONPATH=src python -m agentic_os.cli preflight 2>&1 | tee "$VERIFICATION_DIR/preflight.log"
+      - name: Full exact-tree test discovery
+        run: PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$VERIFICATION_DIR/full-tests.log"
+      - name: Compilation, migration parity and clean identity
+        run: |
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" PYTHONPATH=src python -m compileall -q scripts src tests
+          PYTHONPATH=src python -m unittest tests.test_migrations.MigrationTests.test_packaged_migration_assets_match_repository_assets tests.test_migrations.MigrationTests.test_default_migration_loader_uses_package_resources tests.test_migrations.MigrationTests.test_manifest_is_machine_readable_and_has_pinned_migrations -v 2>&1 | tee "$VERIFICATION_DIR/migration.log"
+          git diff --check origin/main...HEAD
+          test -z "$(git status --porcelain)"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          printf 'compilation migration diff cleanliness exact-head exact-tree passed\n' > "$VERIFICATION_DIR/verification-complete.txt"
+      - name: Retain test results even when a check fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr45-private-verification-node${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/private-verification/identity.json
+            ${{ runner.temp }}/private-verification/*.log
+            ${{ runner.temp }}/private-verification/verification-complete.txt
+          retention-days: 7
