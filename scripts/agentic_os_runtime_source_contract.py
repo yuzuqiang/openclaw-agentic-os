@@ -612,7 +612,7 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                     raise RuntimeSourceContractError("runtime source contains an ambiguous JavaScript slash token")
                 regex_start = previous is None or (
                     previous[0] == "punctuation"
-                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>"}
+                    and previous_value in {"(", "{", "[", "=", ",", ":", ";", "!", "&", "|", "?", "+", "-", "*", "%", "^", "~", "<", ">", "=>", "..."}
                 ) or (
                     previous[0] == "identifier"
                     and previous_value in {"await", "case", "delete", "else", "in", "instanceof", "new", "return", "throw", "typeof", "void", "yield", "do"}
@@ -669,7 +669,7 @@ def _source_tokens(source_text: str) -> list[tuple[str, str, int, int]]:
                 elif character == "}":
                     depth -= 1
                 pair = source_text[index:index + 2]
-                value = pair if pair in {"?.", "++", "--", "=>"} else character
+                value = "..." if source_text.startswith("...", index) else pair if pair in {"?.", "++", "--", "=>"} else character
                 index += len(value)
                 token("punctuation", start, index)
                 current = ("punctuation", value)
@@ -2057,6 +2057,13 @@ def _execution_capability_bindings(
                     "runtime source contains an unsupported child-process Node entrypoint binding"
                 )
 
+        elif module == "module":
+            if imported in {"*", "default", "Module"}:
+                bindings[local] = "module-namespace"
+            elif imported == "runMain":
+                bindings[local] = "module-loader"
+            # createRequire/register have separate factory/signature validators.
+
     def clause(start: int, end: int, module: str, *, commonjs: bool) -> None:
         index = start
         if not commonjs and text(index) == "type":
@@ -2120,7 +2127,7 @@ def _execution_capability_bindings(
                 module = specifier.removeprefix("node:")
                 if module in {"worker_threads", "child_process", "module"} and value == "export":
                     raise RuntimeSourceContractError("runtime source contains an unsupported execution capability re-export")
-                if module in {"worker_threads", "child_process"}:
+                if module in {"worker_threads", "child_process", "module"}:
                     clause(index + 1, cursor, module, commonjs=False)
                 if value == "import":
                     declarations.append((start, tokens[cursor + 1][3]))
@@ -2137,7 +2144,7 @@ def _execution_capability_bindings(
         if specifier is None or text(index + 3) != ")":
             continue
         module = specifier.removeprefix("node:")
-        if module not in {"worker_threads", "child_process"}:
+        if module not in {"worker_threads", "child_process", "module"}:
             continue
         # Only a direct require on a simple declaration RHS has a locally
         # accounted-for returned namespace.  Inline/grouped/aliased factories
@@ -2164,6 +2171,14 @@ def _reject_execution_capability_escapes(
 ) -> None:
     bindings, declarations, builtin_loads = _execution_capability_bindings(source_text)
     expected = sorted(specifier.removeprefix("node:") for specifier in loaded_execution_modules)
+    # Preserve the already-supported inline module.createRequire call. Its
+    # base, literal argument and result consumption are validated separately.
+    inline_module_spans = [
+        match.span() for match in _executable_pattern_matches(source_text, INLINE_CREATE_REQUIRE_SPECIFIER)
+        if source_text[match.start():match.end()].lstrip().startswith("require")
+    ]
+    builtin_loads += ["module"] * len(inline_module_spans)
+    accepted_spans = accepted_spans + inline_module_spans
     if sorted(builtin_loads) != expected:
         raise RuntimeSourceContractError(
             "runtime source contains an unsupported Worker entrypoint or child-process Node entrypoint namespace origin"
@@ -2178,6 +2193,22 @@ def _reject_execution_capability_escapes(
         if any(left <= start < right for left, right in declarations + accepted_spans):
             continue
         capability = bindings[value]
+        if capability == "module-namespace":
+            member_index = _skip_js_trivia(source_text, _end)
+            if source_text[member_index:member_index + 1] == ".":
+                member = _parse_js_identifier(source_text, _skip_js_trivia(source_text, member_index + 1))
+                if member is not None and member[0] in {"builtinModules", "isBuiltin", "syncBuiltinESMExports"}:
+                    continue
+                if member is not None and member[0] == "createRequire":
+                    call = _skip_js_trivia(source_text, member[1])
+                    if source_text[call:call + 1] == "(":
+                        continue  # Checked by the factory/result validator.
+                if member is not None and member[0] == "register":
+                    if _parse_module_register_invocation(source_text, start, value + ".register") is not None:
+                        continue
+            raise RuntimeSourceContractError("runtime source contains an unsupported CommonJS runtime loader namespace transfer")
+        if capability == "module-loader":
+            raise RuntimeSourceContractError("runtime source contains an unsupported CommonJS runtime loader transfer")
         if capability.startswith("worker"):
             description = "Worker entrypoint"
         elif capability == "child-shell":
@@ -3418,7 +3449,7 @@ def _create_require_specifiers(
             after = source_text[after_index] if after_index < len(source_text) else ""
             is_loader_identifier = (
                 source_text.startswith(loader_name, index)
-                and not (before and (_is_identifier_character(before) or before == "."))
+                and not (before and (_is_identifier_character(before) or (before == "." and source_text[max(0, index - 3):index] != "...")))
                 and not (after and _is_identifier_character(after))
             )
             if not is_loader_identifier:
@@ -3505,7 +3536,7 @@ def _commonjs_require_specifiers(
             after = source_text[after_index] if after_index < len(source_text) else ""
             is_alias_identifier = (
                 source_text.startswith(alias_name, index)
-                and not (before and (_is_identifier_character(before) or before == "."))
+                and not (before and (_is_identifier_character(before) or (before == "." and source_text[max(0, index - 3):index] != "...")))
                 and not (after and _is_identifier_character(after))
             )
             if not is_alias_identifier:
@@ -4130,7 +4161,7 @@ def import_specifiers(source_text: str) -> list[tuple[str, bool, str]]:
         source_text,
         loaded_execution_modules=[
             specifier for specifier in commonjs_specifiers + create_require_specifiers
-            if specifier.removeprefix("node:") in {"worker_threads", "child_process"}
+            if specifier.removeprefix("node:") in {"worker_threads", "child_process", "module"}
         ],
     )
     _reject_unaccounted_create_require_references(source_text)
