@@ -31,7 +31,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pr45-verification"
           python - <<'PY'
           import base64, hashlib, os, pathlib, zlib
-          encoded = pathlib.Path('.github/audits/pr45-fix.patch.zlib.b64').read_text().strip()
+          paths = [f'.github/audits/pr45-patch-{i}.b64' for i in range(3)] + ['.github/audits/pr45-fix.patch.zlib.b64']
+          encoded = ''.join(pathlib.Path(p).read_text().strip() for p in paths)
           patch = zlib.decompress(base64.b64decode(encoded, validate=True))
           if hashlib.sha256(patch).hexdigest() != os.environ['PATCH_SHA256']:
               raise SystemExit('Repair patch digest mismatch')
