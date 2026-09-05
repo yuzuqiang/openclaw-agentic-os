@@ -15,7 +15,7 @@ jobs:
     permissions:
       contents: write
     env:
-      CANDIDATE_ROOT: ${{ runner.temp }}/pr45-validated
+      CANDIDATE_ROOT: /tmp/pr45-validated-83042208
       EXPECTED_PARENT: 871b8242767192cdf2c9f8ba71724b9f346ccc1b
       EXPECTED_TREE: 83042208330f913ad48be5df255b524c9f0ca487
     steps:
