@@ -309,6 +309,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "({env:process.env}={env:()=>{}}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "[process.env]=[()=>{}]; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "({nested:{env:process.env}}={nested:{env:()=>{}}}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for (process.env of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for ((process.env) of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for ([process.env] of [[()=>{}]]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
         ):
             with self.subTest(source=source):
                 self.assert_closed(source)
@@ -317,6 +321,15 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         source = (
             "const f = () => true;\n"
             "const snapshot = { env: process.env };\n"
+            "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_process_env_for_of_reads_do_not_become_reassignments(self) -> None:
+        source = (
+            "const f = () => true;\n"
+            "for (const env of [process.env]) { String(env.OPENCLAW_MODE); }\n"
             "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
             "if (process.env[key] === '1') { await import('./entry.mjs'); }\n"
         )

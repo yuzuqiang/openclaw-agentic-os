@@ -2006,6 +2006,10 @@ def _process_env_target_was_reassigned(source_text: str, target_start: int) -> b
                     source_text, index, target_start
                 ):
                     return True
+                if _process_env_reference_is_for_of_assignment_target(
+                    source_text, index, member[1], target_start
+                ):
+                    return True
                 index = max(index + 1, member[1])
                 continue
         index += 1
@@ -2028,6 +2032,50 @@ def _process_env_reference_is_destructuring_assignment_target(
         ):
             return True
     return False
+
+
+def _process_env_reference_is_for_of_assignment_target(
+    source_text: str, process_start: int, process_end: int, target_start: int
+) -> bool:
+    for opener, opener_index in reversed(
+        _js_delimiter_stack_at(source_text, process_start)
+    ):
+        if opener != "(" or not _for_header_opener_belongs_to_for(
+            source_text, opener_index
+        ):
+            continue
+        header_close = _matching_for_header_close_index(source_text, opener_index)
+        if header_close < 0 or header_close >= target_start:
+            continue
+        separator = _for_header_top_level_of_separator_span(
+            source_text, opener_index + 1, header_close
+        )
+        if (
+            separator is not None
+            and opener_index < process_start
+            and process_end <= separator[0]
+        ):
+            return True
+    return False
+
+
+def _for_header_opener_belongs_to_for(source_text: str, opener_index: int) -> bool:
+    cursor = opener_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    word_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    word = source_text[cursor + 1 : word_end]
+    if word == "await":
+        cursor -= 1
+        while cursor >= 0 and source_text[cursor].isspace():
+            cursor -= 1
+        word_end = cursor + 1
+        while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+            cursor -= 1
+        word = source_text[cursor + 1 : word_end]
+    return word == "for"
 
 
 def _js_delimiter_stack_at(source_text: str, target_index: int) -> list[tuple[str, int]]:
