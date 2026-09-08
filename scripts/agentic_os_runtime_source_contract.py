@@ -1997,9 +1997,12 @@ def _process_env_target_was_reassigned(source_text: str, target_start: int) -> b
         if process_end is not None:
             member = _parse_process_member(source_text, process_end)
             if member is not None and member[0] == "env":
-                after_env = _skip_js_trivia(source_text, member[1])
-                if after_env < target_start and _starts_js_assignment_operator(
-                    source_text, after_env
+                assignment_target_end = _parenthesized_process_env_target_end(
+                    source_text, index, member[1], target_start
+                )
+                after_target = _skip_js_trivia(source_text, assignment_target_end)
+                if after_target < target_start and _starts_js_assignment_operator(
+                    source_text, after_target
                 ):
                     return True
                 if _process_env_reference_is_destructuring_assignment_target(
@@ -2014,6 +2017,27 @@ def _process_env_target_was_reassigned(source_text: str, target_start: int) -> b
                 continue
         index += 1
     return False
+
+
+def _parenthesized_process_env_target_end(
+    source_text: str, process_start: int, process_end: int, target_start: int
+) -> int:
+    target_start_index = process_start
+    target_end = process_end
+    while True:
+        opener_index = _previous_non_trivia_index(source_text, target_start_index)
+        if opener_index < 0 or source_text[opener_index] != "(":
+            return target_end
+        closer_index = _skip_js_trivia(source_text, target_end)
+        if closer_index >= target_start or source_text[closer_index] != ")":
+            return target_end
+        matching_close = _matching_js_delimiter_index(
+            source_text, opener_index, target_start
+        )
+        if matching_close != closer_index:
+            return target_end
+        target_start_index = opener_index
+        target_end = closer_index + 1
 
 
 def _process_env_reference_is_destructuring_assignment_target(
@@ -4201,10 +4225,15 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
 
 
 def _previous_non_trivia_character(source_text: str, index: int) -> str:
+    cursor = _previous_non_trivia_index(source_text, index)
+    return source_text[cursor] if cursor >= 0 else ""
+
+
+def _previous_non_trivia_index(source_text: str, index: int) -> int:
     cursor = index - 1
     while cursor >= 0 and source_text[cursor].isspace():
         cursor -= 1
-    return source_text[cursor] if cursor >= 0 else ""
+    return cursor
 
 
 def _previous_code_word(source_text: str, index: int) -> str:

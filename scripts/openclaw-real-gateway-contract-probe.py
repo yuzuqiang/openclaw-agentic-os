@@ -1150,6 +1150,11 @@ def validate_candidate_root(root: Path) -> str:
     return head
 
 
+def _assert_candidate_root_still_bound(root: Path, expected_head: str) -> None:
+    if validate_candidate_root(root) != expected_head:
+        raise ProbeError("OpenClaw candidate changed before prelaunch evidence write")
+
+
 def _candidate_probe_mode(root: Path) -> str:
     root = root.resolve()
     if (root / PERSISTENT_LIFECYCLE_RUNNER).is_file():
@@ -6221,6 +6226,7 @@ def run_probe(
                     "Agentic OS validator HEAD changed before prelaunch evidence write"
                 )
             _assert_agentic_sources_still_bound(agentic_sources)
+            _assert_candidate_root_still_bound(openclaw_root, head)
             _write_validated_payload(
                 evidence_file,
                 _persistent_prelaunch_failure_summary(
@@ -6249,6 +6255,7 @@ def run_probe(
                     "Agentic OS validator HEAD changed before prelaunch evidence write"
                 )
             _assert_agentic_sources_still_bound(agentic_sources)
+            _assert_candidate_root_still_bound(openclaw_root, head)
             _write_validated_payload(
                 evidence_file,
                 _persistent_prelaunch_failure_summary(

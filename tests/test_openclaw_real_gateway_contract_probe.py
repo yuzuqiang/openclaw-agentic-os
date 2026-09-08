@@ -5653,6 +5653,10 @@ class RealGatewayProbeTests(unittest.TestCase):
                 return_value="persistent_lifecycle_runner",
             ), mock.patch.object(
                 MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE,
                 "_persistent_runtime_source_bindings",
                 side_effect=MODULE.ProbeError("runtime source blocked"),
             ), mock.patch.object(
@@ -5667,6 +5671,58 @@ class RealGatewayProbeTests(unittest.TestCase):
                 side_effect=MODULE.ProbeError("source binding changed"),
             ):
                 with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_revalidates_candidate_before_source_closure_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            with mock.patch.object(
+                MODULE,
+                "validate_candidate_root",
+                side_effect=[VALID_RUNTIME_HEAD, "changed-head"],
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE,
+                "_persistent_runtime_source_bindings",
+                side_effect=MODULE.ProbeError("runtime source blocked"),
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE,
+                "_assert_agentic_sources_still_bound",
+                return_value=None,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "candidate changed"):
                     MODULE.run_probe(root, evidence_file, timeout=1)
 
             self.assertFalse(launched)
@@ -5715,6 +5771,56 @@ class RealGatewayProbeTests(unittest.TestCase):
                 side_effect=MODULE.ProbeError("source binding changed"),
             ):
                 with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_revalidates_candidate_before_boundary_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            with mock.patch.object(
+                MODULE,
+                "validate_candidate_root",
+                side_effect=[VALID_RUNTIME_HEAD, "changed-head"],
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE, "_persistent_runtime_source_bindings", return_value=[]
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ), mock.patch.object(
+                MODULE,
+                "_require_process_containment_boundary_request",
+                side_effect=MODULE.ProbeError("containment boundary required"),
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "candidate changed"):
                     MODULE.run_probe(root, evidence_file, timeout=1)
 
             self.assertFalse(launched)

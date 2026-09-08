@@ -306,6 +306,8 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "const build=(()=>{})['constructor']; build(\"return import('./hidden.mjs')\")();",
             "var let=()=>{}; const build=let['constructor']; build(\"return import('./hidden.mjs')\")();",
             "process.env=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "(process.env)=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "((process.env))=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "({env:process.env}={env:()=>{}}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "[process.env]=[()=>{}]; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "({nested:{env:process.env}}={nested:{env:()=>{}}}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",

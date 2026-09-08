@@ -311,6 +311,14 @@ class CurrentStatusTests(unittest.TestCase):
             issue44_candidate_payload["openclaw_head_sha"],
             issue44_candidate["openclaw_head_sha"],
         )
+        self.assertEqual(
+            index["downstream_candidate_evidence"]["isolated_non_production_gateway"][
+                "run_root_sha256"
+            ],
+            issue44_candidate_payload["isolated_non_production_gateway"][
+                "run_root_sha256"
+            ],
+        )
 
         authority = status["production_authority"]
         self.assertEqual(authority["status"], "disabled")
@@ -594,6 +602,10 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(candidate_payload["reason"], "runtime_source_closure_failed")
         self.assertFalse(
             candidate_payload["isolated_non_production_gateway"]["candidate_process_started"]
+        )
+        self.assertEqual(
+            candidate["isolated_non_production_gateway"]["run_root_sha256"],
+            candidate_payload["isolated_non_production_gateway"]["run_root_sha256"],
         )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
