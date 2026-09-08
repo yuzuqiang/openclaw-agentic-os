@@ -165,6 +165,20 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "}"
         )
 
+    def test_for_of_rhs_identifier_named_of_is_still_a_computed_member_target(self) -> None:
+        for source in (
+            "const of=()=>{}; "
+            "for (const build of [of['constructor']]) { "
+            "build(\"return import('./hidden.mjs')\")() "
+            "}",
+            "const of=()=>{}; "
+            "for (const build of of['constructor']) { "
+            "build(\"return import('./hidden.mjs')\")() "
+            "}",
+        ):
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
     def test_contextual_for_of_array_literals_do_not_look_like_computed_members(self) -> None:
         source = "for (const value of ['constructor']) { void value; }"
         self.assertEqual(CONTRACT.import_specifiers(source), [])

@@ -1592,16 +1592,20 @@ def _token_is_contextual_for_of(source_text: str, token_start: int, token_end: i
     if word != "for":
         return False
     header_close = _matching_for_header_close_index(source_text, opener)
-    if header_close < 0 or _for_header_has_top_level_semicolon(
-        source_text, opener + 1, header_close
-    ):
+    if header_close < 0:
         return False
-    header_prefix = source_text[opener + 1 : token_start]
-    if not header_prefix.strip():
+    separator = _for_header_top_level_of_separator_span(
+        source_text, opener + 1, header_close
+    )
+    if separator is None:
         return False
     previous = source_text[token_start - 1] if token_start > 0 else ""
     following = source_text[token_end] if token_end < len(source_text) else ""
-    return not _is_identifier_character(previous) and not _is_identifier_character(following)
+    return (
+        separator == (token_start, token_end)
+        and not _is_identifier_character(previous)
+        and not _is_identifier_character(following)
+    )
 
 
 def _matching_for_header_close_index(source_text: str, opener: int) -> int:
@@ -1731,6 +1735,99 @@ def _for_header_has_top_level_semicolon(
             return True
         index += 1
     return False
+
+
+def _for_header_top_level_of_separator_span(
+    source_text: str, start_index: int, end_index: int
+) -> tuple[int, int] | None:
+    index = start_index
+    depth = 0
+    state = "code"
+    quote = ""
+    separator: tuple[int, int] | None = None
+    while index < end_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < end_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < end_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= end_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if depth > 0:
+                depth -= 1
+            index += 1
+            continue
+        if character == ";" and depth == 0:
+            return None
+        token_end = index + 2
+        if (
+            depth == 0
+            and source_text.startswith("of", index)
+            and (
+                index == start_index
+                or not _is_identifier_character(source_text[index - 1])
+            )
+            and (
+                token_end >= end_index
+                or not _is_identifier_character(source_text[token_end])
+            )
+        ):
+            prefix = source_text[start_index:index].strip()
+            suffix = source_text[token_end:end_index].strip()
+            if prefix and suffix and prefix not in {
+                "await using",
+                "const",
+                "let",
+                "using",
+                "var",
+            }:
+                if separator is None:
+                    separator = (index, token_end)
+            index = token_end
+            continue
+        index += 1
+    return separator
 
 
 def _computed_member_bracket_has_target(source_text: str, bracket_index: int) -> bool:
