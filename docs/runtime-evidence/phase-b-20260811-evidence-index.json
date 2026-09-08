@@ -4,7 +4,7 @@
     "classification": "issue44_live_installed_fail_closed_no_production_lease_mutation",
     "generator_binding_requirements": {
       "bound_head_is_ancestor_of_containing_revision": true,
-      "containing_revision_sha": "6e2f56219dd7d1c74764823c1b6043d2a5a0a760",
+      "containing_revision_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
       "bound_tree_matches_bound_head_tree": true,
       "capability_source_paths": [
         "scripts/openclaw-tool-capability-preflight.py",
@@ -21,21 +21,21 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "6e2f56219dd7d1c74764823c1b6043d2a5a0a760",
+      "head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
       "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "0e2f53334b14563326aed9fac313b5db1a5badc3"
+      "tree_sha": "8a9447d703efc53c41bbb417de41624beff51e0a"
     },
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "6e2f56219dd7d1c74764823c1b6043d2a5a0a760",
+    "reviewed_head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
     "runtime_ready": false,
-    "sha256": "edb43edc4c32729c6a6cc2aec43d89e58fafa9520a5bed879de3730a970c3135",
+    "sha256": "858b8e68e95b3a9fadf211d7dc61ef0b0e2b023abb9af53b2b4391bd00a17744",
     "status": "captured_from_clean_generator_revision",
     "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-08 from the exact PR #46 generator revision with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "6e2f56219dd7d1c74764823c1b6043d2a5a0a760",
+    "agentic_os_head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
     "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
     "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
     "db_authority_enabled": false,
@@ -53,17 +53,17 @@
       "production_gateway_restart_attempted": false,
       "production_lease_mutation_attempted": false,
       "production_session_mutation_attempted": false,
-      "run_id_sha256": "e7e16ef144503b984686798ccfa6d815ddd9a17a68a453cb0415e965fc9d4eff",
-      "run_root_sha256": "d00e7540a02604d26b762f655c6f23a3ac2774cfad8f67916441fc269c001210",
+      "run_id_sha256": "2c90174df5d9ee6c57be2eb4feb7975508ed47b6dc8e4cbcc5728eb3fb31edb9",
+      "run_root_sha256": "329e7629d40d0cac1c0b4278762bbf58d27a487a2f7ece49d89d3a9fd7dc30e4",
       "status": "not_started",
-      "transition_id_sha256": "b7c7fb438c77dc5772656a19ca0cd4693a9265136d1836b6c60b75586ab9e662"
+      "transition_id_sha256": "2c90174df5d9ee6c57be2eb4feb7975508ed47b6dc8e4cbcc5728eb3fb31edb9"
     },
     "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json",
     "phase_c_exact_head_required_before_review": true,
     "production_authority_enabled": false,
     "runtime_ready": false,
     "runtime_ready_candidate_evidence": false,
-    "sha256": "62993b7d908750e54f0bed494d61715104d7c7f28c25e2cf25d507ee9a5b0660",
+    "sha256": "2573e1db6e799c052d6d80174d4e07ab11239d32b459aedecb2a16dadd54d437",
     "status": "fail_closed_runtime_source_closure_pending_phase_c",
     "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed on 2026-09-08 from the exact PR #46 Agentic OS generator revision in an isolated non-production auto-created run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
     "validation_receipt_bound": false
