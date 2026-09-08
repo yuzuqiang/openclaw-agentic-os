@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `2b954da1fefd250f6f78671165d5d4505fcc8d2c6f27a2e426e1f660a8fd3ccc`
+- Current corrected design artifact SHA-256: `6d00c39e4c377a705494a9dd8dc525621f874405a83834c1aada5cf6a41acb4e`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -489,8 +489,8 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`bdf3e2c2985804f0078cc4017095bd2c483f8f3b` in
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`.
+`6e2f56219dd7d1c74764823c1b6043d2a5a0a760` in
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
 therefore a fail-closed, no-production-lease-mutation record: disk source
@@ -530,12 +530,13 @@ There is current Issue #44 downstream recapture evidence, but it is not a
 runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
 review binding. The local downstream OpenClaw candidate remains clean at
 `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
-`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260905.json`
+`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json`
 and failed closed before starting the candidate because runtime source closure
 still rejects the downstream launcher as an unsupported evaluated-loader /
-dynamic-import pattern. That recapture used an isolated non-production run root
-and loopback port `51344`, recorded `candidate_process_started=false`, and
-records no production Gateway/config/Cron/session/lease mutation or restart.
+dynamic-import pattern. That recapture used an isolated non-production
+auto-created run root and loopback port `51344`, recorded
+`candidate_process_started=false`, and records no production
+Gateway/config/Cron/session/lease mutation or restart.
 Historical candidate invocations and reviews must not be counted as current
 exact-head runtime evidence.
 

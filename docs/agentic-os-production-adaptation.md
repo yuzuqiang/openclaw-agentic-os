@@ -23,8 +23,10 @@ Non-goals:
 
 ## Delivery Change Log
 
+- 2026-09-08: Rebound Issue #44 PR #46 runtime evidence after exact-head validation found the 2026-09-05 installed evidence was source-stale:
+  - Corrections: installed OpenClaw 2026.7.1 was recaptured from exact generator head `6e2f56219dd7d1c74764823c1b6043d2a5a0a760` in `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`; it remains fail-closed with `runtime_ready=false`, `tools.catalog` unavailable, `subagents.allowLease.status` intentionally skipped to avoid possible production lease cleanup, and live acquire/release/build/attestation readiness unproven. The local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json` is current fail-closed recapture evidence from Agentic OS generator head `6e2f56219dd7d1c74764823c1b6043d2a5a0a760`, not runtime-ready candidate proof. The probe used an isolated non-production auto-created run root and loopback port `51344`, wrote durable prelaunch evidence, and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader / dynamic-import launcher pattern. It records no production Gateway/config/Cron/session/lease mutation or restart, keeps `agentic_os.DB_AUTHORITY_ENABLED=False`, and still requires different-agent exact-head Phase C before any review or promotion.
 - 2026-09-05: Recaptured Issue #44 after merged PR #45 from a clean downstream Agentic OS worktree:
-  - Corrections: installed OpenClaw 2026.7.1 was recaptured from exact generator head `bdf3e2c2985804f0078cc4017095bd2c483f8f3b` in `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`; it remains fail-closed with `runtime_ready=false`, `tools.catalog` unavailable, `subagents.allowLease.status` intentionally skipped to avoid possible production lease cleanup, and live acquire/release/build/attestation readiness unproven. The local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260905.json` is current fail-closed recapture evidence from Agentic OS generator head `c09e35701e6b362c2be00ea9570d1b5e9fec21ca`, not runtime-ready candidate proof. The probe used an isolated non-production run root and loopback port `51344`, wrote durable prelaunch evidence, and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader / dynamic-import launcher pattern. It records no production Gateway/config/Cron/session/lease mutation or restart, keeps `agentic_os.DB_AUTHORITY_ENABLED=False`, and still requires different-agent exact-head Phase C before any review or promotion.
+  - Corrections: installed OpenClaw 2026.7.1 was recaptured from exact generator head `bdf3e2c2985804f0078cc4017095bd2c483f8f3b` in `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`; the local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260905.json` was fail-closed recapture evidence from Agentic OS generator head `c09e35701e6b362c2be00ea9570d1b5e9fec21ca`. The 2026-09-08 sidecars supersede those prior current-evidence bindings because the forward index must remain bound to the latest capability-source revision.
 - 2026-08-26: Recaptured the Issue #44 downstream candidate evidence after Phase B producer/validator contract remediation, then invalidated it after later validator hardening:
   - Corrections: the local downstream OpenClaw candidate at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6` emitted persistent lifecycle evidence through `scripts/agentic-os-persistent-lifecycle-runner.mts` with runner SHA-256 `afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6`. That round-3 JSON remains byte-for-byte historical output, but it binds Agentic OS head `7332a7955fc51582d5314cf2637f0ff2a8a16dc9`, records generator hashes that no longer match this reviewed tree, and predates the lifecycle-attestation evidence now required by the corrected validator. `docs/runtime-evidence/phase-b-20260811-evidence-index.json` now marks `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json` as `invalid_capability_source_drift_pending_recapture` with `runtime_ready_candidate_evidence=false`; a clean exact-head recapture plus different-agent exact-head Phase C PASS is required before review or promotion.
 - 2026-08-24: Added the Issue #44 live downstream runtime readiness gate:
@@ -131,19 +133,19 @@ Current-vs-proposed truth:
   `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks its stored
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
-- The 2026-09-05 Issue #44 installed-runtime evidence supersedes the pending
+- The 2026-09-08 Issue #44 installed-runtime evidence supersedes the pending
   split-catalog capture state and the 2026-08-24 installed snapshot. It still
   has `runtime_ready=false`: the installed 2026.7.1 catalog call failed,
   `subagents.allowLease.status` was intentionally skipped to avoid possible
   production lease cleanup, and connected Gateway build plus attestation
-  readiness remain unproven. The 2026-09-05 downstream candidate recapture at
+  readiness remain unproven. The 2026-09-08 downstream candidate recapture at
   OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic OS
-  `c09e35701e6b362c2be00ea9570d1b5e9fec21ca` is current fail-closed evidence,
-  not runtime-ready candidate proof: it used an isolated non-production run
-  root and loopback port `51344`, did not start the candidate, and stopped
-  before Gateway/session/lease mutation because runtime source closure rejected
-  an unsupported evaluated-loader / dynamic-import launcher pattern. The
-  2026-08-26 downstream candidate snapshot passed its isolated persistent
+  `6e2f56219dd7d1c74764823c1b6043d2a5a0a760` is current fail-closed evidence,
+  not runtime-ready candidate proof: it used an isolated non-production
+  auto-created run root and loopback port `51344`, did not start the candidate,
+  and stopped before Gateway/session/lease mutation because runtime source
+  closure rejected an unsupported evaluated-loader / dynamic-import launcher
+  pattern. The 2026-08-26 downstream candidate snapshot passed its isolated persistent
   lifecycle runner with authenticated validation and duplicate release identity
   parity, but remains invalidated as current evidence because its generator
   hashes and lifecycle-attestation requirements drifted. A different-agent
