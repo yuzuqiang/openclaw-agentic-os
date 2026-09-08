@@ -1336,7 +1336,16 @@ class RealGatewayProbeTests(unittest.TestCase):
             captured = {}
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                if command and command[0] == "git":
+                    self.assertIs(start_new_session, False)
+                    return MODULE.subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "agentic-head\n",
+                        "",
+                    )
                 self.assertIs(start_new_session, True)
+                captured["child_start_new_session"] = start_new_session
                 exc = MODULE.subprocess.TimeoutExpired(
                     command,
                     timeout,
@@ -1362,6 +1371,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._terminate_and_verify_process_group = fake_terminate_and_verify
                 with self.assertRaisesRegex(MODULE.ProbeError, "process group remained alive"):
                     MODULE.run_probe(Path(directory), output, timeout=1)
+                self.assertIs(captured["child_start_new_session"], True)
                 self.assertEqual(captured["cleanup"], cleanup)
             finally:
                 MODULE._run = original_run
