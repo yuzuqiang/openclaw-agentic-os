@@ -12,21 +12,18 @@ permissions:
 jobs:
   agentic-os-ci:
     name: agentic-os-ci
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, macOS, ARM64, openclaw-agentic-os]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        run: |
-          export UV_CACHE_DIR="${RUNNER_TEMP}/uv-cache"
-          export UV_PYTHON_INSTALL_DIR="${RUNNER_TOOL_CACHE}/uv-python"
-          uv python install 3.10
-          dirname "$(uv python find 3.10)" >> "${GITHUB_PATH}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
       - name: Privacy preflight
         run: PYTHONPATH=src python -m agentic_os.cli preflight
