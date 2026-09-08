@@ -7,7 +7,7 @@
       "status": "current_fail_closed_runtime_evidence_pending_phase_c"
     },
     "issue44_downstream_persistent_lifecycle_probe": {
-      "agentic_os_head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
+      "agentic_os_head_sha": "ec2e3671f17fac1b3c579b20ae3d1b1de2b9bb24",
       "candidate_process_started": false,
       "db_authority_enabled": false,
       "duplicate_acquire_identity_parity": false,
@@ -38,7 +38,7 @@
       "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
       "production_authority_enabled": false,
       "runtime_ready": false,
-      "sha256": "858b8e68e95b3a9fadf211d7dc61ef0b0e2b023abb9af53b2b4391bd00a17744",
+      "sha256": "02501cff36f127b254460e312606e5456ffd6ac81dffcef09c2afd6a776d8286",
       "status": "fail_closed_future_contract",
       "status_rpc_live_reachability": "skipped_no_production_lease_mutation"
     },

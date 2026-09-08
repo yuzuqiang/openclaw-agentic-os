@@ -4,7 +4,7 @@
     "classification": "issue44_live_installed_fail_closed_no_production_lease_mutation",
     "generator_binding_requirements": {
       "bound_head_is_ancestor_of_containing_revision": true,
-      "containing_revision_sha": "61b093d9017c797528f114d1e81cb1a0695f4fcf",
+      "containing_revision_sha": "ec2e3671f17fac1b3c579b20ae3d1b1de2b9bb24",
       "bound_tree_matches_bound_head_tree": true,
       "capability_source_paths": [
         "scripts/openclaw-tool-capability-preflight.py",
@@ -21,18 +21,18 @@
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
+      "head_sha": "ec2e3671f17fac1b3c579b20ae3d1b1de2b9bb24",
       "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "8a9447d703efc53c41bbb417de41624beff51e0a"
+      "tree_sha": "8103ee6e8ab2a4ed15ae2a4e034ed2b207b3b9ad"
     },
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "61b093d9017c797528f114d1e81cb1a0695f4fcf",
+    "reviewed_head_sha": "ec2e3671f17fac1b3c579b20ae3d1b1de2b9bb24",
     "runtime_ready": false,
-    "sha256": "858b8e68e95b3a9fadf211d7dc61ef0b0e2b023abb9af53b2b4391bd00a17744",
+    "sha256": "02501cff36f127b254460e312606e5456ffd6ac81dffcef09c2afd6a776d8286",
     "status": "captured_from_clean_generator_revision",
-    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-08 from generator revision cb63dd8871cfa7d437ec6e8a829576a312ff2ca2, which is an ancestor of reviewed PR #46 head 61b093d9017c797528f114d1e81cb1a0695f4fcf with no capability source drift in between; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
+    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-08 from generator revision ec2e3671f17fac1b3c579b20ae3d1b1de2b9bb24 with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
   },
   "downstream_candidate_evidence": {
     "agentic_os_head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
