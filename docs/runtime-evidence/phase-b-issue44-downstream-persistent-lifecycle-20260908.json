@@ -1,14 +1,14 @@
 {
   "accepted_session_spawned": false,
-  "agentic_os_head_sha": "cb63dd8871cfa7d437ec6e8a829576a312ff2ca2",
+  "agentic_os_head_sha": "3273bcb6836c28a3c439ddab85c2f22a99c08559",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
-      "sha256": "1a08fd83e68e9ddf1b0638ebb9c3818b9f0981b84d125bd5ba6560382d13c3fa"
+      "sha256": "7335cee59c2cbf60b9ab2ce7455491e236d596375af8a86d97e8b086ffc9e47e"
     },
     {
       "path": "scripts/agentic_os_runtime_source_contract.py",
-      "sha256": "07fcb725909d36049abac3062894aef46acc4c78bd602c275a084bf68b59877c"
+      "sha256": "5c1e9e30f57e705033cd28fedc7660a16b4949c7d91973429a0f2652bde3a61c"
     },
     {
       "path": "scripts/openclaw-live-accepted-session-probe.py",
@@ -55,10 +55,10 @@
     "production_gateway_restart_attempted": false,
     "production_lease_mutation_attempted": false,
     "production_session_mutation_attempted": false,
-    "run_id_sha256": "2c90174df5d9ee6c57be2eb4feb7975508ed47b6dc8e4cbcc5728eb3fb31edb9",
-    "run_root_sha256": "329e7629d40d0cac1c0b4278762bbf58d27a487a2f7ece49d89d3a9fd7dc30e4",
+    "run_id_sha256": "e7e16ef144503b984686798ccfa6d815ddd9a17a68a453cb0415e965fc9d4eff",
+    "run_root_sha256": "198ff71c1498847dd048845f4fbdd7136bd042a615916587f46275d5b5fca78b",
     "status": "not_started",
-    "transition_id_sha256": "2c90174df5d9ee6c57be2eb4feb7975508ed47b6dc8e4cbcc5728eb3fb31edb9"
+    "transition_id_sha256": "b7c7fb438c77dc5772656a19ca0cd4693a9265136d1836b6c60b75586ab9e662"
   },
   "lease_release_cleanup_observed": false,
   "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
