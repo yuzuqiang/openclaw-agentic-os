@@ -5697,6 +5697,7 @@ def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> No
 def _persistent_prelaunch_failure_summary(
     *,
     head: str,
+    agentic_os_head: str,
     agentic_sources: list[dict[str, str]],
     runtime_sources: list[dict[str, str]],
     run_root: Path,
@@ -5716,7 +5717,7 @@ def _persistent_prelaunch_failure_summary(
         "error_message_sha256": _text_sha256(error_message),
         "probe": "agentic-os-persistent-lifecycle-runner",
         "openclaw_head_sha": head,
-        "agentic_os_head_sha": _git(ROOT, "rev-parse", "HEAD"),
+        "agentic_os_head_sha": agentic_os_head,
         "agentic_sources": agentic_sources,
         "runtime_sources": runtime_sources,
         "required_tool_names": sorted(PERSISTENT_REQUIRED_TOOL_NAMES),
@@ -6195,6 +6196,7 @@ def run_probe(
     transition_id: str | None = None,
 ) -> dict[str, Any]:
     head = validate_candidate_root(openclaw_root)
+    agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
     agentic_sources = _source_bindings(ROOT, AGENTIC_SOURCE_PATHS)
     mode = _candidate_probe_mode(openclaw_root)
     if mode == "legacy_e2e":
@@ -6214,10 +6216,16 @@ def run_probe(
         runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
     except ProbeError as exc:
         try:
+            if _git(ROOT, "rev-parse", "HEAD") != agentic_os_head:
+                raise ProbeError(
+                    "Agentic OS validator HEAD changed before prelaunch evidence write"
+                )
+            _assert_agentic_sources_still_bound(agentic_sources)
             _write_validated_payload(
                 evidence_file,
                 _persistent_prelaunch_failure_summary(
                     head=head,
+                    agentic_os_head=agentic_os_head,
                     agentic_sources=agentic_sources,
                     runtime_sources=[],
                     run_root=selected_run_root,
@@ -6236,10 +6244,16 @@ def run_probe(
         requested_process_boundary = _require_process_containment_boundary_request()
     except ProbeError as exc:
         try:
+            if _git(ROOT, "rev-parse", "HEAD") != agentic_os_head:
+                raise ProbeError(
+                    "Agentic OS validator HEAD changed before prelaunch evidence write"
+                )
+            _assert_agentic_sources_still_bound(agentic_sources)
             _write_validated_payload(
                 evidence_file,
                 _persistent_prelaunch_failure_summary(
                     head=head,
+                    agentic_os_head=agentic_os_head,
                     agentic_sources=agentic_sources,
                     runtime_sources=runtime_sources,
                     run_root=selected_run_root,

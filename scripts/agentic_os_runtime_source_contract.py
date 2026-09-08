@@ -2002,10 +2002,171 @@ def _process_env_target_was_reassigned(source_text: str, target_start: int) -> b
                     source_text, after_env
                 ):
                     return True
+                if _process_env_reference_is_destructuring_assignment_target(
+                    source_text, index, target_start
+                ):
+                    return True
                 index = max(index + 1, member[1])
                 continue
         index += 1
     return False
+
+
+def _process_env_reference_is_destructuring_assignment_target(
+    source_text: str, process_start: int, target_start: int
+) -> bool:
+    stack = _js_delimiter_stack_at(source_text, process_start)
+    for opener, opener_index in reversed(stack):
+        if opener not in "{[":
+            continue
+        close_index = _matching_js_delimiter_index(source_text, opener_index, target_start)
+        if close_index is None:
+            continue
+        after_close = _skip_js_trivia(source_text, close_index + 1)
+        if after_close < target_start and _starts_js_assignment_operator(
+            source_text, after_close
+        ):
+            return True
+    return False
+
+
+def _js_delimiter_stack_at(source_text: str, target_index: int) -> list[tuple[str, int]]:
+    index = 0
+    state = "code"
+    quote = ""
+    stack: list[tuple[str, int]] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    while index < target_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < target_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < target_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= target_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            stack.append((character, index))
+            index += 1
+            continue
+        if character in ")]}":
+            expected = pairs[character]
+            if stack and stack[-1][0] == expected:
+                stack.pop()
+            index += 1
+            continue
+        index += 1
+    return stack
+
+
+def _matching_js_delimiter_index(
+    source_text: str, opener_index: int, end_index: int
+) -> int | None:
+    opener = source_text[opener_index]
+    closer = {"(": ")", "[": "]", "{": "}"}[opener]
+    index = opener_index + 1
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < end_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < end_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < end_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= end_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character == opener:
+            depth += 1
+            index += 1
+            continue
+        if character == closer:
+            if depth == 0:
+                return index
+            depth -= 1
+            index += 1
+            continue
+        if character in "([{" and character != opener:
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}" and character != closer and depth > 0:
+            depth -= 1
+            index += 1
+            continue
+        index += 1
+    return None
 
 
 def _starts_js_assignment_operator(source_text: str, index: int) -> bool:
