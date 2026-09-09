@@ -371,6 +371,43 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                     CONTRACT.import_specifiers(source),
                 )
 
+    def test_static_process_env_prototype_mutator_callee_variants_fail_closed(self) -> None:
+        for callee in (
+            'Object["setPrototypeOf"]',
+            'Reflect["setPrototypeOf"]',
+            "Object?.setPrototypeOf",
+            "Reflect?.setPrototypeOf",
+        ):
+            source = (
+                f"{callee}(process.env,()=>{{}}); "
+                "const key='constructor'; "
+                "const build=process.env[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(callee=callee):
+                self.assert_closed(source)
+
+    def test_process_env_prototype_mutator_detection_preserves_safe_controls(self) -> None:
+        for source in (
+            "Object.assign(process.env,{}); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            'Object["assign"](process.env,{}); '
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            'Object["setPrototypeOf"]({}, process.env); '
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "Reflect?.setPrototypeOf({}, process.env); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(
+                    ("./entry.mjs", True, "import"),
+                    CONTRACT.import_specifiers(source),
+                )
+
     def test_unresolved_computed_member_scan_is_local_to_receiver(self) -> None:
         source = " ".join(f"value{i}[key]" for i in range(5000))
         bracket_index = source.rfind("[")

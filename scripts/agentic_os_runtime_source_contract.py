@@ -2225,12 +2225,29 @@ def _process_env_reference_is_prototype_mutation_target(
 
 
 def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int) -> bool:
-    return bool(
-        re.search(
-            r"(?:^|[^\w$])(?:Object|Reflect)\s*\.\s*setPrototypeOf\s*$",
-            source_text[:opener_index],
-        )
-    )
+    window_start = max(0, opener_index - 256)
+    window = source_text[window_start:opener_index]
+    for match in re.finditer(r"\b(?:Object|Reflect)\b", window):
+        candidate_start = window_start + match.start()
+        base = _parse_js_identifier(source_text, candidate_start)
+        if base is None or base[0] not in {"Object", "Reflect"}:
+            continue
+        before = source_text[candidate_start - 1] if candidate_start > 0 else ""
+        if before and (_is_identifier_character(before) or before == "."):
+            continue
+        try:
+            member = _parse_static_runtime_member(
+                source_text,
+                base[1],
+                dynamic_error="runtime source contains an unsupported process.env prototype mutator",
+            )
+        except RuntimeSourceContractError:
+            continue
+        if member is None or member[0] != "setPrototypeOf":
+            continue
+        if _skip_js_trivia(source_text, member[1]) == opener_index:
+            return True
+    return False
 
 
 def _for_header_opener_belongs_to_for(source_text: str, opener_index: int) -> bool:
