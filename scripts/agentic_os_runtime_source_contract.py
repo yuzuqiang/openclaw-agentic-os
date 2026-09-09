@@ -439,6 +439,12 @@ COMMONJS_REQUIRE_ALIAS_ASSIGNMENT = re.compile(
     """,
     re.VERBOSE,
 )
+PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    """,
+    re.VERBOSE,
+)
 INDIRECT_COMMONJS_REQUIRE_INVOCATION = re.compile(
     rf"""
     (?:
@@ -2228,26 +2234,71 @@ def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int
     window_start = max(0, opener_index - 256)
     window = source_text[window_start:opener_index]
     for match in re.finditer(r"\b(?:Object|Reflect)\b", window):
-        candidate_start = window_start + match.start()
-        base = _parse_js_identifier(source_text, candidate_start)
-        if base is None or base[0] not in {"Object", "Reflect"}:
-            continue
-        before = source_text[candidate_start - 1] if candidate_start > 0 else ""
-        if before and (_is_identifier_character(before) or before == "."):
-            continue
-        try:
-            member = _parse_static_runtime_member(
-                source_text,
-                base[1],
-                dynamic_error="runtime source contains an unsupported process.env prototype mutator",
-            )
-        except RuntimeSourceContractError:
-            continue
-        if member is None or member[0] != "setPrototypeOf":
-            continue
-        if _skip_js_trivia(source_text, member[1]) == opener_index:
+        member_end = _parse_process_env_prototype_mutator_member_at(
+            source_text, window_start + match.start()
+        )
+        if member_end is not None and _skip_js_trivia(source_text, member_end) == opener_index:
             return True
-    return False
+
+    alias = _callee_identifier_before_call(source_text, opener_index)
+    return alias in _process_env_prototype_mutator_alias_names(source_text, opener_index)
+
+
+def _parse_process_env_prototype_mutator_member_at(
+    source_text: str, candidate_start: int
+) -> int | None:
+    base = _parse_js_identifier(source_text, candidate_start)
+    if base is None or base[0] not in {"Object", "Reflect"}:
+        return None
+    before = source_text[candidate_start - 1] if candidate_start > 0 else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    try:
+        member = _parse_static_runtime_member(
+            source_text,
+            base[1],
+            dynamic_error="runtime source contains an unsupported process.env prototype mutator",
+        )
+    except RuntimeSourceContractError:
+        return None
+    if member is not None and member[0] == "setPrototypeOf":
+        return member[1]
+    return None
+
+
+def _callee_identifier_before_call(source_text: str, opener_index: int) -> str | None:
+    cursor = opener_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0 or not _is_identifier_character(source_text[cursor]):
+        return None
+    token_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    token_start = cursor + 1
+    before = source_text[cursor] if cursor >= 0 else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    return source_text[token_start:token_end]
+
+
+def _process_env_prototype_mutator_alias_names(
+    source_text: str, end_index: int
+) -> set[str]:
+    aliases: set[str] = set()
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        member_end = _parse_process_env_prototype_mutator_member_at(source_text, rhs_start)
+        if member_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, member_end)
+        if assignment_end >= end_index or source_text[assignment_end] in {";", ",", "\r", "\n"}:
+            aliases.add(match.group("name"))
+    return aliases
 
 
 def _for_header_opener_belongs_to_for(source_text: str, opener_index: int) -> bool:

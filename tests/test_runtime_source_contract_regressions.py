@@ -337,6 +337,7 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Object.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Reflect.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             *(
                 padded_process_env_reassignment
                 + f" const build={access}; build(\"return import('./hidden.mjs')\")();"
@@ -344,6 +345,25 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             ),
         ):
             with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_aliased_process_env_prototype_mutators_fail_closed(self) -> None:
+        for alias_assignment in (
+            "const set=Object.setPrototypeOf;",
+            'const set=Object["setPrototypeOf"];',
+            "const set=Reflect?.setPrototypeOf;",
+            'const set=Reflect["setPrototypeOf"];',
+            "let set=Object.setPrototypeOf;",
+            "var set=Reflect.setPrototypeOf;",
+        ):
+            source = (
+                f"{alias_assignment} "
+                "set(process.env,()=>{}); "
+                "const key='constructor'; "
+                "const build=process.env[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(alias_assignment=alias_assignment):
                 self.assert_closed(source)
 
     def test_process_env_computed_lookup_does_not_inherit_function_window_risk(self) -> None:
@@ -399,6 +419,12 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
             "if (process.env[key] === '1') { await import('./entry.mjs'); }",
             "Reflect?.setPrototypeOf({}, process.env); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "const set=Object.assign; set(process.env,{}); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "const set=Object.setPrototypeOf; set({}, process.env); "
             "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
             "if (process.env[key] === '1') { await import('./entry.mjs'); }",
         ):
