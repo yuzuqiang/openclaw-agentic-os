@@ -16,7 +16,7 @@
         "src/agentic_os/heartbeat_shadow.py",
         "src/agentic_os/__init__.py"
       ],
-      "containing_revision_sha": "a5c4aa441909855d315afd281229eed5b949a849",
+      "containing_revision_sha": "8f62215c01a03b6e94946d52a7645d7301cca7dc",
       "no_capability_source_drift_after_bound_head": true,
       "script_digest_matches_bound_head_blob": true
     },
@@ -28,11 +28,11 @@
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "a5c4aa441909855d315afd281229eed5b949a849",
+    "reviewed_head_sha": "8f62215c01a03b6e94946d52a7645d7301cca7dc",
     "runtime_ready": false,
     "sha256": "0b5d9c4a3f3dd0766bcd9412e81f5e5bd9882f2bce43810644df119c9f8de22f",
     "status": "captured_from_clean_generator_revision",
-    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-08 from generator revision a5c4aa441909855d315afd281229eed5b949a849 with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
+    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-08 from generator revision a5c4aa441909855d315afd281229eed5b949a849, which is an ancestor of reviewed PR #46 head 8f62215c01a03b6e94946d52a7645d7301cca7dc, with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
   },
   "downstream_candidate_evidence": {
     "agentic_os_head_sha": "a5c4aa441909855d315afd281229eed5b949a849",

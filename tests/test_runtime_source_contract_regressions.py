@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -367,6 +368,17 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                     ("./entry.mjs", True, "import"),
                     CONTRACT.import_specifiers(source),
                 )
+
+    def test_unresolved_computed_member_scan_is_local_to_receiver(self) -> None:
+        source = " ".join(f"value{i}[key]" for i in range(5000))
+        bracket_index = source.rfind("[")
+        start = time.perf_counter()
+
+        self.assertIsNone(
+            CONTRACT._computed_member_process_env_target_start(source, bracket_index)
+        )
+
+        self.assertLess(time.perf_counter() - start, 1.0)
 
     def test_process_env_for_of_reads_do_not_become_reassignments(self) -> None:
         source = (

@@ -1956,9 +1956,9 @@ def _computed_member_process_env_target_start(
         if opener_index is not None:
             candidate_starts.append(opener_index)
 
-    for index in range(target_end):
-        if source_text[index] in {"(", "g", "p", "\\"}:
-            candidate_starts.append(index)
+    candidate_starts.extend(
+        _computed_member_receiver_process_candidate_starts(source_text, target_end)
+    )
 
     seen: set[int] = set()
     for candidate_start in candidate_starts:
@@ -1975,6 +1975,27 @@ def _computed_member_process_env_target_start(
         if _skip_js_trivia(source_text, parsed_end) == target_end:
             return process_start
     return None
+
+
+def _computed_member_receiver_process_candidate_starts(
+    source_text: str, target_end: int
+) -> list[int]:
+    cursor = target_end - 1
+    budget = 4096
+    while cursor >= 0 and target_end - cursor <= budget:
+        character = source_text[cursor]
+        if character in ";\r\n{}=,:+-*/%&|^!<>~":
+            cursor += 1
+            break
+        cursor -= 1
+    else:
+        cursor = max(0, target_end - budget)
+
+    starts: list[int] = []
+    window = source_text[cursor:target_end]
+    for match in re.finditer(r"\b(?:globalThis|global|process)\b", window):
+        starts.append(cursor + match.start())
+    return starts
 
 
 def _parse_grouped_process_env_target(
