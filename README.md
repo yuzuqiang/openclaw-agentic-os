@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `fffa3f5a2e0f9a19de399d7c71530857ea583a5ee3715b84504cf07834c3bb91`
+- Current corrected design artifact SHA-256: `bc77e82fc512cee9e45079004867cd7a657ca23485a74266881e7bcf4688a704`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -489,7 +489,7 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`db24b0688c8077fe09a64703d6503d31ccb5c3d8` in
+`9918654d6b9ba270e48abb4135322e0fbb48694d` in
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
@@ -531,7 +531,7 @@ runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
 review binding. The local downstream OpenClaw candidate remains clean at
 `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
 `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json`
-from generator head `db24b0688c8077fe09a64703d6503d31ccb5c3d8` and failed
+from generator head `9918654d6b9ba270e48abb4135322e0fbb48694d` and failed
 closed before starting the candidate because runtime source closure still
 rejects the downstream launcher as an unsupported evaluated-loader /
 dynamic-import pattern. That recapture used an isolated non-production
