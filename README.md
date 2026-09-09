@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `8dde8b33129c0412791a1b9e392b7edef420c8283f7ef5ff4f3391dccb0a0f47`
+- Current corrected design artifact SHA-256: `945e45abf8061ffd71cd49aa59620137c5babcd9e9fbaae12d63ff11f60455f9`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -489,7 +489,7 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`a5c4aa441909855d315afd281229eed5b949a849` in
+`844c90ea39f4e5fcba225cba6bd687eac8a037b3` in
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
