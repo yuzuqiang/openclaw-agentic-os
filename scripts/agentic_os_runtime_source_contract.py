@@ -1922,22 +1922,83 @@ def _computed_member_target_may_be_function_constructor(
 ) -> bool:
     if not _computed_member_bracket_has_target(source_text, bracket_index):
         return False
+    process_env_target_start = _computed_member_process_env_target_start(
+        source_text, bracket_index
+    )
+    if process_env_target_start is not None:
+        return _process_env_target_was_reassigned(
+            source_text, process_env_target_start
+        )
     cursor = bracket_index - 1
     while cursor >= 0 and source_text[cursor].isspace():
         cursor -= 1
     if cursor < 0:
         return False
-    process_env_target = "process.env"
-    start = cursor - len(process_env_target) + 1
-    if start >= 0 and source_text[start : cursor + 1] == process_env_target:
-        before = source_text[start - 1] if start > 0 else ""
-        if not before or (not _is_identifier_character(before) and before not in "."):
-            return _process_env_target_was_reassigned(source_text, start)
     window_start = max(0, cursor - 240)
     target_window = source_text[window_start : cursor + 1]
     return "=>" in target_window or bool(
         re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
     )
+
+
+def _computed_member_process_env_target_start(
+    source_text: str, bracket_index: int
+) -> int | None:
+    target_end = bracket_index
+    while target_end > 0 and source_text[target_end - 1].isspace():
+        target_end -= 1
+    if target_end <= 0:
+        return None
+    process_env_target = "process.env"
+    parsed = None
+    if target_end >= len(process_env_target):
+        parsed = _parse_grouped_literal_process_env_target(
+            source_text, target_end - len(process_env_target)
+        )
+    if parsed is not None and parsed[1] == target_end:
+        return parsed[0]
+    if source_text[target_end - 1] != ")":
+        return None
+    opener_index = _matching_js_opener_index(source_text, target_end - 1)
+    if opener_index is None:
+        return None
+    parsed = _parse_grouped_literal_process_env_target(source_text, opener_index)
+    if parsed is None:
+        return None
+    process_start, parsed_end = parsed
+    if _skip_js_trivia(source_text, parsed_end) != target_end:
+        return None
+    return process_start
+
+
+def _parse_grouped_literal_process_env_target(
+    source_text: str, index: int
+) -> tuple[int, int] | None:
+    if index < 0:
+        return None
+    index = _skip_js_trivia(source_text, index)
+    if index < 0 or index >= len(source_text):
+        return None
+    if source_text[index] == "(":
+        parsed = _parse_grouped_literal_process_env_target(source_text, index + 1)
+        if parsed is None:
+            return None
+        process_start, inner_end = parsed
+        close_index = _skip_js_trivia(source_text, inner_end)
+        if close_index >= len(source_text) or source_text[close_index] != ")":
+            return None
+        return process_start, close_index + 1
+    process_env_target = "process.env"
+    end = index + len(process_env_target)
+    if source_text[index:end] != process_env_target:
+        return None
+    before = source_text[index - 1] if index > 0 else ""
+    after = source_text[end] if end < len(source_text) else ""
+    if (before and (_is_identifier_character(before) or before == ".")) or (
+        after and _is_identifier_character(after)
+    ):
+        return None
+    return index, end
 
 
 def _process_env_target_was_reassigned(source_text: str, target_start: int) -> bool:
@@ -2239,6 +2300,23 @@ def _matching_js_delimiter_index(
             continue
         index += 1
     return None
+
+
+def _matching_js_opener_index(source_text: str, closer_index: int) -> int | None:
+    closer = source_text[closer_index] if closer_index < len(source_text) else ""
+    expected = {")": "(", "]": "[", "}": "{"}.get(closer)
+    if expected is None:
+        return None
+    stack = _js_delimiter_stack_at(source_text, closer_index)
+    if not stack or stack[-1][0] != expected:
+        return None
+    opener_index = stack[-1][1]
+    if (
+        _matching_js_delimiter_index(source_text, opener_index, closer_index + 1)
+        != closer_index
+    ):
+        return None
+    return opener_index
 
 
 def _starts_js_assignment_operator(source_text: str, index: int) -> bool:

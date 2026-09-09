@@ -299,6 +299,13 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
 
     def test_unresolved_computed_function_constructor_access_fails_closed(self) -> None:
+        padded_process_env_reassignment = (
+            "process.env=()=>{};\n"
+            + "/*"
+            + ("x" * 320)
+            + "*/\n"
+            + "const key='constructor';"
+        )
         for source in (
             "const member='constructor'; const build=(()=>{})[member]; build(\"return import('./hidden.mjs')\")();",
             "const member='constructor'; const build=(function(){})[member]; build(\"return require('./hidden.cjs')\")();",
@@ -315,18 +322,31 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "for ((process.env) of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "for ([process.env] of [[()=>{}]]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            padded_process_env_reassignment
+            + " const build=(process.env)[key]; build(\"return import('./hidden.mjs')\")();",
+            padded_process_env_reassignment
+            + " const build=((process.env))[key]; build(\"return import('./hidden.mjs')\")();",
         ):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
     def test_process_env_computed_lookup_does_not_inherit_function_window_risk(self) -> None:
-        source = (
-            "const f = () => true;\n"
-            "const snapshot = { env: process.env };\n"
-            "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
-            "if (process.env[key] === '1') { await import('./entry.mjs'); }\n"
-        )
-        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+        for access in (
+            "process.env[key]",
+            "(process.env)[key]",
+            "((process.env))[key]",
+        ):
+            source = (
+                "const f = () => true;\n"
+                "const snapshot = { env: process.env };\n"
+                "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
+                f"if ({access} === '1') {{ await import('./entry.mjs'); }}\n"
+            )
+            with self.subTest(access=access):
+                self.assertIn(
+                    ("./entry.mjs", True, "import"),
+                    CONTRACT.import_specifiers(source),
+                )
 
     def test_process_env_for_of_reads_do_not_become_reassignments(self) -> None:
         source = (
