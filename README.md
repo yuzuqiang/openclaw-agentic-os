@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `8a41ab3a26fdc3d15baa28ff78677015d9c8373af9bc5485735f0bb755049841`
+- Current corrected design artifact SHA-256: `8dde8b33129c0412791a1b9e392b7edef420c8283f7ef5ff4f3391dccb0a0f47`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -489,7 +489,7 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`e3cd609ca8d43a01c76218027df8d8296792e3f2` in
+`a5c4aa441909855d315afd281229eed5b949a849` in
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`.
 That preflight deliberately used `--skip-live-status-rpc` because the installed
 `subagents.allowLease.status` path may perform incidental lease cleanup. It is
@@ -534,7 +534,7 @@ review binding. The local downstream OpenClaw candidate remains clean at
 and failed closed before starting the candidate because runtime source closure
 still rejects the downstream launcher as an unsupported evaluated-loader /
 dynamic-import pattern. That recapture used an isolated non-production
-auto-created run root and loopback port `51344`, recorded
+auto-created run root and loopback port `20189`, recorded
 `candidate_process_started=false`, and records no production
 Gateway/config/Cron/session/lease mutation or restart.
 Historical candidate invocations and reviews must not be counted as current
