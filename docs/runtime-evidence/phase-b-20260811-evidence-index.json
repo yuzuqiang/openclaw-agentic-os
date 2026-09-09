@@ -16,26 +16,26 @@
         "src/agentic_os/heartbeat_shadow.py",
         "src/agentic_os/__init__.py"
       ],
-      "containing_revision_sha": "1d2b4010c608219778aeb26f3efcfa7989762d68",
+      "containing_revision_sha": "eff7d38ff19ca5889032666df78d67a24a0a8cfd",
       "no_capability_source_drift_after_bound_head": true,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "1d2b4010c608219778aeb26f3efcfa7989762d68",
+      "head_sha": "eff7d38ff19ca5889032666df78d67a24a0a8cfd",
       "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "27a4b38415f311cbab1628a21dbd8ce449ac3fce"
+      "tree_sha": "ec6ce79bfaae0e62219daed489a656d637492e56"
     },
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "1d2b4010c608219778aeb26f3efcfa7989762d68",
+    "reviewed_head_sha": "eff7d38ff19ca5889032666df78d67a24a0a8cfd",
     "runtime_ready": false,
-    "sha256": "187652e6044fa17af163370db10378d24a8e51524d439371f586cec400a473c4",
+    "sha256": "e482eec1b268dec450acf8a0d9e25bdb0ee5bc688336103b4b1ad3cd404f0d1f",
     "status": "captured_from_clean_generator_revision",
-    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-09 from generator revision 1d2b4010c608219778aeb26f3efcfa7989762d68, with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
+    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-09 from generator revision eff7d38ff19ca5889032666df78d67a24a0a8cfd, with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "1d2b4010c608219778aeb26f3efcfa7989762d68",
+    "agentic_os_head_sha": "eff7d38ff19ca5889032666df78d67a24a0a8cfd",
     "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
     "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
     "db_authority_enabled": false,
@@ -54,7 +54,7 @@
       "production_lease_mutation_attempted": false,
       "production_session_mutation_attempted": false,
       "run_id_sha256": "e7e16ef144503b984686798ccfa6d815ddd9a17a68a453cb0415e965fc9d4eff",
-      "run_root_sha256": "abb85272c9ed46c82c73a65fd4fc1d1cfe889f52a51f787ae83bf4f206c45c30",
+      "run_root_sha256": "4f090243d00de2ddd2806d66a3651d6ff14f76c9f388219c9e7f988732267e7b",
       "status": "not_started",
       "transition_id_sha256": "b7c7fb438c77dc5772656a19ca0cd4693a9265136d1836b6c60b75586ab9e662"
     },
@@ -63,9 +63,9 @@
     "production_authority_enabled": false,
     "runtime_ready": false,
     "runtime_ready_candidate_evidence": false,
-    "sha256": "77c8951be492899d01927fb5f2c9800145cc33ea9a854fbee05abddf09ab6231",
+    "sha256": "a52e92c72f3a993c7447bb7cfd1e9afc1f0824ba28d4129102429a98d43d22b1",
     "status": "fail_closed_runtime_source_closure_pending_phase_c",
-    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed on 2026-09-09 from PR #46 Agentic OS generator revision 1d2b4010c608219778aeb26f3efcfa7989762d68 in an isolated non-production auto-created run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
+    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed on 2026-09-09 from PR #46 Agentic OS generator revision eff7d38ff19ca5889032666df78d67a24a0a8cfd in an isolated non-production auto-created run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
     "validation_receipt_bound": false
   },
   "historical_artifacts": [
