@@ -1,6 +1,6 @@
 {
   "accepted_session_spawned": false,
-  "agentic_os_head_sha": "fe53fbb3bbf2adee6fead28a301a1292f9d86821",
+  "agentic_os_head_sha": "e3cd609ca8d43a01c76218027df8d8296792e3f2",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
@@ -8,7 +8,7 @@
     },
     {
       "path": "scripts/agentic_os_runtime_source_contract.py",
-      "sha256": "e78745ccf7da3f886c4c3c22ac60e109da91c956a846ef721cbf6197cf626c34"
+      "sha256": "c8dacb8e0a2394011013c8751c76be004f032c1fc8355b12b6f2d9a16eef96bb"
     },
     {
       "path": "scripts/openclaw-live-accepted-session-probe.py",
@@ -56,7 +56,7 @@
     "production_lease_mutation_attempted": false,
     "production_session_mutation_attempted": false,
     "run_id_sha256": "e7e16ef144503b984686798ccfa6d815ddd9a17a68a453cb0415e965fc9d4eff",
-    "run_root_sha256": "b1a9710c32fdee193019c31e3a3e98a4871c03f7621b70c09856ad5d5ab05c0e",
+    "run_root_sha256": "675032de4331f699cab90637d5b6b4597cf4967408c4efe6e68a2a9829658a4b",
     "status": "not_started",
     "transition_id_sha256": "b7c7fb438c77dc5772656a19ca0cd4693a9265136d1836b6c60b75586ab9e662"
   },
