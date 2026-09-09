@@ -337,6 +337,8 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Object.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Reflect.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Object.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Reflect.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "const set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             *(
                 padded_process_env_reassignment
@@ -358,13 +360,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         ):
             source = (
                 f"{alias_assignment} "
-                "set(process.env,()=>{}); "
+                "{call} "
                 "const key='constructor'; "
                 "const build=process.env[key]; "
                 "build(\"return import('./hidden.mjs')\")();"
             )
-            with self.subTest(alias_assignment=alias_assignment):
-                self.assert_closed(source)
+            for call in ("set(process.env,()=>{});", "set?.(process.env,()=>{});"):
+                with self.subTest(alias_assignment=alias_assignment, call=call):
+                    self.assert_closed(source.format(call=call))
 
     def test_process_env_computed_lookup_does_not_inherit_function_window_risk(self) -> None:
         for access in (

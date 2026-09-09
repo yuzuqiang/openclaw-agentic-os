@@ -2237,11 +2237,24 @@ def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int
         member_end = _parse_process_env_prototype_mutator_member_at(
             source_text, window_start + match.start()
         )
-        if member_end is not None and _skip_js_trivia(source_text, member_end) == opener_index:
+        if member_end is not None and _callee_end_reaches_call_opener(
+            source_text, member_end, opener_index
+        ):
             return True
 
     alias = _callee_identifier_before_call(source_text, opener_index)
     return alias in _process_env_prototype_mutator_alias_names(source_text, opener_index)
+
+
+def _callee_end_reaches_call_opener(
+    source_text: str, callee_end: int, opener_index: int
+) -> bool:
+    cursor = _skip_js_trivia(source_text, callee_end)
+    if cursor == opener_index:
+        return True
+    if source_text.startswith("?.", cursor):
+        return _skip_js_trivia(source_text, cursor + 2) == opener_index
+    return False
 
 
 def _parse_process_env_prototype_mutator_member_at(
@@ -2270,6 +2283,10 @@ def _callee_identifier_before_call(source_text: str, opener_index: int) -> str |
     cursor = opener_index - 1
     while cursor >= 0 and source_text[cursor].isspace():
         cursor -= 1
+    if cursor >= 1 and source_text[cursor - 1 : cursor + 1] == "?.":
+        cursor -= 2
+        while cursor >= 0 and source_text[cursor].isspace():
+            cursor -= 1
     if cursor < 0 or not _is_identifier_character(source_text[cursor]):
         return None
     token_end = cursor + 1
