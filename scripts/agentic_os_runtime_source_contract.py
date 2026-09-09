@@ -1548,12 +1548,34 @@ def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bo
     token = source_text[token_start:token_end]
     if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
         return False
+    if token == "let" and _let_token_starts_lexical_declaration(
+        source_text, token_start, token_end, bracket_index
+    ):
+        return False
     if token in {"await", "case", "const", "return", "throw", "var", "yield"}:
         before_token = token_start - 1
         while before_token >= 0 and source_text[before_token].isspace():
             before_token -= 1
         return before_token >= 0 and source_text[before_token] == "."
     return True
+
+
+def _let_token_starts_lexical_declaration(
+    source_text: str, token_start: int, token_end: int, bracket_index: int
+) -> bool:
+    if source_text[token_start:token_end] != "let":
+        return False
+    after_token = _skip_js_trivia(source_text, token_end)
+    if after_token != bracket_index or source_text[bracket_index] not in "[{":
+        return False
+    before_token = _previous_non_trivia_index(source_text, token_start)
+    if before_token < 0:
+        return True
+    if source_text[before_token] in ";{}":
+        return True
+    return source_text[before_token] == "(" and _for_header_opener_belongs_to_for(
+        source_text, before_token
+    )
 
 
 def _token_is_contextual_for_of(source_text: str, token_start: int, token_end: int) -> bool:
@@ -1848,6 +1870,10 @@ def _computed_member_bracket_has_target(source_text: str, bracket_index: int) ->
     token = source_text[token_start:token_end]
     if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
         return False
+    if token == "let" and _let_token_starts_lexical_declaration(
+        source_text, token_start, token_end, bracket_index
+    ):
+        return False
     if token in {"await", "case", "const", "return", "throw", "var", "yield"}:
         before_token = token_start - 1
         while before_token >= 0 and source_text[before_token].isspace():
@@ -2099,6 +2125,10 @@ def _process_env_target_was_reassigned(source_text: str, target_start: int) -> b
                     source_text, index, member[1], target_start
                 ):
                     return True
+                if _process_env_reference_is_prototype_mutation_target(
+                    source_text, index, member[1], target_start
+                ):
+                    return True
                 index = max(index + 1, member[1])
                 continue
         index += 1
@@ -2167,6 +2197,40 @@ def _process_env_reference_is_for_of_assignment_target(
         ):
             return True
     return False
+
+
+def _process_env_reference_is_prototype_mutation_target(
+    source_text: str, process_start: int, process_end: int, target_start: int
+) -> bool:
+    for opener, opener_index in reversed(
+        _js_delimiter_stack_at(source_text, process_start)
+    ):
+        if opener != "(" or not _callee_is_process_env_prototype_mutator(
+            source_text, opener_index
+        ):
+            continue
+        first_argument_start = _skip_js_trivia(source_text, opener_index + 1)
+        if (
+            first_argument_start < process_start
+            and "," in source_text[first_argument_start:process_start]
+        ):
+            continue
+        target_end = _parenthesized_process_env_target_end(
+            source_text, process_start, process_end, target_start
+        )
+        after_target = _skip_js_trivia(source_text, target_end)
+        if after_target < target_start and source_text[after_target] in ",)":
+            return True
+    return False
+
+
+def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int) -> bool:
+    return bool(
+        re.search(
+            r"(?:^|[^\w$])(?:Object|Reflect)\s*\.\s*setPrototypeOf\s*$",
+            source_text[:opener_index],
+        )
+    )
 
 
 def _for_header_opener_belongs_to_for(source_text: str, opener_index: int) -> bool:

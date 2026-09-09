@@ -335,6 +335,8 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "for ((process.env) of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "for ([process.env] of [[()=>{}]]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Object.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Reflect.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             *(
                 padded_process_env_reassignment
                 + f" const build={access}; build(\"return import('./hidden.mjs')\")();"
@@ -398,6 +400,28 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "await import('./entry.mjs');\n"
         )
         self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_let_array_declaration_is_not_computed_member_access(self) -> None:
+        for source in (
+            "const f=()=>true; let [value]=['x']; await import('./entry.mjs');",
+            "for (let [value] of [['x']]) { String(value); } await import('./entry.mjs');",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(
+                    ("./entry.mjs", True, "import"),
+                    CONTRACT.import_specifiers(source),
+                )
+
+    def test_sloppy_identifier_named_let_still_can_be_computed_member_target(
+        self,
+    ) -> None:
+        source = (
+            "var let=()=>{}; "
+            "const member='constructor'; "
+            "const build=let[member]; "
+            "build(\"return import('./hidden.mjs')\")();"
+        )
+        self.assert_closed(source)
 
     def test_numeric_computed_index_does_not_inherit_function_window_risk(self) -> None:
         source = (
