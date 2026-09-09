@@ -306,6 +306,18 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             + "*/\n"
             + "const key='constructor';"
         )
+        process_env_computed_accesses = (
+            "process.env[key]",
+            "(process.env)[key]",
+            "((process.env))[key]",
+            "process . env[key]",
+            "process/*c*/.env[key]",
+            "process['env'][key]",
+            "process?.env[key]",
+            "process?.['env'][key]",
+            "global.process.env[key]",
+            "globalThis.process.env[key]",
+        )
         for source in (
             "const member='constructor'; const build=(()=>{})[member]; build(\"return import('./hidden.mjs')\")();",
             "const member='constructor'; const build=(function(){})[member]; build(\"return require('./hidden.cjs')\")();",
@@ -322,10 +334,11 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "for ((process.env) of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "for ([process.env] of [[()=>{}]]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
-            padded_process_env_reassignment
-            + " const build=(process.env)[key]; build(\"return import('./hidden.mjs')\")();",
-            padded_process_env_reassignment
-            + " const build=((process.env))[key]; build(\"return import('./hidden.mjs')\")();",
+            *(
+                padded_process_env_reassignment
+                + f" const build={access}; build(\"return import('./hidden.mjs')\")();"
+                for access in process_env_computed_accesses
+            ),
         ):
             with self.subTest(source=source):
                 self.assert_closed(source)
@@ -335,6 +348,13 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "process.env[key]",
             "(process.env)[key]",
             "((process.env))[key]",
+            "process . env[key]",
+            "process/*c*/.env[key]",
+            "process['env'][key]",
+            "process?.env[key]",
+            "process?.['env'][key]",
+            "global.process.env[key]",
+            "globalThis.process.env[key]",
         ):
             source = (
                 "const f = () => true;\n"

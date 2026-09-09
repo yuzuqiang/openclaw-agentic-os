@@ -1949,29 +1949,35 @@ def _computed_member_process_env_target_start(
         target_end -= 1
     if target_end <= 0:
         return None
-    process_env_target = "process.env"
-    parsed = None
-    if target_end >= len(process_env_target):
-        parsed = _parse_grouped_literal_process_env_target(
-            source_text, target_end - len(process_env_target)
-        )
-    if parsed is not None and parsed[1] == target_end:
-        return parsed[0]
-    if source_text[target_end - 1] != ")":
-        return None
-    opener_index = _matching_js_opener_index(source_text, target_end - 1)
-    if opener_index is None:
-        return None
-    parsed = _parse_grouped_literal_process_env_target(source_text, opener_index)
-    if parsed is None:
-        return None
-    process_start, parsed_end = parsed
-    if _skip_js_trivia(source_text, parsed_end) != target_end:
-        return None
-    return process_start
+
+    candidate_starts: list[int] = []
+    if source_text[target_end - 1] == ")":
+        opener_index = _matching_js_opener_index(source_text, target_end - 1)
+        if opener_index is not None:
+            candidate_starts.append(opener_index)
+
+    for index in range(target_end):
+        if source_text[index] in {"(", "g", "p", "\\"}:
+            candidate_starts.append(index)
+
+    seen: set[int] = set()
+    for candidate_start in candidate_starts:
+        if candidate_start in seen:
+            continue
+        seen.add(candidate_start)
+        try:
+            parsed = _parse_grouped_process_env_target(source_text, candidate_start)
+        except RuntimeSourceContractError:
+            continue
+        if parsed is None:
+            continue
+        process_start, parsed_end = parsed
+        if _skip_js_trivia(source_text, parsed_end) == target_end:
+            return process_start
+    return None
 
 
-def _parse_grouped_literal_process_env_target(
+def _parse_grouped_process_env_target(
     source_text: str, index: int
 ) -> tuple[int, int] | None:
     if index < 0:
@@ -1980,7 +1986,7 @@ def _parse_grouped_literal_process_env_target(
     if index < 0 or index >= len(source_text):
         return None
     if source_text[index] == "(":
-        parsed = _parse_grouped_literal_process_env_target(source_text, index + 1)
+        parsed = _parse_grouped_process_env_target(source_text, index + 1)
         if parsed is None:
             return None
         process_start, inner_end = parsed
@@ -1988,17 +1994,15 @@ def _parse_grouped_literal_process_env_target(
         if close_index >= len(source_text) or source_text[close_index] != ")":
             return None
         return process_start, close_index + 1
-    process_env_target = "process.env"
-    end = index + len(process_env_target)
-    if source_text[index:end] != process_env_target:
+
+    process_start = index
+    process_end = _parse_process_base(source_text, index)
+    if process_end is None:
         return None
-    before = source_text[index - 1] if index > 0 else ""
-    after = source_text[end] if end < len(source_text) else ""
-    if (before and (_is_identifier_character(before) or before == ".")) or (
-        after and _is_identifier_character(after)
-    ):
+    member = _parse_process_member(source_text, process_end)
+    if member is None or member[0] != "env":
         return None
-    return index, end
+    return process_start, member[1]
 
 
 def _process_env_target_was_reassigned(source_text: str, target_start: int) -> bool:
