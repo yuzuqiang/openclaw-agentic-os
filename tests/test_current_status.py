@@ -492,6 +492,16 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertTrue(first_downstream["raw_runtime_ready_candidate_evidence"])
         self.assertFalse(first_downstream["runtime_ready_candidate_evidence"])
+        round3_downstream = historical[
+            "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json"
+        ]
+        self.assertEqual(
+            round3_downstream["status"],
+            "invalid_capability_source_drift_pending_recapture",
+        )
+        self.assertEqual(round3_downstream["raw_status"], "pass")
+        self.assertTrue(round3_downstream["raw_runtime_ready_candidate_evidence"])
+        self.assertFalse(round3_downstream["runtime_ready_candidate_evidence"])
         negative = historical[
             "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
         ]
