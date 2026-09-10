@@ -395,6 +395,7 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                     self.assert_closed(source.format(call=call))
 
     def test_dynamic_process_env_prototype_mutator_callees_fail_closed(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
         for callee in (
             "Object[name]",
             "Reflect[name]",
@@ -402,6 +403,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "Reflect?.[name]",
             "Object/*c*/[name]",
             "Reflect /*c*/ [name]",
+            f"Object{long_trivia}[name]",
+            f"Reflect{long_trivia}[name]",
+            f"Object?.[{long_trivia}name]",
+            f"Reflect?.[{long_trivia}name]",
         ):
             for call_operator in ("", "?."):
                 source = (
@@ -456,8 +461,12 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 self.assert_closed(source)
 
     def test_process_env_prototype_mutator_detection_preserves_safe_controls(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
         for source in (
             "Object.assign(process.env,{}); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            f"Object{long_trivia}[\"assign\"](process.env,{{}}); "
             "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
             "if (process.env[key] === '1') { await import('./entry.mjs'); }",
             'Object["assign"](process.env,{}); '

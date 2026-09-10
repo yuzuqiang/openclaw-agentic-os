@@ -144,6 +144,7 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "requires Node execution witness")
     def test_real_node_witness_for_destructured_process_env_prototype_mutator_alias(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
         sources = (
             (
                 "const {setPrototypeOf:set}=Object;"
@@ -203,6 +204,34 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
             (
                 "const name='setPrototypeOf';"
                 "Reflect?.[name]?.(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Object{long_trivia}[name](process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Object?.[{long_trivia}name]?.(process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Reflect{long_trivia}[name](process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Reflect?.[{long_trivia}name]?.(process.env,()=>{{}});"
                 "const key='constructor';"
                 "const build=process.env[key];"
                 "await build(\"return import('./hidden.mjs')\")();"

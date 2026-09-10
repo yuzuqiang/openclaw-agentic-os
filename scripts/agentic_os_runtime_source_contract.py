@@ -2693,11 +2693,13 @@ def _process_env_reference_is_prototype_mutation_target(
 
 
 def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int) -> bool:
-    window_start = max(0, opener_index - 256)
-    window = source_text[window_start:opener_index]
-    for match in re.finditer(r"\b(?:Object|Reflect)\b", window):
+    for kind, value, start, _end in _source_tokens(source_text):
+        if start >= opener_index:
+            break
+        if kind != "identifier" or value not in {"Object", "Reflect"}:
+            continue
         member_end = _parse_process_env_prototype_mutator_member_at(
-            source_text, window_start + match.start(), opener_index=opener_index
+            source_text, start, opener_index=opener_index
         )
         if member_end is not None and _callee_end_reaches_call_opener(
             source_text, member_end, opener_index
