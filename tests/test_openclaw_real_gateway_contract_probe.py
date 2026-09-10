@@ -2867,20 +2867,23 @@ class RealGatewayProbeTests(unittest.TestCase):
         cases = {
             "node_test": (
                 "import { run } from 'node:test';\n"
-                "run({ files: ['./hidden.cjs'] });\n"
+                "run({ files: ['./hidden.cjs'] });\n",
+                "unbound execution capability",
             ),
             "node_vm": (
                 "import vm from 'node:vm';\n"
                 "const member = ['run', 'InThis', 'Context'].join('');\n"
-                "vm[member]('hidden source');\n"
+                "vm[member]('hidden source');\n",
+                "evaluated loader",
             ),
             "node_sqlite": (
                 "import { DatabaseSync } from 'node:sqlite';\n"
                 "new DatabaseSync(':memory:', { allowExtension: true })"
-                ".loadExtension('./hidden.so');\n"
+                ".loadExtension('./hidden.so');\n",
+                "unbound execution capability",
             ),
         }
-        for name, source in cases.items():
+        for name, (source, expected_error) in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 self._write_runtime_source_fixture(
@@ -2888,9 +2891,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     {MODULE.PERSISTENT_LIFECYCLE_RUNNER: source},
                 )
 
-                with self.assertRaisesRegex(
-                    MODULE.ProbeError, "unbound execution capability"
-                ):
+                with self.assertRaisesRegex(MODULE.ProbeError, expected_error):
                     MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_callable_constructor_evaluation(

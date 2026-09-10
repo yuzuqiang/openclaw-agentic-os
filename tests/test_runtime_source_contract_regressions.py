@@ -43,6 +43,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         with self.assertRaises(CONTRACT.RuntimeSourceContractError):
             CONTRACT.import_specifiers(source)
 
+    def assert_closed_with_message(self, source: str, expected: str) -> None:
+        with self.assertRaisesRegex(CONTRACT.RuntimeSourceContractError, expected):
+            CONTRACT.import_specifiers(source)
+
     def test_worker_transfers_do_not_escape_through_new_syntax(self) -> None:
         imports = (
             "import {Worker as W} from 'node:worker_threads';",
@@ -68,6 +72,32 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             for use in uses:
                 with self.subTest(declaration=declaration, use=use):
                     self.assert_closed(declaration + use)
+
+    def test_unbound_execution_capability_messages_match_first_fail_closed_boundary(
+        self,
+    ) -> None:
+        cases = {
+            "node_test": (
+                "import { run } from 'node:test';\n"
+                "run({ files: ['./hidden.cjs'] });\n",
+                "unbound execution capability",
+            ),
+            "node_vm": (
+                "import vm from 'node:vm';\n"
+                "const member = ['run', 'InThis', 'Context'].join('');\n"
+                "vm[member]('hidden source');\n",
+                "evaluated loader",
+            ),
+            "node_sqlite": (
+                "import { DatabaseSync } from 'node:sqlite';\n"
+                "new DatabaseSync(':memory:', { allowExtension: true })"
+                ".loadExtension('./hidden.so');\n",
+                "unbound execution capability",
+            ),
+        }
+        for name, (source, expected) in cases.items():
+            with self.subTest(name=name):
+                self.assert_closed_with_message(source, expected)
 
     def test_worker_namespace_transfers_and_unknown_origins_fail_closed(self) -> None:
         sources = (
