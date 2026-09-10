@@ -538,6 +538,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                     CONTRACT.import_specifiers(source),
                 )
 
+    def test_grouped_control_condition_does_not_become_prototype_mutator_call(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        source = (
+            f"if (Object.setPrototypeOf) (process.env,Object); {long_trivia}"
+            "const key='con'+'structor'; process.env[key];"
+        )
+        self.assertEqual([], CONTRACT.import_specifiers(source))
+
     def test_unresolved_computed_member_scan_is_local_to_receiver(self) -> None:
         source = " ".join(f"value{i}[key]" for i in range(5000))
         bracket_index = source.rfind("[")

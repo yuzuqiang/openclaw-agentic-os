@@ -2703,7 +2703,7 @@ def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int
                 source_text, candidate_start, opener_index=opener_index
             )
             if member_end is not None and _callee_end_reaches_call_opener(
-                source_text, member_end, opener_index
+                source_text, candidate_start, member_end, opener_index
             ):
                 return True
 
@@ -2725,18 +2725,48 @@ def _grouped_identifier_candidate_starts(
 
 
 def _callee_end_reaches_call_opener(
-    source_text: str, callee_end: int, opener_index: int
+    source_text: str, callee_start: int, callee_end: int, opener_index: int
 ) -> bool:
     cursor = _skip_js_trivia(source_text, callee_end)
-    while cursor < opener_index and source_text[cursor] == ")":
-        if _matching_js_opener_index(source_text, cursor) is None:
-            return False
+    wrappers = [
+        wrapper_index
+        for wrapper, wrapper_index in reversed(
+            _js_delimiter_stack_at(source_text, callee_start)
+        )
+        if wrapper == "("
+    ]
+    while cursor < opener_index and cursor < len(source_text) and source_text[cursor] == ")":
+        matching_wrapper = next(
+            (
+                wrapper_index
+                for wrapper_index in wrappers
+                if _matching_js_delimiter_index(source_text, wrapper_index, opener_index)
+                == cursor
+            ),
+            None,
+        )
+        if matching_wrapper is None or not _paren_can_wrap_callee_expression(
+            source_text, matching_wrapper
+        ):
+            break
+        wrappers.remove(matching_wrapper)
         cursor = _skip_js_trivia(source_text, cursor + 1)
     if cursor == opener_index:
         return True
     if source_text.startswith("?.", cursor):
         return _skip_js_trivia(source_text, cursor + 2) == opener_index
     return False
+
+
+def _paren_can_wrap_callee_expression(source_text: str, opener_index: int) -> bool:
+    cursor = opener_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    word_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    preceding_word = source_text[cursor + 1 : word_end]
+    return preceding_word not in {"catch", "for", "if", "switch", "while", "with"}
 
 
 def _parse_process_env_prototype_mutator_member_at(
@@ -2764,7 +2794,7 @@ def _parse_process_env_prototype_mutator_member_at(
                 source_text, base_end
             )
             if member_end is not None and _callee_end_reaches_call_opener(
-                source_text, member_end, opener_index
+                source_text, candidate_start, member_end, opener_index
             ):
                 raise
         return None
