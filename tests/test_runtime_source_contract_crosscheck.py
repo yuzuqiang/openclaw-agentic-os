@@ -217,6 +217,20 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
             ),
             (
                 "const name='setPrototypeOf';"
+                "(Object.setPrototypeOf)(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"(Object{long_trivia}[name])(process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
                 f"Object?.[{long_trivia}name]?.(process.env,()=>{{}});"
                 "const key='constructor';"
                 "const build=process.env[key];"
