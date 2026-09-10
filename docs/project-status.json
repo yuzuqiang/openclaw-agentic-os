@@ -7,7 +7,7 @@
       "status": "current_fail_closed_runtime_evidence_pending_phase_c"
     },
     "issue44_downstream_persistent_lifecycle_probe": {
-      "agentic_os_head_sha": "dd350461d2c9588b5aa9e79c4e8eb88a33366988",
+      "agentic_os_head_sha": "1a2b526eeeb59f3b4dad007aef72a3e9475b31c2",
       "candidate_process_started": false,
       "db_authority_enabled": false,
       "duplicate_acquire_identity_parity": false,
@@ -27,18 +27,18 @@
       "runtime_ready": false,
       "runtime_ready_blocked_until_phase_c": true,
       "runtime_ready_candidate_evidence": false,
-      "sha256": "7fb13c59a3b9e6c65026c11e4d02f8ff350e4edc6790e9a48560d06612894811",
+      "sha256": "4bc14eacf5fdb40d41dc7b0467d8f7379e3510431b5ca6bbefa094e09d651edb",
       "status": "fail_closed_runtime_source_closure_pending_phase_c",
       "validation_receipt_bound": false
     },
     "issue44_live_installed_preflight": {
-      "agentic_os_head_sha": "dd350461d2c9588b5aa9e79c4e8eb88a33366988",
+      "agentic_os_head_sha": "1a2b526eeeb59f3b4dad007aef72a3e9475b31c2",
       "no_production_lease_mutation": true,
       "openclaw_version": "2026.7.1",
       "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
       "production_authority_enabled": false,
       "runtime_ready": false,
-      "sha256": "015386bc206e01b00dbb809ccfc64e309c1e0e4d1de1ce3c0b0b28370ba965a1",
+      "sha256": "a37bc0323f45196a4e56b6355cc6d9e1d85693785140a198715ace67196699f1",
       "status": "fail_closed_future_contract",
       "status_rpc_live_reachability": "skipped_no_production_lease_mutation"
     },
@@ -100,7 +100,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "213be3c9715c99c1376a9f8a614cd5f3b3c5df17537d7087a72cc7d753eb108a",
+      "sha256": "6b7d1b476a7194cac32a81ff1640c7a542000215c66480fd93b6ca3fdde5801d",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",
