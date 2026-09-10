@@ -1,6 +1,6 @@
 {
   "accepted_session_spawned": false,
-  "agentic_os_head_sha": "24f6b58758025d9803d12843c1ccd64e22511fa2",
+  "agentic_os_head_sha": "915d43a0eb0e589fc0545eee2c41728bd8d80dd2",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
@@ -8,7 +8,7 @@
     },
     {
       "path": "scripts/agentic_os_runtime_source_contract.py",
-      "sha256": "033546585d8f212afd52f1f6116d52833363959a114c8349124a82146ce10d87"
+      "sha256": "22e9ec3fc267a919124c2362019cbd1d53df1f074c4816a2ce60e3d0a6ae0fbe"
     },
     {
       "path": "scripts/openclaw-live-accepted-session-probe.py",
@@ -55,10 +55,10 @@
     "production_gateway_restart_attempted": false,
     "production_lease_mutation_attempted": false,
     "production_session_mutation_attempted": false,
-    "run_id_sha256": "0a966ce9c0a01b69f1de839fa373740b9ff1d83b61a20ba3ba06a3f0703f32f2",
-    "run_root_sha256": "5e8d8a6438a500ef6182cd3124f6d556b0b8ce13287479a696379aeebfaeea6a",
+    "run_id_sha256": "29b6ec564f5602354e6be1e1e2b0eb8001a5be2edb7dc1596d1e4fbb3b1c738d",
+    "run_root_sha256": "97550974b6004a449e2c943a282c738dea8a495a484f1a8bca07129d11c62f61",
     "status": "not_started",
-    "transition_id_sha256": "0a966ce9c0a01b69f1de839fa373740b9ff1d83b61a20ba3ba06a3f0703f32f2"
+    "transition_id_sha256": "29b6ec564f5602354e6be1e1e2b0eb8001a5be2edb7dc1596d1e4fbb3b1c738d"
   },
   "lease_release_cleanup_observed": false,
   "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
