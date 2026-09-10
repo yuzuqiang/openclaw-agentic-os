@@ -451,6 +451,20 @@ PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_ASSIGNMENT = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_REASSIGNMENT = re.compile(
+    rf"""
+    (?<![\w$.])
+    (?P<name>{JS_IDENTIFIER})\s*=\s*
+    """,
+    re.VERBOSE,
+)
+PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_REASSIGNMENT = re.compile(
+    r"""
+    (?<![\w$.])
+    \(?\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 INDIRECT_COMMONJS_REQUIRE_INVOCATION = re.compile(
     rf"""
     (?:
@@ -1974,9 +1988,131 @@ def _computed_member_target_may_be_function_constructor(
         return False
     window_start = max(0, cursor - 240)
     target_window = source_text[window_start : cursor + 1]
-    return "=>" in target_window or bool(
-        re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
+    return (
+        _computed_member_receiver_is_builtin_function(source_text, bracket_index)
+        or "=>" in target_window
+        or bool(
+            re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
+        )
     )
+
+
+def _computed_member_receiver_is_builtin_function(
+    source_text: str, bracket_index: int
+) -> bool:
+    receiver = _computed_member_identifier_receiver(source_text, bracket_index)
+    if receiver is not None and _identifier_was_bound_to_builtin_function(
+        source_text, receiver, bracket_index
+    ):
+        return True
+    receiver_start = _computed_member_direct_receiver_start(source_text, bracket_index)
+    if receiver_start is None:
+        return False
+    return _parse_builtin_function_reference_end(source_text, receiver_start) is not None
+
+
+def _computed_member_identifier_receiver(
+    source_text: str, bracket_index: int
+) -> str | None:
+    cursor = bracket_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0 or not _is_identifier_character(source_text[cursor]):
+        return None
+    token_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    before = source_text[cursor] if cursor >= 0 else ""
+    if before and (_is_identifier_character(before) or before in ".]"):
+        return None
+    return source_text[cursor + 1 : token_end]
+
+
+def _computed_member_direct_receiver_start(
+    source_text: str, bracket_index: int
+) -> int | None:
+    cursor = bracket_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0:
+        return None
+    if not _is_identifier_character(source_text[cursor]):
+        return None
+    token_end = cursor + 1
+    while cursor >= 0 and (
+        _is_identifier_character(source_text[cursor]) or source_text[cursor] == "."
+    ):
+        cursor -= 1
+    return cursor + 1 if cursor + 1 < token_end else None
+
+
+def _identifier_was_bound_to_builtin_function(
+    source_text: str, name: str, end_index: int
+) -> bool:
+    assignment = re.compile(
+        rf"""
+        (?:
+            \b(?:const|let|var)\s+{re.escape(name)}
+          |
+            (?<![\w$.]){re.escape(name)}
+        )
+        \s*=\s*
+        """,
+        re.VERBOSE,
+    )
+    for match in _executable_pattern_matches(source_text, assignment):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        rhs_end = _parse_builtin_function_reference_end(source_text, rhs_start)
+        if rhs_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end >= end_index or source_text[assignment_end] in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            return True
+    return False
+
+
+def _parse_builtin_function_reference_end(source_text: str, index: int) -> int | None:
+    parsed_math = _parse_grouped_named_base(source_text, index, "Math")
+    if parsed_math is not None:
+        try:
+            member = _parse_static_runtime_member(
+                source_text,
+                parsed_math,
+                dynamic_error="runtime source contains an unsupported evaluated loader reference",
+            )
+        except RuntimeSourceContractError:
+            return None
+        if member is not None:
+            return member[1]
+
+    for base in ("Object", "Reflect"):
+        parsed_base = _parse_grouped_named_base(source_text, index, base)
+        if parsed_base is None:
+            continue
+        try:
+            member = _parse_static_runtime_member(
+                source_text,
+                parsed_base,
+                dynamic_error="runtime source contains an unsupported evaluated loader reference",
+            )
+        except RuntimeSourceContractError:
+            return None
+        if member is not None and member[0] in {
+            "assign",
+            "create",
+            "defineProperty",
+            "getPrototypeOf",
+            "setPrototypeOf",
+        }:
+            return member[1]
+    return None
 
 
 def _computed_member_process_env_target_start(
@@ -2322,6 +2458,26 @@ def _process_env_prototype_mutator_alias_names(
         if assignment_end >= end_index or source_text[assignment_end] in {";", ",", "\r", "\n"}:
             aliases.add(match.group("name"))
     for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_REASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        name = match.group("name")
+        if name in {"const", "let", "var"}:
+            continue
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        member_end = _parse_process_env_prototype_mutator_member_at(source_text, rhs_start)
+        if member_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, member_end)
+        if assignment_end >= end_index or source_text[assignment_end] in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            aliases.add(name)
+    for match in _executable_pattern_matches(
         source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_ASSIGNMENT
     ):
         if match.start() >= end_index:
@@ -2336,6 +2492,30 @@ def _process_env_prototype_mutator_alias_names(
         if assignment_end < end_index and source_text[assignment_end] not in {
             ";",
             ",",
+            "\r",
+            "\n",
+        }:
+            continue
+        for alias in _process_env_prototype_mutator_destructured_aliases(
+            match.group("body")
+        ):
+            aliases.add(alias)
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_REASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        rhs_end = _parse_process_env_prototype_mutator_destructuring_base(
+            source_text, rhs_start
+        )
+        if rhs_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            ")",
             "\r",
             "\n",
         }:

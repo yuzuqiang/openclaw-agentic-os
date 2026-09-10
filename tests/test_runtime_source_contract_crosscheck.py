@@ -144,26 +144,43 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "requires Node execution witness")
     def test_real_node_witness_for_destructured_process_env_prototype_mutator_alias(self) -> None:
-        source = (
-            "const {setPrototypeOf:set}=Object;"
-            "set(process.env,()=>{});"
-            "const key='constructor';"
-            "const build=process.env[key];"
-            "await build(\"return import('./hidden.mjs')\")();"
+        sources = (
+            (
+                "const {setPrototypeOf:set}=Object;"
+                "set(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "let set;"
+                "set=Object.setPrototypeOf;"
+                "set(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const key='constructor';"
+                "const f=Math.max;"
+                "const build=f[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
         )
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "hidden.mjs").write_text(
-                "console.log('DEPENDENCY_EXECUTED');", encoding="utf-8"
-            )
-            (root / "main.mjs").write_text(source, encoding="utf-8")
-            result = subprocess.run(
-                [shutil.which("node"), str(root / "main.mjs")],
-                cwd=root,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=10,
-            )
-            self.assertEqual("DEPENDENCY_EXECUTED", result.stdout.strip())
-            self.assert_rejected(source)
+        for source in sources:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "hidden.mjs").write_text(
+                    "console.log('DEPENDENCY_EXECUTED');", encoding="utf-8"
+                )
+                (root / "main.mjs").write_text(source, encoding="utf-8")
+                result = subprocess.run(
+                    [shutil.which("node"), str(root / "main.mjs")],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=10,
+                )
+                self.assertEqual("DEPENDENCY_EXECUTED", result.stdout.strip())
+                self.assert_rejected(source)

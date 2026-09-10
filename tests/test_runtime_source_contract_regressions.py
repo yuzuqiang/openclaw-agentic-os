@@ -340,6 +340,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "Object.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Reflect.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "const set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "let set; set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "let set; ({setPrototypeOf:set}=Object); set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const key='constructor'; const f=Math.max; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const key='constructor'; const build=Math.max[key]; build(\"return import('./hidden.mjs')\")();",
             *(
                 padded_process_env_reassignment
                 + f" const build={access}; build(\"return import('./hidden.mjs')\")();"
@@ -357,6 +361,9 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             'const set=Reflect["setPrototypeOf"];',
             "let set=Object.setPrototypeOf;",
             "var set=Reflect.setPrototypeOf;",
+            "let set; set=Object.setPrototypeOf;",
+            "var set; set=Reflect.setPrototypeOf;",
+            "let set; ({{setPrototypeOf:set}}=Object);",
         ):
             source = (
                 f"{alias_assignment} "
