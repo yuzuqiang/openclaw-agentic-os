@@ -193,6 +193,20 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
                 "const build=f[key];"
                 "await build(\"return import('./hidden.mjs')\")();"
             ),
+            (
+                "const name='setPrototypeOf';"
+                "Object[name](process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                "Reflect?.[name]?.(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
         )
         for source in sources:
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:

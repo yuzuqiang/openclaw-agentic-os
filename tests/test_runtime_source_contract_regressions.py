@@ -339,6 +339,8 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "Reflect.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Object.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "Reflect.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const name='setPrototypeOf'; Object[name](process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const name='setPrototypeOf'; Reflect[name](process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "const set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "let set; set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
             "let set; ({setPrototypeOf:set}=Object); set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
@@ -391,6 +393,26 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             for call in ("set(process.env,()=>{});", "set?.(process.env,()=>{});"):
                 with self.subTest(alias_assignment=alias_assignment, call=call):
                     self.assert_closed(source.format(call=call))
+
+    def test_dynamic_process_env_prototype_mutator_callees_fail_closed(self) -> None:
+        for callee in (
+            "Object[name]",
+            "Reflect[name]",
+            "Object?.[name]",
+            "Reflect?.[name]",
+            "Object/*c*/[name]",
+            "Reflect /*c*/ [name]",
+        ):
+            for call_operator in ("", "?."):
+                source = (
+                    "const name='setPrototypeOf'; "
+                    f"{callee}{call_operator}(process.env,()=>{{}}); "
+                    "const key='constructor'; "
+                    "const build=process.env[key]; "
+                    "build(\"return import('./hidden.mjs')\")();"
+                )
+                with self.subTest(callee=callee, call_operator=call_operator):
+                    self.assert_closed(source)
 
     def test_process_env_computed_lookup_does_not_inherit_function_window_risk(self) -> None:
         for access in (
@@ -451,6 +473,9 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
             "if (process.env[key] === '1') { await import('./entry.mjs'); }",
             "const set=Object.setPrototypeOf; set({}, process.env); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "const name='setPrototypeOf'; Object[name]({}, process.env); "
             "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
             "if (process.env[key] === '1') { await import('./entry.mjs'); }",
         ):

@@ -2673,9 +2673,7 @@ def _process_env_reference_is_prototype_mutation_target(
     for opener, opener_index in reversed(
         _js_delimiter_stack_at(source_text, process_start)
     ):
-        if opener != "(" or not _callee_is_process_env_prototype_mutator(
-            source_text, opener_index
-        ):
+        if opener != "(":
             continue
         first_argument_start = _skip_js_trivia(source_text, opener_index + 1)
         if (
@@ -2687,7 +2685,9 @@ def _process_env_reference_is_prototype_mutation_target(
             source_text, process_start, process_end, target_start
         )
         after_target = _skip_js_trivia(source_text, target_end)
-        if after_target < target_start and source_text[after_target] in ",)":
+        if after_target >= target_start or source_text[after_target] not in ",)":
+            continue
+        if _callee_is_process_env_prototype_mutator(source_text, opener_index):
             return True
     return False
 
@@ -2697,7 +2697,7 @@ def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int
     window = source_text[window_start:opener_index]
     for match in re.finditer(r"\b(?:Object|Reflect)\b", window):
         member_end = _parse_process_env_prototype_mutator_member_at(
-            source_text, window_start + match.start()
+            source_text, window_start + match.start(), opener_index=opener_index
         )
         if member_end is not None and _callee_end_reaches_call_opener(
             source_text, member_end, opener_index
@@ -2720,7 +2720,7 @@ def _callee_end_reaches_call_opener(
 
 
 def _parse_process_env_prototype_mutator_member_at(
-    source_text: str, candidate_start: int
+    source_text: str, candidate_start: int, *, opener_index: int | None = None
 ) -> int | None:
     base = _parse_js_identifier(source_text, candidate_start)
     if base is None or base[0] not in {"Object", "Reflect"}:
@@ -2735,10 +2735,41 @@ def _parse_process_env_prototype_mutator_member_at(
             dynamic_error="runtime source contains an unsupported process.env prototype mutator",
         )
     except RuntimeSourceContractError:
+        if opener_index is not None:
+            member_end = _unsupported_computed_runtime_member_end(source_text, base[1])
+            if member_end is not None and _callee_end_reaches_call_opener(
+                source_text, member_end, opener_index
+            ):
+                raise
         return None
     if member is not None and member[0] == "setPrototypeOf":
         return member[1]
     return None
+
+
+def _unsupported_computed_runtime_member_end(
+    source_text: str, index: int
+) -> int | None:
+    member_index = _skip_js_trivia(source_text, index)
+    if source_text.startswith("?.", member_index):
+        property_index = _skip_js_trivia(source_text, member_index + 2)
+    elif member_index < len(source_text) and source_text[member_index] == ".":
+        property_index = _skip_js_trivia(source_text, member_index + 1)
+    elif member_index < len(source_text) and source_text[member_index] == "[":
+        property_index = member_index
+    else:
+        return None
+
+    if property_index >= len(source_text) or source_text[property_index] != "[":
+        return None
+    close_index = _matching_js_delimiter_index(
+        source_text, property_index, len(source_text)
+    )
+    if close_index is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported process.env prototype mutator"
+        )
+    return close_index + 1
 
 
 def _callee_identifier_before_call(source_text: str, opener_index: int) -> str | None:
