@@ -148,6 +148,28 @@ STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     """.replace("__STATIC_IMPORT_CLAUSE_FRAGMENT__", STATIC_IMPORT_CLAUSE_FRAGMENT),
     re.VERBOSE | re.DOTALL,
 )
+STATIC_RUNTIME_IMPORT_BINDING = re.compile(
+    r"""
+    \bimport\s+(?!type\b)
+    (?P<clause>__STATIC_IMPORT_CLAUSE_FRAGMENT__)\s+from\s*
+    ["'][^"']+["']
+    """.replace("__STATIC_IMPORT_CLAUSE_FRAGMENT__", STATIC_IMPORT_CLAUSE_FRAGMENT),
+    re.VERBOSE | re.DOTALL,
+)
+COMMONJS_REQUIRE_VALUE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(
+    """,
+    re.VERBOSE,
+)
+COMMONJS_REQUIRE_VALUE_DESTRUCTURING_ASSIGNMENT = re.compile(
+    r"""
+    \b(?:const|let|var)\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    require\s*\(
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 COMMONJS_REQUIRE_TOKEN = "require"
 COMMONJS_REQUIRE_RESOLVE_MEMBER = "resolve"
 DYNAMIC_IMPORT_TOKEN = "import"
@@ -2014,8 +2036,9 @@ def _computed_member_receiver_is_builtin_function(
     source_text: str, bracket_index: int
 ) -> bool:
     receiver = _computed_member_identifier_receiver(source_text, bracket_index)
-    if receiver is not None and _identifier_was_bound_to_builtin_function(
-        source_text, receiver, bracket_index
+    if receiver is not None and (
+        _identifier_was_bound_to_builtin_function(source_text, receiver, bracket_index)
+        or _identifier_was_bound_to_runtime_import(source_text, receiver, bracket_index)
     ):
         return True
     receiver_start = _computed_member_direct_receiver_start(source_text, bracket_index)
@@ -2057,6 +2080,80 @@ def _computed_member_direct_receiver_start(
     ):
         cursor -= 1
     return cursor + 1 if cursor + 1 < token_end else None
+
+
+def _identifier_was_bound_to_runtime_import(
+    source_text: str, name: str, end_index: int
+) -> bool:
+    for match in _executable_pattern_matches(source_text, STATIC_RUNTIME_IMPORT_BINDING):
+        if match.start() >= end_index:
+            break
+        if name in _static_import_clause_local_names(match.group("clause")):
+            return True
+    for match in _executable_pattern_matches(source_text, COMMONJS_REQUIRE_VALUE_ASSIGNMENT):
+        if match.start() >= end_index:
+            break
+        if match.group("name") == name:
+            return True
+    for match in _executable_pattern_matches(
+        source_text, COMMONJS_REQUIRE_VALUE_DESTRUCTURING_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        if name in _destructured_aliases_for_static_members(
+            match.group("body"), allowed_members=None, fail_closed_on_unsupported=True
+        ):
+            return True
+    return False
+
+
+def _static_import_clause_local_names(clause: str) -> set[str]:
+    names: set[str] = set()
+    clause = clause.strip()
+    if not clause:
+        return names
+    default_part, separator, rest = clause.partition(",")
+    first_part = default_part.strip()
+    if first_part.startswith("*"):
+        match = re.fullmatch(rf"\*\s+as\s+({JS_IDENTIFIER})", first_part)
+        if match is not None:
+            names.add(match.group(1))
+    elif first_part.startswith("{"):
+        names.update(_static_import_named_clause_local_names(clause))
+        return names
+    else:
+        parsed_default = _parse_js_identifier(first_part, 0)
+        if parsed_default is not None:
+            local_name, local_end = parsed_default
+            if first_part[local_end:].strip() == "":
+                names.add(local_name)
+    if separator:
+        rest = rest.strip()
+        if rest.startswith("{"):
+            names.update(_static_import_named_clause_local_names(rest))
+        elif rest.startswith("*"):
+            match = re.fullmatch(rf"\*\s+as\s+({JS_IDENTIFIER})", rest)
+            if match is not None:
+                names.add(match.group(1))
+    return names
+
+
+def _static_import_named_clause_local_names(clause: str) -> set[str]:
+    start = clause.find("{")
+    end = clause.rfind("}")
+    if start < 0 or end <= start:
+        return set()
+    names: set[str] = set()
+    for part in _split_top_level_comma_parts(clause[start + 1 : end]):
+        part = part.strip()
+        if part.startswith("type "):
+            part = part[5:].strip()
+        parsed = _parse_named_binding_part(part)
+        if parsed is None:
+            continue
+        _imported, local = parsed
+        names.add(local)
+    return names
 
 
 def _identifier_was_bound_to_builtin_function(
@@ -2675,24 +2772,42 @@ def _process_env_reference_is_prototype_mutation_target(
     ):
         if opener != "(":
             continue
-        first_argument_start = _skip_js_trivia(source_text, opener_index + 1)
-        if (
-            first_argument_start < process_start
-            and "," in source_text[first_argument_start:process_start]
-        ):
-            continue
         target_end = _parenthesized_process_env_target_end(
             source_text, process_start, process_end, target_start
         )
         after_target = _skip_js_trivia(source_text, target_end)
         if after_target >= target_start or source_text[after_target] not in ",)":
             continue
-        if _callee_is_process_env_prototype_mutator(source_text, opener_index):
+        argument_index = _call_argument_index_before(source_text, opener_index, process_start)
+        try:
+            invocation = _callee_process_env_prototype_mutator_invocation(
+                source_text, opener_index
+            )
+        except RuntimeSourceContractError:
+            if argument_index == 0:
+                raise
+            continue
+        if invocation is None:
+            continue
+        if invocation == "direct" and argument_index == 0:
+            return True
+        if invocation in {"call", "bind"} and argument_index >= 1:
+            return True
+        if invocation == "apply" and argument_index >= 1:
             return True
     return False
 
 
 def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int) -> bool:
+    return (
+        _callee_process_env_prototype_mutator_invocation(source_text, opener_index)
+        is not None
+    )
+
+
+def _callee_process_env_prototype_mutator_invocation(
+    source_text: str, opener_index: int
+) -> str | None:
     for kind, value, start, _end in _source_tokens(source_text):
         if start >= opener_index:
             break
@@ -2705,10 +2820,96 @@ def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int
             if member_end is not None and _callee_end_reaches_call_opener(
                 source_text, candidate_start, member_end, opener_index
             ):
-                return True
+                return "direct"
+            helper = _process_env_prototype_mutator_invocation_helper(
+                source_text, member_end, opener_index
+            )
+            if helper is not None:
+                return helper
 
     alias = _callee_identifier_before_call(source_text, opener_index)
-    return alias in _process_env_prototype_mutator_alias_names(source_text, opener_index)
+    if alias in _process_env_prototype_mutator_alias_names(source_text, opener_index):
+        return "direct"
+    return None
+
+
+def _process_env_prototype_mutator_invocation_helper(
+    source_text: str, member_end: int | None, opener_index: int
+) -> str | None:
+    if member_end is None:
+        return None
+    try:
+        member = _parse_static_runtime_member(
+            source_text,
+            member_end,
+            dynamic_error="runtime source contains an unsupported process.env prototype mutator",
+        )
+    except RuntimeSourceContractError:
+        return None
+    if member is None or member[0] not in {"apply", "bind", "call"}:
+        return None
+    if _callee_end_reaches_call_opener(source_text, member_end, member[1], opener_index):
+        return member[0]
+    return None
+
+
+def _call_argument_index_before(
+    source_text: str, opener_index: int, position: int
+) -> int:
+    argument_index = 0
+    index = opener_index + 1
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < position:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < position else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                state = "code"
+                index += 2
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < position:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            state = "line_comment"
+            index += 2
+            continue
+        if character == "/" and next_character == "*":
+            state = "block_comment"
+            index += 2
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if character == "," and depth == 0:
+            argument_index += 1
+        index += 1
+    return argument_index
 
 
 def _grouped_identifier_candidate_starts(

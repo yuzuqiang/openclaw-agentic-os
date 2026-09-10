@@ -358,6 +358,11 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "const {setPrototypeOf:f}=Reflect; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const f=Math.max.bind(null); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const f=Object.assign.bind(Object); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "import f from './dep.mjs'; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "import {make as f} from './dep.mjs'; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "import * as f from './dep.mjs'; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const f=require('./dep.cjs'); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {make:f}=require('./dep.cjs'); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             *(
                 padded_process_env_reassignment
                 + f" const build={access}; build(\"return import('./hidden.mjs')\")();"
@@ -502,6 +507,24 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 "build(\"return import('./hidden.mjs')\")();"
             )
             with self.subTest(callee=callee):
+                self.assert_closed(source)
+
+    def test_indirect_process_env_prototype_mutator_invocations_fail_closed(self) -> None:
+        for call in (
+            "Object.setPrototypeOf.call(null, process.env,()=>{});",
+            "Reflect.setPrototypeOf.call(null, process.env,()=>{});",
+            "Object.setPrototypeOf.apply(null, [process.env,()=>{}]);",
+            "Reflect.setPrototypeOf.apply(null, [process.env,()=>{}]);",
+            "Object.setPrototypeOf.bind(null, process.env,()=>{})();",
+            "Reflect.setPrototypeOf.bind(null, process.env,()=>{})();",
+        ):
+            source = (
+                f"{call} "
+                "const key='constructor'; "
+                "const build=process.env[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(call=call):
                 self.assert_closed(source)
 
     def test_process_env_prototype_mutator_detection_preserves_safe_controls(self) -> None:
