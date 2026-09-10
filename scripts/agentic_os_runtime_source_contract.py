@@ -2218,7 +2218,6 @@ def _parse_builtin_function_destructuring_base(
 
 
 def _builtin_function_destructured_aliases(base: str, body: str) -> set[str]:
-    aliases: set[str] = set()
     allowed_object_members = {
         "assign",
         "create",
@@ -2226,21 +2225,214 @@ def _builtin_function_destructured_aliases(base: str, body: str) -> set[str]:
         "getPrototypeOf",
         "setPrototypeOf",
     }
-    for part in body.split(","):
-        segment = part.strip()
-        if not segment:
+    allowed_members = allowed_object_members if base in {"Object", "Reflect"} else None
+    return _destructured_aliases_for_static_members(
+        body, allowed_members=allowed_members, fail_closed_on_unsupported=True
+    )
+
+
+def _destructured_aliases_for_static_members(
+    body: str,
+    *,
+    allowed_members: set[str] | None,
+    fail_closed_on_unsupported: bool,
+) -> set[str]:
+    aliases: set[str] = set()
+    for segment in _split_top_level_comma_parts(body):
+        parsed = _parse_static_destructured_property_alias(segment)
+        if parsed is None:
+            if fail_closed_on_unsupported:
+                alias = _destructured_property_fallback_alias(segment)
+                if alias is not None:
+                    aliases.add(alias)
             continue
-        matched = re.fullmatch(
-            rf"(?P<member>{JS_IDENTIFIER})(?:\s*:\s*(?P<name>{JS_IDENTIFIER}))?",
-            segment,
-        )
-        if matched is None:
-            continue
-        member = matched.group("member")
-        if base in {"Object", "Reflect"} and member not in allowed_object_members:
-            continue
-        aliases.add(matched.group("name") or member)
+        member, alias = parsed
+        if allowed_members is None or member in allowed_members:
+            aliases.add(alias)
     return aliases
+
+
+def _split_top_level_comma_parts(source_text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    index = 0
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if character == "," and depth == 0:
+            parts.append(source_text[start:index])
+            start = index + 1
+        index += 1
+    parts.append(source_text[start:])
+    return parts
+
+
+def _parse_static_destructured_property_alias(
+    segment: str,
+) -> tuple[str, str] | None:
+    index = _skip_js_trivia(segment, 0)
+    if index >= len(segment):
+        return None
+    if segment[index] == "[":
+        member_index = _skip_js_trivia(segment, index + 1)
+        parsed = _parse_quoted_specifier(segment, member_index)
+        if parsed is None:
+            parsed = _parse_static_template_member(segment, member_index)
+        if parsed is None:
+            return None
+        member, member_end = parsed
+        close_index = _skip_js_trivia(segment, member_end)
+        if close_index >= len(segment) or segment[close_index] != "]":
+            return None
+        colon_index = _skip_js_trivia(segment, close_index + 1)
+        if colon_index >= len(segment) or segment[colon_index] != ":":
+            return None
+        alias_index = _skip_js_trivia(segment, colon_index + 1)
+        parsed_alias = _parse_js_identifier(segment, alias_index)
+        if parsed_alias is None:
+            return None
+        alias, alias_end = parsed_alias
+        return (member, alias) if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+    parsed_literal = _parse_quoted_specifier(segment, index)
+    if parsed_literal is not None:
+        member, member_end = parsed_literal
+        colon_index = _skip_js_trivia(segment, member_end)
+        if colon_index >= len(segment) or segment[colon_index] != ":":
+            return None
+        alias_index = _skip_js_trivia(segment, colon_index + 1)
+        parsed_alias = _parse_js_identifier(segment, alias_index)
+        if parsed_alias is None:
+            return None
+        alias, alias_end = parsed_alias
+        return (member, alias) if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+    parsed_identifier = _parse_js_identifier(segment, index)
+    if parsed_identifier is None:
+        return None
+    member, member_end = parsed_identifier
+    after_member = _skip_js_trivia(segment, member_end)
+    if after_member == len(segment):
+        return member, member
+    if after_member >= len(segment) or segment[after_member] != ":":
+        return None
+    alias_index = _skip_js_trivia(segment, after_member + 1)
+    parsed_alias = _parse_js_identifier(segment, alias_index)
+    if parsed_alias is None:
+        return None
+    alias, alias_end = parsed_alias
+    return (member, alias) if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+
+
+def _destructured_property_fallback_alias(segment: str) -> str | None:
+    colon_index = _top_level_colon_index(segment)
+    if colon_index is None:
+        return None
+    alias_index = _skip_js_trivia(segment, colon_index + 1)
+    parsed_alias = _parse_js_identifier(segment, alias_index)
+    if parsed_alias is None:
+        return None
+    alias, alias_end = parsed_alias
+    return alias if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+
+
+def _top_level_colon_index(source_text: str) -> int | None:
+    index = 0
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if character == ":" and depth == 0:
+            return index
+        index += 1
+    return None
 
 
 def _computed_member_process_env_target_start(
@@ -2678,18 +2870,9 @@ def _parse_process_env_prototype_mutator_destructuring_base(
 
 
 def _process_env_prototype_mutator_destructured_aliases(body: str) -> set[str]:
-    aliases: set[str] = set()
-    for part in body.split(","):
-        segment = part.strip()
-        if not segment:
-            continue
-        matched = re.fullmatch(
-            rf"setPrototypeOf(?:\s*:\s*(?P<name>{JS_IDENTIFIER}))?", segment
-        )
-        if matched is None:
-            continue
-        aliases.add(matched.group("name") or "setPrototypeOf")
-    return aliases
+    return _destructured_aliases_for_static_members(
+        body, allowed_members={"setPrototypeOf"}, fail_closed_on_unsupported=True
+    )
 
 
 def _for_header_opener_belongs_to_for(source_text: str, opener_index: int) -> bool:

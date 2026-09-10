@@ -345,8 +345,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "const key='constructor'; const f=Math.max; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const key='constructor'; const build=Math.max[key]; build(\"return import('./hidden.mjs')\")();",
             "const {max:f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {'max':f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {'max':f}=Math; const build=f['constructor']; build(\"return import('./hidden.mjs')\")();",
+            "const {['max']:f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const name='max'; const {[name]:f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "let f; ({max:f}=Math); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const {assign:f}=Object; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {'assign':f}=Object; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {['assign']:f}=Object; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const {setPrototypeOf:f}=Reflect; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const f=Math.max.bind(null); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
             "const f=Object.assign.bind(Object); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
@@ -370,6 +376,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "let set; set=Object.setPrototypeOf;",
             "var set; set=Reflect.setPrototypeOf;",
             "let set; ({{setPrototypeOf:set}}=Object);",
+            "let set; ({{'setPrototypeOf':set}}=Object);",
+            "let set; ({{['setPrototypeOf']:set}}=Object);",
+            "let set; ({{[`setPrototypeOf`]:set}}=Reflect);",
+            "let name='setPrototypeOf', set; ({{[name]:set}}=Object);",
         ):
             source = (
                 f"{alias_assignment} "
@@ -868,7 +878,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
     def test_node_destructured_builtin_function_alias_executes_hidden_import(self) -> None:
         witnesses = (
             "const {max:f}=Math;\n",
+            "const {'max':f}=Math;\n",
+            "const {['max']:f}=Math;\n",
             "const {assign:f}=Object;\n",
+            "const {'assign':f}=Object;\n",
             "const f=Math.max.bind(null);\n",
         )
         for declaration in witnesses:
