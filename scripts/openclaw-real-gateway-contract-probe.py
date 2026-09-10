@@ -48,8 +48,8 @@ def _db_authority_enabled() -> bool:
         inserted = True
     try:
         from agentic_os import DB_AUTHORITY_ENABLED as enabled
-    except Exception:
-        return False
+    except Exception as exc:
+        raise ProbeError("failed to read Agentic OS DB authority flag") from exc
     finally:
         if inserted:
             try:

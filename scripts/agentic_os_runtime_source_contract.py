@@ -445,6 +445,12 @@ PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_ASSIGNMENT = re.compile(
     """,
     re.VERBOSE,
 )
+PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_ASSIGNMENT = re.compile(
+    r"""
+    \b(?:const|let|var)\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 INDIRECT_COMMONJS_REQUIRE_INVOCATION = re.compile(
     rf"""
     (?:
@@ -2315,6 +2321,66 @@ def _process_env_prototype_mutator_alias_names(
         assignment_end = _skip_js_trivia(source_text, member_end)
         if assignment_end >= end_index or source_text[assignment_end] in {";", ",", "\r", "\n"}:
             aliases.add(match.group("name"))
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        rhs_end = _parse_process_env_prototype_mutator_destructuring_base(
+            source_text, rhs_start
+        )
+        if rhs_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            continue
+        for alias in _process_env_prototype_mutator_destructured_aliases(
+            match.group("body")
+        ):
+            aliases.add(alias)
+    return aliases
+
+
+def _parse_process_env_prototype_mutator_destructuring_base(
+    source_text: str, index: int
+) -> int | None:
+    parsed = (
+        _parse_grouped_named_base(source_text, index, "Object")
+        or _parse_grouped_named_base(source_text, index, "Reflect")
+    )
+    if parsed is None:
+        return None
+    before = source_text[index - 1] if index > 0 else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    after = _skip_js_trivia(source_text, parsed)
+    if after < len(source_text) and (
+        _is_identifier_character(source_text[after])
+        or source_text[after] in ".([`"
+        or source_text.startswith("?.", after)
+    ):
+        return None
+    return parsed
+
+
+def _process_env_prototype_mutator_destructured_aliases(body: str) -> set[str]:
+    aliases: set[str] = set()
+    for part in body.split(","):
+        segment = part.strip()
+        if not segment:
+            continue
+        matched = re.fullmatch(
+            rf"setPrototypeOf(?:\s*:\s*(?P<name>{JS_IDENTIFIER}))?", segment
+        )
+        if matched is None:
+            continue
+        aliases.add(matched.group("name") or "setPrototypeOf")
     return aliases
 
 
