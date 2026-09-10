@@ -399,14 +399,28 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         for callee in (
             "Object[name]",
             "Reflect[name]",
+            "(Object)[name]",
+            "(Reflect)[name]",
+            "((Object))[name]",
+            "((Reflect))[name]",
             "Object?.[name]",
             "Reflect?.[name]",
+            "(Object)?.[name]",
+            "(Reflect)?.[name]",
+            "((Object))?.[name]",
+            "((Reflect))?.[name]",
             "Object/*c*/[name]",
             "Reflect /*c*/ [name]",
             f"Object{long_trivia}[name]",
             f"Reflect{long_trivia}[name]",
+            f"(Object{long_trivia})[name]",
+            f"(Reflect{long_trivia})[name]",
+            f"((Object){long_trivia})[name]",
+            f"((Reflect){long_trivia})[name]",
             f"Object?.[{long_trivia}name]",
             f"Reflect?.[{long_trivia}name]",
+            f"(Object)?.[{long_trivia}name]",
+            f"(Reflect)?.[{long_trivia}name]",
         ):
             for call_operator in ("", "?."):
                 source = (
@@ -446,10 +460,18 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
 
     def test_static_process_env_prototype_mutator_callee_variants_fail_closed(self) -> None:
         for callee in (
+            "(Object).setPrototypeOf",
+            "(Reflect).setPrototypeOf",
+            "((Object)).setPrototypeOf",
+            "((Reflect)).setPrototypeOf",
             'Object["setPrototypeOf"]',
             'Reflect["setPrototypeOf"]',
+            '(Object)["setPrototypeOf"]',
+            '(Reflect)["setPrototypeOf"]',
             "Object?.setPrototypeOf",
             "Reflect?.setPrototypeOf",
+            "(Object)?.setPrototypeOf",
+            "(Reflect)?.setPrototypeOf",
         ):
             source = (
                 f"{callee}(process.env,()=>{{}}); "
@@ -927,6 +949,33 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                         declaration
                         + "const member='constructor';\n"
                         + "const build=f[member];\n"
+                        + "await build(\"return import('./hidden.mjs')\")();\n",
+                        encoding="utf-8",
+                    )
+                    (root / "hidden.mjs").write_text("console.log('executed');\n", encoding="utf-8")
+                    env = {key: value for key, value in os.environ.items() if not key.startswith("NODE_")}
+                    result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
+                    self.assertEqual("executed", result.stdout.strip())
+                    self.assert_closed(entry.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(NODE, "Node is required for the independent execution witness")
+    def test_node_grouped_dynamic_process_env_prototype_mutator_exposes_constructor(
+        self,
+    ) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        witnesses = (
+            f"const name='setPrototypeOf';\n(Object{long_trivia})[name](process.env,()=>{{}});\n",
+            f"const name='setPrototypeOf';\n((Object){long_trivia})?.[name]?.(process.env,()=>{{}});\n",
+        )
+        for declaration in witnesses:
+            with self.subTest(declaration=declaration):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    entry = root / "entry.mjs"
+                    entry.write_text(
+                        declaration
+                        + "const member='constructor';\n"
+                        + "const build=process.env[member];\n"
                         + "await build(\"return import('./hidden.mjs')\")();\n",
                         encoding="utf-8",
                     )

@@ -2698,16 +2698,30 @@ def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int
             break
         if kind != "identifier" or value not in {"Object", "Reflect"}:
             continue
-        member_end = _parse_process_env_prototype_mutator_member_at(
-            source_text, start, opener_index=opener_index
-        )
-        if member_end is not None and _callee_end_reaches_call_opener(
-            source_text, member_end, opener_index
-        ):
-            return True
+        for candidate_start in _grouped_identifier_candidate_starts(source_text, start):
+            member_end = _parse_process_env_prototype_mutator_member_at(
+                source_text, candidate_start, opener_index=opener_index
+            )
+            if member_end is not None and _callee_end_reaches_call_opener(
+                source_text, member_end, opener_index
+            ):
+                return True
 
     alias = _callee_identifier_before_call(source_text, opener_index)
     return alias in _process_env_prototype_mutator_alias_names(source_text, opener_index)
+
+
+def _grouped_identifier_candidate_starts(
+    source_text: str, identifier_start: int
+) -> list[int]:
+    starts = [identifier_start]
+    for opener, opener_index in reversed(
+        _js_delimiter_stack_at(source_text, identifier_start)
+    ):
+        if opener != "(":
+            continue
+        starts.append(opener_index)
+    return starts
 
 
 def _callee_end_reaches_call_opener(
@@ -2724,21 +2738,27 @@ def _callee_end_reaches_call_opener(
 def _parse_process_env_prototype_mutator_member_at(
     source_text: str, candidate_start: int, *, opener_index: int | None = None
 ) -> int | None:
-    base = _parse_js_identifier(source_text, candidate_start)
-    if base is None or base[0] not in {"Object", "Reflect"}:
-        return None
-    before = source_text[candidate_start - 1] if candidate_start > 0 else ""
-    if before and (_is_identifier_character(before) or before == "."):
+    base_end = None
+    for base_name in ("Object", "Reflect"):
+        parsed_base_end = _parse_grouped_named_base(
+            source_text, candidate_start, base_name
+        )
+        if parsed_base_end is not None:
+            base_end = parsed_base_end
+            break
+    if base_end is None:
         return None
     try:
         member = _parse_static_runtime_member(
             source_text,
-            base[1],
+            base_end,
             dynamic_error="runtime source contains an unsupported process.env prototype mutator",
         )
     except RuntimeSourceContractError:
         if opener_index is not None:
-            member_end = _unsupported_computed_runtime_member_end(source_text, base[1])
+            member_end = _unsupported_computed_runtime_member_end(
+                source_text, base_end
+            )
             if member_end is not None and _callee_end_reaches_call_opener(
                 source_text, member_end, opener_index
             ):
