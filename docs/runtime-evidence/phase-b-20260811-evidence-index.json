@@ -53,10 +53,10 @@
       "production_gateway_restart_attempted": false,
       "production_lease_mutation_attempted": false,
       "production_session_mutation_attempted": false,
-      "run_id_sha256": "29b6ec564f5602354e6be1e1e2b0eb8001a5be2edb7dc1596d1e4fbb3b1c738d",
-      "run_root_sha256": "97550974b6004a449e2c943a282c738dea8a495a484f1a8bca07129d11c62f61",
+      "run_id_sha256": "5537357979b35d1b702f5445e25071775419847a4fca074ed2624a55e94e54cd",
+      "run_root_sha256": "b7384a80481530c8148269b0cce1ca2a45a6985c54b344852509ab33a6049265",
       "status": "not_started",
-      "transition_id_sha256": "29b6ec564f5602354e6be1e1e2b0eb8001a5be2edb7dc1596d1e4fbb3b1c738d"
+      "transition_id_sha256": "5537357979b35d1b702f5445e25071775419847a4fca074ed2624a55e94e54cd"
     },
     "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json",
     "phase_c_exact_head_required_before_review": true,
