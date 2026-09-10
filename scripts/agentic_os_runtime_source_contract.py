@@ -2016,18 +2016,17 @@ def _computed_member_target_may_be_function_constructor(
         return _process_env_target_was_reassigned(
             source_text, process_env_target_start
         )
-    cursor = bracket_index - 1
-    while cursor >= 0 and source_text[cursor].isspace():
-        cursor -= 1
-    if cursor < 0:
-        return False
-    window_start = max(0, cursor - 240)
-    target_window = source_text[window_start : cursor + 1]
+    receiver = _computed_member_identifier_receiver(source_text, bracket_index)
     return (
         _computed_member_receiver_is_builtin_function(source_text, bracket_index)
-        or "=>" in target_window
-        or bool(
-            re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
+        or (
+            receiver is not None
+            and _identifier_was_bound_to_function_like_value(
+                source_text, receiver, bracket_index
+            )
+        )
+        or _computed_member_direct_receiver_is_function_like_literal(
+            source_text, bracket_index
         )
     )
 
@@ -2080,6 +2079,91 @@ def _computed_member_direct_receiver_start(
     ):
         cursor -= 1
     return cursor + 1 if cursor + 1 < token_end else None
+
+
+def _identifier_was_bound_to_function_like_value(
+    source_text: str, name: str, end_index: int
+) -> bool:
+    escaped = re.escape(name)
+    patterns = (
+        re.compile(
+            rf"\b(?:async\s+)?function\s*\*?\s+{escaped}\b",
+            re.VERBOSE,
+        ),
+        re.compile(rf"\bclass\s+{escaped}\b", re.VERBOSE),
+        re.compile(
+            rf"""
+            (?:
+                \b(?:const|let|var)\s+{escaped}
+              |
+                (?<![\w$.]){escaped}
+            )
+            \s*=\s*
+            (?:
+                (?:async\s+)?function\b
+              | class\b
+              | (?:async\s*)?\([^)]*\)\s*=>
+              | (?:async\s+)?{JS_IDENTIFIER}\s*=>
+            )
+            """,
+            re.VERBOSE | re.DOTALL,
+        ),
+    )
+    for pattern in patterns:
+        for match in _executable_pattern_matches(source_text, pattern):
+            if match.start() >= end_index:
+                break
+            return True
+    return False
+
+
+def _computed_member_direct_receiver_is_function_like_literal(
+    source_text: str, bracket_index: int
+) -> bool:
+    receiver_start = _computed_member_expression_receiver_start(
+        source_text, bracket_index
+    )
+    if receiver_start is None:
+        return False
+    receiver = source_text[receiver_start:bracket_index]
+    return bool(
+        re.search(
+            r"(?:^|[^\w$])(?:async\s+)?function\b|(?:^|[^\w$])class\b|=>",
+            receiver,
+        )
+    )
+
+
+def _computed_member_expression_receiver_start(
+    source_text: str, bracket_index: int
+) -> int | None:
+    cursor = bracket_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0:
+        return None
+    if source_text[cursor] in ")]}":
+        matching = _matching_open_js_delimiter_index(source_text, cursor)
+        return matching
+    return None
+
+
+def _matching_open_js_delimiter_index(source_text: str, close_index: int) -> int | None:
+    closer = source_text[close_index]
+    opener = {")": "(", "]": "[", "}": "{"}.get(closer)
+    if opener is None:
+        return None
+    depth = 0
+    for kind, value, start, _end in reversed(_source_tokens(source_text[: close_index + 1])):
+        if kind in {"comment", "string", "template", "static-template", "regexp"}:
+            continue
+        if value == closer:
+            depth += 1
+        elif value == opener:
+            depth -= 1
+            if depth == 0:
+                return start
+    return None
 
 
 def _identifier_was_bound_to_runtime_import(
@@ -2830,6 +2914,38 @@ def _callee_process_env_prototype_mutator_invocation(
     alias = _callee_identifier_before_call(source_text, opener_index)
     if alias in _process_env_prototype_mutator_alias_names(source_text, opener_index):
         return "direct"
+    alias_invocation = _callee_process_env_prototype_mutator_alias_invocation(
+        source_text, opener_index
+    )
+    if alias_invocation is not None:
+        return alias_invocation
+    return None
+
+
+def _callee_process_env_prototype_mutator_alias_invocation(
+    source_text: str, opener_index: int
+) -> str | None:
+    aliases = _process_env_prototype_mutator_alias_names(source_text, opener_index)
+    if not aliases:
+        return None
+    for kind, value, start, _end in _source_tokens(source_text):
+        if start >= opener_index:
+            break
+        if kind != "identifier" or value not in aliases:
+            continue
+        for candidate_start in _grouped_identifier_candidate_starts(source_text, start):
+            alias_end = _parse_grouped_named_base(source_text, candidate_start, value)
+            if alias_end is None:
+                continue
+            if _callee_end_reaches_call_opener(
+                source_text, candidate_start, alias_end, opener_index
+            ):
+                return "direct"
+            helper = _process_env_prototype_mutator_invocation_helper(
+                source_text, alias_end, opener_index
+            )
+            if helper is not None:
+                return helper
     return None
 
 

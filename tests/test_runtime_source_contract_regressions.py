@@ -372,6 +372,28 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_function_like_receiver_bindings_fail_closed_beyond_local_window(self) -> None:
+        padding = "\n".join(f"const harmless{i} = {i};" for i in range(40))
+        for declaration in (
+            "function f(){}",
+            "async function f(){}",
+            "function* f(){}",
+            "class f {}",
+            "const f = function(){};",
+            "let f = class {};",
+            "var f = () => true;",
+            "let f; f = async () => true;",
+        ):
+            source = (
+                f"{declaration}\n"
+                f"{padding}\n"
+                "const key='constructor'; "
+                "const build=f[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(declaration=declaration):
+                self.assert_closed(source)
+
     def test_aliased_process_env_prototype_mutators_fail_closed(self) -> None:
         for alias_assignment in (
             "const set=Object.setPrototypeOf;",
@@ -395,7 +417,13 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 "const build=process.env[key]; "
                 "build(\"return import('./hidden.mjs')\")();"
             )
-            for call in ("set(process.env,()=>{});", "set?.(process.env,()=>{});"):
+            for call in (
+                "set(process.env,()=>{});",
+                "set?.(process.env,()=>{});",
+                "set.call(null, process.env,()=>{});",
+                "set.apply(null, [process.env,()=>{}]);",
+                "set.bind(null, process.env,()=>{})();",
+            ):
                 with self.subTest(alias_assignment=alias_assignment, call=call):
                     self.assert_closed(source.format(call=call))
 

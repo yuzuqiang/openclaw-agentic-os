@@ -23,8 +23,9 @@ Non-goals:
 
 ## Delivery Change Log
 
-- 2026-09-08: Rebound Issue #44 PR #46 runtime evidence after exact-head validation found the 2026-09-05 installed evidence was source-stale, then recaptured it again after the first 2026-09-08 rebind landed on a stale forward index:
-  - Corrections: installed OpenClaw 2026.7.1 was recaptured from exact generator head `c3e2294540d90d3dea5a09029897771644bf9f16` in `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`; it remains fail-closed with `runtime_ready=false`, `tools.catalog` unavailable, `subagents.allowLease.status` intentionally skipped to avoid possible production lease cleanup, and live acquire/release/build/attestation readiness unproven. The local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json` is current fail-closed recapture evidence from Agentic OS generator head `c3e2294540d90d3dea5a09029897771644bf9f16`, not runtime-ready candidate proof. The probe used an isolated non-production run root and loopback port `20247`, wrote durable prelaunch evidence, and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader / dynamic-import launcher pattern. It records no production Gateway/config/Cron/session/lease mutation or restart, keeps `agentic_os.DB_AUTHORITY_ENABLED=False`, and still requires different-agent exact-head Phase C before any review or promotion.
+- 2026-09-08: Rebound Issue #44 PR #46 runtime evidence after exact-head validation found the 2026-09-05 installed evidence was source-stale, then recaptured it again after the first 2026-09-08 rebind landed on a stale forward index. The 2026-09-10 lineage correction below supersedes that installed-runtime capture as current evidence.
+- 2026-09-10: Corrected PR #46's current-evidence lineage after review proved the 2026-09-08 installed recapture was bound to `c3e2294540d90d3dea5a09029897771644bf9f16`, which is not an ancestor of reviewed head `77a57c7b353bfa8c21de2ac612b050a663df7c30`:
+  - Corrections: `docs/runtime-evidence/phase-b-20260811-evidence-index.json` now marks current live-installed evidence as `pending_clean_generator_revision_capture` instead of treating the stale-lineage installed recapture as current proof. Runtime readiness remains false, production authority remains disabled, and a clean live-installed recapture from the current PR #46 lineage is required before any current evidence can be promoted. The local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json` remains fail-closed downstream evidence from Agentic OS generator head `c3e2294540d90d3dea5a09029897771644bf9f16`, not runtime-ready candidate proof. It records no production Gateway/config/Cron/session/lease mutation or restart, keeps `agentic_os.DB_AUTHORITY_ENABLED=False`, and still requires different-agent exact-head Phase C before any review or promotion.
 - 2026-09-05: Recaptured Issue #44 after merged PR #45 from a clean downstream Agentic OS worktree:
   - Corrections: installed OpenClaw 2026.7.1 was recaptured from exact generator head `bdf3e2c2985804f0078cc4017095bd2c483f8f3b` in `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`; the local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260905.json` was fail-closed recapture evidence from Agentic OS generator head `c09e35701e6b362c2be00ea9570d1b5e9fec21ca`. The 2026-09-08 sidecars supersede those prior current-evidence bindings because the forward index must remain bound to the latest capability-source revision.
 - 2026-08-26: Recaptured the Issue #44 downstream candidate evidence after Phase B producer/validator contract remediation, then invalidated it after later validator hardening:
@@ -133,11 +134,11 @@ Current-vs-proposed truth:
   `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks its stored
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
-- The 2026-09-08 Issue #44 installed-runtime evidence supersedes the pending
-  split-catalog capture state and the 2026-08-24 installed snapshot. It still
-  has `runtime_ready=false`: the installed 2026.7.1 catalog call failed,
-  `subagents.allowLease.status` was intentionally skipped to avoid possible
-  production lease cleanup, and connected Gateway build plus attestation
+- The 2026-09-08 Issue #44 installed-runtime evidence no longer counts as
+  current evidence for PR #46 because its generator head is not an ancestor of
+  the reviewed lineage. Current live-installed evidence is pending clean
+  recapture and still has `runtime_ready=false`: connected Gateway build,
+  model-callable catalog availability, live reachability, and attestation
   readiness remain unproven. The 2026-09-08 downstream candidate recapture at
   OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic OS
   `c3e2294540d90d3dea5a09029897771644bf9f16` remains separate fail-closed evidence,

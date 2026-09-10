@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `64f09c2d6b77a4e0864c212bdf90ec98c1856cdadcdac359168d6638ffa40c05`
+- Current corrected design artifact SHA-256: `46b95329e340f31c4cded43d40fe79ef4baaaec20034ce14567c47e6450ca14d`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -488,14 +488,12 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `lightContext`, `client_request_id`, `idempotency_key`, `gateway_lease_id`, and
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
-Issue #44 recaptured installed OpenClaw 2026.7.1 from exact generator head
-`c3e2294540d90d3dea5a09029897771644bf9f16` in
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json`.
-That preflight deliberately used `--skip-live-status-rpc` because the installed
-`subagents.allowLease.status` path may perform incidental lease cleanup. It is
-therefore a fail-closed, no-production-lease-mutation record: disk source
-declarations for allowLease RPCs are preserved, but live reachability, connected
-Gateway build identity, model-callable catalog availability, and
+Issue #44 previously recaptured installed OpenClaw 2026.7.1 from generator head
+`c3e2294540d90d3dea5a09029897771644bf9f16`, but that head is not an ancestor of
+current PR #46 head `77a57c7b353bfa8c21de2ac612b050a663df7c30`. The forward
+index therefore marks current live-installed evidence as pending clean
+recapture from this lineage. Runtime readiness remains false: live reachability,
+connected Gateway build identity, model-callable catalog availability, and
 `agenticOs.runtime.attest` readiness remain unproven. The plain-catalog path is
 deliberately offline-only: it reports
 `classification=offline_schema_validation_only` and can never set
@@ -528,7 +526,8 @@ model-callable `tools.catalog` evidence with Gateway source declarations.
 
 There is current Issue #44 downstream recapture evidence, but it is not a
 runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
-review binding. The local downstream OpenClaw candidate remains clean at
+review binding. Current live-installed evidence is pending recapture from the
+PR #46 lineage. The local downstream OpenClaw candidate remains clean at
 `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
 `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json`
 from generator head `c3e2294540d90d3dea5a09029897771644bf9f16` and failed

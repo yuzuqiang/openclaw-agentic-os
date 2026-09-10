@@ -1,9 +1,9 @@
 {
   "classification": "evidence_lineage_correction",
   "current_evidence": {
-    "classification": "issue44_live_installed_fail_closed_no_production_lease_mutation",
+    "classification": "issue44_live_installed_pending_clean_generator_recapture",
     "generator_binding_requirements": {
-      "bound_head_is_ancestor_of_containing_revision": true,
+      "bound_head_is_ancestor_of_containing_revision": false,
       "bound_tree_matches_bound_head_tree": true,
       "capability_source_paths": [
         "scripts/openclaw-tool-capability-preflight.py",
@@ -16,8 +16,8 @@
         "src/agentic_os/heartbeat_shadow.py",
         "src/agentic_os/__init__.py"
       ],
-      "containing_revision_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
-      "no_capability_source_drift_after_bound_head": true,
+      "containing_revision_sha": "77a57c7b353bfa8c21de2ac612b050a663df7c30",
+      "no_capability_source_drift_after_bound_head": false,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
@@ -26,13 +26,13 @@
       "tree_sha": "98f36a6e869c842f1f2c8ce8b10b50af250b82b4"
     },
     "no_production_lease_mutation": true,
-    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260908.json",
+    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-recapture.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
+    "reviewed_head_sha": "77a57c7b353bfa8c21de2ac612b050a663df7c30",
     "runtime_ready": false,
-    "sha256": "5f3040b9732eb24aff6c41263a61e6c939710b2f65800370893c23f7f59a5de5",
-    "status": "captured_from_clean_generator_revision",
-    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 was recaptured on 2026-09-10 from generator revision c3e2294540d90d3dea5a09029897771644bf9f16, with --skip-live-status-rpc; it remains fail-closed because tools.catalog, live acquire/release reachability, connected build identity, and agenticOs.runtime.attest readiness are unproven."
+    "sha256": null,
+    "status": "pending_clean_generator_revision_capture",
+    "status_reason": "The prior installed OpenClaw 2026.7.1 recapture was bound to generator revision c3e2294540d90d3dea5a09029897771644bf9f16, which is not an ancestor of reviewed PR #46 head 77a57c7b353bfa8c21de2ac612b050a663df7c30. Current live-installed evidence is therefore pending a clean recapture from this lineage; runtime_ready remains false."
   },
   "downstream_candidate_evidence": {
     "agentic_os_head_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
@@ -115,5 +115,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "current_fail_closed_runtime_evidence_pending_phase_c"
+  "status": "pending_current_evidence"
 }
