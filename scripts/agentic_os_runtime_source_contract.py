@@ -465,6 +465,19 @@ PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_REASSIGNMENT = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+BUILTIN_FUNCTION_DESTRUCTURING_ASSIGNMENT = re.compile(
+    r"""
+    \b(?:const|let|var)\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+BUILTIN_FUNCTION_DESTRUCTURING_REASSIGNMENT = re.compile(
+    r"""
+    (?<![\w$.])
+    \(?\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 INDIRECT_COMMONJS_REQUIRE_INVOCATION = re.compile(
     rf"""
     (?:
@@ -2064,7 +2077,9 @@ def _identifier_was_bound_to_builtin_function(
         if match.start() >= end_index:
             break
         rhs_start = _skip_js_trivia(source_text, match.end())
-        rhs_end = _parse_builtin_function_reference_end(source_text, rhs_start)
+        rhs_end = _parse_builtin_function_or_bound_reference_end(
+            source_text, rhs_start
+        )
         if rhs_end is None:
             continue
         assignment_end = _skip_js_trivia(source_text, rhs_end)
@@ -2075,7 +2090,73 @@ def _identifier_was_bound_to_builtin_function(
             "\n",
         }:
             return True
+    for match in _executable_pattern_matches(
+        source_text, BUILTIN_FUNCTION_DESTRUCTURING_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        parsed_base = _parse_builtin_function_destructuring_base(source_text, rhs_start)
+        if parsed_base is None:
+            continue
+        base, rhs_end = parsed_base
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            continue
+        if name in _builtin_function_destructured_aliases(base, match.group("body")):
+            return True
+    for match in _executable_pattern_matches(
+        source_text, BUILTIN_FUNCTION_DESTRUCTURING_REASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        parsed_base = _parse_builtin_function_destructuring_base(source_text, rhs_start)
+        if parsed_base is None:
+            continue
+        base, rhs_end = parsed_base
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            ")",
+            "\r",
+            "\n",
+        }:
+            continue
+        if name in _builtin_function_destructured_aliases(base, match.group("body")):
+            return True
     return False
+
+
+def _parse_builtin_function_or_bound_reference_end(
+    source_text: str, index: int
+) -> int | None:
+    builtin_end = _parse_builtin_function_reference_end(source_text, index)
+    if builtin_end is None:
+        return None
+    try:
+        member = _parse_static_runtime_member(
+            source_text,
+            builtin_end,
+            dynamic_error="runtime source contains an unsupported evaluated loader reference",
+        )
+    except RuntimeSourceContractError:
+        return builtin_end
+    if member is None or member[0] != "bind":
+        return builtin_end
+    call_index = _skip_js_trivia(source_text, member[1])
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return builtin_end
+    close_index = _matching_js_delimiter_index(source_text, call_index, len(source_text))
+    if close_index is None:
+        return builtin_end
+    return close_index + 1
 
 
 def _parse_builtin_function_reference_end(source_text: str, index: int) -> int | None:
@@ -2113,6 +2194,53 @@ def _parse_builtin_function_reference_end(source_text: str, index: int) -> int |
         }:
             return member[1]
     return None
+
+
+def _parse_builtin_function_destructuring_base(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    for base in ("Math", "Object", "Reflect"):
+        parsed = _parse_grouped_named_base(source_text, index, base)
+        if parsed is None:
+            continue
+        before = source_text[index - 1] if index > 0 else ""
+        if before and (_is_identifier_character(before) or before == "."):
+            continue
+        after = _skip_js_trivia(source_text, parsed)
+        if after < len(source_text) and (
+            _is_identifier_character(source_text[after])
+            or source_text[after] in ".([`"
+            or source_text.startswith("?.", after)
+        ):
+            continue
+        return base, parsed
+    return None
+
+
+def _builtin_function_destructured_aliases(base: str, body: str) -> set[str]:
+    aliases: set[str] = set()
+    allowed_object_members = {
+        "assign",
+        "create",
+        "defineProperty",
+        "getPrototypeOf",
+        "setPrototypeOf",
+    }
+    for part in body.split(","):
+        segment = part.strip()
+        if not segment:
+            continue
+        matched = re.fullmatch(
+            rf"(?P<member>{JS_IDENTIFIER})(?:\s*:\s*(?P<name>{JS_IDENTIFIER}))?",
+            segment,
+        )
+        if matched is None:
+            continue
+        member = matched.group("member")
+        if base in {"Object", "Reflect"} and member not in allowed_object_members:
+            continue
+        aliases.add(matched.group("name") or member)
+    return aliases
 
 
 def _computed_member_process_env_target_start(
