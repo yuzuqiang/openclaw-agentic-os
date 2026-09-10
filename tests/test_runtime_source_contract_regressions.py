@@ -409,6 +409,12 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "(Reflect)?.[name]",
             "((Object))?.[name]",
             "((Reflect))?.[name]",
+            "(Object[name])",
+            "(Reflect[name])",
+            "((Object)[name])",
+            "((Reflect)[name])",
+            "((Object)?.[name])",
+            "((Reflect)?.[name])",
             "Object/*c*/[name]",
             "Reflect /*c*/ [name]",
             f"Object{long_trivia}[name]",
@@ -417,10 +423,16 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             f"(Reflect{long_trivia})[name]",
             f"((Object){long_trivia})[name]",
             f"((Reflect){long_trivia})[name]",
+            f"(Object{long_trivia}[name])",
+            f"(Reflect{long_trivia}[name])",
+            f"((Object){long_trivia}[name])",
+            f"((Reflect){long_trivia}[name])",
             f"Object?.[{long_trivia}name]",
             f"Reflect?.[{long_trivia}name]",
             f"(Object)?.[{long_trivia}name]",
             f"(Reflect)?.[{long_trivia}name]",
+            f"(Object?.[{long_trivia}name])",
+            f"(Reflect?.[{long_trivia}name])",
         ):
             for call_operator in ("", "?."):
                 source = (
@@ -464,14 +476,24 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "(Reflect).setPrototypeOf",
             "((Object)).setPrototypeOf",
             "((Reflect)).setPrototypeOf",
+            "(Object.setPrototypeOf)",
+            "(Reflect.setPrototypeOf)",
+            "((Object).setPrototypeOf)",
+            "((Reflect).setPrototypeOf)",
             'Object["setPrototypeOf"]',
             'Reflect["setPrototypeOf"]',
             '(Object)["setPrototypeOf"]',
             '(Reflect)["setPrototypeOf"]',
+            '(Object["setPrototypeOf"])',
+            '(Reflect["setPrototypeOf"])',
+            '((Object)["setPrototypeOf"])',
+            '((Reflect)["setPrototypeOf"])',
             "Object?.setPrototypeOf",
             "Reflect?.setPrototypeOf",
             "(Object)?.setPrototypeOf",
             "(Reflect)?.setPrototypeOf",
+            "(Object?.setPrototypeOf)",
+            "(Reflect?.setPrototypeOf)",
         ):
             source = (
                 f"{callee}(process.env,()=>{{}}); "
@@ -966,6 +988,9 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         witnesses = (
             f"const name='setPrototypeOf';\n(Object{long_trivia})[name](process.env,()=>{{}});\n",
             f"const name='setPrototypeOf';\n((Object){long_trivia})?.[name]?.(process.env,()=>{{}});\n",
+            "const name='setPrototypeOf';\n(Object.setPrototypeOf)(process.env,()=>{});\n",
+            f"const name='setPrototypeOf';\n(Object{long_trivia}[name])(process.env,()=>{{}});\n",
+            f"const name='setPrototypeOf';\n(Reflect?.[{long_trivia}name])?.(process.env,()=>{{}});\n",
         )
         for declaration in witnesses:
             with self.subTest(declaration=declaration):

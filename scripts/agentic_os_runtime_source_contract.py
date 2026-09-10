@@ -2728,6 +2728,10 @@ def _callee_end_reaches_call_opener(
     source_text: str, callee_end: int, opener_index: int
 ) -> bool:
     cursor = _skip_js_trivia(source_text, callee_end)
+    while cursor < opener_index and source_text[cursor] == ")":
+        if _matching_js_opener_index(source_text, cursor) is None:
+            return False
+        cursor = _skip_js_trivia(source_text, cursor + 1)
     if cursor == opener_index:
         return True
     if source_text.startswith("?.", cursor):
