@@ -1,7 +1,7 @@
 {
     "classification": "evidence_lineage_correction",
     "current_evidence": {
-        "classification": "issue44_live_installed_clean_generator_recapture_fail_closed",
+        "classification": "issue44_live_installed_source_drift_pending_clean_generator_recapture",
         "generator_binding_requirements": {
             "bound_head_is_ancestor_of_containing_revision": true,
             "bound_tree_matches_bound_head_tree": true,
@@ -17,7 +17,7 @@
                 "src/agentic_os/__init__.py"
             ],
             "containing_revision_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
-            "no_capability_source_drift_after_bound_head": false,
+            "no_capability_source_drift_after_bound_head": true,
             "script_digest_matches_bound_head_blob": true
         },
         "generator_revision": {
@@ -26,13 +26,13 @@
             "tree_sha": "133e960782f1fabbbb32196471a557a0a1679a93"
         },
         "no_production_lease_mutation": true,
-        "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json",
+        "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-current.json",
         "raw_status": "fail",
         "reviewed_head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
         "runtime_ready": false,
-        "sha256": "add3eab40b6472e2b473a5e18e7df6852417578175c96a0860dd510efe5ce603",
-        "status": "captured_from_clean_generator_revision",
-        "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean post-PR49 main lineage after PR #49 merged at 5908c6886d732e710631508aa0a1e365cad76989. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease.status was intentionally skipped to preserve the no-production-lease-mutation boundary."
+        "sha256": "",
+        "status": "pending_clean_generator_revision_capture",
+        "status_reason": "The prior installed OpenClaw 2026.7.1 preflight artifact remains fail-closed historical evidence, but PR #50 changed capability source paths after its bound clean generator head. Current evidence is demoted until a clean exact-head recapture has zero capability-source drift."
     },
     "downstream_candidate_evidence": {
         "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
@@ -80,7 +80,7 @@
         "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
         "policy": "downstream/local OpenClaw adaptation only; no openclaw/openclaw write, no production Gateway/Cron/service/DB/session/lease mutation, and no DB authority promotion without exact isolated evidence plus independent Phase C",
         "runtime_ready": false,
-        "sha256": "4e99c1ca93197bb81a25240457d7f727da279bd9de00f7f2bafaf1b92f48c361",
+        "sha256": "4d6659fdda7716b28b1b4b19c560d1c7d61713df8985eec9fdb72eddafa8b789",
         "source_closure_blockers": [
             "openclaw.mjs:357",
             "openclaw.mjs:373",
@@ -138,5 +138,5 @@
         }
     ],
     "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-    "status": "current_fail_closed_runtime_evidence_pending_phase_c"
+    "status": "pending_current_evidence"
 }

@@ -939,6 +939,42 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         )
         self.assert_closed(source)
 
+    def test_literal_forwarded_dynamic_imports_reject_body_self_reference(self) -> None:
+        sources = (
+            (
+                "const tryImport = async (specifier) => {"
+                "  await import(specifier);"
+                "  queueMicrotask(() => tryImport(attackerValue));"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => {"
+                "  await import(specifier);"
+                "  return tryImport;"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_with_scoped_call_site(self) -> None:
+        sources = (
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) { await tryImport('./dist/entry.js'); }"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) await tryImport('./dist/entry.js');"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
     def test_literal_forwarded_dynamic_imports_reject_out_of_scope_calls(self) -> None:
         source = (
             "{"

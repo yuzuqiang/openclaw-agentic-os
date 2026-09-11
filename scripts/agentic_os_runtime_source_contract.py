@@ -6003,6 +6003,48 @@ def _parse_literal_helper_call(source_text: str, name_start: int, name_end: int)
     return specifier, close_index + 1
 
 
+def _js_with_block_ranges(source_text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    tokens = _source_tokens(source_text)
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "with":
+            continue
+        cursor = index + 1
+        while cursor < len(tokens) and tokens[cursor][0] == "comment":
+            cursor += 1
+        if (
+            cursor >= len(tokens)
+            or tokens[cursor][0] != "punctuation"
+            or tokens[cursor][1] != "("
+        ):
+            continue
+        condition_end = _matching_js_delimiter_end(source_text, tokens[cursor][2], "(", ")")
+        if condition_end is None:
+            continue
+        body_index = _skip_js_trivia(source_text, condition_end)
+        if body_index >= len(source_text) or source_text[body_index] != "{":
+            statement_end = len(source_text)
+            for token_kind, token_value, token_start, token_end in tokens:
+                if token_start < body_index or token_kind != "punctuation":
+                    continue
+                if token_value == ";":
+                    statement_end = token_end
+                    break
+                if token_value == "}":
+                    statement_end = token_start
+                    break
+            ranges.append((body_index, statement_end))
+            continue
+        body_end = _matching_js_delimiter_end(source_text, body_index, "{", "}")
+        if body_end is not None:
+            ranges.append((body_index, body_end))
+    return ranges
+
+
+def _index_in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start < index < end for start, end in ranges)
+
+
 def _helper_parameter_is_only_dynamic_import_argument(
     source_text: str, argument: str, body_start: int, body_end: int
 ) -> bool:
@@ -6076,14 +6118,19 @@ def _literal_forwarded_dynamic_import_specifiers(
         scope_end = _enclosing_js_block_end(source_text, match.start())
         name = match.group("name")
         name_start, name_end = match.span("name")
+        with_ranges = _js_with_block_ranges(source_text)
         values: list[str] = []
         for kind, value, start, end in _source_tokens(source_text):
             if kind != "identifier" or value != name:
                 continue
             if start == name_start and end == name_end:
                 continue
+            if body_start < start < body_end:
+                return None
             if not (body_end <= start < scope_end):
                 continue
+            if _index_in_ranges(start, with_ranges):
+                return None
             parsed_call = _parse_literal_helper_call(source_text, start, end)
             if parsed_call is None:
                 return None

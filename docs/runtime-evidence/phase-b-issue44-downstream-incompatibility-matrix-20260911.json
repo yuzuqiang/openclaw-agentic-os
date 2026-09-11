@@ -2,7 +2,7 @@
     "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
     "blockers": [
         {
-            "evidence": "scripts/agentic_os_runtime_source_contract.py now accepts only local async helper-call dynamic imports whose parameter is not rewritten, whose body has no dynamic with scope, and whose accepted direct literal calls remain in the helper declaration's lexical block. Literal-array for-of dynamic import bindings remain rejected because JavaScript iterator semantics are mutable; arbitrary import(specifier) remains rejected.",
+            "evidence": "scripts/agentic_os_runtime_source_contract.py now accepts only local async helper-call dynamic imports whose parameter is not rewritten, whose body has no dynamic with scope or self-reference, and whose accepted direct literal calls remain in the helper declaration's lexical block outside dynamic with scope. Literal-array for-of dynamic import bindings remain rejected because JavaScript iterator semantics are mutable; arbitrary import(specifier) remains rejected.",
             "id": "source_closure_computed_dynamic_import",
             "smallest_downstream_local_increment": "No official openclaw/openclaw write. Keep this as analyzer compatibility only until different-agent Phase C validates the exact Agentic OS head.",
             "source_locations": [

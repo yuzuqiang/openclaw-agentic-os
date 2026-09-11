@@ -535,8 +535,10 @@ from the post-PR49 generator lineage and failed closed before starting the
 candidate. The helper-call `import(specifier)` sites in `openclaw.mjs` are now
 accounted only when they flow from literal helper calls whose parameter is not
 rewritten, whose body has no dynamic `with` scope, and whose direct calls stay in
-the helper declaration's lexical block, while literal-array `for...of` computed
-imports remain fail-closed because iterator semantics are mutable. The companion
+the helper declaration's lexical block; helper body self-references and helper
+call sites inside dynamic `with` scopes also fail closed. Literal-array
+`for...of` computed imports remain fail-closed because iterator semantics are
+mutable. The companion
 `docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json`
 binds the first local source-closure blocker to `openclaw.mjs:357`,
 `openclaw.mjs:373`, and `openclaw.mjs:769`, while preserving respawn lines
@@ -552,6 +554,13 @@ non-production run root and loopback port `20351`, recorded
 Gateway/config/Cron/session/lease mutation or restart.
 Historical candidate invocations and reviews must not be counted as current
 exact-head runtime evidence.
+
+The prior installed OpenClaw preflight JSON from the post-PR49 generator lineage
+is now treated as fail-closed historical evidence, not current proof, because
+PR #50 changed capability source paths after that artifact's bound clean
+generator head. A fresh clean exact-head installed preflight recapture with zero
+capability-source drift is required before the evidence index may return to
+`current_fail_closed_runtime_evidence_pending_phase_c`.
 
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can

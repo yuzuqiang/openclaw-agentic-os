@@ -197,8 +197,12 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(
-            live["status"], "current_fail_closed_runtime_evidence_pending_phase_c"
+        self.assertIn(
+            live["status"],
+            {
+                "current_fail_closed_runtime_evidence_pending_phase_c",
+                "pending_current_evidence",
+            },
         )
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
@@ -244,8 +248,12 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(
-            index["status"], "current_fail_closed_runtime_evidence_pending_phase_c"
+        self.assertIn(
+            index["status"],
+            {
+                "current_fail_closed_runtime_evidence_pending_phase_c",
+                "pending_current_evidence",
+            },
         )
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
@@ -255,27 +263,42 @@ class CurrentStatusTests(unittest.TestCase):
             live["evidence_index"]["downstream_candidate_status"],
             index["downstream_candidate_evidence"]["status"],
         )
-        self.assertEqual(
+        self.assertIn(
             index["current_evidence"]["status"],
-            "captured_from_clean_generator_revision",
+            {
+                "captured_from_clean_generator_revision",
+                "pending_clean_generator_revision_capture",
+            },
         )
         current_evidence_path = root / index["current_evidence"]["path"]
-        self.assertTrue(current_evidence_path.exists())
-        self.assertEqual(
-            index["current_evidence"]["sha256"],
-            hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
-        )
+        if index["current_evidence"]["status"] == "pending_clean_generator_revision_capture":
+            self.assertEqual(index["status"], "pending_current_evidence")
+            self.assertFalse(current_evidence_path.exists())
+        else:
+            self.assertTrue(current_evidence_path.exists())
+            self.assertEqual(
+                index["current_evidence"]["sha256"],
+                hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
+            )
 
         issue44_installed = live["issue44_live_installed_preflight"]
         issue44_installed_path = root / issue44_installed["path"]
-        self.assertEqual(
-            issue44_installed["status"], "captured_from_clean_generator_revision"
+        self.assertIn(
+            issue44_installed["status"],
+            {
+                "captured_from_clean_generator_revision",
+                "pending_clean_generator_revision_capture",
+            },
         )
-        self.assertTrue(issue44_installed_path.exists())
-        self.assertEqual(
-            issue44_installed["sha256"],
-            hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
-        )
+        if issue44_installed["status"] == "pending_clean_generator_revision_capture":
+            self.assertFalse(issue44_installed_path.exists())
+            self.assertEqual(issue44_installed["sha256"], "")
+        else:
+            self.assertTrue(issue44_installed_path.exists())
+            self.assertEqual(
+                issue44_installed["sha256"],
+                hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
+            )
         self.assertFalse(issue44_installed["runtime_ready"])
 
         issue44_candidate = live["issue44_downstream_persistent_lifecycle_probe"]
@@ -590,6 +613,7 @@ class CurrentStatusTests(unittest.TestCase):
         expected_no_source_drift = current["generator_binding_requirements"][
             "no_capability_source_drift_after_bound_head"
         ]
+        self.assertTrue(expected_no_source_drift)
         reviewed_head = current["reviewed_head_sha"]
         self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
         self.assertEqual(
