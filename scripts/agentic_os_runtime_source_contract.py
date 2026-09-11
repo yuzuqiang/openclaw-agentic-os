@@ -6013,6 +6013,8 @@ def _helper_parameter_is_only_dynamic_import_argument(
     ]
     dynamic_import_arguments: set[tuple[int, int]] = set()
     for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind == "identifier" and value == "with":
+            return False
         if kind != "identifier" or value != "import":
             continue
         if index + 3 >= len(tokens):
@@ -6037,6 +6039,23 @@ def _helper_parameter_is_only_dynamic_import_argument(
     return True
 
 
+def _enclosing_js_block_end(source_text: str, index: int) -> int:
+    block_stack: list[int] = []
+    for kind, value, start, _end in _source_tokens(source_text):
+        if start >= index:
+            break
+        if kind != "punctuation":
+            continue
+        if value == "{":
+            block_stack.append(start)
+        elif value == "}" and block_stack:
+            block_stack.pop()
+    if not block_stack:
+        return len(source_text)
+    end = _matching_js_delimiter_end(source_text, block_stack[-1], "{", "}")
+    return len(source_text) if end is None else end
+
+
 def _literal_forwarded_dynamic_import_specifiers(
     source_text: str, argument: str, call_index: int
 ) -> list[str] | None:
@@ -6054,6 +6073,7 @@ def _literal_forwarded_dynamic_import_specifiers(
             source_text, argument, body_start, body_end
         ):
             continue
+        scope_end = _enclosing_js_block_end(source_text, match.start())
         name = match.group("name")
         name_start, name_end = match.span("name")
         values: list[str] = []
@@ -6061,6 +6081,8 @@ def _literal_forwarded_dynamic_import_specifiers(
             if kind != "identifier" or value != name:
                 continue
             if start == name_start and end == name_end:
+                continue
+            if not (body_end <= start < scope_end):
                 continue
             parsed_call = _parse_literal_helper_call(source_text, start, end)
             if parsed_call is None:

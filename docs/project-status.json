@@ -18,7 +18,7 @@
             ],
             "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
             "runtime_ready": false,
-            "sha256": "55c77bb7bdb07c16e1a78b2d072ec38df304f2563cf483791c7891633c4561d1",
+            "sha256": "4e99c1ca93197bb81a25240457d7f727da279bd9de00f7f2bafaf1b92f48c361",
             "smallest_downstream_local_increment": "local downstream OpenClaw launcher/build adaptation only; no arbitrary import(specifier), no ambient respawn spawn whitelist, no openclaw/openclaw write, and no DB authority promotion before exact isolated evidence plus Phase C",
             "status": "fail_closed_downstream_local_remediation_required"
         },
@@ -61,7 +61,7 @@
             "runtime_ready_candidate_evidence": false,
             "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
             "status": "fail_closed_runtime_source_closure_pending_phase_c",
-            "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate. PR #50 review later tightened dynamic import accounting: helper-call computed imports are accepted only when the parameter is not rewritten, while literal-array for-of computed imports remain fail-closed because JavaScript iterator semantics are mutable. The companion incompatibility matrix now preserves dynamic-import remediation as the first downstream/local blocker, with the compile-cache respawn child-process entrypoint and missing committed dist entrypoints to recapture after that source-closure boundary.",
+            "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate. PR #50 review later tightened dynamic import accounting: helper-call computed imports are accepted only when the parameter is not rewritten, the helper body has no dynamic with scope, and each accepted direct call remains in the helper declaration's lexical block, while literal-array for-of computed imports remain fail-closed because JavaScript iterator semantics are mutable. The companion incompatibility matrix now preserves dynamic-import remediation as the first downstream/local blocker, with the compile-cache respawn child-process entrypoint and missing committed dist entrypoints to recapture after that source-closure boundary.",
             "validation_receipt_bound": false
         },
         "issue44_live_installed_preflight": {
@@ -133,7 +133,7 @@
         },
         "current_corrected_design_artifact": {
             "path": "docs/agentic-os-production-adaptation.md",
-            "sha256": "98d24f16aac98d1b316cd4915d9cf2ed4322f3e8ea47bf66d82bfa5115cb7829",
+            "sha256": "657febfc0813591ac7495ee2c6b7c037862fecd342b25a925d2b95802059f7a2",
             "status": "current_successor_artifact_not_pr39_acceptance"
         },
         "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",

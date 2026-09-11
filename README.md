@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `98d24f16aac98d1b316cd4915d9cf2ed4322f3e8ea47bf66d82bfa5115cb7829`
+- Current corrected design artifact SHA-256: `657febfc0813591ac7495ee2c6b7c037862fecd342b25a925d2b95802059f7a2`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -534,8 +534,9 @@ review binding. The local downstream OpenClaw candidate remains clean at
 from the post-PR49 generator lineage and failed closed before starting the
 candidate. The helper-call `import(specifier)` sites in `openclaw.mjs` are now
 accounted only when they flow from literal helper calls whose parameter is not
-rewritten, while literal-array `for...of` computed imports remain fail-closed
-because iterator semantics are mutable. The companion
+rewritten, whose body has no dynamic `with` scope, and whose direct calls stay in
+the helper declaration's lexical block, while literal-array `for...of` computed
+imports remain fail-closed because iterator semantics are mutable. The companion
 `docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json`
 binds the first local source-closure blocker to `openclaw.mjs:357`,
 `openclaw.mjs:373`, and `openclaw.mjs:769`, while preserving respawn lines

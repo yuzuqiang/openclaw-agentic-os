@@ -930,6 +930,32 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_literal_forwarded_dynamic_imports_reject_with_shadowed_parameter(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => {"
+            "  with (scope) { await import(specifier); }"
+            "};"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_out_of_scope_calls(self) -> None:
+        source = (
+            "{"
+            "  const tryImport = async (specifier) => { await import(specifier); };"
+            "}"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_in_scope_helper_escape(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => { await import(specifier); };"
+            "{ const escaped = tryImport; }"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
     def test_downstream_launcher_dynamic_imports_fail_closed_on_for_of_boundary(self) -> None:
         source = (
             "const installProcessWarningFilter = async () => {"
