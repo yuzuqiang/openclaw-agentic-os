@@ -312,6 +312,34 @@ class CurrentStatusTests(unittest.TestCase):
                 "run_root_sha256"
             ],
         )
+        matrix = live["issue44_downstream_incompatibility_matrix"]
+        matrix_path = root / matrix["path"]
+        self.assertTrue(matrix_path.exists())
+        self.assertEqual(
+            matrix["sha256"],
+            hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
+        )
+        matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+        self.assertFalse(matrix_payload["runtime_ready"])
+        self.assertFalse(matrix_payload["production_authority_enabled"])
+        self.assertIn("source_closure_computed_dynamic_import", matrix["blockers"])
+        self.assertEqual(
+            index["downstream_local_remediation_boundary"]["sha256"],
+            matrix["sha256"],
+        )
+        self.assertEqual(
+            index["downstream_local_remediation_boundary"]["source_closure_blockers"],
+            ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
+        )
+        dist_blocker = next(
+            item
+            for item in matrix_payload["blockers"]
+            if item["id"] == "missing_committed_dist_entrypoints"
+        )
+        self.assertIn(
+            {"path": "dist/entry.js", "tracked": False, "exists": False},
+            dist_blocker["paths"],
+        )
 
         authority = status["production_authority"]
         self.assertEqual(authority["status"], "disabled")
@@ -609,6 +637,16 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(
             candidate["isolated_non_production_gateway"]["run_root_sha256"],
             candidate_payload["isolated_non_production_gateway"]["run_root_sha256"],
+        )
+        matrix = index["downstream_local_remediation_boundary"]
+        matrix_path = root / matrix["path"]
+        self.assertEqual(
+            matrix["sha256"], hashlib.sha256(matrix_path.read_bytes()).hexdigest()
+        )
+        self.assertFalse(matrix["runtime_ready"])
+        self.assertEqual(
+            matrix["source_closure_blockers"],
+            ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")

@@ -1,0 +1,82 @@
+{
+  "agentic_os_head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+  "blockers": [
+    {
+      "evidence": "scripts/agentic_os_runtime_source_contract.py rejects non-literal dynamic import arguments; probe reason runtime_source_closure_failed before candidate start.",
+      "id": "source_closure_computed_dynamic_import",
+      "smallest_downstream_local_increment": "Patch only the downstream/local OpenClaw launcher or committed build output so persistent-runner dynamic imports are literal, source-bound, and exact-head; do not write openclaw/openclaw.",
+      "source_locations": [
+        {
+          "line": 357,
+          "path": "openclaw.mjs",
+          "source": "const mod = await import(specifier);"
+        },
+        {
+          "line": 373,
+          "path": "openclaw.mjs",
+          "source": "await import(specifier);"
+        },
+        {
+          "line": 769,
+          "path": "openclaw.mjs",
+          "source": "const mod = await import(specifier);"
+        }
+      ],
+      "status": "blocking_prelaunch"
+    },
+    {
+      "evidence": "The exact clean downstream candidate tracks openclaw.mjs only for the launcher-facing dist entrypoints; dist/ is absent from the committed tree.",
+      "id": "missing_committed_dist_entrypoints",
+      "paths": [
+        {
+          "exists": false,
+          "path": "dist/warning-filter.js",
+          "tracked": false
+        },
+        {
+          "exists": false,
+          "path": "dist/warning-filter.mjs",
+          "tracked": false
+        },
+        {
+          "exists": false,
+          "path": "dist/entry.js",
+          "tracked": false
+        },
+        {
+          "exists": false,
+          "path": "dist/entry.mjs",
+          "tracked": false
+        },
+        {
+          "exists": false,
+          "path": "dist/cli/program/root-help.js",
+          "tracked": false
+        },
+        {
+          "exists": false,
+          "path": "dist/cli/program/root-help.mjs",
+          "tracked": false
+        }
+      ],
+      "smallest_downstream_local_increment": "Use a local downstream OpenClaw commit with committed/dist-bound entrypoints or a source-mode persistent runner contract; untracked build output is not exact-head evidence.",
+      "status": "next_fail_closed_after_source_closure"
+    },
+    {
+      "evidence": "tools.catalog remains unavailable before contract validation, connected Gateway build identity is unproven, and allowLease.status reachability was intentionally skipped to avoid production lease mutation.",
+      "evidence_path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json",
+      "id": "live_installed_tools_catalog",
+      "status": "blocking_db_authority"
+    }
+  ],
+  "db_authority_enabled": false,
+  "generated_at_utc": "2026-09-11T05:18:21Z",
+  "no_production_mutation_observed": true,
+  "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+  "phase_c_exact_head_required_before_review": true,
+  "production_authority_enabled": false,
+  "runtime_ready": false,
+  "safe_to_promote_runtime_ready": false,
+  "schema": "issue44_downstream_runtime_incompatibility_matrix_v1",
+  "summary": "Fail closed: the downstream launcher still cannot produce exact persistent runtime source closure because import(specifier) is computed, and the local candidate has no committed dist entrypoints to launch even after that boundary is remediated."
+}

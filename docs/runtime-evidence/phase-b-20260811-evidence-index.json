@@ -1,119 +1,133 @@
 {
-  "classification": "evidence_lineage_correction",
-  "current_evidence": {
-    "classification": "issue44_live_installed_clean_generator_recapture_fail_closed",
-    "generator_binding_requirements": {
-      "bound_head_is_ancestor_of_containing_revision": true,
-      "bound_tree_matches_bound_head_tree": true,
-      "capability_source_paths": [
-        "scripts/openclaw-tool-capability-preflight.py",
-        "scripts/agentic_os_runtime_source_contract.py",
-        "scripts/openclaw-live-accepted-session-probe.py",
-        "scripts/openclaw-real-gateway-contract-probe.py",
-        "src/agentic_os/openclaw_adapter.py",
-        "src/agentic_os/runtime_attestation.py",
-        "src/agentic_os/metadata.py",
-        "src/agentic_os/heartbeat_shadow.py",
-        "src/agentic_os/__init__.py"
-      ],
-      "containing_revision_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
-      "no_capability_source_drift_after_bound_head": true,
-      "script_digest_matches_bound_head_blob": true
+    "classification": "evidence_lineage_correction",
+    "current_evidence": {
+        "classification": "issue44_live_installed_clean_generator_recapture_fail_closed",
+        "generator_binding_requirements": {
+            "bound_head_is_ancestor_of_containing_revision": true,
+            "bound_tree_matches_bound_head_tree": true,
+            "capability_source_paths": [
+                "scripts/openclaw-tool-capability-preflight.py",
+                "scripts/agentic_os_runtime_source_contract.py",
+                "scripts/openclaw-live-accepted-session-probe.py",
+                "scripts/openclaw-real-gateway-contract-probe.py",
+                "src/agentic_os/openclaw_adapter.py",
+                "src/agentic_os/runtime_attestation.py",
+                "src/agentic_os/metadata.py",
+                "src/agentic_os/heartbeat_shadow.py",
+                "src/agentic_os/__init__.py"
+            ],
+            "containing_revision_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+            "no_capability_source_drift_after_bound_head": true,
+            "script_digest_matches_bound_head_blob": true
+        },
+        "generator_revision": {
+            "head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+            "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
+            "tree_sha": "bc47ca8e803ceb2d714a4f12dd19390aa77ecb9c"
+        },
+        "no_production_lease_mutation": true,
+        "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json",
+        "raw_status": "fail",
+        "reviewed_head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+        "runtime_ready": false,
+        "sha256": "e48a870068cec75012d4529fd37dfad84eb3dea9834aefcccfabe9a477a45e14",
+        "status": "captured_from_clean_generator_revision",
+        "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean GitHub main 45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0 after PR #48 merged. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease.status was intentionally skipped to preserve the no-production-lease-mutation boundary."
     },
-    "generator_revision": {
-      "head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
-      "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "84d282206a6acb0e4096c78a657217f726a907e1"
+    "downstream_candidate_evidence": {
+        "agentic_os_head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+        "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+        "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
+        "db_authority_enabled": false,
+        "duplicate_acquire_identity_parity": false,
+        "duplicate_release_identity_parity": false,
+        "duplicate_spawn_identity_parity": false,
+        "isolated_non_production_gateway": {
+            "candidate_port_closed": "not_required",
+            "candidate_port_opened": false,
+            "candidate_process_started": false,
+            "db_authority_enabled": false,
+            "loopback": true,
+            "port": 20349,
+            "production_config_mutation_attempted": false,
+            "production_gateway_restart_attempted": false,
+            "production_lease_mutation_attempted": false,
+            "production_session_mutation_attempted": false,
+            "run_id_sha256": "aec26a2941fd342aadde2700a6e6ed4894d89cba1b29bae2296907e5eaf77695",
+            "run_root_sha256": "4cd30aae55b0268868cabe388d5874b67971cd1d6f064ff17759f642fb129fd1",
+            "status": "not_started",
+            "transition_id_sha256": "564a317ebb5146e12b206e7136e170e980ccd3ad46967831afe9f57ca04b299f"
+        },
+        "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json",
+        "phase_c_exact_head_required_before_review": true,
+        "production_authority_enabled": false,
+        "runtime_ready": false,
+        "runtime_ready_candidate_evidence": false,
+        "sha256": "bb1bdb50b36d3800adfa538b2135bab07fdc8f2a431702e9a296866c1b4bc404",
+        "status": "fail_closed_runtime_source_closure_pending_phase_c",
+        "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from merged GitHub main Agentic OS generator revision 45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0 in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects computed dynamic import(source variable) before any Gateway/session/lease mutation. The companion incompatibility matrix records openclaw.mjs lines 357, 373, and 769 plus missing committed dist entrypoints as the smallest downstream/local remediation boundary.",
+        "validation_receipt_bound": false
     },
-    "no_production_lease_mutation": true,
-    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json",
-    "raw_status": "fail",
-    "reviewed_head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
-    "runtime_ready": false,
-    "sha256": "3faa671e09a9937c3809408f21cdb97f36e5a6876c89e733bef4bc017510df26",
-    "status": "captured_from_clean_generator_revision",
-    "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean GitHub main 2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15 after PR #47 merged. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease status was intentionally skipped to preserve the no-production-lease-mutation boundary."
-  },
-  "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
-    "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
-    "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
-    "db_authority_enabled": false,
-    "duplicate_acquire_identity_parity": false,
-    "duplicate_release_identity_parity": false,
-    "duplicate_spawn_identity_parity": false,
-    "isolated_non_production_gateway": {
-      "candidate_port_closed": "not_required",
-      "candidate_port_opened": false,
-      "candidate_process_started": false,
-      "db_authority_enabled": false,
-      "loopback": true,
-      "port": 20347,
-      "production_config_mutation_attempted": false,
-      "production_gateway_restart_attempted": false,
-      "production_lease_mutation_attempted": false,
-      "production_session_mutation_attempted": false,
-      "run_id_sha256": "5a627833127392488817419e8e68596bdc0b61be1863315646b54459c4ca27e0",
-      "run_root_sha256": "045ee030f5c032bf265d96c9a4f3d5b3c001575f5c5f1e82d8ad665ef7ab4c80",
-      "status": "not_started",
-      "transition_id_sha256": "6b5b8fdd02926ce51b3a56e9c95e6a2198d128cfcbf2193a55b3ce9f9c0ab95f"
-    },
-    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json",
-    "phase_c_exact_head_required_before_review": true,
-    "production_authority_enabled": false,
-    "runtime_ready": false,
-    "runtime_ready_candidate_evidence": false,
-    "sha256": "c00d6857936c5c7d8141d6db662b15dbbf65a5d8a4bd10fb092bf28c62e6f974",
-    "status": "fail_closed_runtime_source_closure_pending_phase_c",
-    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from merged GitHub main Agentic OS generator revision 2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15 in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported dynamic import before any Gateway/session/lease mutation.",
-    "validation_receipt_bound": false
-  },
-  "historical_artifacts": [
-    {
-      "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
-      "immutable_historical_bytes": true,
-      "interpretation": "superseded downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
-      "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
-      "raw_runtime_ready_candidate_evidence": true,
-      "raw_status": "pass",
-      "runtime_ready_candidate_evidence": false,
-      "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
-      "status": "invalidated_historical_downstream_snapshot"
-    },
-    {
-      "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
-      "immutable_historical_bytes": true,
-      "interpretation": "superseded round-3 downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening and capability-source drift invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
-      "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json",
-      "raw_runtime_ready_candidate_evidence": true,
-      "raw_status": "pass",
-      "runtime_ready_candidate_evidence": false,
-      "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
-      "status": "invalid_capability_source_drift_pending_recapture"
-    },
-    {
-      "binding_assessment": {
-        "actual_script_sha256_at_bound_head": "b975eafaa3b2769fd10b48a2dddabaec1b5129ba49792ad0a5a642b48fd5693a",
-        "bound_head": "b850fd85c79c3310774355fd906766d1adca8533",
-        "reason": "stored script digest does not match the script blob at the stored bound head",
-        "status": "invalid_mixed_revision_binding",
-        "stored_script_sha256": "712ae4fbecdad72071de3657980c85937342591683a768df0d480721d466afc9"
-      },
-      "immutable_historical_bytes": true,
-      "interpretation": "superseded false negative: tools.catalog was incorrectly treated as the Gateway RPC registry",
-      "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
-      "raw_status": "fail",
-      "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342"
-    },
-    {
-      "epoch_policy": "frozen historical record; current evidence is namespaced only in this sidecar",
-      "immutable_historical_bytes": true,
-      "interpretation": "historical revalidation only; not current-head authority",
-      "path": "docs/runtime-evidence/phase-b-revalidation-20260809.json",
-      "raw_status": "superseded",
-      "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3"
+    "historical_artifacts": [
+        {
+            "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
+            "immutable_historical_bytes": true,
+            "interpretation": "superseded downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
+            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260824.json",
+            "raw_runtime_ready_candidate_evidence": true,
+            "raw_status": "pass",
+            "runtime_ready_candidate_evidence": false,
+            "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
+            "status": "invalidated_historical_downstream_snapshot"
+        },
+        {
+            "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
+            "immutable_historical_bytes": true,
+            "interpretation": "superseded round-3 downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening and capability-source drift invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
+            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json",
+            "raw_runtime_ready_candidate_evidence": true,
+            "raw_status": "pass",
+            "runtime_ready_candidate_evidence": false,
+            "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
+            "status": "invalid_capability_source_drift_pending_recapture"
+        },
+        {
+            "binding_assessment": {
+                "actual_script_sha256_at_bound_head": "b975eafaa3b2769fd10b48a2dddabaec1b5129ba49792ad0a5a642b48fd5693a",
+                "bound_head": "b850fd85c79c3310774355fd906766d1adca8533",
+                "reason": "stored script digest does not match the script blob at the stored bound head",
+                "status": "invalid_mixed_revision_binding",
+                "stored_script_sha256": "712ae4fbecdad72071de3657980c85937342591683a768df0d480721d466afc9"
+            },
+            "immutable_historical_bytes": true,
+            "interpretation": "superseded false negative: tools.catalog was incorrectly treated as the Gateway RPC registry",
+            "path": "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json",
+            "raw_status": "fail",
+            "sha256": "92a199248f743b643e96e1b1adee00b4d0d16700160a12e03fa8edb9f88a6342"
+        },
+        {
+            "epoch_policy": "frozen historical record; current evidence is namespaced only in this sidecar",
+            "immutable_historical_bytes": true,
+            "interpretation": "historical revalidation only; not current-head authority",
+            "path": "docs/runtime-evidence/phase-b-revalidation-20260809.json",
+            "raw_status": "superseded",
+            "sha256": "e178fe8244a332f64836714b8fbac0b6c57d27f6005d2358957e52709bca7aa3"
+        }
+    ],
+    "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
+    "status": "current_fail_closed_runtime_evidence_pending_phase_c",
+    "downstream_local_remediation_boundary": {
+        "classification": "issue44_downstream_local_incompatibility_matrix",
+        "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
+        "sha256": "9947c97085391682ae4dfc4df10301b7920a8d58094128e79c84b0737b1047ab",
+        "runtime_ready": false,
+        "status": "fail_closed_downstream_local_remediation_required",
+        "source_closure_blockers": [
+            "openclaw.mjs:357",
+            "openclaw.mjs:373",
+            "openclaw.mjs:769"
+        ],
+        "next_blocker_after_source_closure": "missing committed dist/entry.js and dist/entry.mjs in the clean downstream candidate",
+        "policy": "downstream/local OpenClaw adaptation only; no openclaw/openclaw write, no production Gateway/Cron/service/DB/session/lease mutation, and no DB authority promotion without exact isolated evidence plus independent Phase C"
     }
-  ],
-  "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "current_fail_closed_runtime_evidence_pending_phase_c"
 }
