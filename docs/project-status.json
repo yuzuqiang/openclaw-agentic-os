@@ -8,16 +8,17 @@
         },
         "issue44_downstream_incompatibility_matrix": {
             "accounted_boundaries": [
-                "source_closure_computed_dynamic_import"
+                "literal_helper_call_dynamic_import"
             ],
             "blockers": [
+                "source_closure_computed_dynamic_import",
                 "source_closure_compile_cache_respawn_child_process",
                 "missing_committed_dist_entrypoints",
                 "live_installed_tools_catalog"
             ],
             "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
             "runtime_ready": false,
-            "sha256": "36922ad33ef6e0e2fc849723f7bdc8a95b533be5919b00ac89b48a53ee292527",
+            "sha256": "55c77bb7bdb07c16e1a78b2d072ec38df304f2563cf483791c7891633c4561d1",
             "smallest_downstream_local_increment": "local downstream OpenClaw launcher/build adaptation only; no arbitrary import(specifier), no ambient respawn spawn whitelist, no openclaw/openclaw write, and no DB authority promotion before exact isolated evidence plus Phase C",
             "status": "fail_closed_downstream_local_remediation_required"
         },
@@ -60,7 +61,7 @@
             "runtime_ready_candidate_evidence": false,
             "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
             "status": "fail_closed_runtime_source_closure_pending_phase_c",
-            "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate: bounded literal dynamic import(source variable) sites are now source-accounted, but runtime source closure still rejects the compile-cache respawn child-process entrypoint before any Gateway/session/lease mutation. The companion incompatibility matrix preserves missing committed dist entrypoints as the next downstream/local blocker after that source-closure boundary.",
+            "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate. PR #50 review later tightened dynamic import accounting: helper-call computed imports are accepted only when the parameter is not rewritten, while literal-array for-of computed imports remain fail-closed because JavaScript iterator semantics are mutable. The companion incompatibility matrix now preserves dynamic-import remediation as the first downstream/local blocker, with the compile-cache respawn child-process entrypoint and missing committed dist entrypoints to recapture after that source-closure boundary.",
             "validation_receipt_bound": false
         },
         "issue44_live_installed_preflight": {
@@ -132,7 +133,7 @@
         },
         "current_corrected_design_artifact": {
             "path": "docs/agentic-os-production-adaptation.md",
-            "sha256": "0a158111d185aeb3302f6dced002fe8ecc3a13cdc92812fdb7fce976c8f2ab18",
+            "sha256": "98d24f16aac98d1b316cd4915d9cf2ed4322f3e8ea47bf66d82bfa5115cb7829",
             "status": "current_successor_artifact_not_pr39_acceptance"
         },
         "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",

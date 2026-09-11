@@ -2,7 +2,7 @@
     "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
     "blockers": [
         {
-            "evidence": "scripts/agentic_os_runtime_source_contract.py now accepts only bounded literal for-of dynamic import bindings and local async helper calls whose every helper reference is a direct literal call; arbitrary import(specifier) remains rejected.",
+            "evidence": "scripts/agentic_os_runtime_source_contract.py now accepts only local async helper-call dynamic imports whose parameter is not rewritten and whose every helper reference is a direct literal call. Literal-array for-of dynamic import bindings remain rejected because JavaScript iterator semantics are mutable; arbitrary import(specifier) remains rejected.",
             "id": "source_closure_computed_dynamic_import",
             "smallest_downstream_local_increment": "No official openclaw/openclaw write. Keep this as analyzer compatibility only until different-agent Phase C validates the exact Agentic OS head.",
             "source_locations": [
@@ -22,10 +22,10 @@
                     "source": "const mod = await import(specifier);"
                 }
             ],
-            "status": "accounted_pending_phase_c"
+            "status": "blocking_prelaunch"
         },
         {
-            "evidence": "After literal dynamic imports are accounted, the isolated prelaunch recapture still fails before candidate start with runtime_source_closure_failed; the emitted error hash corresponds to the validator error \"runtime source contains an unsupported child-process Node entrypoint\".",
+            "evidence": "The prior isolated prelaunch recapture reached this boundary only before PR #50 tightened literal-array for-of dynamic import handling. Recapture this blocker after the downstream dynamic-import sites are rewritten or otherwise proven source-bound.",
             "id": "source_closure_compile_cache_respawn_child_process",
             "smallest_downstream_local_increment": "Patch only the downstream/local OpenClaw launcher so compile-cache respawn is disabled or source-bound for persistent-runner preflight; do not whitelist ambient process.execArgv/process.argv/env spawning.",
             "source_locations": [
@@ -45,10 +45,10 @@
                     "source": "return runRespawnedChild(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), ...process.argv.slice(2)], env);"
                 }
             ],
-            "status": "blocking_prelaunch"
+            "status": "blocked_behind_dynamic_import_remediation"
         },
         {
-            "evidence": "The exact clean downstream candidate tracks openclaw.mjs only for launcher-facing dist entrypoints; dist/ is absent from the committed tree. The Agentic OS fixture regression proves the newly accounted dynamic imports would then resolve to the missing dist boundary.",
+            "evidence": "The exact clean downstream candidate tracks openclaw.mjs only for launcher-facing dist entrypoints; dist/ is absent from the committed tree. This remains a downstream blocker to recapture after the dynamic-import and respawn source-closure boundaries are remediated.",
             "id": "missing_committed_dist_entrypoints",
             "paths": [
                 {
@@ -83,7 +83,7 @@
                 }
             ],
             "smallest_downstream_local_increment": "Use a local downstream OpenClaw commit with committed/dist-bound entrypoints or a source-mode persistent runner contract; untracked build output is not exact-head evidence.",
-            "status": "next_fail_closed_after_respawn_source_closure"
+            "status": "future_blocker_after_source_closure_recapture"
         },
         {
             "evidence": "tools.catalog remains unavailable before contract validation, connected Gateway build identity is unproven, and allowLease.status reachability was intentionally skipped to avoid production lease mutation.",
@@ -101,5 +101,5 @@
     "runtime_ready": false,
     "safe_to_promote_runtime_ready": false,
     "schema": "issue44_downstream_runtime_incompatibility_matrix_v1",
-    "summary": "Fail closed: bounded literal dynamic import(source variable) patterns in openclaw.mjs are now source-accounted by the Agentic OS analyzer, but the clean downstream candidate still cannot produce exact persistent runtime source closure because its compile-cache respawn path launches process.execPath with unbound ambient process arguments/environment. Missing committed dist entrypoints remain the next launch-output blocker after that downstream/local source-closure boundary."
+    "summary": "Fail closed: literal-array for-of dynamic import(source variable) patterns in openclaw.mjs remain rejected because JavaScript iterator semantics are mutable. The clean downstream candidate must first rewrite or otherwise prove those dynamic imports source-bound; compile-cache respawn child-process closure and missing committed dist entrypoints remain downstream blockers to recapture after that boundary."
 }

@@ -5980,27 +5980,9 @@ def _parse_dynamic_import_identifier_argument(
 def _literal_for_of_dynamic_import_specifiers(
     source_text: str, argument: str, call_index: int
 ) -> list[str] | None:
-    loop = re.compile(
-        rf"\bfor\s*\(\s*(?:const|let|var)\s+{re.escape(argument)}\s+of\s*\[",
-        re.DOTALL,
-    )
-    for match in loop.finditer(source_text):
-        array_start = match.end() - 1
-        parsed_array = _parse_literal_string_array_specifiers(source_text, array_start)
-        if parsed_array is None:
-            continue
-        values, array_end = parsed_array
-        header_end = _skip_js_trivia(source_text, array_end)
-        if header_end >= len(source_text) or source_text[header_end] != ")":
-            continue
-        body_start = _skip_js_trivia(source_text, header_end + 1)
-        if body_start >= len(source_text) or source_text[body_start] != "{":
-            continue
-        body_end = _matching_js_delimiter_end(source_text, body_start, "{", "}")
-        if body_end is None:
-            continue
-        if body_start < call_index < body_end:
-            return values
+    # Even `for (const specifier of ["./safe.mjs"])` depends on mutable
+    # Array.prototype[Symbol.iterator] semantics.  This recognizer cannot prove
+    # the iterator path immutable, so loop-bound computed imports fail closed.
     return None
 
 
@@ -6021,6 +6003,40 @@ def _parse_literal_helper_call(source_text: str, name_start: int, name_end: int)
     return specifier, close_index + 1
 
 
+def _helper_parameter_is_only_dynamic_import_argument(
+    source_text: str, argument: str, body_start: int, body_end: int
+) -> bool:
+    tokens = [
+        token
+        for token in _source_tokens(source_text)
+        if token[0] != "comment" and body_start < token[2] and token[3] < body_end
+    ]
+    dynamic_import_arguments: set[tuple[int, int]] = set()
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "import":
+            continue
+        if index + 3 >= len(tokens):
+            continue
+        open_token = tokens[index + 1]
+        argument_token = tokens[index + 2]
+        close_token = tokens[index + 3]
+        if (
+            open_token[0] == "punctuation"
+            and open_token[1] == "("
+            and argument_token[0] == "identifier"
+            and argument_token[1] == argument
+            and close_token[0] == "punctuation"
+            and close_token[1] == ")"
+        ):
+            dynamic_import_arguments.add((argument_token[2], argument_token[3]))
+    if not dynamic_import_arguments:
+        return False
+    for kind, value, start, end in tokens:
+        if kind == "identifier" and value == argument and (start, end) not in dynamic_import_arguments:
+            return False
+    return True
+
+
 def _literal_forwarded_dynamic_import_specifiers(
     source_text: str, argument: str, call_index: int
 ) -> list[str] | None:
@@ -6029,10 +6045,14 @@ def _literal_forwarded_dynamic_import_specifiers(
         rf"\(\s*{re.escape(argument)}\s*\)\s*=>\s*\{{",
         re.DOTALL,
     )
-    for match in helper.finditer(source_text):
+    for match in _executable_pattern_matches(source_text, helper):
         body_start = match.end() - 1
         body_end = _matching_js_delimiter_end(source_text, body_start, "{", "}")
         if body_end is None or not (body_start < call_index < body_end):
+            continue
+        if not _helper_parameter_is_only_dynamic_import_argument(
+            source_text, argument, body_start, body_end
+        ):
             continue
         name = match.group("name")
         name_start, name_end = match.span("name")

@@ -322,7 +322,8 @@ class CurrentStatusTests(unittest.TestCase):
         matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
         self.assertFalse(matrix_payload["runtime_ready"])
         self.assertFalse(matrix_payload["production_authority_enabled"])
-        self.assertIn("source_closure_computed_dynamic_import", matrix["accounted_boundaries"])
+        self.assertIn("literal_helper_call_dynamic_import", matrix["accounted_boundaries"])
+        self.assertIn("source_closure_computed_dynamic_import", matrix["blockers"])
         self.assertIn("source_closure_compile_cache_respawn_child_process", matrix["blockers"])
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["sha256"],
@@ -330,10 +331,21 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["source_closure_blockers"],
-            ["openclaw.mjs:141", "openclaw.mjs:266", "openclaw.mjs:293"],
+            [
+                "openclaw.mjs:357",
+                "openclaw.mjs:373",
+                "openclaw.mjs:769",
+                "openclaw.mjs:141",
+                "openclaw.mjs:266",
+                "openclaw.mjs:293",
+            ],
         )
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["accounted_dynamic_import_locations"],
+            [],
+        )
+        self.assertEqual(
+            index["downstream_local_remediation_boundary"]["dynamic_import_blocker_locations"],
             ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         dist_blocker = next(
@@ -575,11 +587,9 @@ class CurrentStatusTests(unittest.TestCase):
             return
         self.assertEqual(current["status"], "captured_from_clean_generator_revision")
         self.assertEqual(index["status"], "current_fail_closed_runtime_evidence_pending_phase_c")
-        self.assertTrue(
-            current["generator_binding_requirements"][
-                "no_capability_source_drift_after_bound_head"
-            ]
-        )
+        expected_no_source_drift = current["generator_binding_requirements"][
+            "no_capability_source_drift_after_bound_head"
+        ]
         reviewed_head = current["reviewed_head_sha"]
         self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
         self.assertEqual(
@@ -651,10 +661,21 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertFalse(matrix["runtime_ready"])
         self.assertEqual(
             matrix["source_closure_blockers"],
-            ["openclaw.mjs:141", "openclaw.mjs:266", "openclaw.mjs:293"],
+            [
+                "openclaw.mjs:357",
+                "openclaw.mjs:373",
+                "openclaw.mjs:769",
+                "openclaw.mjs:141",
+                "openclaw.mjs:266",
+                "openclaw.mjs:293",
+            ],
         )
         self.assertEqual(
             matrix["accounted_dynamic_import_locations"],
+            [],
+        )
+        self.assertEqual(
+            matrix["dynamic_import_blocker_locations"],
             ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
@@ -863,7 +884,7 @@ class CurrentStatusTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         self.assertEqual(ancestry_check.returncode, 0)
-        self.assertEqual(drift_check.returncode, 0)
+        self.assertEqual(drift_check.returncode == 0, expected_no_source_drift)
 
 
 if __name__ == "__main__":

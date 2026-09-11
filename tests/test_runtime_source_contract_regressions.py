@@ -859,20 +859,27 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
-    def test_literal_for_of_dynamic_imports_are_source_bound(self) -> None:
-        source = (
-            "for (const specifier of ['./dist/warning-filter.js', './dist/warning-filter.mjs']) {"
-            "  const mod = await import(specifier);"
-            "  void mod;"
-            "}"
+    def test_literal_for_of_dynamic_imports_fail_closed(self) -> None:
+        sources = (
+            "for (const specifier of ['./dist/warning-filter.js']) { await import(specifier); }",
+            (
+                "for (let specifier of ['./dist/warning-filter.js']) {"
+                "  specifier = attackerValue; await import(specifier);"
+                "}"
+            ),
+            (
+                "Array.prototype[Symbol.iterator] = function* () { yield attackerValue; };"
+                "for (const specifier of ['./dist/warning-filter.js']) { await import(specifier); }"
+            ),
+            (
+                "const specifier = getUserInput();"
+                "const marker = \"for (const specifier of ['./dist/warning-filter.js']) {\";"
+                "await import(specifier);"
+            ),
         )
-        self.assertEqual(
-            [
-                ("./dist/warning-filter.js", True, "import"),
-                ("./dist/warning-filter.mjs", True, "import"),
-            ],
-            CONTRACT.import_specifiers(source),
-        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
 
     def test_literal_forwarded_dynamic_imports_are_source_bound(self) -> None:
         source = (
@@ -899,7 +906,31 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         )
         self.assert_closed(source)
 
-    def test_downstream_launcher_dynamic_imports_reach_missing_dist_entrypoint_boundary(self) -> None:
+    def test_literal_forwarded_dynamic_imports_reject_mutated_parameter(self) -> None:
+        sources = (
+            (
+                "const tryImport = async (specifier) => {"
+                "  specifier = attackerValue; await import(specifier);"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => {"
+                "  const specifier = attackerValue; await import(specifier);"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const marker = \"const tryImport = async (specifier) => {\";"
+                "const specifier = getUserInput();"
+                "await import(specifier);"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_downstream_launcher_dynamic_imports_fail_closed_on_for_of_boundary(self) -> None:
         source = (
             "const installProcessWarningFilter = async () => {"
             "  for (const specifier of ['./dist/warning-filter.js', './dist/warning-filter.mjs']) {"
@@ -919,7 +950,7 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             self.fixture(root, source)
             with self.assertRaisesRegex(
                 CONTRACT.RuntimeSourceContractError,
-                r"scripts/agentic-os-persistent-lifecycle-runner\.mts imports \./dist/",
+                "unsupported dynamic import",
             ):
                 CONTRACT.runtime_source_paths(root)
 

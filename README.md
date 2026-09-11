@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `0a158111d185aeb3302f6dced002fe8ecc3a13cdc92812fdb7fce976c8f2ab18`
+- Current corrected design artifact SHA-256: `98d24f16aac98d1b316cd4915d9cf2ed4322f3e8ea47bf66d82bfa5115cb7829`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -532,17 +532,19 @@ review binding. The local downstream OpenClaw candidate remains clean at
 `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
 `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json`
 from the post-PR49 generator lineage and failed closed before starting the
-candidate. The bounded `import(specifier)` sites in `openclaw.mjs` are now
-accounted only when they flow from literal arrays or literal helper calls, but
-runtime source closure still rejects the compile-cache respawn child-process
-entrypoint. The companion
+candidate. The helper-call `import(specifier)` sites in `openclaw.mjs` are now
+accounted only when they flow from literal helper calls whose parameter is not
+rewritten, while literal-array `for...of` computed imports remain fail-closed
+because iterator semantics are mutable. The companion
 `docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json`
-binds the current local source-closure blocker to `openclaw.mjs:141`,
-`openclaw.mjs:266`, and `openclaw.mjs:293`, while preserving the missing
-committed `dist/entry.js` and `dist/entry.mjs` launch outputs as the next
-downstream blocker after respawn source-closure remediation. The smallest safe
+binds the first local source-closure blocker to `openclaw.mjs:357`,
+`openclaw.mjs:373`, and `openclaw.mjs:769`, while preserving respawn lines
+`openclaw.mjs:141`, `openclaw.mjs:266`, and `openclaw.mjs:293` plus the missing
+committed `dist/entry.js` and `dist/entry.mjs` launch outputs as downstream
+blockers to recapture after dynamic-import remediation. The smallest safe
 remediation is downstream/local only: provide a source-bound OpenClaw
-launcher/build whose respawn and launch entrypoints are committed or otherwise
+launcher/build whose dynamic imports, respawn, and launch entrypoints are
+committed or otherwise
 covered by the runtime source contract. That recapture used an isolated
 non-production run root and loopback port `20351`, recorded
 `candidate_process_started=false`, and records no production
