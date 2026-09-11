@@ -19,13 +19,13 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `8f4f87f1dea927c601d390d733e88ab2085e0b71c1b5c07ebcd67f642cf1fe9f`
+- Current corrected design artifact SHA-256: `1fecf2346f1660d1daf9e6a37ce683e2063ad738d154ecefbd2728063d5e31c0`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and Issue #44 downstream
-  persistent-lifecycle recapture after PR #47 merged to `main` at
-  `2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15`. The current installed evidence
+  persistent-lifecycle recapture after PR #48 merged to `main` at
+  `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0`. The current installed evidence
   remains fail-closed, and the current downstream candidate evidence is
   fail-closed before launch on runtime source-closure rejection with
   `candidate_process_started=false`; no runtime-ready persistent-lifecycle
@@ -490,8 +490,8 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 now has a clean live-installed recapture from GitHub main
-`2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15` after PR #47 merged:
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json`.
+`45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` after PR #48 merged:
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json`.
 It still fails closed. Runtime readiness remains false: live reachability,
 connected Gateway build identity, model-callable catalog availability, and
 `agenticOs.runtime.attest` readiness remain unproven, and
@@ -530,14 +530,20 @@ There is current Issue #44 downstream recapture evidence, but it is not a
 runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
 review binding. The local downstream OpenClaw candidate remains clean at
 `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
-`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json`
-from generator head `2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15` and failed
+`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json`
+from generator head `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` and failed
 closed before starting the candidate because runtime source closure still
-rejects the downstream launcher as an unsupported dynamic import. That recapture
-used an isolated non-production
-run root and loopback port `20347`, recorded
-`candidate_process_started=false`, and records no production
-Gateway/config/Cron/session/lease mutation or restart.
+rejects computed dynamic imports in `openclaw.mjs`. The companion
+`docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json`
+binds the exact local blockers: `openclaw.mjs:357`, `openclaw.mjs:373`, and
+`openclaw.mjs:769` call `import(specifier)`, and the clean downstream candidate
+does not have committed `dist/entry.js` or `dist/entry.mjs` launch outputs. The
+smallest safe remediation is downstream/local only: provide a source-bound
+OpenClaw launcher/build whose persistent-runner imports are statically
+accountable and whose launch entrypoints are committed or otherwise covered by
+the runtime source contract. That recapture used an isolated non-production run
+root and loopback port `20349`, recorded `candidate_process_started=false`, and
+records no production Gateway/config/Cron/session/lease mutation or restart.
 Historical candidate invocations and reviews must not be counted as current
 exact-head runtime evidence.
 
