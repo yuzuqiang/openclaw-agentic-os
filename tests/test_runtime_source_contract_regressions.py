@@ -970,6 +970,11 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 "const tryImport = async (specifier) => { await import(specifier); };"
                 "with (scope) await tryImport('./dist/entry.js');"
             ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) for (let i = 0; i < 1; i++) "
+                "await tryImport('./dist/entry.js');"
+            ),
         )
         for source in sources:
             with self.subTest(source=source):
@@ -980,6 +985,13 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             "{"
             "  const tryImport = async (specifier) => { await import(specifier); };"
             "}"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_for_initializer_scope_escape(self) -> None:
+        source = (
+            "for (const tryImport = async (specifier) => { await import(specifier); }; false;) {}"
             "await tryImport('./dist/entry.js');"
         )
         self.assert_closed(source)

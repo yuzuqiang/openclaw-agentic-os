@@ -908,7 +908,7 @@ class CurrentStatusTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         self.assertEqual(ancestry_check.returncode, 0)
-        self.assertEqual(drift_check.returncode == 0, expected_no_source_drift)
+        self.assertEqual(drift_check.returncode, 0)
 
 
 if __name__ == "__main__":

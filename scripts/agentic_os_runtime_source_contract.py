@@ -6023,17 +6023,7 @@ def _js_with_block_ranges(source_text: str) -> list[tuple[int, int]]:
             continue
         body_index = _skip_js_trivia(source_text, condition_end)
         if body_index >= len(source_text) or source_text[body_index] != "{":
-            statement_end = len(source_text)
-            for token_kind, token_value, token_start, token_end in tokens:
-                if token_start < body_index or token_kind != "punctuation":
-                    continue
-                if token_value == ";":
-                    statement_end = token_end
-                    break
-                if token_value == "}":
-                    statement_end = token_start
-                    break
-            ranges.append((body_index, statement_end))
+            ranges.append((body_index, _js_statement_end(source_text, body_index)))
             continue
         body_end = _matching_js_delimiter_end(source_text, body_index, "{", "}")
         if body_end is not None:
@@ -6098,6 +6088,55 @@ def _enclosing_js_block_end(source_text: str, index: int) -> int:
     return len(source_text) if end is None else end
 
 
+def _js_statement_end(source_text: str, statement_start: int) -> int:
+    statement_start = _skip_js_trivia(source_text, statement_start)
+    if statement_start >= len(source_text):
+        return len(source_text)
+    if source_text[statement_start] == "{":
+        block_end = _matching_js_delimiter_end(source_text, statement_start, "{", "}")
+        return len(source_text) if block_end is None else block_end
+    depth = 0
+    for kind, value, start, end in _source_tokens(source_text):
+        if start < statement_start or kind != "punctuation":
+            continue
+        if value in {"(", "[", "{"}:
+            depth += 1
+            continue
+        if value in {")", "]", "}"}:
+            if depth == 0:
+                return start
+            depth -= 1
+            if value == "}" and depth == 0:
+                return end
+            continue
+        if value == ";" and depth == 0:
+            return end
+    return len(source_text)
+
+
+def _for_initializer_lexical_scope_end(source_text: str, index: int) -> int | None:
+    tokens = _source_tokens(source_text)
+    for token_index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "for":
+            continue
+        cursor = token_index + 1
+        while cursor < len(tokens) and tokens[cursor][0] == "comment":
+            cursor += 1
+        if (
+            cursor >= len(tokens)
+            or tokens[cursor][0] != "punctuation"
+            or tokens[cursor][1] != "("
+        ):
+            continue
+        header_start = tokens[cursor][2]
+        header_end = _matching_js_delimiter_end(source_text, header_start, "(", ")")
+        if header_end is None or not (header_start < index < header_end):
+            continue
+        body_start = _skip_js_trivia(source_text, header_end)
+        return _js_statement_end(source_text, body_start)
+    return None
+
+
 def _literal_forwarded_dynamic_import_specifiers(
     source_text: str, argument: str, call_index: int
 ) -> list[str] | None:
@@ -6115,7 +6154,9 @@ def _literal_forwarded_dynamic_import_specifiers(
             source_text, argument, body_start, body_end
         ):
             continue
-        scope_end = _enclosing_js_block_end(source_text, match.start())
+        scope_end = _for_initializer_lexical_scope_end(
+            source_text, match.start()
+        ) or _enclosing_js_block_end(source_text, match.start())
         name = match.group("name")
         name_start, name_end = match.span("name")
         with_ranges = _js_with_block_ranges(source_text)
