@@ -16,26 +16,26 @@
                 "src/agentic_os/heartbeat_shadow.py",
                 "src/agentic_os/__init__.py"
             ],
-            "containing_revision_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+            "containing_revision_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
             "no_capability_source_drift_after_bound_head": true,
             "script_digest_matches_bound_head_blob": true
         },
         "generator_revision": {
-            "head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+            "head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
             "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-            "tree_sha": "bc47ca8e803ceb2d714a4f12dd19390aa77ecb9c"
+            "tree_sha": "133e960782f1fabbbb32196471a557a0a1679a93"
         },
         "no_production_lease_mutation": true,
         "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json",
         "raw_status": "fail",
-        "reviewed_head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+        "reviewed_head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
         "runtime_ready": false,
-        "sha256": "e48a870068cec75012d4529fd37dfad84eb3dea9834aefcccfabe9a477a45e14",
+        "sha256": "add3eab40b6472e2b473a5e18e7df6852417578175c96a0860dd510efe5ce603",
         "status": "captured_from_clean_generator_revision",
-        "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean GitHub main 45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0 after PR #48 merged. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease.status was intentionally skipped to preserve the no-production-lease-mutation boundary."
+        "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean post-PR49 main lineage after PR #49 merged at 5908c6886d732e710631508aa0a1e365cad76989. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease.status was intentionally skipped to preserve the no-production-lease-mutation boundary."
     },
     "downstream_candidate_evidence": {
-        "agentic_os_head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+        "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
         "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
         "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
         "db_authority_enabled": false,
@@ -48,25 +48,44 @@
             "candidate_process_started": false,
             "db_authority_enabled": false,
             "loopback": true,
-            "port": 20349,
+            "port": 20351,
             "production_config_mutation_attempted": false,
             "production_gateway_restart_attempted": false,
             "production_lease_mutation_attempted": false,
             "production_session_mutation_attempted": false,
-            "run_id_sha256": "aec26a2941fd342aadde2700a6e6ed4894d89cba1b29bae2296907e5eaf77695",
-            "run_root_sha256": "4cd30aae55b0268868cabe388d5874b67971cd1d6f064ff17759f642fb129fd1",
+            "run_id_sha256": "7f6ac3ac6951a1f04df84fbbf15c22b27b795662e52e23371a281c19688eabd1",
+            "run_root_sha256": "23d58a98486bfd58361cfb317909bacbfa3b9dfff7efe8dca578a74ccab8d4e4",
             "status": "not_started",
-            "transition_id_sha256": "564a317ebb5146e12b206e7136e170e980ccd3ad46967831afe9f57ca04b299f"
+            "transition_id_sha256": "0d0118865dd3208abac97a262a0b097710144817584e53154fcf78ce38a38a99"
         },
         "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json",
         "phase_c_exact_head_required_before_review": true,
         "production_authority_enabled": false,
         "runtime_ready": false,
         "runtime_ready_candidate_evidence": false,
-        "sha256": "bb1bdb50b36d3800adfa538b2135bab07fdc8f2a431702e9a296866c1b4bc404",
+        "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
         "status": "fail_closed_runtime_source_closure_pending_phase_c",
-        "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from merged GitHub main Agentic OS generator revision 45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0 in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects computed dynamic import(source variable) before any Gateway/session/lease mutation. The companion incompatibility matrix records openclaw.mjs lines 357, 373, and 769 plus missing committed dist entrypoints as the smallest downstream/local remediation boundary.",
+        "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate: bounded literal dynamic import(source variable) sites are now source-accounted, but runtime source closure still rejects the compile-cache respawn child-process entrypoint before any Gateway/session/lease mutation. The companion incompatibility matrix preserves missing committed dist entrypoints as the next downstream/local blocker after that source-closure boundary.",
         "validation_receipt_bound": false
+    },
+    "downstream_local_remediation_boundary": {
+        "accounted_dynamic_import_locations": [
+            "openclaw.mjs:357",
+            "openclaw.mjs:373",
+            "openclaw.mjs:769"
+        ],
+        "classification": "issue44_downstream_local_incompatibility_matrix",
+        "next_blocker_after_source_closure": "missing committed dist/entry.js and dist/entry.mjs in the clean downstream candidate",
+        "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
+        "policy": "downstream/local OpenClaw adaptation only; no openclaw/openclaw write, no production Gateway/Cron/service/DB/session/lease mutation, and no DB authority promotion without exact isolated evidence plus independent Phase C",
+        "runtime_ready": false,
+        "sha256": "36922ad33ef6e0e2fc849723f7bdc8a95b533be5919b00ac89b48a53ee292527",
+        "source_closure_blockers": [
+            "openclaw.mjs:141",
+            "openclaw.mjs:266",
+            "openclaw.mjs:293"
+        ],
+        "status": "fail_closed_downstream_local_remediation_required"
     },
     "historical_artifacts": [
         {
@@ -115,19 +134,5 @@
         }
     ],
     "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-    "status": "current_fail_closed_runtime_evidence_pending_phase_c",
-    "downstream_local_remediation_boundary": {
-        "classification": "issue44_downstream_local_incompatibility_matrix",
-        "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
-        "sha256": "9947c97085391682ae4dfc4df10301b7920a8d58094128e79c84b0737b1047ab",
-        "runtime_ready": false,
-        "status": "fail_closed_downstream_local_remediation_required",
-        "source_closure_blockers": [
-            "openclaw.mjs:357",
-            "openclaw.mjs:373",
-            "openclaw.mjs:769"
-        ],
-        "next_blocker_after_source_closure": "missing committed dist/entry.js and dist/entry.mjs in the clean downstream candidate",
-        "policy": "downstream/local OpenClaw adaptation only; no openclaw/openclaw write, no production Gateway/Cron/service/DB/session/lease mutation, and no DB authority promotion without exact isolated evidence plus independent Phase C"
-    }
+    "status": "current_fail_closed_runtime_evidence_pending_phase_c"
 }

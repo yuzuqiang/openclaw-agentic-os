@@ -23,8 +23,8 @@ Non-goals:
 
 ## Delivery Change Log
 
-- 2026-09-11: Rebound Issue #44 after PR #48 merged to GitHub main `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0`:
-  - Corrections: `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json` is the current clean-generator installed OpenClaw 2026.7.1 recapture and still fails closed with `runtime_ready=false` because model-callable `tools.catalog`, connected Gateway build identity, accepted-session semantics, and `agenticOs.runtime.attest` readiness remain unproven. `subagents.allowLease.status` live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary. `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json` is the current downstream candidate prelaunch recapture for OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6`; it did not start the candidate, used isolated non-production loopback port `20349`, stopped on runtime source-closure rejection of computed dynamic imports in `openclaw.mjs`, and records no production Gateway/config/Cron/session/lease mutation or restart. `docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json` records the smallest downstream/local remediation boundary: account for `openclaw.mjs:357`, `openclaw.mjs:373`, and `openclaw.mjs:769` without an official `openclaw/openclaw` write, then prove committed/source-bound launch entrypoints because this candidate has no tracked `dist/entry.js` or `dist/entry.mjs`. Runtime readiness remains false, production authority remains disabled, and different-agent exact-head Phase C is required before any Ready/review/merge action.
+- 2026-09-11: Rebound Issue #44 after PR #49 merged to GitHub main `5908c6886d732e710631508aa0a1e365cad76989`:
+  - Corrections: `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json` is the current clean-generator installed OpenClaw 2026.7.1 recapture and still fails closed with `runtime_ready=false` because model-callable `tools.catalog`, connected Gateway build identity, accepted-session semantics, and `agenticOs.runtime.attest` readiness remain unproven. `subagents.allowLease.status` live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary. `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json` is the current downstream candidate prelaunch recapture for OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6`; it did not start the candidate, used isolated non-production loopback port `20351`, stopped on runtime source-closure rejection of the compile-cache respawn child-process entrypoint after bounded literal dynamic imports were accounted, and records no production Gateway/config/Cron/session/lease mutation or restart. `docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json` records the smallest downstream/local remediation boundary: keep `openclaw.mjs:357`, `openclaw.mjs:373`, and `openclaw.mjs:769` accepted only through finite literal flows, then remediate `openclaw.mjs:141`, `openclaw.mjs:266`, and `openclaw.mjs:293` without an official `openclaw/openclaw` write, and finally prove committed/source-bound launch entrypoints because this candidate has no tracked `dist/entry.js` or `dist/entry.mjs`. Runtime readiness remains false, production authority remains disabled, and different-agent exact-head Phase C is required before any Ready/review/merge action.
 - 2026-09-10: Rebound Issue #44 after PR #47 merged to GitHub main `2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15`:
   - Corrections: `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json` is the current clean-generator installed OpenClaw 2026.7.1 recapture and still fails closed with `runtime_ready=false` because model-callable `tools.catalog`, connected Gateway build identity, accepted-session semantics, and `agenticOs.runtime.attest` readiness remain unproven. `subagents.allowLease.status` live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary. `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json` is the current downstream candidate prelaunch recapture for OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6`; it did not start the candidate, used isolated non-production loopback port `20347`, stopped on runtime source-closure rejection of an unsupported dynamic import, and records no production Gateway/config/Cron/session/lease mutation or restart. Runtime readiness remains false, production authority remains disabled, and different-agent exact-head Phase C is required before any Ready/review/merge action.
 - 2026-09-08: Rebound Issue #44 PR #46 runtime evidence after exact-head validation found the 2026-09-05 installed evidence was source-stale, then recaptured it again after the first 2026-09-08 rebind landed on a stale forward index. The 2026-09-10 lineage correction below supersedes that installed-runtime capture as current evidence.
@@ -141,19 +141,23 @@ Current-vs-proposed truth:
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
 - The 2026-09-11 Issue #44 installed-runtime evidence is the current clean
-  recapture from merged main `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` and
+  recapture from the post-PR49 main lineage after merge commit
+  `5908c6886d732e710631508aa0a1e365cad76989` and
   still has `runtime_ready=false`: connected Gateway build, model-callable
   catalog availability, live reachability, accepted-session semantics, and
   attestation readiness remain unproven. The 2026-09-11 downstream candidate
   recapture at OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic
-  OS `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` remains fail-closed evidence,
-  not runtime-ready candidate proof: it used an isolated non-production
-  run root and loopback port `20349`, did not start the candidate,
-  and stopped before Gateway/session/lease mutation because runtime source
-  closure rejected computed dynamic imports in `openclaw.mjs`. The
-  incompatibility matrix binds the exact source-closure blocker lines and the
-  missing committed `dist/entry.(m)js` launch outputs, so the next remediation
-  must stay downstream/local until exact isolated evidence proves otherwise. The
+  OS post-PR49 generator lineage remains fail-closed evidence, not runtime-ready
+  candidate proof: it used an isolated non-production run root and loopback port
+  `20351`, did not start the candidate, and stopped before
+  Gateway/session/lease mutation because runtime source closure rejected the
+  compile-cache respawn child-process entrypoint. The bounded computed dynamic
+  imports in `openclaw.mjs` are now source-accounted only for literal array and
+  literal helper-call flows; arbitrary `import(specifier)` remains rejected. The
+  incompatibility matrix binds the current source-closure blocker lines and the
+  missing committed `dist/entry.(m)js` launch outputs as the next downstream
+  blocker, so the next remediation must stay downstream/local until exact
+  isolated evidence proves otherwise. The
   2026-08-26 downstream candidate snapshot passed its isolated persistent
   lifecycle runner with authenticated validation and duplicate release identity
   parity, but remains invalidated as current evidence because its generator

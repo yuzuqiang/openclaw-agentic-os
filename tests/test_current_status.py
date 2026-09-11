@@ -322,13 +322,18 @@ class CurrentStatusTests(unittest.TestCase):
         matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
         self.assertFalse(matrix_payload["runtime_ready"])
         self.assertFalse(matrix_payload["production_authority_enabled"])
-        self.assertIn("source_closure_computed_dynamic_import", matrix["blockers"])
+        self.assertIn("source_closure_computed_dynamic_import", matrix["accounted_boundaries"])
+        self.assertIn("source_closure_compile_cache_respawn_child_process", matrix["blockers"])
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["sha256"],
             matrix["sha256"],
         )
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["source_closure_blockers"],
+            ["openclaw.mjs:141", "openclaw.mjs:266", "openclaw.mjs:293"],
+        )
+        self.assertEqual(
+            index["downstream_local_remediation_boundary"]["accounted_dynamic_import_locations"],
             ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         dist_blocker = next(
@@ -624,7 +629,7 @@ class CurrentStatusTests(unittest.TestCase):
         candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
         self.assertEqual(candidate["status"], "fail_closed_runtime_source_closure_pending_phase_c")
         self.assertFalse(candidate["runtime_ready_candidate_evidence"])
-        self.assertIn("runtime source closure still rejects", candidate["status_reason"])
+        self.assertIn("compile-cache respawn child-process entrypoint", candidate["status_reason"])
         self.assertFalse(candidate["validation_receipt_bound"])
         self.assertFalse(candidate["duplicate_release_identity_parity"])
         self.assertEqual(candidate_payload["status"], "fail_closed")
@@ -646,6 +651,10 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertFalse(matrix["runtime_ready"])
         self.assertEqual(
             matrix["source_closure_blockers"],
+            ["openclaw.mjs:141", "openclaw.mjs:266", "openclaw.mjs:293"],
+        )
+        self.assertEqual(
+            matrix["accounted_dynamic_import_locations"],
             ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
