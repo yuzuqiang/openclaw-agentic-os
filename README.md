@@ -19,13 +19,13 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `35a6fe7b83c8b72b7ba723cd3530e1e2f565f1bf0569d82626ad9186961b77c4`
+- Current corrected design artifact SHA-256: `8f4f87f1dea927c601d390d733e88ab2085e0b71c1b5c07ebcd67f642cf1fe9f`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and Issue #44 downstream
-  persistent-lifecycle recapture after PR #46 merged to `main` at
-  `63bbfbda233f66d032e392a1af31bfd508c08d1e`. The current installed evidence
+  persistent-lifecycle recapture after PR #47 merged to `main` at
+  `2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15`. The current installed evidence
   remains fail-closed, and the current downstream candidate evidence is
   fail-closed before launch on runtime source-closure rejection with
   `candidate_process_started=false`; no runtime-ready persistent-lifecycle
@@ -490,7 +490,7 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 now has a clean live-installed recapture from GitHub main
-`63bbfbda233f66d032e392a1af31bfd508c08d1e` after PR #46 merged:
+`2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15` after PR #47 merged:
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json`.
 It still fails closed. Runtime readiness remains false: live reachability,
 connected Gateway build identity, model-callable catalog availability, and
@@ -531,10 +531,10 @@ runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
 review binding. The local downstream OpenClaw candidate remains clean at
 `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
 `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json`
-from generator head `63bbfbda233f66d032e392a1af31bfd508c08d1e` and failed
+from generator head `2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15` and failed
 closed before starting the candidate because runtime source closure still
-rejects the downstream launcher as an unsupported evaluated-loader /
-dynamic-import pattern. That recapture used an isolated non-production
+rejects the downstream launcher as an unsupported dynamic import. That recapture
+used an isolated non-production
 run root and loopback port `20347`, recorded
 `candidate_process_started=false`, and records no production
 Gateway/config/Cron/session/lease mutation or restart.

@@ -7,7 +7,7 @@
       "status": "current_fail_closed_runtime_evidence_pending_phase_c"
     },
     "issue44_downstream_persistent_lifecycle_probe": {
-      "agentic_os_head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+      "agentic_os_head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
       "candidate_process_started": false,
       "db_authority_enabled": false,
       "duplicate_acquire_identity_parity": false,
@@ -27,18 +27,18 @@
       "runtime_ready": false,
       "runtime_ready_blocked_until_phase_c": true,
       "runtime_ready_candidate_evidence": false,
-      "sha256": "feecfe7e7fdd7ae59c501715b348ed2d90644a396a93a725b00b97c5531d344f",
+      "sha256": "c00d6857936c5c7d8141d6db662b15dbbf65a5d8a4bd10fb092bf28c62e6f974",
       "status": "fail_closed_runtime_source_closure_pending_phase_c",
       "validation_receipt_bound": false
     },
     "issue44_live_installed_preflight": {
-      "agentic_os_head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+      "agentic_os_head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
       "no_production_lease_mutation": true,
       "openclaw_version": "2026.7.1",
       "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json",
       "production_authority_enabled": false,
       "runtime_ready": false,
-      "sha256": "d779f9547f8caa694bb9a5eefa411ae4f4d60e1384e64da9257f78f88a737d43",
+      "sha256": "3faa671e09a9937c3809408f21cdb97f36e5a6876c89e733bef4bc017510df26",
       "status": "captured_from_clean_generator_revision",
       "status_rpc_live_reachability": "skipped_no_production_lease_mutation"
     },
@@ -100,7 +100,7 @@
     },
     "current_corrected_design_artifact": {
       "path": "docs/agentic-os-production-adaptation.md",
-      "sha256": "35a6fe7b83c8b72b7ba723cd3530e1e2f565f1bf0569d82626ad9186961b77c4",
+      "sha256": "8f4f87f1dea927c601d390d733e88ab2085e0b71c1b5c07ebcd67f642cf1fe9f",
       "status": "current_successor_artifact_not_pr39_acceptance"
     },
     "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",
