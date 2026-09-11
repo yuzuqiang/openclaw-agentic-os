@@ -16,26 +16,26 @@
         "src/agentic_os/heartbeat_shadow.py",
         "src/agentic_os/__init__.py"
       ],
-      "containing_revision_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+      "containing_revision_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
       "no_capability_source_drift_after_bound_head": true,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+      "head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
       "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "5616a46628270c066fdef2202274fde5ac7de92f"
+      "tree_sha": "84d282206a6acb0e4096c78a657217f726a907e1"
     },
     "no_production_lease_mutation": true,
     "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+    "reviewed_head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
     "runtime_ready": false,
-    "sha256": "d779f9547f8caa694bb9a5eefa411ae4f4d60e1384e64da9257f78f88a737d43",
+    "sha256": "3faa671e09a9937c3809408f21cdb97f36e5a6876c89e733bef4bc017510df26",
     "status": "captured_from_clean_generator_revision",
-    "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean GitHub main 63bbfbda233f66d032e392a1af31bfd508c08d1e after PR #46 merged. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease status was intentionally skipped to preserve the no-production-lease-mutation boundary."
+    "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean GitHub main 2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15 after PR #47 merged. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease status was intentionally skipped to preserve the no-production-lease-mutation boundary."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+    "agentic_os_head_sha": "2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15",
     "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
     "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
     "db_authority_enabled": false,
@@ -53,19 +53,19 @@
       "production_gateway_restart_attempted": false,
       "production_lease_mutation_attempted": false,
       "production_session_mutation_attempted": false,
-      "run_id_sha256": "096f86c52932e70b72e551c14adc778781b7df612bc11ab56e856f8a446628cf",
-      "run_root_sha256": "1f2e0e2aca2be27dbb5b3a034444bcc0056d3ac713c0d125e4ec8f871c2b7f83",
+      "run_id_sha256": "5a627833127392488817419e8e68596bdc0b61be1863315646b54459c4ca27e0",
+      "run_root_sha256": "045ee030f5c032bf265d96c9a4f3d5b3c001575f5c5f1e82d8ad665ef7ab4c80",
       "status": "not_started",
-      "transition_id_sha256": "096f86c52932e70b72e551c14adc778781b7df612bc11ab56e856f8a446628cf"
+      "transition_id_sha256": "6b5b8fdd02926ce51b3a56e9c95e6a2198d128cfcbf2193a55b3ce9f9c0ab95f"
     },
     "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json",
     "phase_c_exact_head_required_before_review": true,
     "production_authority_enabled": false,
     "runtime_ready": false,
     "runtime_ready_candidate_evidence": false,
-    "sha256": "feecfe7e7fdd7ae59c501715b348ed2d90644a396a93a725b00b97c5531d344f",
+    "sha256": "c00d6857936c5c7d8141d6db662b15dbbf65a5d8a4bd10fb092bf28c62e6f974",
     "status": "fail_closed_runtime_source_closure_pending_phase_c",
-    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from merged GitHub main Agentic OS generator revision 63bbfbda233f66d032e392a1af31bfd508c08d1e in an isolated non-production run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
+    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from merged GitHub main Agentic OS generator revision 2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15 in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported dynamic import before any Gateway/session/lease mutation.",
     "validation_receipt_bound": false
   },
   "historical_artifacts": [
