@@ -5923,6 +5923,153 @@ def _commonjs_require_specifiers(
     return specifiers
 
 
+def _parse_literal_string_array_specifiers(source_text: str, index: int) -> tuple[list[str], int] | None:
+    if index >= len(source_text) or source_text[index] != "[":
+        return None
+    values: list[str] = []
+    index = _skip_js_trivia(source_text, index + 1)
+    if index < len(source_text) and source_text[index] == "]":
+        return values, index + 1
+    while index < len(source_text):
+        parsed = _parse_quoted_specifier(source_text, index)
+        if parsed is None:
+            return None
+        value, index = parsed
+        values.append(value)
+        index = _skip_js_trivia(source_text, index)
+        if index < len(source_text) and source_text[index] == ",":
+            index = _skip_js_trivia(source_text, index + 1)
+            if index < len(source_text) and source_text[index] == "]":
+                return values, index + 1
+            continue
+        if index < len(source_text) and source_text[index] == "]":
+            return values, index + 1
+        return None
+    return None
+
+
+def _matching_js_delimiter_end(
+    source_text: str, open_index: int, open_character: str, close_character: str
+) -> int | None:
+    depth = 0
+    for kind, value, start, end in _source_tokens(source_text):
+        if start < open_index or kind != "punctuation":
+            continue
+        if value == open_character:
+            depth += 1
+        elif value == close_character:
+            depth -= 1
+            if depth == 0:
+                return end
+    return None
+
+
+def _parse_dynamic_import_identifier_argument(
+    source_text: str, argument_index: int
+) -> tuple[str, int] | None:
+    parsed = _parse_js_identifier(source_text, argument_index)
+    if parsed is None:
+        return None
+    argument, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        return None
+    return argument, close_index
+
+
+def _literal_for_of_dynamic_import_specifiers(
+    source_text: str, argument: str, call_index: int
+) -> list[str] | None:
+    loop = re.compile(
+        rf"\bfor\s*\(\s*(?:const|let|var)\s+{re.escape(argument)}\s+of\s*\[",
+        re.DOTALL,
+    )
+    for match in loop.finditer(source_text):
+        array_start = match.end() - 1
+        parsed_array = _parse_literal_string_array_specifiers(source_text, array_start)
+        if parsed_array is None:
+            continue
+        values, array_end = parsed_array
+        header_end = _skip_js_trivia(source_text, array_end)
+        if header_end >= len(source_text) or source_text[header_end] != ")":
+            continue
+        body_start = _skip_js_trivia(source_text, header_end + 1)
+        if body_start >= len(source_text) or source_text[body_start] != "{":
+            continue
+        body_end = _matching_js_delimiter_end(source_text, body_start, "{", "}")
+        if body_end is None:
+            continue
+        if body_start < call_index < body_end:
+            return values
+    return None
+
+
+def _parse_literal_helper_call(source_text: str, name_start: int, name_end: int) -> tuple[str, int] | None:
+    if _previous_non_trivia_character(source_text, name_start) in {".", "?"}:
+        return None
+    open_index = _skip_js_trivia(source_text, name_end)
+    if open_index >= len(source_text) or source_text[open_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, open_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        return None
+    specifier, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        return None
+    return specifier, close_index + 1
+
+
+def _literal_forwarded_dynamic_import_specifiers(
+    source_text: str, argument: str, call_index: int
+) -> list[str] | None:
+    helper = re.compile(
+        rf"\bconst\s+(?P<name>{JS_IDENTIFIER})\s*=\s*async\s*"
+        rf"\(\s*{re.escape(argument)}\s*\)\s*=>\s*\{{",
+        re.DOTALL,
+    )
+    for match in helper.finditer(source_text):
+        body_start = match.end() - 1
+        body_end = _matching_js_delimiter_end(source_text, body_start, "{", "}")
+        if body_end is None or not (body_start < call_index < body_end):
+            continue
+        name = match.group("name")
+        name_start, name_end = match.span("name")
+        values: list[str] = []
+        for kind, value, start, end in _source_tokens(source_text):
+            if kind != "identifier" or value != name:
+                continue
+            if start == name_start and end == name_end:
+                continue
+            parsed_call = _parse_literal_helper_call(source_text, start, end)
+            if parsed_call is None:
+                return None
+            values.append(parsed_call[0])
+        if values:
+            return values
+    return None
+
+
+def _literal_bound_dynamic_import_specifiers(
+    source_text: str, argument_index: int, call_index: int
+) -> tuple[list[str], int] | None:
+    parsed_argument = _parse_dynamic_import_identifier_argument(source_text, argument_index)
+    if parsed_argument is None:
+        return None
+    argument, close_index = parsed_argument
+    specifiers = _literal_for_of_dynamic_import_specifiers(
+        source_text, argument, call_index
+    )
+    if specifiers is None:
+        specifiers = _literal_forwarded_dynamic_import_specifiers(
+            source_text, argument, call_index
+        )
+    if specifiers is None:
+        return None
+    return specifiers, close_index
+
+
 def _dynamic_import_specifiers(source_text: str) -> list[str]:
     specifiers: list[str] = []
     index = 0
@@ -5991,9 +6138,17 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
             argument_index = _skip_js_trivia(source_text, call_index + 1)
             parsed = _parse_quoted_specifier(source_text, argument_index)
             if parsed is None:
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported dynamic import"
+                literal_bound = _literal_bound_dynamic_import_specifiers(
+                    source_text, argument_index, index
                 )
+                if literal_bound is None:
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported dynamic import"
+                    )
+                literal_specifiers, close_index = literal_bound
+                specifiers.extend(literal_specifiers)
+                index = close_index + 1
+                continue
             specifier, end_index = parsed
             close_index = _skip_js_trivia(source_text, end_index)
             if close_index < len(source_text) and source_text[close_index] == ",":

@@ -859,6 +859,70 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_literal_for_of_dynamic_imports_are_source_bound(self) -> None:
+        source = (
+            "for (const specifier of ['./dist/warning-filter.js', './dist/warning-filter.mjs']) {"
+            "  const mod = await import(specifier);"
+            "  void mod;"
+            "}"
+        )
+        self.assertEqual(
+            [
+                ("./dist/warning-filter.js", True, "import"),
+                ("./dist/warning-filter.mjs", True, "import"),
+            ],
+            CONTRACT.import_specifiers(source),
+        )
+
+    def test_literal_forwarded_dynamic_imports_are_source_bound(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => {"
+            "  try { await import(specifier); return true; }"
+            "  catch (err) { return false; }"
+            "};"
+            "if (await tryImport('./dist/entry.js')) {}"
+            "else if (await tryImport('./dist/entry.mjs')) {}"
+        )
+        self.assertEqual(
+            [
+                ("./dist/entry.js", True, "import"),
+                ("./dist/entry.mjs", True, "import"),
+            ],
+            CONTRACT.import_specifiers(source),
+        )
+
+    def test_literal_forwarded_dynamic_imports_reject_nonliteral_uses(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => { await import(specifier); };"
+            "const escaped = tryImport;"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_downstream_launcher_dynamic_imports_reach_missing_dist_entrypoint_boundary(self) -> None:
+        source = (
+            "const installProcessWarningFilter = async () => {"
+            "  for (const specifier of ['./dist/warning-filter.js', './dist/warning-filter.mjs']) {"
+            "    try { const mod = await import(specifier); void mod; } catch (err) {}"
+            "  }"
+            "};"
+            "const tryImport = async (specifier) => {"
+            "  try { await import(specifier); return true; }"
+            "  catch (err) { return false; }"
+            "};"
+            "await installProcessWarningFilter();"
+            "if (await tryImport('./dist/entry.js')) {}"
+            "else if (await tryImport('./dist/entry.mjs')) {}"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, source)
+            with self.assertRaisesRegex(
+                CONTRACT.RuntimeSourceContractError,
+                r"scripts/agentic-os-persistent-lifecycle-runner\.mts imports \./dist/",
+            ):
+                CONTRACT.runtime_source_paths(root)
+
     def test_literal_process_arguments_remain_supported(self) -> None:
         for source, import_kind in (
             ("import {fork} from 'node:child_process'; fork('./bound.cjs', ['a','b',]);", "fork"),
