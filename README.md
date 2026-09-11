@@ -24,8 +24,8 @@ not evidence of production OpenClaw authority.
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and Issue #44 downstream
-  persistent-lifecycle recapture after PR #47 merged to `main` at
-  `2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15`. The current installed evidence
+  persistent-lifecycle recapture after PR #48 merged to `main` at
+  `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0`. The current installed evidence
   remains fail-closed, and the current downstream candidate evidence is
   fail-closed before launch on runtime source-closure rejection with
   `candidate_process_started=false`; no runtime-ready persistent-lifecycle
@@ -490,8 +490,8 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
 Issue #44 now has a clean live-installed recapture from GitHub main
-`2e1d67a21c28e33b3a91b8e6fe6506883cc1fa15` after PR #47 merged:
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json`.
+`45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` after PR #48 merged:
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json`.
 It still fails closed. Runtime readiness remains false: live reachability,
 connected Gateway build identity, model-callable catalog availability, and
 `agenticOs.runtime.attest` readiness remain unproven, and
