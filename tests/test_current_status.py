@@ -197,7 +197,9 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(live["status"], "pending_current_evidence")
+        self.assertEqual(
+            live["status"], "current_fail_closed_runtime_evidence_pending_phase_c"
+        )
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
         local_p03 = live["local_p03_runtime_heartbeat_shadow"]
@@ -242,7 +244,9 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(index["status"], "pending_current_evidence")
+        self.assertEqual(
+            index["status"], "current_fail_closed_runtime_evidence_pending_phase_c"
+        )
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
             index["current_evidence"]["status"],
@@ -253,16 +257,25 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             index["current_evidence"]["status"],
-            "pending_clean_generator_revision_capture",
+            "captured_from_clean_generator_revision",
         )
         current_evidence_path = root / index["current_evidence"]["path"]
-        self.assertFalse(current_evidence_path.exists())
+        self.assertTrue(current_evidence_path.exists())
+        self.assertEqual(
+            index["current_evidence"]["sha256"],
+            hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
+        )
 
         issue44_installed = live["issue44_live_installed_preflight"]
         issue44_installed_path = root / issue44_installed["path"]
-        self.assertEqual(issue44_installed["status"], "pending_clean_generator_revision_capture")
-        self.assertFalse(issue44_installed_path.exists())
-        self.assertIsNone(issue44_installed["sha256"])
+        self.assertEqual(
+            issue44_installed["status"], "captured_from_clean_generator_revision"
+        )
+        self.assertTrue(issue44_installed_path.exists())
+        self.assertEqual(
+            issue44_installed["sha256"],
+            hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
+        )
         self.assertFalse(issue44_installed["runtime_ready"])
 
         issue44_candidate = live["issue44_downstream_persistent_lifecycle_probe"]

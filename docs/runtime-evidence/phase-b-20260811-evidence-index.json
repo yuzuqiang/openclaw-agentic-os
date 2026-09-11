@@ -1,9 +1,9 @@
 {
   "classification": "evidence_lineage_correction",
   "current_evidence": {
-    "classification": "issue44_live_installed_pending_clean_generator_recapture",
+    "classification": "issue44_live_installed_clean_generator_recapture_fail_closed",
     "generator_binding_requirements": {
-      "bound_head_is_ancestor_of_containing_revision": false,
+      "bound_head_is_ancestor_of_containing_revision": true,
       "bound_tree_matches_bound_head_tree": true,
       "capability_source_paths": [
         "scripts/openclaw-tool-capability-preflight.py",
@@ -16,26 +16,26 @@
         "src/agentic_os/heartbeat_shadow.py",
         "src/agentic_os/__init__.py"
       ],
-      "containing_revision_sha": "77a57c7b353bfa8c21de2ac612b050a663df7c30",
-      "no_capability_source_drift_after_bound_head": false,
+      "containing_revision_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
+      "no_capability_source_drift_after_bound_head": true,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
+      "head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
       "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-      "tree_sha": "98f36a6e869c842f1f2c8ce8b10b50af250b82b4"
+      "tree_sha": "5616a46628270c066fdef2202274fde5ac7de92f"
     },
     "no_production_lease_mutation": true,
-    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-recapture.json",
+    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json",
     "raw_status": "fail",
-    "reviewed_head_sha": "77a57c7b353bfa8c21de2ac612b050a663df7c30",
+    "reviewed_head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
     "runtime_ready": false,
-    "sha256": null,
-    "status": "pending_clean_generator_revision_capture",
-    "status_reason": "The prior installed OpenClaw 2026.7.1 recapture was bound to generator revision c3e2294540d90d3dea5a09029897771644bf9f16, which is not an ancestor of reviewed PR #46 head 77a57c7b353bfa8c21de2ac612b050a663df7c30. Current live-installed evidence is therefore pending a clean recapture from this lineage; runtime_ready remains false."
+    "sha256": "d779f9547f8caa694bb9a5eefa411ae4f4d60e1384e64da9257f78f88a737d43",
+    "status": "captured_from_clean_generator_revision",
+    "status_reason": "Installed OpenClaw 2026.7.1 was recaptured from clean GitHub main 63bbfbda233f66d032e392a1af31bfd508c08d1e after PR #46 merged. The preflight still fails closed because model-callable tools.catalog is unavailable, connected Gateway build identity and accepted-session semantics remain unproven, and live allowLease status was intentionally skipped to preserve the no-production-lease-mutation boundary."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
+    "agentic_os_head_sha": "63bbfbda233f66d032e392a1af31bfd508c08d1e",
     "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
     "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
     "db_authority_enabled": false,
@@ -48,24 +48,24 @@
       "candidate_process_started": false,
       "db_authority_enabled": false,
       "loopback": true,
-      "port": 20247,
+      "port": 20347,
       "production_config_mutation_attempted": false,
       "production_gateway_restart_attempted": false,
       "production_lease_mutation_attempted": false,
       "production_session_mutation_attempted": false,
-      "run_id_sha256": "5537357979b35d1b702f5445e25071775419847a4fca074ed2624a55e94e54cd",
-      "run_root_sha256": "b7384a80481530c8148269b0cce1ca2a45a6985c54b344852509ab33a6049265",
+      "run_id_sha256": "096f86c52932e70b72e551c14adc778781b7df612bc11ab56e856f8a446628cf",
+      "run_root_sha256": "1f2e0e2aca2be27dbb5b3a034444bcc0056d3ac713c0d125e4ec8f871c2b7f83",
       "status": "not_started",
-      "transition_id_sha256": "5537357979b35d1b702f5445e25071775419847a4fca074ed2624a55e94e54cd"
+      "transition_id_sha256": "096f86c52932e70b72e551c14adc778781b7df612bc11ab56e856f8a446628cf"
     },
-    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json",
+    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json",
     "phase_c_exact_head_required_before_review": true,
     "production_authority_enabled": false,
     "runtime_ready": false,
     "runtime_ready_candidate_evidence": false,
-    "sha256": "4be5d1ca75d7cd891dd794b7e2d86fd4817681a357557b394bcaeeb3a2e73517",
+    "sha256": "feecfe7e7fdd7ae59c501715b348ed2d90644a396a93a725b00b97c5531d344f",
     "status": "fail_closed_runtime_source_closure_pending_phase_c",
-    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed on 2026-09-10 from PR #46 Agentic OS generator revision c3e2294540d90d3dea5a09029897771644bf9f16 in an isolated non-production run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
+    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from merged GitHub main Agentic OS generator revision 63bbfbda233f66d032e392a1af31bfd508c08d1e in an isolated non-production run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
     "validation_receipt_bound": false
   },
   "historical_artifacts": [
@@ -115,5 +115,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "pending_current_evidence"
+  "status": "current_fail_closed_runtime_evidence_pending_phase_c"
 }
