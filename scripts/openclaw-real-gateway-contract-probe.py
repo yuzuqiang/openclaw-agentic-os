@@ -37,6 +37,28 @@ if _PROBE_ROOT_OVERRIDE is not None and Path(_PROBE_ROOT_OVERRIDE).resolve() != 
         f"{PROBE_ROOT_ENV} must match the executing probe script checkout"
     )
 ROOT = _SCRIPT_ROOT
+
+
+def _db_authority_enabled() -> bool:
+    """Read the local authority flag without making validator startup package-dependent."""
+    src_root = ROOT / "src"
+    inserted = False
+    if src_root.exists() and str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+        inserted = True
+    try:
+        from agentic_os import DB_AUTHORITY_ENABLED as enabled
+    except Exception as exc:
+        raise ProbeError("failed to read Agentic OS DB authority flag") from exc
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(str(src_root))
+            except ValueError:
+                pass
+    return bool(enabled)
+
+
 E2E_TEST = "test/agentic-os-runtime-contract.e2e.test.ts"
 PERSISTENT_LIFECYCLE_RUNNER = "scripts/agentic-os-persistent-lifecycle-runner.mts"
 PERSISTENT_LIFECYCLE_DEFAULT_PORT = 20189
@@ -1126,6 +1148,11 @@ def validate_candidate_root(root: Path) -> str:
     if dirty:
         raise ProbeError("candidate worktree is dirty; exact-head evidence is not authoritative")
     return head
+
+
+def _assert_candidate_root_still_bound(root: Path, expected_head: str) -> None:
+    if validate_candidate_root(root) != expected_head:
+        raise ProbeError("OpenClaw candidate changed before prelaunch evidence write")
 
 
 def _candidate_probe_mode(root: Path) -> str:
@@ -5656,6 +5683,7 @@ def _persistent_failure_summary(
 
 
 def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> None:
+    _walk_evidence(payload)
     evidence_file = evidence_file.resolve()
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
     temporary_evidence_file = evidence_file.with_name(
@@ -5669,6 +5697,67 @@ def _write_validated_payload(evidence_file: Path, payload: dict[str, Any]) -> No
     finally:
         if temporary_evidence_file.exists():
             temporary_evidence_file.unlink()
+
+
+def _persistent_prelaunch_failure_summary(
+    *,
+    head: str,
+    agentic_os_head: str,
+    agentic_sources: list[dict[str, str]],
+    runtime_sources: list[dict[str, str]],
+    run_root: Path,
+    port: int,
+    run_id: str,
+    transition_id: str,
+    reason: str,
+    error: ProbeError,
+) -> dict[str, Any]:
+    error_message = str(error)
+    return {
+        "status": "fail_closed",
+        "classification": "persistent_lifecycle_prelaunch_blocked",
+        "reason": reason,
+        "error": "prelaunch validation failed",
+        "error_class": type(error).__name__,
+        "error_message_sha256": _text_sha256(error_message),
+        "probe": "agentic-os-persistent-lifecycle-runner",
+        "openclaw_head_sha": head,
+        "agentic_os_head_sha": agentic_os_head,
+        "agentic_sources": agentic_sources,
+        "runtime_sources": runtime_sources,
+        "required_tool_names": sorted(PERSISTENT_REQUIRED_TOOL_NAMES),
+        "current_head_evidence_required": True,
+        "phase_c_exact_head_required_before_review": True,
+        "runtime_ready": False,
+        "runtime_ready_candidate_evidence": False,
+        "production_behavior_proven": False,
+        "production_authority_enabled": False,
+        "db_authority_enabled": _db_authority_enabled(),
+        "persistent_attestation_validated": False,
+        "accepted_session_spawned": False,
+        "runtime_catalog_discovered": False,
+        "session_list_status_history_observed": False,
+        "lease_release_cleanup_observed": False,
+        "duplicate_acquire_identity_parity": False,
+        "duplicate_spawn_identity_parity": False,
+        "duplicate_release_identity_parity": False,
+        "isolated_non_production_gateway": {
+            "status": "not_started",
+            "loopback": True,
+            "port": port,
+            "run_root_sha256": runtime_source_contract.path_sha256(run_root.resolve()),
+            "run_id_sha256": _sha256_bytes(run_id.encode("utf-8")),
+            "transition_id_sha256": _sha256_bytes(transition_id.encode("utf-8")),
+            "production_config_mutation_attempted": False,
+            "production_gateway_restart_attempted": False,
+            "production_session_mutation_attempted": False,
+            "production_lease_mutation_attempted": False,
+            "candidate_process_started": False,
+            "candidate_port_opened": False,
+            "candidate_port_closed": "not_required",
+            "db_authority_enabled": _db_authority_enabled(),
+        },
+    }
 
 
 def _require_trusted_persistent_lifecycle_boundary() -> None:
@@ -6112,6 +6201,7 @@ def run_probe(
     transition_id: str | None = None,
 ) -> dict[str, Any]:
     head = validate_candidate_root(openclaw_root)
+    agentic_os_head = _git(ROOT, "rev-parse", "HEAD")
     agentic_sources = _source_bindings(ROOT, AGENTIC_SOURCE_PATHS)
     mode = _candidate_probe_mode(openclaw_root)
     if mode == "legacy_e2e":
@@ -6122,9 +6212,69 @@ def run_probe(
             head=head,
             agentic_sources=agentic_sources,
         )
-    requested_process_boundary = _require_process_containment_boundary_request()
-    runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
+    auto_created_run_root = run_root is None
     selected_run_root = run_root if run_root is not None else _default_private_run_root(head)
+    selected_port = port or PERSISTENT_LIFECYCLE_DEFAULT_PORT
+    selected_run_id = run_id or "agentic-os-real-gateway-contract-probe"
+    selected_transition_id = transition_id or "persistent-lifecycle-runtime-readiness"
+    try:
+        runtime_sources = _persistent_runtime_source_bindings(openclaw_root)
+    except ProbeError as exc:
+        try:
+            if _git(ROOT, "rev-parse", "HEAD") != agentic_os_head:
+                raise ProbeError(
+                    "Agentic OS validator HEAD changed before prelaunch evidence write"
+                )
+            _assert_agentic_sources_still_bound(agentic_sources)
+            _assert_candidate_root_still_bound(openclaw_root, head)
+            _write_validated_payload(
+                evidence_file,
+                _persistent_prelaunch_failure_summary(
+                    head=head,
+                    agentic_os_head=agentic_os_head,
+                    agentic_sources=agentic_sources,
+                    runtime_sources=[],
+                    run_root=selected_run_root,
+                    port=selected_port,
+                    run_id=selected_run_id,
+                    transition_id=selected_transition_id,
+                    reason="runtime_source_closure_failed",
+                    error=exc,
+                ),
+            )
+        finally:
+            if auto_created_run_root:
+                shutil.rmtree(selected_run_root, ignore_errors=True)
+        raise
+    try:
+        requested_process_boundary = _require_process_containment_boundary_request()
+    except ProbeError as exc:
+        try:
+            if _git(ROOT, "rev-parse", "HEAD") != agentic_os_head:
+                raise ProbeError(
+                    "Agentic OS validator HEAD changed before prelaunch evidence write"
+                )
+            _assert_agentic_sources_still_bound(agentic_sources)
+            _assert_candidate_root_still_bound(openclaw_root, head)
+            _write_validated_payload(
+                evidence_file,
+                _persistent_prelaunch_failure_summary(
+                    head=head,
+                    agentic_os_head=agentic_os_head,
+                    agentic_sources=agentic_sources,
+                    runtime_sources=runtime_sources,
+                    run_root=selected_run_root,
+                    port=selected_port,
+                    run_id=selected_run_id,
+                    transition_id=selected_transition_id,
+                    reason="process_containment_boundary_required",
+                    error=exc,
+                ),
+            )
+        finally:
+            if auto_created_run_root:
+                shutil.rmtree(selected_run_root, ignore_errors=True)
+        raise
     return _run_persistent_lifecycle_probe(
         openclaw_root,
         evidence_file,
@@ -6133,9 +6283,9 @@ def run_probe(
         agentic_sources=agentic_sources,
         runtime_sources=runtime_sources,
         run_root=selected_run_root,
-        port=port or PERSISTENT_LIFECYCLE_DEFAULT_PORT,
-        run_id=run_id or "agentic-os-real-gateway-contract-probe",
-        transition_id=transition_id or "persistent-lifecycle-runtime-readiness",
+        port=selected_port,
+        run_id=selected_run_id,
+        transition_id=selected_transition_id,
         requested_process_boundary=requested_process_boundary,
     )
 

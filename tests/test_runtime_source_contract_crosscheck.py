@@ -141,3 +141,182 @@ class RuntimeSourceCrosscheckTests(unittest.TestCase):
                                         capture_output=True, text=True, check=True, timeout=10)
                 self.assertEqual("DEPENDENCY_EXECUTED", result.stdout.strip())
                 self.assert_bound(source)
+
+    @unittest.skipUnless(shutil.which("node"), "requires Node execution witness")
+    def test_real_node_witness_for_destructured_process_env_prototype_mutator_alias(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        sources = (
+            (
+                "const {setPrototypeOf:set}=Object;"
+                "set(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "let set;"
+                "({'setPrototypeOf':set}=Object);"
+                "set(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "let set;"
+                "({['setPrototypeOf']:set}=Reflect);"
+                "set(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "let set;"
+                "set=Object.setPrototypeOf;"
+                "set(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const key='constructor';"
+                "const {'max':f}=Math;"
+                "const build=f[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const {['assign']:f}=Object;"
+                "const build=f['constructor'];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const key='constructor';"
+                "const f=Math.max;"
+                "const build=f[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                "Object[name](process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                "Reflect?.[name]?.(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Object{long_trivia}[name](process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                "(Object.setPrototypeOf)(process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"(Object{long_trivia}[name])(process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Object?.[{long_trivia}name]?.(process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Reflect{long_trivia}[name](process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "const name='setPrototypeOf';"
+                f"Reflect?.[{long_trivia}name]?.(process.env,()=>{{}});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "Object.setPrototypeOf.call(null,process.env,()=>{});"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "Reflect.setPrototypeOf.apply(null,[process.env,()=>{}]);"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+            (
+                "Object.setPrototypeOf.bind(null,process.env,()=>{})();"
+                "const key='constructor';"
+                "const build=process.env[key];"
+                "await build(\"return import('./hidden.mjs')\")();"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "hidden.mjs").write_text(
+                    "console.log('DEPENDENCY_EXECUTED');", encoding="utf-8"
+                )
+                (root / "main.mjs").write_text(source, encoding="utf-8")
+                result = subprocess.run(
+                    [shutil.which("node"), str(root / "main.mjs")],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=10,
+                )
+                self.assertEqual("DEPENDENCY_EXECUTED", result.stdout.strip())
+                self.assert_rejected(source)
+
+    @unittest.skipUnless(shutil.which("node"), "requires Node execution witness")
+    def test_real_node_witness_for_imported_function_dynamic_member(self) -> None:
+        sources = (
+            "import f from './dep.mjs';"
+            "const key='constructor';"
+            "const build=f[key];"
+            "await build(\"return import('./hidden.mjs')\")();",
+            "import {make as f} from './dep.mjs';"
+            "const key='constructor';"
+            "const build=f[key];"
+            "await build(\"return import('./hidden.mjs')\")();",
+        )
+        for source in sources:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "dep.mjs").write_text(
+                    "export default function defaultMake(){}; export function make(){}",
+                    encoding="utf-8",
+                )
+                (root / "hidden.mjs").write_text(
+                    "console.log('DEPENDENCY_EXECUTED');", encoding="utf-8"
+                )
+                (root / "main.mjs").write_text(source, encoding="utf-8")
+                result = subprocess.run(
+                    [shutil.which("node"), str(root / "main.mjs")],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=10,
+                )
+                self.assertEqual("DEPENDENCY_EXECUTED", result.stdout.strip())
+                self.assert_rejected(source)

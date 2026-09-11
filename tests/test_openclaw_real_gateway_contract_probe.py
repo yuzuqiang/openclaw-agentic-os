@@ -1336,7 +1336,16 @@ class RealGatewayProbeTests(unittest.TestCase):
             captured = {}
 
             def fake_run(command, *, cwd, env=None, timeout=240, start_new_session=False):
+                if command and command[0] == "git":
+                    self.assertIs(start_new_session, False)
+                    return MODULE.subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "agentic-head\n",
+                        "",
+                    )
                 self.assertIs(start_new_session, True)
+                captured["child_start_new_session"] = start_new_session
                 exc = MODULE.subprocess.TimeoutExpired(
                     command,
                     timeout,
@@ -1362,6 +1371,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._terminate_and_verify_process_group = fake_terminate_and_verify
                 with self.assertRaisesRegex(MODULE.ProbeError, "process group remained alive"):
                     MODULE.run_probe(Path(directory), output, timeout=1)
+                self.assertIs(captured["child_start_new_session"], True)
                 self.assertEqual(captured["cleanup"], cleanup)
             finally:
                 MODULE._run = original_run
@@ -2857,20 +2867,23 @@ class RealGatewayProbeTests(unittest.TestCase):
         cases = {
             "node_test": (
                 "import { run } from 'node:test';\n"
-                "run({ files: ['./hidden.cjs'] });\n"
+                "run({ files: ['./hidden.cjs'] });\n",
+                "unbound execution capability",
             ),
             "node_vm": (
                 "import vm from 'node:vm';\n"
                 "const member = ['run', 'InThis', 'Context'].join('');\n"
-                "vm[member]('hidden source');\n"
+                "vm[member]('hidden source');\n",
+                "evaluated loader",
             ),
             "node_sqlite": (
                 "import { DatabaseSync } from 'node:sqlite';\n"
                 "new DatabaseSync(':memory:', { allowExtension: true })"
-                ".loadExtension('./hidden.so');\n"
+                ".loadExtension('./hidden.so');\n",
+                "unbound execution capability",
             ),
         }
-        for name, source in cases.items():
+        for name, (source, expected_error) in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 self._write_runtime_source_fixture(
@@ -2878,9 +2891,7 @@ class RealGatewayProbeTests(unittest.TestCase):
                     {MODULE.PERSISTENT_LIFECYCLE_RUNNER: source},
                 )
 
-                with self.assertRaisesRegex(
-                    MODULE.ProbeError, "unbound execution capability"
-                ):
+                with self.assertRaisesRegex(MODULE.ProbeError, expected_error):
                     MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_callable_constructor_evaluation(
@@ -5521,6 +5532,388 @@ class RealGatewayProbeTests(unittest.TestCase):
                 MODULE._run_persistent_lifecycle_probe = original_run_persistent
 
             self.assertFalse(launched)
+            self.assertTrue(evidence_file.is_file())
+            evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "fail_closed")
+            self.assertEqual(
+                evidence["classification"],
+                "persistent_lifecycle_prelaunch_blocked",
+            )
+            self.assertEqual(
+                evidence["reason"], "process_containment_boundary_required"
+            )
+            self.assertEqual(evidence["openclaw_head_sha"], VALID_RUNTIME_HEAD)
+            self.assertFalse(evidence["runtime_ready_candidate_evidence"])
+            self.assertFalse(evidence["production_authority_enabled"])
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"][
+                    "production_gateway_restart_attempted"
+                ]
+            )
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"][
+                    "production_session_mutation_attempted"
+                ]
+            )
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"][
+                    "production_lease_mutation_attempted"
+                ]
+            )
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"]["candidate_process_started"]
+            )
+
+    def test_persistent_runner_writes_fail_closed_evidence_on_source_closure_rejection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_persistent_runtime_source_bindings = (
+                MODULE._persistent_runtime_source_bindings
+            )
+            original_run_persistent = MODULE._run_persistent_lifecycle_probe
+            original_default_private_run_root = MODULE._default_private_run_root
+            launched = False
+            private_error = "runtime source import escapes to /home/alice/private-secret.mjs"
+
+            def fake_source_bindings(*_args, **_kwargs):
+                raise MODULE.ProbeError(private_error)
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            try:
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
+                MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
+                MODULE._persistent_runtime_source_bindings = fake_source_bindings
+                MODULE._default_private_run_root = fake_default_private_run_root
+                MODULE._run_persistent_lifecycle_probe = fake_run_persistent
+                with self.assertRaisesRegex(MODULE.ProbeError, "private-secret"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+            finally:
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._persistent_runtime_source_bindings = (
+                    original_persistent_runtime_source_bindings
+                )
+                MODULE._default_private_run_root = original_default_private_run_root
+                MODULE._run_persistent_lifecycle_probe = original_run_persistent
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["status"], "fail_closed")
+            self.assertEqual(evidence["reason"], "runtime_source_closure_failed")
+            self.assertEqual(evidence["error"], "prelaunch validation failed")
+            self.assertEqual(evidence["error_class"], "ProbeError")
+            self.assertEqual(
+                evidence["error_message_sha256"],
+                MODULE._text_sha256(private_error),
+            )
+            self.assertNotIn("private-secret", evidence_file.read_text(encoding="utf-8"))
+            self.assertNotIn("/home/alice", evidence_file.read_text(encoding="utf-8"))
+            self.assertFalse(evidence["runtime_ready_candidate_evidence"])
+            self.assertFalse(
+                evidence["isolated_non_production_gateway"]["candidate_process_started"]
+            )
+
+    def test_persistent_runner_rejects_prelaunch_evidence_when_db_authority_unknown(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            with mock.patch.object(
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE,
+                "_persistent_runtime_source_bindings",
+                side_effect=MODULE.ProbeError("runtime source blocked"),
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ), mock.patch.object(
+                MODULE,
+                "_db_authority_enabled",
+                side_effect=MODULE.ProbeError(
+                    "failed to read Agentic OS DB authority flag"
+                ),
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "DB authority flag"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_revalidates_agentic_sources_before_source_closure_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            with mock.patch.object(
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE,
+                "_persistent_runtime_source_bindings",
+                side_effect=MODULE.ProbeError("runtime source blocked"),
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ), mock.patch.object(
+                MODULE,
+                "_assert_agentic_sources_still_bound",
+                side_effect=MODULE.ProbeError("source binding changed"),
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_revalidates_candidate_before_source_closure_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            with mock.patch.object(
+                MODULE,
+                "validate_candidate_root",
+                side_effect=[VALID_RUNTIME_HEAD, "changed-head"],
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE,
+                "_persistent_runtime_source_bindings",
+                side_effect=MODULE.ProbeError("runtime source blocked"),
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE,
+                "_assert_agentic_sources_still_bound",
+                return_value=None,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "candidate changed"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_revalidates_agentic_sources_before_boundary_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            with mock.patch.object(
+                MODULE, "validate_candidate_root", return_value=VALID_RUNTIME_HEAD
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE, "_persistent_runtime_source_bindings", return_value=[]
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ), mock.patch.object(
+                MODULE,
+                "_require_process_containment_boundary_request",
+                side_effect=MODULE.ProbeError("containment boundary required"),
+            ), mock.patch.object(
+                MODULE,
+                "_assert_agentic_sources_still_bound",
+                side_effect=MODULE.ProbeError("source binding changed"),
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "source binding changed"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_revalidates_candidate_before_boundary_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence_file = root / "evidence.json"
+            auto_run_root = root / "auto-run-root"
+            launched = False
+
+            def fake_run_persistent(*_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                return {"status": "pass"}
+
+            def fake_default_private_run_root(_head):
+                auto_run_root.mkdir(mode=0o700)
+                return auto_run_root
+
+            with mock.patch.object(
+                MODULE,
+                "validate_candidate_root",
+                side_effect=[VALID_RUNTIME_HEAD, "changed-head"],
+            ), mock.patch.object(
+                MODULE,
+                "_candidate_probe_mode",
+                return_value="persistent_lifecycle_runner",
+            ), mock.patch.object(
+                MODULE,
+                "_source_bindings",
+                return_value=[],
+            ), mock.patch.object(
+                MODULE, "_persistent_runtime_source_bindings", return_value=[]
+            ), mock.patch.object(
+                MODULE,
+                "_default_private_run_root",
+                side_effect=fake_default_private_run_root,
+            ), mock.patch.object(
+                MODULE, "_run_persistent_lifecycle_probe", side_effect=fake_run_persistent
+            ), mock.patch.object(
+                MODULE,
+                "_require_process_containment_boundary_request",
+                side_effect=MODULE.ProbeError("containment boundary required"),
+            ):
+                with self.assertRaisesRegex(MODULE.ProbeError, "candidate changed"):
+                    MODULE.run_probe(root, evidence_file, timeout=1)
+
+            self.assertFalse(launched)
+            self.assertFalse(auto_run_root.exists())
+            self.assertFalse(evidence_file.exists())
+
+    def test_persistent_runner_preserves_explicit_run_root_on_prelaunch_rejection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            explicit_run_root = root / "explicit-run-root"
+            explicit_run_root.mkdir(mode=0o700)
+            evidence_file = root / "evidence.json"
+            original_validate_candidate_root = MODULE.validate_candidate_root
+            original_candidate_probe_mode = MODULE._candidate_probe_mode
+            original_persistent_runtime_source_bindings = (
+                MODULE._persistent_runtime_source_bindings
+            )
+            try:
+                MODULE.validate_candidate_root = lambda candidate_root: VALID_RUNTIME_HEAD
+                MODULE._candidate_probe_mode = lambda candidate_root: "persistent_lifecycle_runner"
+                MODULE._persistent_runtime_source_bindings = lambda *_args, **_kwargs: (
+                    (_ for _ in ()).throw(MODULE.ProbeError("runtime source blocked"))
+                )
+                with self.assertRaisesRegex(MODULE.ProbeError, "runtime source blocked"):
+                    MODULE.run_probe(
+                        root,
+                        evidence_file,
+                        timeout=1,
+                        run_root=explicit_run_root,
+                    )
+            finally:
+                MODULE.validate_candidate_root = original_validate_candidate_root
+                MODULE._candidate_probe_mode = original_candidate_probe_mode
+                MODULE._persistent_runtime_source_bindings = (
+                    original_persistent_runtime_source_bindings
+                )
+
+            self.assertTrue(explicit_run_root.is_dir())
 
     def test_persistent_runner_accepts_boundary_env_only_as_launch_request(self) -> None:
         with mock.patch.dict(

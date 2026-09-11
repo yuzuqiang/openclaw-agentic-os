@@ -1,56 +1,72 @@
 {
   "classification": "evidence_lineage_correction",
   "current_evidence": {
-    "classification": "issue44_live_installed_fail_closed_no_production_lease_mutation",
+    "classification": "issue44_live_installed_pending_clean_generator_recapture",
     "generator_binding_requirements": {
-      "bound_head_is_ancestor_of_containing_revision": true,
+      "bound_head_is_ancestor_of_containing_revision": false,
       "bound_tree_matches_bound_head_tree": true,
       "capability_source_paths": [
         "scripts/openclaw-tool-capability-preflight.py",
+        "scripts/agentic_os_runtime_source_contract.py",
         "scripts/openclaw-live-accepted-session-probe.py",
         "scripts/openclaw-real-gateway-contract-probe.py",
-        "src/agentic_os/heartbeat_shadow.py",
-        "src/agentic_os/metadata.py",
         "src/agentic_os/openclaw_adapter.py",
-        "src/agentic_os/runtime_dispatch.py",
         "src/agentic_os/runtime_attestation.py",
+        "src/agentic_os/metadata.py",
+        "src/agentic_os/heartbeat_shadow.py",
         "src/agentic_os/__init__.py"
       ],
+      "containing_revision_sha": "77a57c7b353bfa8c21de2ac612b050a663df7c30",
       "no_capability_source_drift_after_bound_head": false,
       "script_digest_matches_bound_head_blob": true
     },
     "generator_revision": {
-      "head_sha": "754cdf022fcee10d0d3440d7250da0f05195187b",
-      "script_sha256": "709ccdd93b9ae34909acb85521f0a64c357291db35d4ef69660eb93f5995ece9",
-      "tree_sha": "2fd21066aed5840db161e0928185ac06f2de03fd"
+      "head_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
+      "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
+      "tree_sha": "98f36a6e869c842f1f2c8ce8b10b50af250b82b4"
     },
     "no_production_lease_mutation": true,
-    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260824.json",
+    "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-recapture.json",
     "raw_status": "fail",
-    "reviewed_head_sha": null,
+    "reviewed_head_sha": "77a57c7b353bfa8c21de2ac612b050a663df7c30",
     "runtime_ready": false,
-    "sha256": "5288657875ac2a92c9ca8dd6b4dbe4a7b6fffd90baf1ac87afefc251fdc59a01",
-    "status": "invalid_capability_source_drift_pending_recapture",
-    "status_reason": "Issue #44 installed OpenClaw 2026.7.1 capture was generated before later changes to declared capability source paths, including scripts/openclaw-real-gateway-contract-probe.py. It remains immutable historical fail-closed output, but it is no longer current evidence until recaptured from the corrected exact head."
+    "sha256": null,
+    "status": "pending_clean_generator_revision_capture",
+    "status_reason": "The prior installed OpenClaw 2026.7.1 recapture was bound to generator revision c3e2294540d90d3dea5a09029897771644bf9f16, which is not an ancestor of reviewed PR #46 head 77a57c7b353bfa8c21de2ac612b050a663df7c30. Current live-installed evidence is therefore pending a clean recapture from this lineage; runtime_ready remains false."
   },
   "downstream_candidate_evidence": {
-    "agentic_os_head_sha": "7332a7955fc51582d5314cf2637f0ff2a8a16dc9",
+    "agentic_os_head_sha": "c3e2294540d90d3dea5a09029897771644bf9f16",
     "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
-    "canonical_payload_sha256": "f761f2af25e51b17ece53ae4ec3ed36acccdad0d38c31c8cf7db9980fe3daa64",
-    "classification": "issue44_phase_b_round3_downstream_candidate_evidence_pending_phase_c",
+    "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
     "db_authority_enabled": false,
-    "duplicate_release_identity_parity": true,
-    "isolated_non_production_gateway": true,
-    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json",
+    "duplicate_acquire_identity_parity": false,
+    "duplicate_release_identity_parity": false,
+    "duplicate_spawn_identity_parity": false,
+    "isolated_non_production_gateway": {
+      "candidate_port_closed": "not_required",
+      "candidate_port_opened": false,
+      "candidate_process_started": false,
+      "db_authority_enabled": false,
+      "loopback": true,
+      "port": 20247,
+      "production_config_mutation_attempted": false,
+      "production_gateway_restart_attempted": false,
+      "production_lease_mutation_attempted": false,
+      "production_session_mutation_attempted": false,
+      "run_id_sha256": "5537357979b35d1b702f5445e25071775419847a4fca074ed2624a55e94e54cd",
+      "run_root_sha256": "b7384a80481530c8148269b0cce1ca2a45a6985c54b344852509ab33a6049265",
+      "status": "not_started",
+      "transition_id_sha256": "5537357979b35d1b702f5445e25071775419847a4fca074ed2624a55e94e54cd"
+    },
+    "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json",
     "phase_c_exact_head_required_before_review": true,
     "production_authority_enabled": false,
-    "runner_sha256": "afc40e3e061e929c9cbe2df5fef9904910bfe570b5a4a900d3409bfb04bbf7f6",
     "runtime_ready": false,
     "runtime_ready_candidate_evidence": false,
-    "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
-    "status": "invalid_capability_source_drift_pending_recapture",
-    "status_reason": "Round 3 remains immutable historical output, but it binds Agentic OS head 7332a7955fc51582d5314cf2637f0ff2a8a16dc9, records generator hashes that no longer match the reviewed tree, and predates the lifecycle-attestation evidence now required by the corrected validator. It is not current candidate evidence until recaptured from a clean exact head.",
-    "validation_receipt_bound": true
+    "sha256": "4be5d1ca75d7cd891dd794b7e2d86fd4817681a357557b394bcaeeb3a2e73517",
+    "status": "fail_closed_runtime_source_closure_pending_phase_c",
+    "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed on 2026-09-10 from PR #46 Agentic OS generator revision c3e2294540d90d3dea5a09029897771644bf9f16 in an isolated non-production run root. The probe wrote durable fail-closed evidence and did not start the candidate because runtime source closure still rejects an unsupported evaluated-loader/dynamic-import pattern before any Gateway/session/lease mutation.",
+    "validation_receipt_bound": false
   },
   "historical_artifacts": [
     {
@@ -63,6 +79,17 @@
       "runtime_ready_candidate_evidence": false,
       "sha256": "c7413e162809e0a4e3c41979977783d19dac3a613c13a634534e51dd7d2c0228",
       "status": "invalidated_historical_downstream_snapshot"
+    },
+    {
+      "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
+      "immutable_historical_bytes": true,
+      "interpretation": "superseded round-3 downstream candidate snapshot; its own payload reported pass and runtime_ready_candidate_evidence=true, but later validator hardening and capability-source drift invalidated it as non-authoritative historical evidence pending clean exact-head recapture",
+      "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json",
+      "raw_runtime_ready_candidate_evidence": true,
+      "raw_status": "pass",
+      "runtime_ready_candidate_evidence": false,
+      "sha256": "a62667b64279a63a119d3afd2aae8516c6b9ae69c847dad5544749bce659e79b",
+      "status": "invalid_capability_source_drift_pending_recapture"
     },
     {
       "binding_assessment": {
@@ -88,5 +115,5 @@
     }
   ],
   "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-  "status": "invalid_runtime_evidence_pending_clean_recapture"
+  "status": "pending_current_evidence"
 }

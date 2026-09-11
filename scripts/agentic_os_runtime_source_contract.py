@@ -148,6 +148,28 @@ STATIC_RUNTIME_IMPORT_SPECIFIER = re.compile(
     """.replace("__STATIC_IMPORT_CLAUSE_FRAGMENT__", STATIC_IMPORT_CLAUSE_FRAGMENT),
     re.VERBOSE | re.DOTALL,
 )
+STATIC_RUNTIME_IMPORT_BINDING = re.compile(
+    r"""
+    \bimport\s+(?!type\b)
+    (?P<clause>__STATIC_IMPORT_CLAUSE_FRAGMENT__)\s+from\s*
+    ["'][^"']+["']
+    """.replace("__STATIC_IMPORT_CLAUSE_FRAGMENT__", STATIC_IMPORT_CLAUSE_FRAGMENT),
+    re.VERBOSE | re.DOTALL,
+)
+COMMONJS_REQUIRE_VALUE_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    require\s*\(
+    """,
+    re.VERBOSE,
+)
+COMMONJS_REQUIRE_VALUE_DESTRUCTURING_ASSIGNMENT = re.compile(
+    r"""
+    \b(?:const|let|var)\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    require\s*\(
+    """,
+    re.VERBOSE | re.DOTALL,
+)
 COMMONJS_REQUIRE_TOKEN = "require"
 COMMONJS_REQUIRE_RESOLVE_MEMBER = "resolve"
 DYNAMIC_IMPORT_TOKEN = "import"
@@ -438,6 +460,45 @@ COMMONJS_REQUIRE_ALIAS_ASSIGNMENT = re.compile(
     \(?\s*require\s*\)?\s*(?:;|,|\n|$)
     """,
     re.VERBOSE,
+)
+PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_ASSIGNMENT = re.compile(
+    rf"""
+    \b(?:const|let|var)\s+(?P<name>{JS_IDENTIFIER})\s*=\s*
+    """,
+    re.VERBOSE,
+)
+PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_ASSIGNMENT = re.compile(
+    r"""
+    \b(?:const|let|var)\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_REASSIGNMENT = re.compile(
+    rf"""
+    (?<![\w$.])
+    (?P<name>{JS_IDENTIFIER})\s*=\s*
+    """,
+    re.VERBOSE,
+)
+PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_REASSIGNMENT = re.compile(
+    r"""
+    (?<![\w$.])
+    \(?\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+BUILTIN_FUNCTION_DESTRUCTURING_ASSIGNMENT = re.compile(
+    r"""
+    \b(?:const|let|var)\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+BUILTIN_FUNCTION_DESTRUCTURING_REASSIGNMENT = re.compile(
+    r"""
+    (?<![\w$.])
+    \(?\s*\{(?P<body>[^{}]*)\}\s*=\s*
+    """,
+    re.VERBOSE | re.DOTALL,
 )
 INDIRECT_COMMONJS_REQUIRE_INVOCATION = re.compile(
     rf"""
@@ -1546,7 +1607,310 @@ def _quoted_literal_is_computed_member(source_text: str, quote_index: int) -> bo
     while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
         token_start -= 1
     token = source_text[token_start:token_end]
-    return token not in {"await", "case", "return", "throw", "yield"}
+    if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
+        return False
+    if token == "let" and _let_token_starts_lexical_declaration(
+        source_text, token_start, token_end, bracket_index
+    ):
+        return False
+    if token in {"await", "case", "const", "return", "throw", "var", "yield"}:
+        before_token = token_start - 1
+        while before_token >= 0 and source_text[before_token].isspace():
+            before_token -= 1
+        return before_token >= 0 and source_text[before_token] == "."
+    return True
+
+
+def _let_token_starts_lexical_declaration(
+    source_text: str, token_start: int, token_end: int, bracket_index: int
+) -> bool:
+    if source_text[token_start:token_end] != "let":
+        return False
+    after_token = _skip_js_trivia(source_text, token_end)
+    if after_token != bracket_index or source_text[bracket_index] not in "[{":
+        return False
+    before_token = _previous_non_trivia_index(source_text, token_start)
+    if before_token < 0:
+        return True
+    if source_text[before_token] in ";{}":
+        return True
+    return source_text[before_token] == "(" and _for_header_opener_belongs_to_for(
+        source_text, before_token
+    )
+
+
+def _token_is_contextual_for_of(source_text: str, token_start: int, token_end: int) -> bool:
+    if source_text[token_start:token_end] != "of":
+        return False
+    cursor = token_start - 1
+    depth = 0
+    opener = -1
+    while cursor >= 0:
+        character = source_text[cursor]
+        if character == ")":
+            depth += 1
+        elif character == "(":
+            if depth == 0:
+                opener = cursor
+                break
+            depth -= 1
+        cursor -= 1
+    if opener < 0:
+        return False
+    before_opener = opener - 1
+    while before_opener >= 0 and source_text[before_opener].isspace():
+        before_opener -= 1
+    word_end = before_opener + 1
+    while before_opener >= 0 and _is_identifier_character(source_text[before_opener]):
+        before_opener -= 1
+    word = source_text[before_opener + 1 : word_end]
+    if word == "await":
+        before_await = before_opener
+        while before_await >= 0 and source_text[before_await].isspace():
+            before_await -= 1
+        await_prefix_end = before_await + 1
+        while before_await >= 0 and _is_identifier_character(source_text[before_await]):
+            before_await -= 1
+        word = source_text[before_await + 1 : await_prefix_end]
+    if word != "for":
+        return False
+    header_close = _matching_for_header_close_index(source_text, opener)
+    if header_close < 0:
+        return False
+    separator = _for_header_top_level_of_separator_span(
+        source_text, opener + 1, header_close
+    )
+    if separator is None:
+        return False
+    previous = source_text[token_start - 1] if token_start > 0 else ""
+    following = source_text[token_end] if token_end < len(source_text) else ""
+    return (
+        separator == (token_start, token_end)
+        and not _is_identifier_character(previous)
+        and not _is_identifier_character(following)
+    )
+
+
+def _matching_for_header_close_index(source_text: str, opener: int) -> int:
+    index = opener + 1
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if depth == 0:
+                return index if character == ")" else -1
+            depth -= 1
+            index += 1
+            continue
+        index += 1
+    return -1
+
+
+def _for_header_has_top_level_semicolon(
+    source_text: str, start_index: int, end_index: int
+) -> bool:
+    index = start_index
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < end_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < end_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < end_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= end_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if depth > 0:
+                depth -= 1
+            index += 1
+            continue
+        if character == ";" and depth == 0:
+            return True
+        index += 1
+    return False
+
+
+def _for_header_top_level_of_separator_span(
+    source_text: str, start_index: int, end_index: int
+) -> tuple[int, int] | None:
+    index = start_index
+    depth = 0
+    state = "code"
+    quote = ""
+    separator: tuple[int, int] | None = None
+    while index < end_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < end_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < end_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= end_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            if depth > 0:
+                depth -= 1
+            index += 1
+            continue
+        if character == ";" and depth == 0:
+            return None
+        token_end = index + 2
+        if (
+            depth == 0
+            and source_text.startswith("of", index)
+            and (
+                index == start_index
+                or not _is_identifier_character(source_text[index - 1])
+            )
+            and (
+                token_end >= end_index
+                or not _is_identifier_character(source_text[token_end])
+            )
+        ):
+            prefix = source_text[start_index:index].strip()
+            suffix = source_text[token_end:end_index].strip()
+            if prefix and suffix and prefix not in {
+                "await using",
+                "const",
+                "let",
+                "using",
+                "var",
+            }:
+                if separator is None:
+                    separator = (index, token_end)
+            index = token_end
+            continue
+        index += 1
+    return separator
 
 
 def _computed_member_bracket_has_target(source_text: str, bracket_index: int) -> bool:
@@ -1565,7 +1929,18 @@ def _computed_member_bracket_has_target(source_text: str, bracket_index: int) ->
     while token_start > 0 and _is_identifier_character(source_text[token_start - 1]):
         token_start -= 1
     token = source_text[token_start:token_end]
-    return token not in {"await", "case", "return", "throw", "yield"}
+    if token == "of" and _token_is_contextual_for_of(source_text, token_start, token_end):
+        return False
+    if token == "let" and _let_token_starts_lexical_declaration(
+        source_text, token_start, token_end, bracket_index
+    ):
+        return False
+    if token in {"await", "case", "const", "return", "throw", "var", "yield"}:
+        before_token = token_start - 1
+        while before_token >= 0 and source_text[before_token].isspace():
+            before_token -= 1
+        return before_token >= 0 and source_text[before_token] == "."
+    return True
 
 
 def _parse_static_template_member(
@@ -1588,6 +1963,21 @@ def _parse_static_template_member(
     )
 
 
+def _parse_static_numeric_member(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    start = index
+    if index >= len(source_text) or not source_text[index].isdigit():
+        return None
+    while index < len(source_text) and source_text[index].isdigit():
+        index += 1
+    if index < len(source_text) and source_text[index] == ".":
+        index += 1
+        while index < len(source_text) and source_text[index].isdigit():
+            index += 1
+    return source_text[start:index], index
+
+
 def _static_computed_member_name(
     source_text: str, bracket_index: int
 ) -> tuple[str, int] | None:
@@ -1599,6 +1989,8 @@ def _static_computed_member_name(
         parsed = _parse_quoted_specifier(source_text, index)
         if parsed is None:
             parsed = _parse_static_template_member(source_text, index)
+        if parsed is None:
+            parsed = _parse_static_numeric_member(source_text, index)
         if parsed is None:
             return None
         piece, index = parsed
@@ -1617,16 +2009,1462 @@ def _computed_member_target_may_be_function_constructor(
 ) -> bool:
     if not _computed_member_bracket_has_target(source_text, bracket_index):
         return False
+    process_env_target_start = _computed_member_process_env_target_start(
+        source_text, bracket_index
+    )
+    if process_env_target_start is not None:
+        return _process_env_target_was_reassigned(
+            source_text, process_env_target_start
+        )
+    receiver = _computed_member_identifier_receiver(source_text, bracket_index)
+    return (
+        _computed_member_receiver_is_builtin_function(source_text, bracket_index)
+        or (
+            receiver is not None
+            and _identifier_was_bound_to_function_like_value(
+                source_text, receiver, bracket_index
+            )
+        )
+        or _computed_member_direct_receiver_is_function_like_literal(
+            source_text, bracket_index
+        )
+    )
+
+
+def _computed_member_receiver_is_builtin_function(
+    source_text: str, bracket_index: int
+) -> bool:
+    receiver = _computed_member_identifier_receiver(source_text, bracket_index)
+    if receiver is not None and (
+        _identifier_was_bound_to_builtin_function(source_text, receiver, bracket_index)
+        or _identifier_was_bound_to_runtime_import(source_text, receiver, bracket_index)
+    ):
+        return True
+    receiver_start = _computed_member_direct_receiver_start(source_text, bracket_index)
+    if receiver_start is None:
+        return False
+    return _parse_builtin_function_reference_end(source_text, receiver_start) is not None
+
+
+def _computed_member_identifier_receiver(
+    source_text: str, bracket_index: int
+) -> str | None:
+    cursor = bracket_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0 or not _is_identifier_character(source_text[cursor]):
+        return None
+    token_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    before = source_text[cursor] if cursor >= 0 else ""
+    if before and (_is_identifier_character(before) or before in ".]"):
+        return None
+    return source_text[cursor + 1 : token_end]
+
+
+def _computed_member_direct_receiver_start(
+    source_text: str, bracket_index: int
+) -> int | None:
     cursor = bracket_index - 1
     while cursor >= 0 and source_text[cursor].isspace():
         cursor -= 1
     if cursor < 0:
-        return False
-    window_start = max(0, cursor - 240)
-    target_window = source_text[window_start : cursor + 1]
-    return "=>" in target_window or bool(
-        re.search(r"\b(?:async\s+)?function\b|\bclass\b", target_window)
+        return None
+    if not _is_identifier_character(source_text[cursor]):
+        return None
+    token_end = cursor + 1
+    while cursor >= 0 and (
+        _is_identifier_character(source_text[cursor]) or source_text[cursor] == "."
+    ):
+        cursor -= 1
+    return cursor + 1 if cursor + 1 < token_end else None
+
+
+def _identifier_was_bound_to_function_like_value(
+    source_text: str, name: str, end_index: int
+) -> bool:
+    escaped = re.escape(name)
+    patterns = (
+        re.compile(
+            rf"\b(?:async\s+)?function\s*\*?\s+{escaped}\b",
+            re.VERBOSE,
+        ),
+        re.compile(rf"\bclass\s+{escaped}\b", re.VERBOSE),
+        re.compile(
+            rf"""
+            (?:
+                \b(?:const|let|var)\s+{escaped}
+              |
+                (?<![\w$.]){escaped}
+            )
+            \s*=\s*
+            (?:
+                (?:async\s+)?function\b
+              | class\b
+              | (?:async\s*)?\([^)]*\)\s*=>
+              | (?:async\s+)?{JS_IDENTIFIER}\s*=>
+            )
+            """,
+            re.VERBOSE | re.DOTALL,
+        ),
     )
+    for pattern in patterns:
+        for match in _executable_pattern_matches(source_text, pattern):
+            if match.start() >= end_index:
+                break
+            return True
+    return False
+
+
+def _computed_member_direct_receiver_is_function_like_literal(
+    source_text: str, bracket_index: int
+) -> bool:
+    receiver_start = _computed_member_expression_receiver_start(
+        source_text, bracket_index
+    )
+    if receiver_start is None:
+        return False
+    receiver = source_text[receiver_start:bracket_index]
+    return bool(
+        re.search(
+            r"(?:^|[^\w$])(?:async\s+)?function\b|(?:^|[^\w$])class\b|=>",
+            receiver,
+        )
+    )
+
+
+def _computed_member_expression_receiver_start(
+    source_text: str, bracket_index: int
+) -> int | None:
+    cursor = bracket_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor < 0:
+        return None
+    if source_text[cursor] in ")]}":
+        matching = _matching_open_js_delimiter_index(source_text, cursor)
+        return matching
+    return None
+
+
+def _matching_open_js_delimiter_index(source_text: str, close_index: int) -> int | None:
+    closer = source_text[close_index]
+    opener = {")": "(", "]": "[", "}": "{"}.get(closer)
+    if opener is None:
+        return None
+    depth = 0
+    for kind, value, start, _end in reversed(_source_tokens(source_text[: close_index + 1])):
+        if kind in {"comment", "string", "template", "static-template", "regexp"}:
+            continue
+        if value == closer:
+            depth += 1
+        elif value == opener:
+            depth -= 1
+            if depth == 0:
+                return start
+    return None
+
+
+def _identifier_was_bound_to_runtime_import(
+    source_text: str, name: str, end_index: int
+) -> bool:
+    for match in _executable_pattern_matches(source_text, STATIC_RUNTIME_IMPORT_BINDING):
+        if match.start() >= end_index:
+            break
+        if name in _static_import_clause_local_names(match.group("clause")):
+            return True
+    for match in _executable_pattern_matches(source_text, COMMONJS_REQUIRE_VALUE_ASSIGNMENT):
+        if match.start() >= end_index:
+            break
+        if match.group("name") == name:
+            return True
+    for match in _executable_pattern_matches(
+        source_text, COMMONJS_REQUIRE_VALUE_DESTRUCTURING_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        if name in _destructured_aliases_for_static_members(
+            match.group("body"), allowed_members=None, fail_closed_on_unsupported=True
+        ):
+            return True
+    return False
+
+
+def _static_import_clause_local_names(clause: str) -> set[str]:
+    names: set[str] = set()
+    clause = clause.strip()
+    if not clause:
+        return names
+    default_part, separator, rest = clause.partition(",")
+    first_part = default_part.strip()
+    if first_part.startswith("*"):
+        match = re.fullmatch(rf"\*\s+as\s+({JS_IDENTIFIER})", first_part)
+        if match is not None:
+            names.add(match.group(1))
+    elif first_part.startswith("{"):
+        names.update(_static_import_named_clause_local_names(clause))
+        return names
+    else:
+        parsed_default = _parse_js_identifier(first_part, 0)
+        if parsed_default is not None:
+            local_name, local_end = parsed_default
+            if first_part[local_end:].strip() == "":
+                names.add(local_name)
+    if separator:
+        rest = rest.strip()
+        if rest.startswith("{"):
+            names.update(_static_import_named_clause_local_names(rest))
+        elif rest.startswith("*"):
+            match = re.fullmatch(rf"\*\s+as\s+({JS_IDENTIFIER})", rest)
+            if match is not None:
+                names.add(match.group(1))
+    return names
+
+
+def _static_import_named_clause_local_names(clause: str) -> set[str]:
+    start = clause.find("{")
+    end = clause.rfind("}")
+    if start < 0 or end <= start:
+        return set()
+    names: set[str] = set()
+    for part in _split_top_level_comma_parts(clause[start + 1 : end]):
+        part = part.strip()
+        if part.startswith("type "):
+            part = part[5:].strip()
+        parsed = _parse_named_binding_part(part)
+        if parsed is None:
+            continue
+        _imported, local = parsed
+        names.add(local)
+    return names
+
+
+def _identifier_was_bound_to_builtin_function(
+    source_text: str, name: str, end_index: int
+) -> bool:
+    assignment = re.compile(
+        rf"""
+        (?:
+            \b(?:const|let|var)\s+{re.escape(name)}
+          |
+            (?<![\w$.]){re.escape(name)}
+        )
+        \s*=\s*
+        """,
+        re.VERBOSE,
+    )
+    for match in _executable_pattern_matches(source_text, assignment):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        rhs_end = _parse_builtin_function_or_bound_reference_end(
+            source_text, rhs_start
+        )
+        if rhs_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end >= end_index or source_text[assignment_end] in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            return True
+    for match in _executable_pattern_matches(
+        source_text, BUILTIN_FUNCTION_DESTRUCTURING_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        parsed_base = _parse_builtin_function_destructuring_base(source_text, rhs_start)
+        if parsed_base is None:
+            continue
+        base, rhs_end = parsed_base
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            continue
+        if name in _builtin_function_destructured_aliases(base, match.group("body")):
+            return True
+    for match in _executable_pattern_matches(
+        source_text, BUILTIN_FUNCTION_DESTRUCTURING_REASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        parsed_base = _parse_builtin_function_destructuring_base(source_text, rhs_start)
+        if parsed_base is None:
+            continue
+        base, rhs_end = parsed_base
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            ")",
+            "\r",
+            "\n",
+        }:
+            continue
+        if name in _builtin_function_destructured_aliases(base, match.group("body")):
+            return True
+    return False
+
+
+def _parse_builtin_function_or_bound_reference_end(
+    source_text: str, index: int
+) -> int | None:
+    builtin_end = _parse_builtin_function_reference_end(source_text, index)
+    if builtin_end is None:
+        return None
+    try:
+        member = _parse_static_runtime_member(
+            source_text,
+            builtin_end,
+            dynamic_error="runtime source contains an unsupported evaluated loader reference",
+        )
+    except RuntimeSourceContractError:
+        return builtin_end
+    if member is None or member[0] != "bind":
+        return builtin_end
+    call_index = _skip_js_trivia(source_text, member[1])
+    if call_index >= len(source_text) or source_text[call_index] != "(":
+        return builtin_end
+    close_index = _matching_js_delimiter_index(source_text, call_index, len(source_text))
+    if close_index is None:
+        return builtin_end
+    return close_index + 1
+
+
+def _parse_builtin_function_reference_end(source_text: str, index: int) -> int | None:
+    parsed_math = _parse_grouped_named_base(source_text, index, "Math")
+    if parsed_math is not None:
+        try:
+            member = _parse_static_runtime_member(
+                source_text,
+                parsed_math,
+                dynamic_error="runtime source contains an unsupported evaluated loader reference",
+            )
+        except RuntimeSourceContractError:
+            return None
+        if member is not None:
+            return member[1]
+
+    for base in ("Object", "Reflect"):
+        parsed_base = _parse_grouped_named_base(source_text, index, base)
+        if parsed_base is None:
+            continue
+        try:
+            member = _parse_static_runtime_member(
+                source_text,
+                parsed_base,
+                dynamic_error="runtime source contains an unsupported evaluated loader reference",
+            )
+        except RuntimeSourceContractError:
+            return None
+        if member is not None and member[0] in {
+            "assign",
+            "create",
+            "defineProperty",
+            "getPrototypeOf",
+            "setPrototypeOf",
+        }:
+            return member[1]
+    return None
+
+
+def _parse_builtin_function_destructuring_base(
+    source_text: str, index: int
+) -> tuple[str, int] | None:
+    for base in ("Math", "Object", "Reflect"):
+        parsed = _parse_grouped_named_base(source_text, index, base)
+        if parsed is None:
+            continue
+        before = source_text[index - 1] if index > 0 else ""
+        if before and (_is_identifier_character(before) or before == "."):
+            continue
+        after = _skip_js_trivia(source_text, parsed)
+        if after < len(source_text) and (
+            _is_identifier_character(source_text[after])
+            or source_text[after] in ".([`"
+            or source_text.startswith("?.", after)
+        ):
+            continue
+        return base, parsed
+    return None
+
+
+def _builtin_function_destructured_aliases(base: str, body: str) -> set[str]:
+    allowed_object_members = {
+        "assign",
+        "create",
+        "defineProperty",
+        "getPrototypeOf",
+        "setPrototypeOf",
+    }
+    allowed_members = allowed_object_members if base in {"Object", "Reflect"} else None
+    return _destructured_aliases_for_static_members(
+        body, allowed_members=allowed_members, fail_closed_on_unsupported=True
+    )
+
+
+def _destructured_aliases_for_static_members(
+    body: str,
+    *,
+    allowed_members: set[str] | None,
+    fail_closed_on_unsupported: bool,
+) -> set[str]:
+    aliases: set[str] = set()
+    for segment in _split_top_level_comma_parts(body):
+        parsed = _parse_static_destructured_property_alias(segment)
+        if parsed is None:
+            if fail_closed_on_unsupported:
+                alias = _destructured_property_fallback_alias(segment)
+                if alias is not None:
+                    aliases.add(alias)
+            continue
+        member, alias = parsed
+        if allowed_members is None or member in allowed_members:
+            aliases.add(alias)
+    return aliases
+
+
+def _split_top_level_comma_parts(source_text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    index = 0
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if character == "," and depth == 0:
+            parts.append(source_text[start:index])
+            start = index + 1
+        index += 1
+    parts.append(source_text[start:])
+    return parts
+
+
+def _parse_static_destructured_property_alias(
+    segment: str,
+) -> tuple[str, str] | None:
+    index = _skip_js_trivia(segment, 0)
+    if index >= len(segment):
+        return None
+    if segment[index] == "[":
+        member_index = _skip_js_trivia(segment, index + 1)
+        parsed = _parse_quoted_specifier(segment, member_index)
+        if parsed is None:
+            parsed = _parse_static_template_member(segment, member_index)
+        if parsed is None:
+            return None
+        member, member_end = parsed
+        close_index = _skip_js_trivia(segment, member_end)
+        if close_index >= len(segment) or segment[close_index] != "]":
+            return None
+        colon_index = _skip_js_trivia(segment, close_index + 1)
+        if colon_index >= len(segment) or segment[colon_index] != ":":
+            return None
+        alias_index = _skip_js_trivia(segment, colon_index + 1)
+        parsed_alias = _parse_js_identifier(segment, alias_index)
+        if parsed_alias is None:
+            return None
+        alias, alias_end = parsed_alias
+        return (member, alias) if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+    parsed_literal = _parse_quoted_specifier(segment, index)
+    if parsed_literal is not None:
+        member, member_end = parsed_literal
+        colon_index = _skip_js_trivia(segment, member_end)
+        if colon_index >= len(segment) or segment[colon_index] != ":":
+            return None
+        alias_index = _skip_js_trivia(segment, colon_index + 1)
+        parsed_alias = _parse_js_identifier(segment, alias_index)
+        if parsed_alias is None:
+            return None
+        alias, alias_end = parsed_alias
+        return (member, alias) if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+    parsed_identifier = _parse_js_identifier(segment, index)
+    if parsed_identifier is None:
+        return None
+    member, member_end = parsed_identifier
+    after_member = _skip_js_trivia(segment, member_end)
+    if after_member == len(segment):
+        return member, member
+    if after_member >= len(segment) or segment[after_member] != ":":
+        return None
+    alias_index = _skip_js_trivia(segment, after_member + 1)
+    parsed_alias = _parse_js_identifier(segment, alias_index)
+    if parsed_alias is None:
+        return None
+    alias, alias_end = parsed_alias
+    return (member, alias) if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+
+
+def _destructured_property_fallback_alias(segment: str) -> str | None:
+    colon_index = _top_level_colon_index(segment)
+    if colon_index is None:
+        return None
+    alias_index = _skip_js_trivia(segment, colon_index + 1)
+    parsed_alias = _parse_js_identifier(segment, alias_index)
+    if parsed_alias is None:
+        return None
+    alias, alias_end = parsed_alias
+    return alias if segment[_skip_js_trivia(segment, alias_end):].strip() == "" else None
+
+
+def _top_level_colon_index(source_text: str) -> int | None:
+    index = 0
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < len(source_text):
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < len(source_text):
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if character == ":" and depth == 0:
+            return index
+        index += 1
+    return None
+
+
+def _computed_member_process_env_target_start(
+    source_text: str, bracket_index: int
+) -> int | None:
+    target_end = bracket_index
+    while target_end > 0 and source_text[target_end - 1].isspace():
+        target_end -= 1
+    if target_end <= 0:
+        return None
+
+    candidate_starts: list[int] = []
+    if source_text[target_end - 1] == ")":
+        opener_index = _matching_js_opener_index(source_text, target_end - 1)
+        if opener_index is not None:
+            candidate_starts.append(opener_index)
+
+    candidate_starts.extend(
+        _computed_member_receiver_process_candidate_starts(source_text, target_end)
+    )
+
+    seen: set[int] = set()
+    for candidate_start in candidate_starts:
+        if candidate_start in seen:
+            continue
+        seen.add(candidate_start)
+        try:
+            parsed = _parse_grouped_process_env_target(source_text, candidate_start)
+        except RuntimeSourceContractError:
+            continue
+        if parsed is None:
+            continue
+        process_start, parsed_end = parsed
+        if _skip_js_trivia(source_text, parsed_end) == target_end:
+            return process_start
+    return None
+
+
+def _computed_member_receiver_process_candidate_starts(
+    source_text: str, target_end: int
+) -> list[int]:
+    cursor = target_end - 1
+    budget = 4096
+    while cursor >= 0 and target_end - cursor <= budget:
+        character = source_text[cursor]
+        if character in ";\r\n{}=,:+-*/%&|^!<>~":
+            cursor += 1
+            break
+        cursor -= 1
+    else:
+        cursor = max(0, target_end - budget)
+
+    starts: list[int] = []
+    window = source_text[cursor:target_end]
+    for match in re.finditer(r"\b(?:globalThis|global|process)\b", window):
+        starts.append(cursor + match.start())
+    return starts
+
+
+def _parse_grouped_process_env_target(
+    source_text: str, index: int
+) -> tuple[int, int] | None:
+    if index < 0:
+        return None
+    index = _skip_js_trivia(source_text, index)
+    if index < 0 or index >= len(source_text):
+        return None
+    if source_text[index] == "(":
+        parsed = _parse_grouped_process_env_target(source_text, index + 1)
+        if parsed is None:
+            return None
+        process_start, inner_end = parsed
+        close_index = _skip_js_trivia(source_text, inner_end)
+        if close_index >= len(source_text) or source_text[close_index] != ")":
+            return None
+        return process_start, close_index + 1
+
+    process_start = index
+    process_end = _parse_process_base(source_text, index)
+    if process_end is None:
+        return None
+    member = _parse_process_member(source_text, process_end)
+    if member is None or member[0] != "env":
+        return None
+    return process_start, member[1]
+
+
+def _process_env_target_was_reassigned(source_text: str, target_start: int) -> bool:
+    index = 0
+    state = "code"
+    quote = ""
+    while index < target_start:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < target_start else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < target_start:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= target_start:
+            index = regex_end
+            continue
+        if character == "`":
+            chunks, new_index = _template_expression_chunks(source_text, index)
+            if new_index <= target_start and any(
+                _process_env_target_was_reassigned(chunk, len(chunk)) for chunk in chunks
+            ):
+                return True
+            index = new_index
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        process_end = _parse_process_base(source_text, index)
+        if process_end is not None:
+            member = _parse_process_member(source_text, process_end)
+            if member is not None and member[0] == "env":
+                assignment_target_end = _parenthesized_process_env_target_end(
+                    source_text, index, member[1], target_start
+                )
+                after_target = _skip_js_trivia(source_text, assignment_target_end)
+                if after_target < target_start and _starts_js_assignment_operator(
+                    source_text, after_target
+                ):
+                    return True
+                if _process_env_reference_is_destructuring_assignment_target(
+                    source_text, index, target_start
+                ):
+                    return True
+                if _process_env_reference_is_for_of_assignment_target(
+                    source_text, index, member[1], target_start
+                ):
+                    return True
+                if _process_env_reference_is_prototype_mutation_target(
+                    source_text, index, member[1], target_start
+                ):
+                    return True
+                index = max(index + 1, member[1])
+                continue
+        index += 1
+    return False
+
+
+def _parenthesized_process_env_target_end(
+    source_text: str, process_start: int, process_end: int, target_start: int
+) -> int:
+    target_start_index = process_start
+    target_end = process_end
+    while True:
+        opener_index = _previous_non_trivia_index(source_text, target_start_index)
+        if opener_index < 0 or source_text[opener_index] != "(":
+            return target_end
+        closer_index = _skip_js_trivia(source_text, target_end)
+        if closer_index >= target_start or source_text[closer_index] != ")":
+            return target_end
+        matching_close = _matching_js_delimiter_index(
+            source_text, opener_index, target_start
+        )
+        if matching_close != closer_index:
+            return target_end
+        target_start_index = opener_index
+        target_end = closer_index + 1
+
+
+def _process_env_reference_is_destructuring_assignment_target(
+    source_text: str, process_start: int, target_start: int
+) -> bool:
+    stack = _js_delimiter_stack_at(source_text, process_start)
+    for opener, opener_index in reversed(stack):
+        if opener not in "{[":
+            continue
+        close_index = _matching_js_delimiter_index(source_text, opener_index, target_start)
+        if close_index is None:
+            continue
+        after_close = _skip_js_trivia(source_text, close_index + 1)
+        if after_close < target_start and _starts_js_assignment_operator(
+            source_text, after_close
+        ):
+            return True
+    return False
+
+
+def _process_env_reference_is_for_of_assignment_target(
+    source_text: str, process_start: int, process_end: int, target_start: int
+) -> bool:
+    for opener, opener_index in reversed(
+        _js_delimiter_stack_at(source_text, process_start)
+    ):
+        if opener != "(" or not _for_header_opener_belongs_to_for(
+            source_text, opener_index
+        ):
+            continue
+        header_close = _matching_for_header_close_index(source_text, opener_index)
+        if header_close < 0 or header_close >= target_start:
+            continue
+        separator = _for_header_top_level_of_separator_span(
+            source_text, opener_index + 1, header_close
+        )
+        if (
+            separator is not None
+            and opener_index < process_start
+            and process_end <= separator[0]
+        ):
+            return True
+    return False
+
+
+def _process_env_reference_is_prototype_mutation_target(
+    source_text: str, process_start: int, process_end: int, target_start: int
+) -> bool:
+    for opener, opener_index in reversed(
+        _js_delimiter_stack_at(source_text, process_start)
+    ):
+        if opener != "(":
+            continue
+        target_end = _parenthesized_process_env_target_end(
+            source_text, process_start, process_end, target_start
+        )
+        after_target = _skip_js_trivia(source_text, target_end)
+        if after_target >= target_start or source_text[after_target] not in ",)":
+            continue
+        argument_index = _call_argument_index_before(source_text, opener_index, process_start)
+        try:
+            invocation = _callee_process_env_prototype_mutator_invocation(
+                source_text, opener_index
+            )
+        except RuntimeSourceContractError:
+            if argument_index == 0:
+                raise
+            continue
+        if invocation is None:
+            continue
+        if invocation == "direct" and argument_index == 0:
+            return True
+        if invocation in {"call", "bind"} and argument_index >= 1:
+            return True
+        if invocation == "apply" and argument_index >= 1:
+            return True
+    return False
+
+
+def _callee_is_process_env_prototype_mutator(source_text: str, opener_index: int) -> bool:
+    return (
+        _callee_process_env_prototype_mutator_invocation(source_text, opener_index)
+        is not None
+    )
+
+
+def _callee_process_env_prototype_mutator_invocation(
+    source_text: str, opener_index: int
+) -> str | None:
+    for kind, value, start, _end in _source_tokens(source_text):
+        if start >= opener_index:
+            break
+        if kind != "identifier" or value not in {"Object", "Reflect"}:
+            continue
+        for candidate_start in _grouped_identifier_candidate_starts(source_text, start):
+            member_end = _parse_process_env_prototype_mutator_member_at(
+                source_text, candidate_start, opener_index=opener_index
+            )
+            if member_end is not None and _callee_end_reaches_call_opener(
+                source_text, candidate_start, member_end, opener_index
+            ):
+                return "direct"
+            helper = _process_env_prototype_mutator_invocation_helper(
+                source_text, member_end, opener_index
+            )
+            if helper is not None:
+                return helper
+
+    alias = _callee_identifier_before_call(source_text, opener_index)
+    if alias in _process_env_prototype_mutator_alias_names(source_text, opener_index):
+        return "direct"
+    alias_invocation = _callee_process_env_prototype_mutator_alias_invocation(
+        source_text, opener_index
+    )
+    if alias_invocation is not None:
+        return alias_invocation
+    return None
+
+
+def _callee_process_env_prototype_mutator_alias_invocation(
+    source_text: str, opener_index: int
+) -> str | None:
+    aliases = _process_env_prototype_mutator_alias_names(source_text, opener_index)
+    if not aliases:
+        return None
+    for kind, value, start, _end in _source_tokens(source_text):
+        if start >= opener_index:
+            break
+        if kind != "identifier" or value not in aliases:
+            continue
+        for candidate_start in _grouped_identifier_candidate_starts(source_text, start):
+            alias_end = _parse_grouped_named_base(source_text, candidate_start, value)
+            if alias_end is None:
+                continue
+            if _callee_end_reaches_call_opener(
+                source_text, candidate_start, alias_end, opener_index
+            ):
+                return "direct"
+            helper = _process_env_prototype_mutator_invocation_helper(
+                source_text, alias_end, opener_index
+            )
+            if helper is not None:
+                return helper
+    return None
+
+
+def _process_env_prototype_mutator_invocation_helper(
+    source_text: str, member_end: int | None, opener_index: int
+) -> str | None:
+    if member_end is None:
+        return None
+    try:
+        member = _parse_static_runtime_member(
+            source_text,
+            member_end,
+            dynamic_error="runtime source contains an unsupported process.env prototype mutator",
+        )
+    except RuntimeSourceContractError:
+        return None
+    if member is None or member[0] not in {"apply", "bind", "call"}:
+        return None
+    if _callee_end_reaches_call_opener(source_text, member_end, member[1], opener_index):
+        return member[0]
+    return None
+
+
+def _call_argument_index_before(
+    source_text: str, opener_index: int, position: int
+) -> int:
+    argument_index = 0
+    index = opener_index + 1
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < position:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < position else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                state = "code"
+                index += 2
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < position:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            state = "line_comment"
+            index += 2
+            continue
+        if character == "/" and next_character == "*":
+            state = "block_comment"
+            index += 2
+            continue
+        if character in {"'", '"', "`"}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if character == "," and depth == 0:
+            argument_index += 1
+        index += 1
+    return argument_index
+
+
+def _grouped_identifier_candidate_starts(
+    source_text: str, identifier_start: int
+) -> list[int]:
+    starts = [identifier_start]
+    for opener, opener_index in reversed(
+        _js_delimiter_stack_at(source_text, identifier_start)
+    ):
+        if opener != "(":
+            continue
+        starts.append(opener_index)
+    return starts
+
+
+def _callee_end_reaches_call_opener(
+    source_text: str, callee_start: int, callee_end: int, opener_index: int
+) -> bool:
+    cursor = _skip_js_trivia(source_text, callee_end)
+    wrappers = [
+        wrapper_index
+        for wrapper, wrapper_index in reversed(
+            _js_delimiter_stack_at(source_text, callee_start)
+        )
+        if wrapper == "("
+    ]
+    while cursor < opener_index and cursor < len(source_text) and source_text[cursor] == ")":
+        matching_wrapper = next(
+            (
+                wrapper_index
+                for wrapper_index in wrappers
+                if _matching_js_delimiter_index(source_text, wrapper_index, opener_index)
+                == cursor
+            ),
+            None,
+        )
+        if matching_wrapper is None or not _paren_can_wrap_callee_expression(
+            source_text, matching_wrapper
+        ):
+            break
+        wrappers.remove(matching_wrapper)
+        cursor = _skip_js_trivia(source_text, cursor + 1)
+    if cursor == opener_index:
+        return True
+    if source_text.startswith("?.", cursor):
+        return _skip_js_trivia(source_text, cursor + 2) == opener_index
+    return False
+
+
+def _paren_can_wrap_callee_expression(source_text: str, opener_index: int) -> bool:
+    cursor = opener_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    word_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    preceding_word = source_text[cursor + 1 : word_end]
+    return preceding_word not in {"catch", "for", "if", "switch", "while", "with"}
+
+
+def _parse_process_env_prototype_mutator_member_at(
+    source_text: str, candidate_start: int, *, opener_index: int | None = None
+) -> int | None:
+    base_end = None
+    for base_name in ("Object", "Reflect"):
+        parsed_base_end = _parse_grouped_named_base(
+            source_text, candidate_start, base_name
+        )
+        if parsed_base_end is not None:
+            base_end = parsed_base_end
+            break
+    if base_end is None:
+        return None
+    try:
+        member = _parse_static_runtime_member(
+            source_text,
+            base_end,
+            dynamic_error="runtime source contains an unsupported process.env prototype mutator",
+        )
+    except RuntimeSourceContractError:
+        if opener_index is not None:
+            member_end = _unsupported_computed_runtime_member_end(
+                source_text, base_end
+            )
+            if member_end is not None and _callee_end_reaches_call_opener(
+                source_text, candidate_start, member_end, opener_index
+            ):
+                raise
+        return None
+    if member is not None and member[0] == "setPrototypeOf":
+        return member[1]
+    return None
+
+
+def _unsupported_computed_runtime_member_end(
+    source_text: str, index: int
+) -> int | None:
+    member_index = _skip_js_trivia(source_text, index)
+    if source_text.startswith("?.", member_index):
+        property_index = _skip_js_trivia(source_text, member_index + 2)
+    elif member_index < len(source_text) and source_text[member_index] == ".":
+        property_index = _skip_js_trivia(source_text, member_index + 1)
+    elif member_index < len(source_text) and source_text[member_index] == "[":
+        property_index = member_index
+    else:
+        return None
+
+    if property_index >= len(source_text) or source_text[property_index] != "[":
+        return None
+    close_index = _matching_js_delimiter_index(
+        source_text, property_index, len(source_text)
+    )
+    if close_index is None:
+        raise RuntimeSourceContractError(
+            "runtime source contains an unsupported process.env prototype mutator"
+        )
+    return close_index + 1
+
+
+def _callee_identifier_before_call(source_text: str, opener_index: int) -> str | None:
+    cursor = opener_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    if cursor >= 1 and source_text[cursor - 1 : cursor + 1] == "?.":
+        cursor -= 2
+        while cursor >= 0 and source_text[cursor].isspace():
+            cursor -= 1
+    if cursor < 0 or not _is_identifier_character(source_text[cursor]):
+        return None
+    token_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    token_start = cursor + 1
+    before = source_text[cursor] if cursor >= 0 else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    return source_text[token_start:token_end]
+
+
+def _process_env_prototype_mutator_alias_names(
+    source_text: str, end_index: int
+) -> set[str]:
+    aliases: set[str] = set()
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        member_end = _parse_process_env_prototype_mutator_member_at(source_text, rhs_start)
+        if member_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, member_end)
+        if assignment_end >= end_index or source_text[assignment_end] in {";", ",", "\r", "\n"}:
+            aliases.add(match.group("name"))
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_ALIAS_REASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        name = match.group("name")
+        if name in {"const", "let", "var"}:
+            continue
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        member_end = _parse_process_env_prototype_mutator_member_at(source_text, rhs_start)
+        if member_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, member_end)
+        if assignment_end >= end_index or source_text[assignment_end] in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            aliases.add(name)
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_ASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        rhs_end = _parse_process_env_prototype_mutator_destructuring_base(
+            source_text, rhs_start
+        )
+        if rhs_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            "\r",
+            "\n",
+        }:
+            continue
+        for alias in _process_env_prototype_mutator_destructured_aliases(
+            match.group("body")
+        ):
+            aliases.add(alias)
+    for match in _executable_pattern_matches(
+        source_text, PROCESS_ENV_PROTOTYPE_MUTATOR_DESTRUCTURING_REASSIGNMENT
+    ):
+        if match.start() >= end_index:
+            break
+        rhs_start = _skip_js_trivia(source_text, match.end())
+        rhs_end = _parse_process_env_prototype_mutator_destructuring_base(
+            source_text, rhs_start
+        )
+        if rhs_end is None:
+            continue
+        assignment_end = _skip_js_trivia(source_text, rhs_end)
+        if assignment_end < end_index and source_text[assignment_end] not in {
+            ";",
+            ",",
+            ")",
+            "\r",
+            "\n",
+        }:
+            continue
+        for alias in _process_env_prototype_mutator_destructured_aliases(
+            match.group("body")
+        ):
+            aliases.add(alias)
+    return aliases
+
+
+def _parse_process_env_prototype_mutator_destructuring_base(
+    source_text: str, index: int
+) -> int | None:
+    parsed = (
+        _parse_grouped_named_base(source_text, index, "Object")
+        or _parse_grouped_named_base(source_text, index, "Reflect")
+    )
+    if parsed is None:
+        return None
+    before = source_text[index - 1] if index > 0 else ""
+    if before and (_is_identifier_character(before) or before == "."):
+        return None
+    after = _skip_js_trivia(source_text, parsed)
+    if after < len(source_text) and (
+        _is_identifier_character(source_text[after])
+        or source_text[after] in ".([`"
+        or source_text.startswith("?.", after)
+    ):
+        return None
+    return parsed
+
+
+def _process_env_prototype_mutator_destructured_aliases(body: str) -> set[str]:
+    return _destructured_aliases_for_static_members(
+        body, allowed_members={"setPrototypeOf"}, fail_closed_on_unsupported=True
+    )
+
+
+def _for_header_opener_belongs_to_for(source_text: str, opener_index: int) -> bool:
+    cursor = opener_index - 1
+    while cursor >= 0 and source_text[cursor].isspace():
+        cursor -= 1
+    word_end = cursor + 1
+    while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+        cursor -= 1
+    word = source_text[cursor + 1 : word_end]
+    if word == "await":
+        cursor -= 1
+        while cursor >= 0 and source_text[cursor].isspace():
+            cursor -= 1
+        word_end = cursor + 1
+        while cursor >= 0 and _is_identifier_character(source_text[cursor]):
+            cursor -= 1
+        word = source_text[cursor + 1 : word_end]
+    return word == "for"
+
+
+def _js_delimiter_stack_at(source_text: str, target_index: int) -> list[tuple[str, int]]:
+    index = 0
+    state = "code"
+    quote = ""
+    stack: list[tuple[str, int]] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    while index < target_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < target_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < target_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= target_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character in "([{":
+            stack.append((character, index))
+            index += 1
+            continue
+        if character in ")]}":
+            expected = pairs[character]
+            if stack and stack[-1][0] == expected:
+                stack.pop()
+            index += 1
+            continue
+        index += 1
+    return stack
+
+
+def _matching_js_delimiter_index(
+    source_text: str, opener_index: int, end_index: int
+) -> int | None:
+    opener = source_text[opener_index]
+    closer = {"(": ")", "[": "]", "{": "}"}[opener]
+    index = opener_index + 1
+    depth = 0
+    state = "code"
+    quote = ""
+    while index < end_index:
+        character = source_text[index]
+        next_character = source_text[index + 1] if index + 1 < end_index else ""
+        if state == "line_comment":
+            if _is_js_line_terminator(character):
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if character == "*" and next_character == "/":
+                index += 2
+                state = "code"
+            else:
+                index += 1
+            continue
+        if state == "string":
+            if character == "\\" and index + 1 < end_index:
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+                quote = ""
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            index += 2
+            state = "line_comment"
+            continue
+        if character == "/" and next_character == "*":
+            index += 2
+            state = "block_comment"
+            continue
+        regex_end = _regex_literal_end_or_fail_closed(source_text, index)
+        if regex_end is not None and regex_end <= end_index:
+            index = regex_end
+            continue
+        if character == "`":
+            _chunks, index = _template_expression_chunks(source_text, index)
+            continue
+        if character in {"'", '"'}:
+            state = "string"
+            quote = character
+            index += 1
+            continue
+        if character == opener:
+            depth += 1
+            index += 1
+            continue
+        if character == closer:
+            if depth == 0:
+                return index
+            depth -= 1
+            index += 1
+            continue
+        if character in "([{" and character != opener:
+            depth += 1
+            index += 1
+            continue
+        if character in ")]}" and character != closer and depth > 0:
+            depth -= 1
+            index += 1
+            continue
+        index += 1
+    return None
+
+
+def _matching_js_opener_index(source_text: str, closer_index: int) -> int | None:
+    closer = source_text[closer_index] if closer_index < len(source_text) else ""
+    expected = {")": "(", "]": "[", "}": "{"}.get(closer)
+    if expected is None:
+        return None
+    stack = _js_delimiter_stack_at(source_text, closer_index)
+    if not stack or stack[-1][0] != expected:
+        return None
+    opener_index = stack[-1][1]
+    if (
+        _matching_js_delimiter_index(source_text, opener_index, closer_index + 1)
+        != closer_index
+    ):
+        return None
+    return opener_index
+
+
+def _starts_js_assignment_operator(source_text: str, index: int) -> bool:
+    for operator in ("**=", ">>>=", "<<=", ">>=", "&&=", "||=", "??="):
+        if source_text.startswith(operator, index):
+            return True
+    if index >= len(source_text):
+        return False
+    character = source_text[index]
+    next_character = source_text[index + 1] if index + 1 < len(source_text) else ""
+    if character == "=":
+        return next_character not in {"=", ">"}
+    return character in {"+", "-", "*", "/", "%", "&", "|", "^"} and next_character == "="
 
 
 def _parse_process_dlopen_invocation(
@@ -3600,10 +5438,15 @@ def _reject_evaluated_runtime_loaders(source_text: str) -> None:
 
 
 def _previous_non_trivia_character(source_text: str, index: int) -> str:
+    cursor = _previous_non_trivia_index(source_text, index)
+    return source_text[cursor] if cursor >= 0 else ""
+
+
+def _previous_non_trivia_index(source_text: str, index: int) -> int:
     cursor = index - 1
     while cursor >= 0 and source_text[cursor].isspace():
         cursor -= 1
-    return source_text[cursor] if cursor >= 0 else ""
+    return cursor
 
 
 def _previous_code_word(source_text: str, index: int) -> str:

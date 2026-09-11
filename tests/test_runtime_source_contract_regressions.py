@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -42,6 +43,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         with self.assertRaises(CONTRACT.RuntimeSourceContractError):
             CONTRACT.import_specifiers(source)
 
+    def assert_closed_with_message(self, source: str, expected: str) -> None:
+        with self.assertRaisesRegex(CONTRACT.RuntimeSourceContractError, expected):
+            CONTRACT.import_specifiers(source)
+
     def test_worker_transfers_do_not_escape_through_new_syntax(self) -> None:
         imports = (
             "import {Worker as W} from 'node:worker_threads';",
@@ -67,6 +72,32 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             for use in uses:
                 with self.subTest(declaration=declaration, use=use):
                     self.assert_closed(declaration + use)
+
+    def test_unbound_execution_capability_messages_match_first_fail_closed_boundary(
+        self,
+    ) -> None:
+        cases = {
+            "node_test": (
+                "import { run } from 'node:test';\n"
+                "run({ files: ['./hidden.cjs'] });\n",
+                "unbound execution capability",
+            ),
+            "node_vm": (
+                "import vm from 'node:vm';\n"
+                "const member = ['run', 'InThis', 'Context'].join('');\n"
+                "vm[member]('hidden source');\n",
+                "evaluated loader",
+            ),
+            "node_sqlite": (
+                "import { DatabaseSync } from 'node:sqlite';\n"
+                "new DatabaseSync(':memory:', { allowExtension: true })"
+                ".loadExtension('./hidden.so');\n",
+                "unbound execution capability",
+            ),
+        }
+        for name, (source, expected) in cases.items():
+            with self.subTest(name=name):
+                self.assert_closed_with_message(source, expected)
 
     def test_worker_namespace_transfers_and_unknown_origins_fail_closed(self) -> None:
         sources = (
@@ -150,6 +181,38 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         ):
             with self.subTest(source=source):
                 self.assert_closed(source)
+
+    def test_standalone_identifier_named_of_is_still_a_computed_member_target(self) -> None:
+        self.assert_closed(
+            "const of=()=>{}; const build=of['constructor']; "
+            "build(\"return import('./hidden.mjs')\")();"
+        )
+
+    def test_for_initializer_identifier_named_of_is_still_a_computed_member_target(self) -> None:
+        self.assert_closed(
+            "const of=()=>{}; "
+            "for (const build=of['constructor']; false;) { "
+            "build(\"return import('./hidden.mjs')\")() "
+            "}"
+        )
+
+    def test_for_of_rhs_identifier_named_of_is_still_a_computed_member_target(self) -> None:
+        for source in (
+            "const of=()=>{}; "
+            "for (const build of [of['constructor']]) { "
+            "build(\"return import('./hidden.mjs')\")() "
+            "}",
+            "const of=()=>{}; "
+            "for (const build of of['constructor']) { "
+            "build(\"return import('./hidden.mjs')\")() "
+            "}",
+        ):
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_contextual_for_of_array_literals_do_not_look_like_computed_members(self) -> None:
+        source = "for (const value of ['constructor']) { void value; }"
+        self.assertEqual(CONTRACT.import_specifiers(source), [])
 
     def test_require_non_call_references_fail_closed_regardless_of_grouping(self) -> None:
         for depth in (2, 3, 8, 32):
@@ -267,14 +330,370 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 self.assertIn(("./hidden.cjs", True, "require"), CONTRACT.import_specifiers(source))
 
     def test_unresolved_computed_function_constructor_access_fails_closed(self) -> None:
+        padded_process_env_reassignment = (
+            "process.env=()=>{};\n"
+            + "/*"
+            + ("x" * 320)
+            + "*/\n"
+            + "const key='constructor';"
+        )
+        process_env_computed_accesses = (
+            "process.env[key]",
+            "(process.env)[key]",
+            "((process.env))[key]",
+            "process . env[key]",
+            "process/*c*/.env[key]",
+            "process['env'][key]",
+            "process?.env[key]",
+            "process?.['env'][key]",
+            "global.process.env[key]",
+            "globalThis.process.env[key]",
+        )
         for source in (
             "const member='constructor'; const build=(()=>{})[member]; build(\"return import('./hidden.mjs')\")();",
             "const member='constructor'; const build=(function(){})[member]; build(\"return require('./hidden.cjs')\")();",
             "const member='constructor'; const build=(class {})[member]; build(\"return import('./hidden.mjs')\")();",
             "const build=(()=>{})['constructor']; build(\"return import('./hidden.mjs')\")();",
+            "var let=()=>{}; const build=let['constructor']; build(\"return import('./hidden.mjs')\")();",
+            "process.env=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "(process.env)=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "((process.env))=()=>{}; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "({env:process.env}={env:()=>{}}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "[process.env]=[()=>{}]; const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "({nested:{env:process.env}}={nested:{env:()=>{}}}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for (process.env of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for ((process.env) of [()=>{}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for ([process.env] of [[()=>{}]]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "for ({env:process.env} of [{env:()=>{}}]) {} const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Object.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Reflect.setPrototypeOf(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Object.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "Reflect.setPrototypeOf?.(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const name='setPrototypeOf'; Object[name](process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const name='setPrototypeOf'; Reflect[name](process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "let set; set=Object.setPrototypeOf; set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "let set; ({setPrototypeOf:set}=Object); set(process.env,()=>{}); const key='constructor'; const build=process.env[key]; build(\"return import('./hidden.mjs')\")();",
+            "const key='constructor'; const f=Math.max; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const key='constructor'; const build=Math.max[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {max:f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {'max':f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {'max':f}=Math; const build=f['constructor']; build(\"return import('./hidden.mjs')\")();",
+            "const {['max']:f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const name='max'; const {[name]:f}=Math; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "let f; ({max:f}=Math); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {assign:f}=Object; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {'assign':f}=Object; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {['assign']:f}=Object; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {setPrototypeOf:f}=Reflect; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const f=Math.max.bind(null); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const f=Object.assign.bind(Object); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "import f from './dep.mjs'; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "import {make as f} from './dep.mjs'; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "import * as f from './dep.mjs'; const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const f=require('./dep.cjs'); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            "const {make:f}=require('./dep.cjs'); const key='constructor'; const build=f[key]; build(\"return import('./hidden.mjs')\")();",
+            *(
+                padded_process_env_reassignment
+                + f" const build={access}; build(\"return import('./hidden.mjs')\")();"
+                for access in process_env_computed_accesses
+            ),
         ):
             with self.subTest(source=source):
                 self.assert_closed(source)
+
+    def test_function_like_receiver_bindings_fail_closed_beyond_local_window(self) -> None:
+        padding = "\n".join(f"const harmless{i} = {i};" for i in range(40))
+        for declaration in (
+            "function f(){}",
+            "async function f(){}",
+            "function* f(){}",
+            "class f {}",
+            "const f = function(){};",
+            "let f = class {};",
+            "var f = () => true;",
+            "let f; f = async () => true;",
+        ):
+            source = (
+                f"{declaration}\n"
+                f"{padding}\n"
+                "const key='constructor'; "
+                "const build=f[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(declaration=declaration):
+                self.assert_closed(source)
+
+    def test_aliased_process_env_prototype_mutators_fail_closed(self) -> None:
+        for alias_assignment in (
+            "const set=Object.setPrototypeOf;",
+            'const set=Object["setPrototypeOf"];',
+            "const set=Reflect?.setPrototypeOf;",
+            'const set=Reflect["setPrototypeOf"];',
+            "let set=Object.setPrototypeOf;",
+            "var set=Reflect.setPrototypeOf;",
+            "let set; set=Object.setPrototypeOf;",
+            "var set; set=Reflect.setPrototypeOf;",
+            "let set; ({{setPrototypeOf:set}}=Object);",
+            "let set; ({{'setPrototypeOf':set}}=Object);",
+            "let set; ({{['setPrototypeOf']:set}}=Object);",
+            "let set; ({{[`setPrototypeOf`]:set}}=Reflect);",
+            "let name='setPrototypeOf', set; ({{[name]:set}}=Object);",
+        ):
+            source = (
+                f"{alias_assignment} "
+                "{call} "
+                "const key='constructor'; "
+                "const build=process.env[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            for call in (
+                "set(process.env,()=>{});",
+                "set?.(process.env,()=>{});",
+                "set.call(null, process.env,()=>{});",
+                "set.apply(null, [process.env,()=>{}]);",
+                "set.bind(null, process.env,()=>{})();",
+            ):
+                with self.subTest(alias_assignment=alias_assignment, call=call):
+                    self.assert_closed(source.format(call=call))
+
+    def test_dynamic_process_env_prototype_mutator_callees_fail_closed(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        for callee in (
+            "Object[name]",
+            "Reflect[name]",
+            "(Object)[name]",
+            "(Reflect)[name]",
+            "((Object))[name]",
+            "((Reflect))[name]",
+            "Object?.[name]",
+            "Reflect?.[name]",
+            "(Object)?.[name]",
+            "(Reflect)?.[name]",
+            "((Object))?.[name]",
+            "((Reflect))?.[name]",
+            "(Object[name])",
+            "(Reflect[name])",
+            "((Object)[name])",
+            "((Reflect)[name])",
+            "((Object)?.[name])",
+            "((Reflect)?.[name])",
+            "Object/*c*/[name]",
+            "Reflect /*c*/ [name]",
+            f"Object{long_trivia}[name]",
+            f"Reflect{long_trivia}[name]",
+            f"(Object{long_trivia})[name]",
+            f"(Reflect{long_trivia})[name]",
+            f"((Object){long_trivia})[name]",
+            f"((Reflect){long_trivia})[name]",
+            f"(Object{long_trivia}[name])",
+            f"(Reflect{long_trivia}[name])",
+            f"((Object){long_trivia}[name])",
+            f"((Reflect){long_trivia}[name])",
+            f"Object?.[{long_trivia}name]",
+            f"Reflect?.[{long_trivia}name]",
+            f"(Object)?.[{long_trivia}name]",
+            f"(Reflect)?.[{long_trivia}name]",
+            f"(Object?.[{long_trivia}name])",
+            f"(Reflect?.[{long_trivia}name])",
+        ):
+            for call_operator in ("", "?."):
+                source = (
+                    "const name='setPrototypeOf'; "
+                    f"{callee}{call_operator}(process.env,()=>{{}}); "
+                    "const key='constructor'; "
+                    "const build=process.env[key]; "
+                    "build(\"return import('./hidden.mjs')\")();"
+                )
+                with self.subTest(callee=callee, call_operator=call_operator):
+                    self.assert_closed(source)
+
+    def test_process_env_computed_lookup_does_not_inherit_function_window_risk(self) -> None:
+        for access in (
+            "process.env[key]",
+            "(process.env)[key]",
+            "((process.env))[key]",
+            "process . env[key]",
+            "process/*c*/.env[key]",
+            "process['env'][key]",
+            "process?.env[key]",
+            "process?.['env'][key]",
+            "global.process.env[key]",
+            "globalThis.process.env[key]",
+        ):
+            source = (
+                "const f = () => true;\n"
+                "const snapshot = { env: process.env };\n"
+                "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
+                f"if ({access} === '1') {{ await import('./entry.mjs'); }}\n"
+            )
+            with self.subTest(access=access):
+                self.assertIn(
+                    ("./entry.mjs", True, "import"),
+                    CONTRACT.import_specifiers(source),
+                )
+
+    def test_static_process_env_prototype_mutator_callee_variants_fail_closed(self) -> None:
+        for callee in (
+            "(Object).setPrototypeOf",
+            "(Reflect).setPrototypeOf",
+            "((Object)).setPrototypeOf",
+            "((Reflect)).setPrototypeOf",
+            "(Object.setPrototypeOf)",
+            "(Reflect.setPrototypeOf)",
+            "((Object).setPrototypeOf)",
+            "((Reflect).setPrototypeOf)",
+            'Object["setPrototypeOf"]',
+            'Reflect["setPrototypeOf"]',
+            '(Object)["setPrototypeOf"]',
+            '(Reflect)["setPrototypeOf"]',
+            '(Object["setPrototypeOf"])',
+            '(Reflect["setPrototypeOf"])',
+            '((Object)["setPrototypeOf"])',
+            '((Reflect)["setPrototypeOf"])',
+            "Object?.setPrototypeOf",
+            "Reflect?.setPrototypeOf",
+            "(Object)?.setPrototypeOf",
+            "(Reflect)?.setPrototypeOf",
+            "(Object?.setPrototypeOf)",
+            "(Reflect?.setPrototypeOf)",
+        ):
+            source = (
+                f"{callee}(process.env,()=>{{}}); "
+                "const key='constructor'; "
+                "const build=process.env[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(callee=callee):
+                self.assert_closed(source)
+
+    def test_indirect_process_env_prototype_mutator_invocations_fail_closed(self) -> None:
+        for call in (
+            "Object.setPrototypeOf.call(null, process.env,()=>{});",
+            "Reflect.setPrototypeOf.call(null, process.env,()=>{});",
+            "Object.setPrototypeOf.apply(null, [process.env,()=>{}]);",
+            "Reflect.setPrototypeOf.apply(null, [process.env,()=>{}]);",
+            "Object.setPrototypeOf.bind(null, process.env,()=>{})();",
+            "Reflect.setPrototypeOf.bind(null, process.env,()=>{})();",
+        ):
+            source = (
+                f"{call} "
+                "const key='constructor'; "
+                "const build=process.env[key]; "
+                "build(\"return import('./hidden.mjs')\")();"
+            )
+            with self.subTest(call=call):
+                self.assert_closed(source)
+
+    def test_process_env_prototype_mutator_detection_preserves_safe_controls(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        for source in (
+            "Object.assign(process.env,{}); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            f"Object{long_trivia}[\"assign\"](process.env,{{}}); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            'Object["assign"](process.env,{}); '
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            'Object["setPrototypeOf"]({}, process.env); '
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "Reflect?.setPrototypeOf({}, process.env); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "const set=Object.assign; set(process.env,{}); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "const set=Object.setPrototypeOf; set({}, process.env); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+            "const name='setPrototypeOf'; Object[name]({}, process.env); "
+            "const key='OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED'; "
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(
+                    ("./entry.mjs", True, "import"),
+                    CONTRACT.import_specifiers(source),
+                )
+
+    def test_grouped_control_condition_does_not_become_prototype_mutator_call(self) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        source = (
+            f"if (Object.setPrototypeOf) (process.env,Object); {long_trivia}"
+            "const key='con'+'structor'; process.env[key];"
+        )
+        self.assertEqual([], CONTRACT.import_specifiers(source))
+
+    def test_unresolved_computed_member_scan_is_local_to_receiver(self) -> None:
+        source = " ".join(f"value{i}[key]" for i in range(5000))
+        bracket_index = source.rfind("[")
+        start = time.perf_counter()
+
+        self.assertIsNone(
+            CONTRACT._computed_member_process_env_target_start(source, bracket_index)
+        )
+
+        self.assertLess(time.perf_counter() - start, 1.0)
+
+    def test_process_env_for_of_reads_do_not_become_reassignments(self) -> None:
+        source = (
+            "const f = () => true;\n"
+            "for (const env of [process.env]) { String(env.OPENCLAW_MODE); }\n"
+            "const key = 'OPENCLAW_COMPILE_CACHE_DISABLED_RESPAWNED';\n"
+            "if (process.env[key] === '1') { await import('./entry.mjs'); }\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_array_destructuring_after_declaration_is_not_computed_member_access(self) -> None:
+        source = (
+            "const parse = (raw) => {\n"
+            "  const [major = '0', minor = '0'] = raw.split('.');\n"
+            "  return major + minor;\n"
+            "};\n"
+            "await import('./entry.mjs');\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_let_array_declaration_is_not_computed_member_access(self) -> None:
+        for source in (
+            "const f=()=>true; let [value]=['x']; await import('./entry.mjs');",
+            "for (let [value] of [['x']]) { String(value); } await import('./entry.mjs');",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(
+                    ("./entry.mjs", True, "import"),
+                    CONTRACT.import_specifiers(source),
+                )
+
+    def test_sloppy_identifier_named_let_still_can_be_computed_member_target(
+        self,
+    ) -> None:
+        source = (
+            "var let=()=>{}; "
+            "const member='constructor'; "
+            "const build=let[member]; "
+            "build(\"return import('./hidden.mjs')\")();"
+        )
+        self.assert_closed(source)
+
+    def test_numeric_computed_index_does_not_inherit_function_window_risk(self) -> None:
+        source = (
+            "const isRelay = (argv) => argv[2] === 'hooks' && argv[3] === 'relay';\n"
+            "if (isRelay(process.argv)) { await import('./entry.mjs'); }\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
+
+    def test_array_literal_after_for_of_is_not_computed_member_access(self) -> None:
+        source = (
+            "const install = async () => {\n"
+            "  for (const specifier of ['./a.mjs', './b.mjs']) { String(specifier); }\n"
+            "};\n"
+            "await import('./entry.mjs');\n"
+        )
+        self.assertIn(("./entry.mjs", True, "import"), CONTRACT.import_specifiers(source))
 
     def test_package_exports_reject_targets_that_escape_before_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -621,6 +1040,64 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
             self.assertEqual("executed", result.stdout.strip())
             self.assert_closed(entry.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(NODE, "Node is required for the independent execution witness")
+    def test_node_destructured_builtin_function_alias_executes_hidden_import(self) -> None:
+        witnesses = (
+            "const {max:f}=Math;\n",
+            "const {'max':f}=Math;\n",
+            "const {['max']:f}=Math;\n",
+            "const {assign:f}=Object;\n",
+            "const {'assign':f}=Object;\n",
+            "const f=Math.max.bind(null);\n",
+        )
+        for declaration in witnesses:
+            with self.subTest(declaration=declaration):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    entry = root / "entry.mjs"
+                    entry.write_text(
+                        declaration
+                        + "const member='constructor';\n"
+                        + "const build=f[member];\n"
+                        + "await build(\"return import('./hidden.mjs')\")();\n",
+                        encoding="utf-8",
+                    )
+                    (root / "hidden.mjs").write_text("console.log('executed');\n", encoding="utf-8")
+                    env = {key: value for key, value in os.environ.items() if not key.startswith("NODE_")}
+                    result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
+                    self.assertEqual("executed", result.stdout.strip())
+                    self.assert_closed(entry.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(NODE, "Node is required for the independent execution witness")
+    def test_node_grouped_dynamic_process_env_prototype_mutator_exposes_constructor(
+        self,
+    ) -> None:
+        long_trivia = "/*" + ("x" * 640) + "*/"
+        witnesses = (
+            f"const name='setPrototypeOf';\n(Object{long_trivia})[name](process.env,()=>{{}});\n",
+            f"const name='setPrototypeOf';\n((Object){long_trivia})?.[name]?.(process.env,()=>{{}});\n",
+            "const name='setPrototypeOf';\n(Object.setPrototypeOf)(process.env,()=>{});\n",
+            f"const name='setPrototypeOf';\n(Object{long_trivia}[name])(process.env,()=>{{}});\n",
+            f"const name='setPrototypeOf';\n(Reflect?.[{long_trivia}name])?.(process.env,()=>{{}});\n",
+        )
+        for declaration in witnesses:
+            with self.subTest(declaration=declaration):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    entry = root / "entry.mjs"
+                    entry.write_text(
+                        declaration
+                        + "const member='constructor';\n"
+                        + "const build=process.env[member];\n"
+                        + "await build(\"return import('./hidden.mjs')\")();\n",
+                        encoding="utf-8",
+                    )
+                    (root / "hidden.mjs").write_text("console.log('executed');\n", encoding="utf-8")
+                    env = {key: value for key, value in os.environ.items() if not key.startswith("NODE_")}
+                    result = subprocess.run([NODE, str(entry)], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=True)
+                    self.assertEqual("executed", result.stdout.strip())
+                    self.assert_closed(entry.read_text(encoding="utf-8"))
 
 
 class RuntimePreloadRegressionTests(unittest.TestCase):

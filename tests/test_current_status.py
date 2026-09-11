@@ -163,10 +163,11 @@ class CurrentStatusTests(unittest.TestCase):
                 self.assertIn(claim, normalized_design_current_status)
 
         current_runtime_review_claims = (
-            "there is no current Issue #44 persistent-lifecycle candidate proof",
-            "no current-head GitHub Codex review binding",
+            "Current installed-runtime evidence lineage and Issue #44 downstream persistent-lifecycle recapture",
+            "no runtime-ready persistent-lifecycle proof exists",
+            "no current-head GitHub Codex review binding exists",
+            "candidate_process_started=false",
             "historical candidate invocations and reviews must not be counted as current exact-head runtime evidence",
-            "fresh Codex review of that same head",
         )
         for claim in current_runtime_review_claims:
             with self.subTest(claim=claim):
@@ -176,6 +177,7 @@ class CurrentStatusTests(unittest.TestCase):
             "Draft PR successor",
             "current Draft remediation",
             "current Draft successor head",
+            "there is no current Issue #44 persistent-lifecycle candidate proof",
             "The current Issue #44 persistent-lifecycle candidate proof is intentionally disabled",
             "final exact-head Phase C revalidation",
             "still required before it can be treated as independently accepted",
@@ -195,7 +197,7 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(live["status"], "invalid_runtime_evidence_pending_clean_recapture")
+        self.assertEqual(live["status"], "pending_current_evidence")
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
         local_p03 = live["local_p03_runtime_heartbeat_shadow"]
@@ -240,7 +242,7 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(index["status"], "invalid_runtime_evidence_pending_clean_recapture")
+        self.assertEqual(index["status"], "pending_current_evidence")
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
             index["current_evidence"]["status"],
@@ -251,37 +253,17 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             index["current_evidence"]["status"],
-            "invalid_capability_source_drift_pending_recapture",
-        )
-        self.assertFalse(
-            index["current_evidence"]["generator_binding_requirements"][
-                "no_capability_source_drift_after_bound_head"
-            ]
+            "pending_clean_generator_revision_capture",
         )
         current_evidence_path = root / index["current_evidence"]["path"]
-        self.assertTrue(current_evidence_path.exists())
-        self.assertEqual(
-            index["current_evidence"]["sha256"],
-            hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
-        )
+        self.assertFalse(current_evidence_path.exists())
 
         issue44_installed = live["issue44_live_installed_preflight"]
         issue44_installed_path = root / issue44_installed["path"]
-        self.assertEqual(
-            issue44_installed["sha256"],
-            hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
-        )
-        issue44_installed_payload = json.loads(
-            issue44_installed_path.read_text(encoding="utf-8")
-        )
-        self.assertEqual(issue44_installed_payload["status"], "fail")
-        self.assertFalse(issue44_installed_payload["runtime_ready"])
-        self.assertEqual(
-            issue44_installed_payload["catalog"]["gateway_rpc_catalog"][
-                "status_corroboration"
-            ]["live_reachability"],
-            "skipped_no_production_lease_mutation",
-        )
+        self.assertEqual(issue44_installed["status"], "pending_clean_generator_revision_capture")
+        self.assertFalse(issue44_installed_path.exists())
+        self.assertIsNone(issue44_installed["sha256"])
+        self.assertFalse(issue44_installed["runtime_ready"])
 
         issue44_candidate = live["issue44_downstream_persistent_lifecycle_probe"]
         issue44_candidate_path = root / issue44_candidate["path"]
@@ -294,18 +276,28 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             issue44_candidate["status"],
-            "invalid_capability_source_drift_pending_recapture",
+            "fail_closed_runtime_source_closure_pending_phase_c",
         )
         self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
-        self.assertTrue(issue44_candidate["validation_receipt_bound"])
-        self.assertTrue(issue44_candidate["duplicate_release_identity_parity"])
-        self.assertEqual(issue44_candidate_payload["status"], "pass")
+        self.assertFalse(issue44_candidate["validation_receipt_bound"])
+        self.assertFalse(issue44_candidate["duplicate_release_identity_parity"])
+        self.assertEqual(issue44_candidate_payload["status"], "fail_closed")
         self.assertFalse(issue44_candidate_payload["runtime_ready"])
-        self.assertTrue(issue44_candidate_payload["runtime_ready_candidate_evidence"])
+        self.assertFalse(issue44_candidate_payload["runtime_ready_candidate_evidence"])
         self.assertTrue(issue44_candidate_payload["phase_c_exact_head_required_before_review"])
+        self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["candidate_process_started"])
+        self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["production_gateway_restart_attempted"])
         self.assertEqual(
             issue44_candidate_payload["openclaw_head_sha"],
             issue44_candidate["openclaw_head_sha"],
+        )
+        self.assertEqual(
+            index["downstream_candidate_evidence"]["isolated_non_production_gateway"][
+                "run_root_sha256"
+            ],
+            issue44_candidate_payload["isolated_non_production_gateway"][
+                "run_root_sha256"
+            ],
         )
 
         authority = status["production_authority"]
@@ -480,6 +472,16 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertTrue(first_downstream["raw_runtime_ready_candidate_evidence"])
         self.assertFalse(first_downstream["runtime_ready_candidate_evidence"])
+        round3_downstream = historical[
+            "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260826-round3.json"
+        ]
+        self.assertEqual(
+            round3_downstream["status"],
+            "invalid_capability_source_drift_pending_recapture",
+        )
+        self.assertEqual(round3_downstream["raw_status"], "pass")
+        self.assertTrue(round3_downstream["raw_runtime_ready_candidate_evidence"])
+        self.assertFalse(round3_downstream["runtime_ready_candidate_evidence"])
         negative = historical[
             "docs/runtime-evidence/phase-b-20260809-installed-negative-baseline.json"
         ]
@@ -525,27 +527,45 @@ class CurrentStatusTests(unittest.TestCase):
             self.assertEqual(index["status"], "pending_current_evidence")
             self.assertFalse(evidence_path.exists())
             return
-        self.assertIn(
-            current["status"],
-            {
-                "captured_from_clean_generator_revision",
-                "invalid_capability_source_drift_pending_recapture",
-            },
+        self.assertEqual(current["status"], "captured_from_clean_generator_revision")
+        self.assertEqual(index["status"], "current_fail_closed_runtime_evidence_pending_phase_c")
+        self.assertTrue(
+            current["generator_binding_requirements"][
+                "no_capability_source_drift_after_bound_head"
+            ]
         )
-        self.assertEqual(index["status"], "invalid_runtime_evidence_pending_clean_recapture")
-        if current["status"] == "invalid_capability_source_drift_pending_recapture":
-            self.assertFalse(
-                current["generator_binding_requirements"][
-                    "no_capability_source_drift_after_bound_head"
-                ]
-            )
-            self.assertIn("immutable historical fail-closed output", current["status_reason"])
-        else:
-            self.assertTrue(
-                current["generator_binding_requirements"][
-                    "no_capability_source_drift_after_bound_head"
-                ]
-            )
+        reviewed_head = current["reviewed_head_sha"]
+        self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
+        self.assertEqual(
+            current["generator_binding_requirements"]["containing_revision_sha"],
+            reviewed_head,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                reviewed_head,
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                current["generator_revision"]["head_sha"],
+                reviewed_head,
+            ],
+            check=True,
+            capture_output=True,
+        )
         self.assertEqual(
             current["sha256"], hashlib.sha256(evidence_path.read_bytes()).hexdigest()
         )
@@ -561,14 +581,22 @@ class CurrentStatusTests(unittest.TestCase):
             candidate["sha256"], hashlib.sha256(candidate_path.read_bytes()).hexdigest()
         )
         candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
-        self.assertEqual(candidate["status"], "invalid_capability_source_drift_pending_recapture")
+        self.assertEqual(candidate["status"], "fail_closed_runtime_source_closure_pending_phase_c")
         self.assertFalse(candidate["runtime_ready_candidate_evidence"])
-        self.assertIn("predates the lifecycle-attestation evidence", candidate["status_reason"])
-        self.assertTrue(candidate["validation_receipt_bound"])
-        self.assertTrue(candidate["duplicate_release_identity_parity"])
-        self.assertEqual(candidate_payload["status"], "pass")
+        self.assertIn("runtime source closure still rejects", candidate["status_reason"])
+        self.assertFalse(candidate["validation_receipt_bound"])
+        self.assertFalse(candidate["duplicate_release_identity_parity"])
+        self.assertEqual(candidate_payload["status"], "fail_closed")
         self.assertFalse(candidate_payload["runtime_ready"])
-        self.assertTrue(candidate_payload["runtime_ready_candidate_evidence"])
+        self.assertFalse(candidate_payload["runtime_ready_candidate_evidence"])
+        self.assertEqual(candidate_payload["reason"], "runtime_source_closure_failed")
+        self.assertFalse(
+            candidate_payload["isolated_non_production_gateway"]["candidate_process_started"]
+        )
+        self.assertEqual(
+            candidate["isolated_non_production_gateway"]["run_root_sha256"],
+            candidate_payload["isolated_non_production_gateway"]["run_root_sha256"],
+        )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
         self.assertEqual(payload["catalog"]["openclaw_version"], "2026.7.1")
         self.assertEqual(
@@ -703,9 +731,36 @@ class CurrentStatusTests(unittest.TestCase):
         )
         bound_head = binding["agentic_os_head_sha"]
         self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
-        self.assertIsNone(current["reviewed_head_sha"])
+        reviewed_head = current["reviewed_head_sha"]
+        self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
+        self.assertEqual(current["reviewed_head_sha"], reviewed_head)
+        self.assertEqual(
+            current["generator_binding_requirements"]["containing_revision_sha"],
+            reviewed_head,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                reviewed_head,
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+        )
         ancestry_check = subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor", bound_head, "HEAD"],
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                bound_head,
+                reviewed_head,
+            ],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -747,16 +802,8 @@ class CurrentStatusTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        if current["status"] == "invalid_capability_source_drift_pending_recapture":
-            self.assertNotEqual(drift_check.returncode, 0)
-            self.assertFalse(
-                current["generator_binding_requirements"][
-                    "no_capability_source_drift_after_bound_head"
-                ]
-            )
-        else:
-            self.assertEqual(ancestry_check.returncode, 0)
-            self.assertEqual(drift_check.returncode, 0)
+        self.assertEqual(ancestry_check.returncode, 0)
+        self.assertEqual(drift_check.returncode, 0)
 
 
 if __name__ == "__main__":
