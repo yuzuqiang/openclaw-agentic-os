@@ -4,7 +4,7 @@
 
 Decision: adapt the nine Agentic OS workflows as an OpenClaw control-plane layer through a compatibility migration. Current OpenClaw file artifacts remain operational authority until each workflow is cut over. The target end state is repo-local SQLite at `/Users/zuqiangyu/clawd/state/agentic-os/control.db` as the single desired-state authority, with JSON, JSONL, Markdown, and run bundles becoming projections and evidence only after the cutover for that workflow.
 
-The previous big-bang authority claim is withdrawn. This document is a corrected production design, not a production runtime receipt. Bounded local/synthetic P0/P1/P2 slices now exist in the repository and are called out below, but they prove only local control-plane contracts and fixture behavior. They do not prove production OpenClaw/Gateway/Cron/session RPC behavior, production `control.db` authority, or steady DB-authority operation. The PR #39 successor passed exact-head Phase C for head `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, received a clean Codex review for that head, and merged to `main` as `b48a7cba8c6671b5dd33a369fb4f59f57d159739`. That is accepted repository state for the design artifact as it existed at the accepted head; later documentation corrections are recorded separately in `docs/project-status.json`. This is repository/design acceptance only; it is not production runtime proof. The historical revalidation evidence in `docs/runtime-evidence/phase-b-revalidation-20260809.json` is superseded by the accepted PR #39 successor, while the current runtime evidence index remains pending and non-authoritative.
+The previous big-bang authority claim is withdrawn. This document is a corrected production design, not a production runtime receipt. Bounded local/synthetic P0/P1/P2 slices now exist in the repository and are called out below, but they prove only local control-plane contracts and fixture behavior. They do not prove production OpenClaw/Gateway/Cron/session RPC behavior, production `control.db` authority, or steady DB-authority operation. The PR #39 successor passed exact-head Phase C for head `53c9555cacb8e1906bc7cb6e252c0b91a73a8141`, received a clean Codex review for that head, and merged to `main` as `b48a7cba8c6671b5dd33a369fb4f59f57d159739`. That is accepted repository state for the design artifact as it existed at the accepted head; later documentation corrections are recorded separately in `docs/project-status.json`. This is repository/design acceptance only; it is not production runtime proof. The historical revalidation evidence in `docs/runtime-evidence/phase-b-revalidation-20260809.json` is superseded by the accepted PR #39 successor, while the current runtime evidence index remains fail-closed and non-authoritative.
 
 Scope:
 
@@ -26,6 +26,8 @@ Non-goals:
 - 2026-09-08: Rebound Issue #44 PR #46 runtime evidence after exact-head validation found the 2026-09-05 installed evidence was source-stale, then recaptured it again after the first 2026-09-08 rebind landed on a stale forward index. The 2026-09-10 lineage correction below supersedes that installed-runtime capture as current evidence.
 - 2026-09-10: Corrected PR #46's current-evidence lineage after review proved the 2026-09-08 installed recapture was bound to `c3e2294540d90d3dea5a09029897771644bf9f16`, which is not an ancestor of reviewed head `77a57c7b353bfa8c21de2ac612b050a663df7c30`:
   - Corrections: `docs/runtime-evidence/phase-b-20260811-evidence-index.json` now marks current live-installed evidence as `pending_clean_generator_revision_capture` instead of treating the stale-lineage installed recapture as current proof. Runtime readiness remains false, production authority remains disabled, and a clean live-installed recapture from the current PR #46 lineage is required before any current evidence can be promoted. The local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260908.json` remains fail-closed downstream evidence from Agentic OS generator head `c3e2294540d90d3dea5a09029897771644bf9f16`, not runtime-ready candidate proof. It records no production Gateway/config/Cron/session/lease mutation or restart, keeps `agentic_os.DB_AUTHORITY_ENABLED=False`, and still requires different-agent exact-head Phase C before any review or promotion.
+- 2026-09-10: Recaptured Issue #44 after PR #46 merged to GitHub main `63bbfbda233f66d032e392a1af31bfd508c08d1e`:
+  - Corrections: `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260910.json` is the current clean-generator installed OpenClaw 2026.7.1 recapture and still fails closed with `runtime_ready=false` because model-callable `tools.catalog`, connected Gateway build identity, accepted-session semantics, and `agenticOs.runtime.attest` readiness remain unproven. `subagents.allowLease.status` live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary. `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260910.json` is the current downstream candidate prelaunch recapture for OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6`; it did not start the candidate, used isolated non-production loopback port `20347`, stopped on runtime source-closure rejection of the evaluated-loader/dynamic-import pattern, and records no production Gateway/config/Cron/session/lease mutation or restart. Runtime readiness remains false, production authority remains disabled, and different-agent exact-head Phase C is required before any Ready/review/merge action.
 - 2026-09-05: Recaptured Issue #44 after merged PR #45 from a clean downstream Agentic OS worktree:
   - Corrections: installed OpenClaw 2026.7.1 was recaptured from exact generator head `bdf3e2c2985804f0078cc4017095bd2c483f8f3b` in `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260905.json`; the local downstream OpenClaw candidate remained clean at exact head `602cc113bc65877c501c304ef7bbb86d0313eeb6`; `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260905.json` was fail-closed recapture evidence from Agentic OS generator head `c09e35701e6b362c2be00ea9570d1b5e9fec21ca`. The 2026-09-08 sidecars supersede those prior current-evidence bindings because the forward index must remain bound to the latest capability-source revision.
 - 2026-08-26: Recaptured the Issue #44 downstream candidate evidence after Phase B producer/validator contract remediation, then invalidated it after later validator hardening:
@@ -134,16 +136,15 @@ Current-vs-proposed truth:
   `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks its stored
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
-- The 2026-09-08 Issue #44 installed-runtime evidence no longer counts as
-  current evidence for PR #46 because its generator head is not an ancestor of
-  the reviewed lineage. Current live-installed evidence is pending clean
-  recapture and still has `runtime_ready=false`: connected Gateway build,
-  model-callable catalog availability, live reachability, and attestation
-  readiness remain unproven. The 2026-09-08 downstream candidate recapture at
-  OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic OS
-  `c3e2294540d90d3dea5a09029897771644bf9f16` remains separate fail-closed evidence,
+- The 2026-09-10 Issue #44 installed-runtime evidence is the current clean
+  recapture from merged main `63bbfbda233f66d032e392a1af31bfd508c08d1e` and
+  still has `runtime_ready=false`: connected Gateway build, model-callable
+  catalog availability, live reachability, accepted-session semantics, and
+  attestation readiness remain unproven. The 2026-09-10 downstream candidate
+  recapture at OpenClaw `602cc113bc65877c501c304ef7bbb86d0313eeb6` and Agentic
+  OS `63bbfbda233f66d032e392a1af31bfd508c08d1e` remains fail-closed evidence,
   not runtime-ready candidate proof: it used an isolated non-production
-  run root and loopback port `20247`, did not start the candidate,
+  run root and loopback port `20347`, did not start the candidate,
   and stopped before Gateway/session/lease mutation because runtime source
   closure rejected an unsupported evaluated-loader / dynamic-import launcher
   pattern. The 2026-08-26 downstream candidate snapshot passed its isolated persistent
