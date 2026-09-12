@@ -1,6 +1,6 @@
 {
   "accepted_session_spawned": false,
-  "agentic_os_head_sha": "45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0",
+  "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
   "agentic_sources": [
     {
       "path": "scripts/openclaw-real-gateway-contract-probe.py",
@@ -8,7 +8,7 @@
     },
     {
       "path": "scripts/agentic_os_runtime_source_contract.py",
-      "sha256": "99556866d7db4c159fca6c165cec3235510c457f617eab7c6e22d0ff587a0405"
+      "sha256": "f0a065c9d97404592b1289beb4716d56a9385020ff0a382d4a343c332235e32b"
     },
     {
       "path": "scripts/openclaw-live-accepted-session-probe.py",
@@ -43,22 +43,22 @@
   "duplicate_spawn_identity_parity": false,
   "error": "prelaunch validation failed",
   "error_class": "ProbeError",
-  "error_message_sha256": "bcb792d0f94116932235dead5c2a602fc57227a4c8334af1f2ba778ef325c72d",
+  "error_message_sha256": "a05330e49e7825c64eaa9e7c86c8f178186b53b24225f9908aa1654c380e59a0",
   "isolated_non_production_gateway": {
     "candidate_port_closed": "not_required",
     "candidate_port_opened": false,
     "candidate_process_started": false,
     "db_authority_enabled": false,
     "loopback": true,
-    "port": 20349,
+    "port": 20351,
     "production_config_mutation_attempted": false,
     "production_gateway_restart_attempted": false,
     "production_lease_mutation_attempted": false,
     "production_session_mutation_attempted": false,
-    "run_id_sha256": "aec26a2941fd342aadde2700a6e6ed4894d89cba1b29bae2296907e5eaf77695",
-    "run_root_sha256": "4cd30aae55b0268868cabe388d5874b67971cd1d6f064ff17759f642fb129fd1",
+    "run_id_sha256": "7f6ac3ac6951a1f04df84fbbf15c22b27b795662e52e23371a281c19688eabd1",
+    "run_root_sha256": "23d58a98486bfd58361cfb317909bacbfa3b9dfff7efe8dca578a74ccab8d4e4",
     "status": "not_started",
-    "transition_id_sha256": "564a317ebb5146e12b206e7136e170e980ccd3ad46967831afe9f57ca04b299f"
+    "transition_id_sha256": "0d0118865dd3208abac97a262a0b097710144817584e53154fcf78ce38a38a99"
   },
   "lease_release_cleanup_observed": false,
   "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",

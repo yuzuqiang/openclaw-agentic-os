@@ -197,8 +197,12 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(set(status), STATUS_DOMAINS)
 
         live = status["live_runtime_evidence"]
-        self.assertEqual(
-            live["status"], "current_fail_closed_runtime_evidence_pending_phase_c"
+        self.assertIn(
+            live["status"],
+            {
+                "current_fail_closed_runtime_evidence_pending_phase_c",
+                "pending_current_evidence",
+            },
         )
         self.assertFalse(live["runtime_ready"])
         self.assertFalse(live["production_behavior_proven"])
@@ -244,8 +248,12 @@ class CurrentStatusTests(unittest.TestCase):
 
         index = json.loads((root / live["evidence_index"]["path"]).read_text(encoding="utf-8"))
         self.assertEqual(live["evidence_index"]["status"], index["status"])
-        self.assertEqual(
-            index["status"], "current_fail_closed_runtime_evidence_pending_phase_c"
+        self.assertIn(
+            index["status"],
+            {
+                "current_fail_closed_runtime_evidence_pending_phase_c",
+                "pending_current_evidence",
+            },
         )
         self.assertEqual(
             live["evidence_index"]["current_evidence_status"],
@@ -255,63 +263,100 @@ class CurrentStatusTests(unittest.TestCase):
             live["evidence_index"]["downstream_candidate_status"],
             index["downstream_candidate_evidence"]["status"],
         )
-        self.assertEqual(
+        self.assertIn(
             index["current_evidence"]["status"],
-            "captured_from_clean_generator_revision",
+            {
+                "captured_from_clean_generator_revision",
+                "pending_clean_generator_revision_capture",
+            },
         )
         current_evidence_path = root / index["current_evidence"]["path"]
-        self.assertTrue(current_evidence_path.exists())
-        self.assertEqual(
-            index["current_evidence"]["sha256"],
-            hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
-        )
+        if index["current_evidence"]["status"] == "pending_clean_generator_revision_capture":
+            self.assertEqual(index["status"], "pending_current_evidence")
+            self.assertFalse(current_evidence_path.exists())
+        else:
+            self.assertTrue(current_evidence_path.exists())
+            self.assertEqual(
+                index["current_evidence"]["sha256"],
+                hashlib.sha256(current_evidence_path.read_bytes()).hexdigest(),
+            )
 
         issue44_installed = live["issue44_live_installed_preflight"]
         issue44_installed_path = root / issue44_installed["path"]
-        self.assertEqual(
-            issue44_installed["status"], "captured_from_clean_generator_revision"
+        self.assertIn(
+            issue44_installed["status"],
+            {
+                "captured_from_clean_generator_revision",
+                "pending_clean_generator_revision_capture",
+            },
         )
-        self.assertTrue(issue44_installed_path.exists())
-        self.assertEqual(
-            issue44_installed["sha256"],
-            hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
-        )
+        if issue44_installed["status"] == "pending_clean_generator_revision_capture":
+            self.assertFalse(issue44_installed_path.exists())
+            self.assertEqual(issue44_installed["sha256"], "")
+        else:
+            self.assertTrue(issue44_installed_path.exists())
+            self.assertEqual(
+                issue44_installed["sha256"],
+                hashlib.sha256(issue44_installed_path.read_bytes()).hexdigest(),
+            )
         self.assertFalse(issue44_installed["runtime_ready"])
 
         issue44_candidate = live["issue44_downstream_persistent_lifecycle_probe"]
         issue44_candidate_path = root / issue44_candidate["path"]
-        self.assertEqual(
-            issue44_candidate["sha256"],
-            hashlib.sha256(issue44_candidate_path.read_bytes()).hexdigest(),
-        )
-        issue44_candidate_payload = json.loads(
-            issue44_candidate_path.read_text(encoding="utf-8")
-        )
-        self.assertEqual(
-            issue44_candidate["status"],
-            "fail_closed_runtime_source_closure_pending_phase_c",
-        )
-        self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
-        self.assertFalse(issue44_candidate["validation_receipt_bound"])
-        self.assertFalse(issue44_candidate["duplicate_release_identity_parity"])
-        self.assertEqual(issue44_candidate_payload["status"], "fail_closed")
-        self.assertFalse(issue44_candidate_payload["runtime_ready"])
-        self.assertFalse(issue44_candidate_payload["runtime_ready_candidate_evidence"])
-        self.assertTrue(issue44_candidate_payload["phase_c_exact_head_required_before_review"])
-        self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["candidate_process_started"])
-        self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["production_gateway_restart_attempted"])
-        self.assertEqual(
-            issue44_candidate_payload["openclaw_head_sha"],
-            issue44_candidate["openclaw_head_sha"],
-        )
-        self.assertEqual(
-            index["downstream_candidate_evidence"]["isolated_non_production_gateway"][
-                "run_root_sha256"
-            ],
-            issue44_candidate_payload["isolated_non_production_gateway"][
-                "run_root_sha256"
-            ],
-        )
+        if issue44_candidate["status"] == "pending_clean_downstream_candidate_recapture":
+            self.assertFalse(issue44_candidate_path.exists())
+            self.assertEqual(issue44_candidate["sha256"], "")
+            self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
+            self.assertFalse(issue44_candidate["validation_receipt_bound"])
+            historical_candidate = next(
+                item
+                for item in index["historical_artifacts"]
+                if item["path"]
+                == "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json"
+            )
+            historical_candidate_path = root / historical_candidate["path"]
+            self.assertTrue(historical_candidate_path.exists())
+            self.assertEqual(
+                historical_candidate["sha256"],
+                hashlib.sha256(historical_candidate_path.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                historical_candidate["status"],
+                "invalid_stale_downstream_snapshot_pending_recapture",
+            )
+        else:
+            self.assertEqual(
+                issue44_candidate["status"],
+                "fail_closed_runtime_source_closure_pending_phase_c",
+            )
+            self.assertEqual(
+                issue44_candidate["sha256"],
+                hashlib.sha256(issue44_candidate_path.read_bytes()).hexdigest(),
+            )
+            issue44_candidate_payload = json.loads(
+                issue44_candidate_path.read_text(encoding="utf-8")
+            )
+            self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
+            self.assertFalse(issue44_candidate["validation_receipt_bound"])
+            self.assertFalse(issue44_candidate["duplicate_release_identity_parity"])
+            self.assertEqual(issue44_candidate_payload["status"], "fail_closed")
+            self.assertFalse(issue44_candidate_payload["runtime_ready"])
+            self.assertFalse(issue44_candidate_payload["runtime_ready_candidate_evidence"])
+            self.assertTrue(issue44_candidate_payload["phase_c_exact_head_required_before_review"])
+            self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["candidate_process_started"])
+            self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["production_gateway_restart_attempted"])
+            self.assertEqual(
+                issue44_candidate_payload["openclaw_head_sha"],
+                issue44_candidate["openclaw_head_sha"],
+            )
+            self.assertEqual(
+                index["downstream_candidate_evidence"]["isolated_non_production_gateway"][
+                    "run_root_sha256"
+                ],
+                issue44_candidate_payload["isolated_non_production_gateway"][
+                    "run_root_sha256"
+                ],
+            )
         matrix = live["issue44_downstream_incompatibility_matrix"]
         matrix_path = root / matrix["path"]
         self.assertTrue(matrix_path.exists())
@@ -322,13 +367,30 @@ class CurrentStatusTests(unittest.TestCase):
         matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
         self.assertFalse(matrix_payload["runtime_ready"])
         self.assertFalse(matrix_payload["production_authority_enabled"])
+        self.assertIn("literal_helper_call_dynamic_import", matrix["accounted_boundaries"])
         self.assertIn("source_closure_computed_dynamic_import", matrix["blockers"])
+        self.assertIn("source_closure_compile_cache_respawn_child_process", matrix["blockers"])
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["sha256"],
             matrix["sha256"],
         )
         self.assertEqual(
             index["downstream_local_remediation_boundary"]["source_closure_blockers"],
+            [
+                "openclaw.mjs:357",
+                "openclaw.mjs:373",
+                "openclaw.mjs:769",
+                "openclaw.mjs:141",
+                "openclaw.mjs:266",
+                "openclaw.mjs:293",
+            ],
+        )
+        self.assertEqual(
+            index["downstream_local_remediation_boundary"]["accounted_dynamic_import_locations"],
+            [],
+        )
+        self.assertEqual(
+            index["downstream_local_remediation_boundary"]["dynamic_import_blocker_locations"],
             ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         dist_blocker = next(
@@ -549,11 +611,103 @@ class CurrentStatusTests(unittest.TestCase):
             hashlib.sha256(historical_script).hexdigest(),
             negative["binding_assessment"]["actual_script_sha256_at_bound_head"],
         )
+        installed_20260911 = historical[
+            "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json"
+        ]
+        self.assertEqual(
+            installed_20260911["status"],
+            "historical_installed_preflight_pending_recapture",
+        )
+        self.assertEqual(installed_20260911["raw_status"], "fail")
+        self.assertFalse(installed_20260911["runtime_ready"])
+        self.assertEqual(
+            installed_20260911["bound_agentic_os_head_sha"],
+            "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+        )
+        self.assertEqual(
+            installed_20260911["current_head_sha"],
+            "9483719b23c3c1493d451c866a807f598abf1e91",
+        )
         for path, record in historical.items():
             self.assertTrue(record["immutable_historical_bytes"])
             self.assertEqual(
                 record["sha256"], hashlib.sha256((root / path).read_bytes()).hexdigest()
             )
+
+    def test_pending_downstream_status_binds_exact_head_without_false_ancestry_claim(
+        self,
+    ) -> None:
+        root = repository_root()
+        exact_pr_head = "2025dd324106da6a83748ad49845570e0fa1426a"
+        stale_parent_head = "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd"
+        historical_generator_head = "e1ddc9be1b4e8cf04e311b192fe9260added0f7b"
+        status = json.loads((root / "docs/project-status.json").read_text(encoding="utf-8"))
+        index = json.loads(
+            (root / "docs/runtime-evidence/phase-b-20260811-evidence-index.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        documents = {
+            "README.md": (root / "README.md").read_text(encoding="utf-8"),
+            "docs/agentic-os-production-adaptation.md": (
+                root / "docs/agentic-os-production-adaptation.md"
+            ).read_text(encoding="utf-8"),
+            "docs/project-status.json": json.dumps(status, sort_keys=True),
+            "docs/runtime-evidence/phase-b-20260811-evidence-index.json": json.dumps(
+                index,
+                sort_keys=True,
+            ),
+        }
+        project_candidate = status["live_runtime_evidence"][
+            "issue44_downstream_persistent_lifecycle_probe"
+        ]
+        index_candidate = index["downstream_candidate_evidence"]
+        historical_candidate = next(
+            item
+            for item in index["historical_artifacts"]
+            if item["path"]
+            == "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json"
+        )
+
+        self.assertEqual(project_candidate["current_head_sha"], exact_pr_head)
+        self.assertEqual(index_candidate["current_head_sha"], exact_pr_head)
+        self.assertEqual(historical_candidate["current_head_sha"], exact_pr_head)
+        self.assertNotEqual(project_candidate["current_head_sha"], stale_parent_head)
+        self.assertNotEqual(index_candidate["current_head_sha"], stale_parent_head)
+        self.assertNotEqual(historical_candidate["current_head_sha"], stale_parent_head)
+        self.assertEqual(
+            historical_candidate["status"],
+            "invalid_stale_downstream_snapshot_pending_recapture",
+        )
+
+        for ancestor in (historical_generator_head, stale_parent_head):
+            with self.subTest(ancestor=ancestor):
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(root),
+                        "merge-base",
+                        "--is-ancestor",
+                        ancestor,
+                        exact_pr_head,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+
+        false_ancestry_claims = (
+            "not an ancestor of the current reviewed lineage",
+            "not an ancestor of this reviewed lineage",
+            "from a non-ancestor generator lineage",
+            "from a non-ancestor Agentic OS generator head",
+            "invalid_non_ancestor_downstream_snapshot_pending_recapture",
+        )
+        for name, document in documents.items():
+            with self.subTest(document=name):
+                self.assertIn("runtime-source verifier/source-contract", document)
+                for claim in false_ancestry_claims:
+                    self.assertNotIn(claim, document)
 
     def test_live_split_catalog_preflight_preserves_dual_catalog_boundary(self) -> None:
         root = repository_root()
@@ -570,11 +724,10 @@ class CurrentStatusTests(unittest.TestCase):
             return
         self.assertEqual(current["status"], "captured_from_clean_generator_revision")
         self.assertEqual(index["status"], "current_fail_closed_runtime_evidence_pending_phase_c")
-        self.assertTrue(
-            current["generator_binding_requirements"][
-                "no_capability_source_drift_after_bound_head"
-            ]
-        )
+        expected_no_source_drift = current["generator_binding_requirements"][
+            "no_capability_source_drift_after_bound_head"
+        ]
+        self.assertTrue(expected_no_source_drift)
         reviewed_head = current["reviewed_head_sha"]
         self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
         self.assertEqual(
@@ -618,13 +771,19 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertTrue(current["no_production_lease_mutation"])
         candidate = index["downstream_candidate_evidence"]
         candidate_path = root / candidate["path"]
+        if candidate["status"] == "pending_clean_downstream_candidate_recapture":
+            self.assertFalse(candidate_path.exists())
+            self.assertEqual(candidate["sha256"], "")
+            self.assertFalse(candidate["runtime_ready_candidate_evidence"])
+            self.assertFalse(candidate["validation_receipt_bound"])
+            return
         self.assertEqual(
             candidate["sha256"], hashlib.sha256(candidate_path.read_bytes()).hexdigest()
         )
         candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
         self.assertEqual(candidate["status"], "fail_closed_runtime_source_closure_pending_phase_c")
         self.assertFalse(candidate["runtime_ready_candidate_evidence"])
-        self.assertIn("runtime source closure still rejects", candidate["status_reason"])
+        self.assertIn("compile-cache respawn child-process entrypoint", candidate["status_reason"])
         self.assertFalse(candidate["validation_receipt_bound"])
         self.assertFalse(candidate["duplicate_release_identity_parity"])
         self.assertEqual(candidate_payload["status"], "fail_closed")
@@ -643,9 +802,37 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(
             matrix["sha256"], hashlib.sha256(matrix_path.read_bytes()).hexdigest()
         )
+        matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            matrix["bound_verifier_head_sha"],
+            "9483719b23c3c1493d451c866a807f598abf1e91",
+        )
+        self.assertEqual(
+            matrix_payload["agentic_os_head_sha"],
+            matrix["bound_verifier_head_sha"],
+        )
+        self.assertEqual(
+            matrix_payload["binding_correction"]["status"],
+            "rebound_to_current_verifier_head",
+        )
         self.assertFalse(matrix["runtime_ready"])
         self.assertEqual(
             matrix["source_closure_blockers"],
+            [
+                "openclaw.mjs:357",
+                "openclaw.mjs:373",
+                "openclaw.mjs:769",
+                "openclaw.mjs:141",
+                "openclaw.mjs:266",
+                "openclaw.mjs:293",
+            ],
+        )
+        self.assertEqual(
+            matrix["accounted_dynamic_import_locations"],
+            [],
+        )
+        self.assertEqual(
+            matrix["dynamic_import_blocker_locations"],
             ["openclaw.mjs:357", "openclaw.mjs:373", "openclaw.mjs:769"],
         )
         self.assertEqual(payload["catalog"]["openclaw_package_name"], "openclaw")
@@ -855,6 +1042,33 @@ class CurrentStatusTests(unittest.TestCase):
         )
         self.assertEqual(ancestry_check.returncode, 0)
         self.assertEqual(drift_check.returncode, 0)
+
+    def test_design_contract_demotes_pending_installed_preflight(self) -> None:
+        root = repository_root()
+        index = json.loads(
+            (root / "docs/runtime-evidence/phase-b-20260811-evidence-index.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        current = index["current_evidence"]
+        if current["status"] != "pending_clean_generator_revision_capture":
+            self.skipTest("installed preflight evidence is no longer pending recapture")
+
+        design_contract = (
+            root / "docs/agentic-os-production-adaptation.md"
+        ).read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        stale_artifact = "phase-b-issue44-live-installed-preflight-20260911.json"
+
+        for document in (design_contract, readme):
+            self.assertIn("pending_clean_generator_revision_capture", document)
+            self.assertIn(current["path"], document)
+            self.assertIn(stale_artifact, document)
+            self.assertNotIn(
+                f"{stale_artifact}` is the current clean-generator",
+                document,
+            )
+            self.assertNotIn("now has a clean live-installed recapture", document)
 
 
 if __name__ == "__main__":

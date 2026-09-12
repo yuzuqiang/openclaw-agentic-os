@@ -25,10 +25,22 @@ each subsequent call.
 
 Supported loader forms include literal static/dynamic imports, direct literal
 CommonJS calls, the existing simple `require` alias form, and directly assigned
-`createRequire(import.meta.url)` / `createRequire(__filename)` loaders. Factory
-results hidden behind grouping, binding, or other result transformations are not
-accepted as ordinary direct assignments. The existing supported inline factory
-invocations still require a literal module specifier and a local factory base.
+`createRequire(import.meta.url)` / `createRequire(__filename)` loaders. A
+computed dynamic import is accepted only for a local helper of the form
+`const helper = async (specifier) => { import(specifier) }` when every helper
+reference resolves in the same lexical block to a direct call with a quoted
+literal argument, the helper body contains no dynamic `with` scope, and the
+parameter is used only as the direct dynamic import argument. Helper references
+inside the helper body and direct-looking call sites inside a dynamic `with`
+scope fail closed because lexical resolution cannot be proven from the literal
+call text alone. Literal-array `for...of` bindings still fail closed because
+JavaScript iterator semantics are mutable. Any escaped helper, computed call,
+nonliteral argument, shadowed parameter, out-of-scope call, self-reference, or
+transformed value still fails closed.
+Factory results hidden behind grouping, binding, or other result transformations
+are not accepted as ordinary direct assignments. The existing supported inline
+factory invocations still require a literal module specifier and a local factory
+base.
 
 Worker URLs constructed from `import.meta.url` resolve relative to the importing
 source. In contrast, the supported literal Node CLI and `fork` script paths

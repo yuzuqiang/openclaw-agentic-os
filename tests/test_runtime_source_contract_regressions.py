@@ -859,6 +859,240 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_literal_for_of_dynamic_imports_fail_closed(self) -> None:
+        sources = (
+            "for (const specifier of ['./dist/warning-filter.js']) { await import(specifier); }",
+            (
+                "for (let specifier of ['./dist/warning-filter.js']) {"
+                "  specifier = attackerValue; await import(specifier);"
+                "}"
+            ),
+            (
+                "Array.prototype[Symbol.iterator] = function* () { yield attackerValue; };"
+                "for (const specifier of ['./dist/warning-filter.js']) { await import(specifier); }"
+            ),
+            (
+                "const specifier = getUserInput();"
+                "const marker = \"for (const specifier of ['./dist/warning-filter.js']) {\";"
+                "await import(specifier);"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_are_source_bound(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => {"
+            "  try { await import(specifier); return true; }"
+            "  catch (err) { return false; }"
+            "};"
+            "if (await tryImport('./dist/entry.js')) {}"
+            "else if (await tryImport('./dist/entry.mjs')) {}"
+        )
+        self.assertEqual(
+            [
+                ("./dist/entry.js", True, "import"),
+                ("./dist/entry.mjs", True, "import"),
+            ],
+            CONTRACT.import_specifiers(source),
+        )
+
+    def test_literal_forwarded_dynamic_imports_reject_nonliteral_uses(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => { await import(specifier); };"
+            "const escaped = tryImport;"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_mutated_parameter(self) -> None:
+        sources = (
+            (
+                "const tryImport = async (specifier) => {"
+                "  specifier = attackerValue; await import(specifier);"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => {"
+                "  const specifier = attackerValue; await import(specifier);"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const marker = \"const tryImport = async (specifier) => {\";"
+                "const specifier = getUserInput();"
+                "await import(specifier);"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_with_shadowed_parameter(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => {"
+            "  with (scope) { await import(specifier); }"
+            "};"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_body_self_reference(self) -> None:
+        sources = (
+            (
+                "const tryImport = async (specifier) => {"
+                "  await import(specifier);"
+                "  queueMicrotask(() => tryImport(attackerValue));"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => {"
+                "  await import(specifier);"
+                "  return tryImport;"
+                "};"
+                "await tryImport('./dist/entry.js');"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_predeclaration_escape(self) -> None:
+        source = (
+            "queueMicrotask(() => tryImport(attackerValue));"
+            "const tryImport = async (specifier) => { await import(specifier); };"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_with_scoped_call_site(self) -> None:
+        sources = (
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) { await tryImport('./dist/entry.js'); }"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) /* comment */ tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) for (let i = 0; i < 1; i++) "
+                "await tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "async function run(xs) {"
+                "with (scope) for await (const item of xs) "
+                "if (false) noop(item); else tryImport('./dist/entry.js');"
+                "}"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) if (false) noop(); else tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) label: if (false) noop(); else tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) x = {a: 1}, tryImport('./dist/entry.js');"
+            ),
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_out_of_scope_calls(self) -> None:
+        source = (
+            "{"
+            "  const tryImport = async (specifier) => { await import(specifier); };"
+            "}"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_for_initializer_scope_escape(self) -> None:
+        source = (
+            "for (const tryImport = async (specifier) => { await import(specifier); }; false;) {}"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_accept_direct_for_initializer_calls(self) -> None:
+        source = (
+            "for (const tryImport = async (specifier) => { await import(specifier); }; false;) {"
+            "  await tryImport('./dist/entry.js');"
+            "}"
+        )
+        self.assertEqual(
+            [("./dist/entry.js", True, "import")],
+            CONTRACT.import_specifiers(source),
+        )
+
+    def test_literal_forwarded_dynamic_imports_reject_nested_for_initializer_scope_escape(self) -> None:
+        source = (
+            "for (let x = (() => {"
+            "  const tryImport = async (specifier) => { await import(specifier); };"
+            "  return 0;"
+            "})(); x === 0; x++) {"
+            "  await tryImport('./dist/entry.js');"
+            "}"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_do_not_treat_property_for_as_loop(self) -> None:
+        source = (
+            "obj.for(() => {"
+            "  const tryImport = async (specifier) => { await import(specifier); };"
+            "}), await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_reject_in_scope_helper_escape(self) -> None:
+        source = (
+            "const tryImport = async (specifier) => { await import(specifier); };"
+            "{ const escaped = tryImport; }"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_downstream_launcher_dynamic_imports_fail_closed_on_for_of_boundary(self) -> None:
+        source = (
+            "const installProcessWarningFilter = async () => {"
+            "  for (const specifier of ['./dist/warning-filter.js', './dist/warning-filter.mjs']) {"
+            "    try { const mod = await import(specifier); void mod; } catch (err) {}"
+            "  }"
+            "};"
+            "const tryImport = async (specifier) => {"
+            "  try { await import(specifier); return true; }"
+            "  catch (err) { return false; }"
+            "};"
+            "await installProcessWarningFilter();"
+            "if (await tryImport('./dist/entry.js')) {}"
+            "else if (await tryImport('./dist/entry.mjs')) {}"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, source)
+            with self.assertRaisesRegex(
+                CONTRACT.RuntimeSourceContractError,
+                "unsupported dynamic import",
+            ):
+                CONTRACT.runtime_source_paths(root)
+
     def test_literal_process_arguments_remain_supported(self) -> None:
         for source, import_kind in (
             ("import {fork} from 'node:child_process'; fork('./bound.cjs', ['a','b',]);", "fork"),

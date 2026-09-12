@@ -5923,6 +5923,468 @@ def _commonjs_require_specifiers(
     return specifiers
 
 
+def _parse_literal_string_array_specifiers(source_text: str, index: int) -> tuple[list[str], int] | None:
+    if index >= len(source_text) or source_text[index] != "[":
+        return None
+    values: list[str] = []
+    index = _skip_js_trivia(source_text, index + 1)
+    if index < len(source_text) and source_text[index] == "]":
+        return values, index + 1
+    while index < len(source_text):
+        parsed = _parse_quoted_specifier(source_text, index)
+        if parsed is None:
+            return None
+        value, index = parsed
+        values.append(value)
+        index = _skip_js_trivia(source_text, index)
+        if index < len(source_text) and source_text[index] == ",":
+            index = _skip_js_trivia(source_text, index + 1)
+            if index < len(source_text) and source_text[index] == "]":
+                return values, index + 1
+            continue
+        if index < len(source_text) and source_text[index] == "]":
+            return values, index + 1
+        return None
+    return None
+
+
+def _matching_js_delimiter_end(
+    source_text: str, open_index: int, open_character: str, close_character: str
+) -> int | None:
+    depth = 0
+    for kind, value, start, end in _source_tokens(source_text):
+        if start < open_index or kind != "punctuation":
+            continue
+        if value == open_character:
+            depth += 1
+        elif value == close_character:
+            depth -= 1
+            if depth == 0:
+                return end
+    return None
+
+
+def _parse_dynamic_import_identifier_argument(
+    source_text: str, argument_index: int
+) -> tuple[str, int] | None:
+    parsed = _parse_js_identifier(source_text, argument_index)
+    if parsed is None:
+        return None
+    argument, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        return None
+    return argument, close_index
+
+
+def _literal_for_of_dynamic_import_specifiers(
+    source_text: str, argument: str, call_index: int
+) -> list[str] | None:
+    # Even `for (const specifier of ["./safe.mjs"])` depends on mutable
+    # Array.prototype[Symbol.iterator] semantics.  This recognizer cannot prove
+    # the iterator path immutable, so loop-bound computed imports fail closed.
+    return None
+
+
+def _parse_literal_helper_call(source_text: str, name_start: int, name_end: int) -> tuple[str, int] | None:
+    if _previous_non_trivia_character(source_text, name_start) in {".", "?"}:
+        return None
+    open_index = _skip_js_trivia(source_text, name_end)
+    if open_index >= len(source_text) or source_text[open_index] != "(":
+        return None
+    argument_index = _skip_js_trivia(source_text, open_index + 1)
+    parsed = _parse_quoted_specifier(source_text, argument_index)
+    if parsed is None:
+        return None
+    specifier, end_index = parsed
+    close_index = _skip_js_trivia(source_text, end_index)
+    if close_index >= len(source_text) or source_text[close_index] != ")":
+        return None
+    return specifier, close_index + 1
+
+
+def _js_with_block_ranges(source_text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    tokens = _source_tokens(source_text)
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "with":
+            continue
+        if _js_identifier_token_is_static_member(tokens, index):
+            continue
+        cursor = index + 1
+        while cursor < len(tokens) and tokens[cursor][0] == "comment":
+            cursor += 1
+        if (
+            cursor >= len(tokens)
+            or tokens[cursor][0] != "punctuation"
+            or tokens[cursor][1] != "("
+        ):
+            continue
+        condition_end = _matching_js_delimiter_end(source_text, tokens[cursor][2], "(", ")")
+        if condition_end is None:
+            continue
+        body_index = _skip_js_trivia(source_text, condition_end)
+        if body_index >= len(source_text) or source_text[body_index] != "{":
+            ranges.append((body_index, _js_statement_end(source_text, body_index)))
+            continue
+        body_end = _matching_js_delimiter_end(source_text, body_index, "{", "}")
+        if body_end is not None:
+            ranges.append((body_index, body_end))
+    return ranges
+
+
+def _js_identifier_token_is_static_member(
+    tokens: list[tuple[str, str, int, int]], index: int
+) -> bool:
+    cursor = index - 1
+    while cursor >= 0 and tokens[cursor][0] == "comment":
+        cursor -= 1
+    return (
+        cursor >= 0
+        and tokens[cursor][0] == "punctuation"
+        and tokens[cursor][1] in {".", "?."}
+    )
+
+
+def _index_in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in ranges)
+
+
+def _helper_parameter_is_only_dynamic_import_argument(
+    source_text: str, argument: str, body_start: int, body_end: int
+) -> bool:
+    tokens = [
+        token
+        for token in _source_tokens(source_text)
+        if token[0] != "comment" and body_start < token[2] and token[3] < body_end
+    ]
+    dynamic_import_arguments: set[tuple[int, int]] = set()
+    for index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind == "identifier" and value == "with":
+            return False
+        if kind != "identifier" or value != "import":
+            continue
+        if index + 3 >= len(tokens):
+            continue
+        open_token = tokens[index + 1]
+        argument_token = tokens[index + 2]
+        close_token = tokens[index + 3]
+        if (
+            open_token[0] == "punctuation"
+            and open_token[1] == "("
+            and argument_token[0] == "identifier"
+            and argument_token[1] == argument
+            and close_token[0] == "punctuation"
+            and close_token[1] == ")"
+        ):
+            dynamic_import_arguments.add((argument_token[2], argument_token[3]))
+    if not dynamic_import_arguments:
+        return False
+    for kind, value, start, end in tokens:
+        if kind == "identifier" and value == argument and (start, end) not in dynamic_import_arguments:
+            return False
+    return True
+
+
+def _enclosing_js_block_range(source_text: str, index: int) -> tuple[int, int]:
+    block_stack: list[int] = []
+    for kind, value, start, _end in _source_tokens(source_text):
+        if start >= index:
+            break
+        if kind != "punctuation":
+            continue
+        if value == "{":
+            block_stack.append(start)
+        elif value == "}" and block_stack:
+            block_stack.pop()
+    if not block_stack:
+        return 0, len(source_text)
+    end = _matching_js_delimiter_end(source_text, block_stack[-1], "{", "}")
+    return block_stack[-1] + 1, len(source_text) if end is None else end
+
+
+def _js_statement_token_index(
+    tokens: list[tuple[str, str, int, int]], statement_start: int
+) -> int | None:
+    for index, token in enumerate(tokens):
+        if token[0] != "comment" and token[2] >= statement_start:
+            return index
+    return None
+
+
+def _next_js_code_token_index(
+    tokens: list[tuple[str, str, int, int]], index: int
+) -> int | None:
+    while index < len(tokens):
+        if tokens[index][0] != "comment":
+            return index
+        index += 1
+    return None
+
+
+def _js_statement_end(source_text: str, statement_start: int) -> int:
+    return _js_statement_end_with_tokens(
+        source_text, _source_tokens(source_text), statement_start
+    )
+
+
+def _js_statement_end_with_tokens(
+    source_text: str, tokens: list[tuple[str, str, int, int]], statement_start: int
+) -> int:
+    statement_start = _skip_js_trivia(source_text, statement_start)
+    if statement_start >= len(source_text):
+        return len(source_text)
+    if source_text[statement_start] == "{":
+        block_end = _matching_js_delimiter_end(source_text, statement_start, "{", "}")
+        return len(source_text) if block_end is None else block_end
+    token_index = _js_statement_token_index(tokens, statement_start)
+    if token_index is not None:
+        kind, value, _start, end = tokens[token_index]
+        if kind == "identifier" and not _js_identifier_token_is_static_member(
+            tokens, token_index
+        ):
+            maybe_label = _next_js_code_token_index(tokens, token_index + 1)
+            if (
+                maybe_label is not None
+                and tokens[maybe_label][0] == "punctuation"
+                and tokens[maybe_label][1] == ":"
+            ):
+                return _js_statement_end_with_tokens(
+                    source_text,
+                    tokens,
+                    _skip_js_trivia(source_text, tokens[maybe_label][3]),
+                )
+            if value == "if":
+                condition_index = _next_js_code_token_index(tokens, token_index + 1)
+                if (
+                    condition_index is not None
+                    and tokens[condition_index][0] == "punctuation"
+                    and tokens[condition_index][1] == "("
+                ):
+                    condition_end = _matching_js_delimiter_end(
+                        source_text, tokens[condition_index][2], "(", ")"
+                    )
+                    if condition_end is not None:
+                        body_end = _js_statement_end_with_tokens(
+                            source_text,
+                            tokens,
+                            _skip_js_trivia(source_text, condition_end),
+                        )
+                        continuation = _js_statement_token_index(
+                            tokens, _skip_js_trivia(source_text, body_end)
+                        )
+                        if (
+                            continuation is not None
+                            and tokens[continuation][0] == "identifier"
+                            and tokens[continuation][1] == "else"
+                            and not _js_identifier_token_is_static_member(tokens, continuation)
+                        ):
+                            return _js_statement_end_with_tokens(
+                                source_text,
+                                tokens,
+                                _skip_js_trivia(
+                                    source_text, tokens[continuation][3]
+                                ),
+                            )
+                        return body_end
+            if value in {"with", "while", "for"}:
+                header_index = _next_js_code_token_index(tokens, token_index + 1)
+                if value == "for" and (
+                    header_index is not None
+                    and tokens[header_index][0] == "identifier"
+                    and tokens[header_index][1] == "await"
+                    and not _js_identifier_token_is_static_member(tokens, header_index)
+                ):
+                    header_index = _next_js_code_token_index(tokens, header_index + 1)
+                if (
+                    header_index is not None
+                    and tokens[header_index][0] == "punctuation"
+                    and tokens[header_index][1] == "("
+                ):
+                    header_end = _matching_js_delimiter_end(
+                        source_text, tokens[header_index][2], "(", ")"
+                    )
+                    if header_end is not None:
+                        return _js_statement_end_with_tokens(
+                            source_text, tokens, _skip_js_trivia(source_text, header_end)
+                        )
+            if value == "try":
+                body_end = _js_statement_end_with_tokens(
+                    source_text, tokens, _skip_js_trivia(source_text, end)
+                )
+                cursor = _js_statement_token_index(
+                    tokens, _skip_js_trivia(source_text, body_end)
+                )
+                while (
+                    cursor is not None
+                    and tokens[cursor][0] == "identifier"
+                    and tokens[cursor][1] in {"catch", "finally"}
+                    and not _js_identifier_token_is_static_member(tokens, cursor)
+                ):
+                    body_start = _skip_js_trivia(source_text, tokens[cursor][3])
+                    if tokens[cursor][1] == "catch":
+                        maybe_header = _js_statement_token_index(tokens, body_start)
+                        if (
+                            maybe_header is not None
+                            and tokens[maybe_header][0] == "punctuation"
+                            and tokens[maybe_header][1] == "("
+                        ):
+                            header_end = _matching_js_delimiter_end(
+                                source_text, tokens[maybe_header][2], "(", ")"
+                            )
+                            if header_end is not None:
+                                body_start = _skip_js_trivia(source_text, header_end)
+                    body_end = _js_statement_end_with_tokens(
+                        source_text, tokens, body_start
+                    )
+                    cursor = _js_statement_token_index(
+                        tokens, _skip_js_trivia(source_text, body_end)
+                    )
+                return body_end
+            if value == "do":
+                body_end = _js_statement_end_with_tokens(
+                    source_text, tokens, _skip_js_trivia(source_text, end)
+                )
+                continuation = _js_statement_token_index(
+                    tokens, _skip_js_trivia(source_text, body_end)
+                )
+                if (
+                    continuation is not None
+                    and tokens[continuation][0] == "identifier"
+                    and tokens[continuation][1] == "while"
+                    and not _js_identifier_token_is_static_member(tokens, continuation)
+                ):
+                    header_index = _next_js_code_token_index(tokens, continuation + 1)
+                    if (
+                        header_index is not None
+                        and tokens[header_index][0] == "punctuation"
+                        and tokens[header_index][1] == "("
+                    ):
+                        header_end = _matching_js_delimiter_end(
+                            source_text, tokens[header_index][2], "(", ")"
+                        )
+                        if header_end is not None:
+                            after_header = _skip_js_trivia(source_text, header_end)
+                            if (
+                                after_header < len(source_text)
+                                and source_text[after_header] == ";"
+                            ):
+                                return after_header + 1
+                            return after_header
+                return body_end
+    depth = 0
+    for kind, value, start, end in tokens:
+        if start < statement_start or kind != "punctuation":
+            continue
+        if value in {"(", "[", "{"}:
+            depth += 1
+            continue
+        if value in {")", "]", "}"}:
+            if depth == 0:
+                return start
+            depth -= 1
+            continue
+        if value == ";" and depth == 0:
+            return end
+    return len(source_text)
+
+
+def _for_initializer_lexical_scope_range(source_text: str, index: int) -> tuple[int, int] | None:
+    tokens = _source_tokens(source_text)
+    for token_index, (kind, value, _start, _end) in enumerate(tokens):
+        if kind != "identifier" or value != "for":
+            continue
+        if _js_identifier_token_is_static_member(tokens, token_index):
+            continue
+        cursor = token_index + 1
+        while cursor < len(tokens) and tokens[cursor][0] == "comment":
+            cursor += 1
+        if (
+            cursor >= len(tokens)
+            or tokens[cursor][0] != "punctuation"
+            or tokens[cursor][1] != "("
+        ):
+            continue
+        header_start = tokens[cursor][2]
+        header_end = _matching_js_delimiter_end(source_text, header_start, "(", ")")
+        if header_end is None or not (header_start < index < header_end):
+            continue
+        first_initializer_token = _js_statement_token_index(tokens, header_start + 1)
+        if first_initializer_token is None or tokens[first_initializer_token][2] != index:
+            continue
+        body_start = _skip_js_trivia(source_text, header_end)
+        return header_start + 1, _js_statement_end(source_text, body_start)
+    return None
+
+
+def _literal_forwarded_dynamic_import_specifiers(
+    source_text: str, argument: str, call_index: int
+) -> list[str] | None:
+    helper = re.compile(
+        rf"\bconst\s+(?P<name>{JS_IDENTIFIER})\s*=\s*async\s*"
+        rf"\(\s*{re.escape(argument)}\s*\)\s*=>\s*\{{",
+        re.DOTALL,
+    )
+    for match in _executable_pattern_matches(source_text, helper):
+        body_start = match.end() - 1
+        body_end = _matching_js_delimiter_end(source_text, body_start, "{", "}")
+        if body_end is None or not (body_start < call_index < body_end):
+            continue
+        if not _helper_parameter_is_only_dynamic_import_argument(
+            source_text, argument, body_start, body_end
+        ):
+            continue
+        scope = _for_initializer_lexical_scope_range(
+            source_text, match.start()
+        ) or _enclosing_js_block_range(source_text, match.start())
+        scope_start, scope_end = scope
+        name = match.group("name")
+        name_start, name_end = match.span("name")
+        with_ranges = _js_with_block_ranges(source_text)
+        values: list[str] = []
+        for kind, value, start, end in _source_tokens(source_text):
+            if kind != "identifier" or value != name:
+                continue
+            if start == name_start and end == name_end:
+                continue
+            if not (scope_start <= start < scope_end):
+                continue
+            if start < name_start:
+                return None
+            if body_start < start < body_end:
+                return None
+            if start < body_end:
+                continue
+            if _index_in_ranges(start, with_ranges):
+                return None
+            parsed_call = _parse_literal_helper_call(source_text, start, end)
+            if parsed_call is None:
+                return None
+            values.append(parsed_call[0])
+        if values:
+            return values
+    return None
+
+
+def _literal_bound_dynamic_import_specifiers(
+    source_text: str, argument_index: int, call_index: int
+) -> tuple[list[str], int] | None:
+    parsed_argument = _parse_dynamic_import_identifier_argument(source_text, argument_index)
+    if parsed_argument is None:
+        return None
+    argument, close_index = parsed_argument
+    specifiers = _literal_for_of_dynamic_import_specifiers(
+        source_text, argument, call_index
+    )
+    if specifiers is None:
+        specifiers = _literal_forwarded_dynamic_import_specifiers(
+            source_text, argument, call_index
+        )
+    if specifiers is None:
+        return None
+    return specifiers, close_index
+
+
 def _dynamic_import_specifiers(source_text: str) -> list[str]:
     specifiers: list[str] = []
     index = 0
@@ -5991,9 +6453,17 @@ def _dynamic_import_specifiers(source_text: str) -> list[str]:
             argument_index = _skip_js_trivia(source_text, call_index + 1)
             parsed = _parse_quoted_specifier(source_text, argument_index)
             if parsed is None:
-                raise RuntimeSourceContractError(
-                    "runtime source contains an unsupported dynamic import"
+                literal_bound = _literal_bound_dynamic_import_specifiers(
+                    source_text, argument_index, index
                 )
+                if literal_bound is None:
+                    raise RuntimeSourceContractError(
+                        "runtime source contains an unsupported dynamic import"
+                    )
+                literal_specifiers, close_index = literal_bound
+                specifiers.extend(literal_specifiers)
+                index = close_index + 1
+                continue
             specifier, end_index = parsed
             close_index = _skip_js_trivia(source_text, end_index)
             if close_index < len(source_text) and source_text[close_index] == ",":

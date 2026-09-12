@@ -1682,6 +1682,155 @@ class RealGatewayProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
                 MODULE._persistent_runtime_source_paths(root)
 
+    def test_persistent_runtime_source_closure_rejects_mutated_helper_import_parameter(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const h = async (specifier) => {\n"
+                        "  specifier = attackerValue;\n"
+                        "  return import(specifier);\n"
+                        "};\n"
+                        "h('./runner-impl.mjs');\n"
+                    ),
+                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_with_scoped_helper_import_parameter(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const h = async (specifier) => {\n"
+                        "  with (scope) { await import(specifier); }\n"
+                        "};\n"
+                        "h('./runner-impl.mjs');\n"
+                    ),
+                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_out_of_scope_helper_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "{ const h = async (specifier) => { await import(specifier); }; }\n"
+                        "h('./runner-impl.mjs');\n"
+                    ),
+                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_helper_call_inside_with_scope(
+        self,
+    ) -> None:
+        cases = (
+            "with (scope) { h('./runner-impl.mjs'); }\n",
+            "with (scope) h('./runner-impl.mjs');\n",
+            "with (scope) /* comment */ h('./runner-impl.mjs');\n",
+        )
+        for invocation in cases:
+            with self.subTest(
+                invocation=invocation
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            "const h = async (specifier) => { await import(specifier); };\n"
+                            + invocation
+                        ),
+                        "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                    },
+                )
+
+                with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                    MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_with_if_else_helper_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const h = async (specifier) => { await import(specifier); };\n"
+                        "with (scope) if (false) noop(); else h('./runner-impl.mjs');\n"
+                    ),
+                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_with_try_continuation_helper_call(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "const h = async (specifier) => { await import(specifier); };\n"
+                        "with (scope) try { throw error; }\n"
+                        "catch (error) { noop(error); }\n"
+                        "finally { h('./runner-impl.mjs'); }\n"
+                    ),
+                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
+    def test_persistent_runtime_source_closure_rejects_property_for_callback_helper_scope(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_runtime_source_fixture(
+                root,
+                {
+                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                        "obj.for(() => {\n"
+                        "  const h = async (specifier) => { await import(specifier); };\n"
+                        "}), h('./runner-impl.mjs');\n"
+                    ),
+                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                },
+            )
+
+            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                MODULE._persistent_runtime_source_paths(root)
+
     def test_persistent_runtime_source_closure_rejects_template_dynamic_import(
         self,
     ) -> None:
