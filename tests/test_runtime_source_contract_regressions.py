@@ -991,6 +991,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 "with (scope) for (let i = 0; i < 1; i++) "
                 "await tryImport('./dist/entry.js');"
             ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) if (false) noop(); else tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) label: if (false) noop(); else tryImport('./dist/entry.js');"
+            ),
         )
         for source in sources:
             with self.subTest(source=source):
@@ -1009,6 +1017,36 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
         source = (
             "for (const tryImport = async (specifier) => { await import(specifier); }; false;) {}"
             "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_accept_direct_for_initializer_calls(self) -> None:
+        source = (
+            "for (const tryImport = async (specifier) => { await import(specifier); }; false;) {"
+            "  await tryImport('./dist/entry.js');"
+            "}"
+        )
+        self.assertEqual(
+            [("./dist/entry.js", True, "import")],
+            CONTRACT.import_specifiers(source),
+        )
+
+    def test_literal_forwarded_dynamic_imports_reject_nested_for_initializer_scope_escape(self) -> None:
+        source = (
+            "for (let x = (() => {"
+            "  const tryImport = async (specifier) => { await import(specifier); };"
+            "  return 0;"
+            "})(); x === 0; x++) {"
+            "  await tryImport('./dist/entry.js');"
+            "}"
+        )
+        self.assert_closed(source)
+
+    def test_literal_forwarded_dynamic_imports_do_not_treat_property_for_as_loop(self) -> None:
+        source = (
+            "obj.for(() => {"
+            "  const tryImport = async (specifier) => { await import(specifier); };"
+            "}), await tryImport('./dist/entry.js');"
         )
         self.assert_closed(source)
 

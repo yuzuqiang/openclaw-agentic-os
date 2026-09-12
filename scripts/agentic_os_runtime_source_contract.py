@@ -6143,6 +6143,17 @@ def _js_statement_end_with_tokens(
         if kind == "identifier" and not _js_identifier_token_is_static_member(
             tokens, token_index
         ):
+            maybe_label = _next_js_code_token_index(tokens, token_index + 1)
+            if (
+                maybe_label is not None
+                and tokens[maybe_label][0] == "punctuation"
+                and tokens[maybe_label][1] == ":"
+            ):
+                return _js_statement_end_with_tokens(
+                    source_text,
+                    tokens,
+                    _skip_js_trivia(source_text, tokens[maybe_label][3]),
+                )
             if value == "if":
                 condition_index = _next_js_code_token_index(tokens, token_index + 1)
                 if (
@@ -6292,6 +6303,9 @@ def _for_initializer_lexical_scope_range(source_text: str, index: int) -> tuple[
         header_start = tokens[cursor][2]
         header_end = _matching_js_delimiter_end(source_text, header_start, "(", ")")
         if header_end is None or not (header_start < index < header_end):
+            continue
+        first_initializer_token = _js_statement_token_index(tokens, header_start + 1)
+        if first_initializer_token is None or tokens[first_initializer_token][2] != index:
             continue
         body_start = _skip_js_trivia(source_text, header_end)
         return header_start + 1, _js_statement_end(source_text, body_start)
