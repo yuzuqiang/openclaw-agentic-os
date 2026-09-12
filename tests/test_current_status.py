@@ -322,7 +322,7 @@ class CurrentStatusTests(unittest.TestCase):
             )
             self.assertEqual(
                 historical_candidate["status"],
-                "invalid_non_ancestor_downstream_snapshot_pending_recapture",
+                "invalid_stale_downstream_snapshot_pending_recapture",
             )
         else:
             self.assertEqual(
@@ -616,6 +616,81 @@ class CurrentStatusTests(unittest.TestCase):
             self.assertEqual(
                 record["sha256"], hashlib.sha256((root / path).read_bytes()).hexdigest()
             )
+
+    def test_pending_downstream_status_binds_exact_head_without_false_ancestry_claim(
+        self,
+    ) -> None:
+        root = repository_root()
+        exact_pr_head = "2025dd324106da6a83748ad49845570e0fa1426a"
+        stale_parent_head = "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd"
+        historical_generator_head = "e1ddc9be1b4e8cf04e311b192fe9260added0f7b"
+        status = json.loads((root / "docs/project-status.json").read_text(encoding="utf-8"))
+        index = json.loads(
+            (root / "docs/runtime-evidence/phase-b-20260811-evidence-index.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        documents = {
+            "README.md": (root / "README.md").read_text(encoding="utf-8"),
+            "docs/agentic-os-production-adaptation.md": (
+                root / "docs/agentic-os-production-adaptation.md"
+            ).read_text(encoding="utf-8"),
+            "docs/project-status.json": json.dumps(status, sort_keys=True),
+            "docs/runtime-evidence/phase-b-20260811-evidence-index.json": json.dumps(
+                index,
+                sort_keys=True,
+            ),
+        }
+        project_candidate = status["live_runtime_evidence"][
+            "issue44_downstream_persistent_lifecycle_probe"
+        ]
+        index_candidate = index["downstream_candidate_evidence"]
+        historical_candidate = next(
+            item
+            for item in index["historical_artifacts"]
+            if item["path"]
+            == "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json"
+        )
+
+        self.assertEqual(project_candidate["current_head_sha"], exact_pr_head)
+        self.assertEqual(index_candidate["current_head_sha"], exact_pr_head)
+        self.assertEqual(historical_candidate["current_head_sha"], exact_pr_head)
+        self.assertNotEqual(project_candidate["current_head_sha"], stale_parent_head)
+        self.assertNotEqual(index_candidate["current_head_sha"], stale_parent_head)
+        self.assertNotEqual(historical_candidate["current_head_sha"], stale_parent_head)
+        self.assertEqual(
+            historical_candidate["status"],
+            "invalid_stale_downstream_snapshot_pending_recapture",
+        )
+
+        for ancestor in (historical_generator_head, stale_parent_head):
+            with self.subTest(ancestor=ancestor):
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(root),
+                        "merge-base",
+                        "--is-ancestor",
+                        ancestor,
+                        exact_pr_head,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+
+        false_ancestry_claims = (
+            "not an ancestor of the current reviewed lineage",
+            "not an ancestor of this reviewed lineage",
+            "from a non-ancestor generator lineage",
+            "from a non-ancestor Agentic OS generator head",
+            "invalid_non_ancestor_downstream_snapshot_pending_recapture",
+        )
+        for name, document in documents.items():
+            with self.subTest(document=name):
+                self.assertIn("runtime-source verifier/source-contract", document)
+                for claim in false_ancestry_claims:
+                    self.assertNotIn(claim, document)
 
     def test_live_split_catalog_preflight_preserves_dual_catalog_boundary(self) -> None:
         root = repository_root()

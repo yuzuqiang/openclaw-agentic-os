@@ -38,7 +38,7 @@
         "agentic_os_head_sha": "",
         "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
         "classification": "issue44_phase_b_downstream_candidate_pending_exact_head_recapture",
-        "current_head_sha": "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd",
+        "current_head_sha": "2025dd324106da6a83748ad49845570e0fa1426a",
         "historical_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
         "db_authority_enabled": false,
         "duplicate_acquire_identity_parity": false,
@@ -67,7 +67,7 @@
         "runtime_ready_candidate_evidence": false,
         "sha256": "",
         "status": "pending_clean_downstream_candidate_recapture",
-        "status_reason": "The prior 2026-09-11 downstream candidate prelaunch artifact remains fail-closed historical evidence, but its Agentic OS generator head is not an ancestor of the current reviewed lineage and the runtime-source verifier changed after that capture. Current downstream candidate evidence is demoted until a clean exact-head recapture is produced from the current reviewed head.",
+        "status_reason": "The prior 2026-09-11 downstream candidate prelaunch artifact remains fail-closed historical evidence, but it predates the current runtime-source verifier/source-contract changes and no clean exact-head recapture has been produced from the current reviewed head. Current downstream candidate evidence is demoted until a clean exact-head recapture is produced from the current reviewed head.",
         "validation_receipt_bound": false
     },
     "downstream_local_remediation_boundary": {
@@ -96,16 +96,16 @@
     "historical_artifacts": [
         {
             "bound_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
-            "current_head_sha": "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd",
+            "current_head_sha": "2025dd324106da6a83748ad49845570e0fa1426a",
             "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
             "immutable_historical_bytes": true,
-            "interpretation": "fail-closed downstream candidate prelaunch snapshot from a non-ancestor Agentic OS generator head; not current evidence and pending clean exact-head recapture",
+            "interpretation": "fail-closed downstream candidate prelaunch snapshot from a stale verifier/source-contract epoch; not current evidence and pending clean exact-head recapture",
             "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json",
             "raw_runtime_ready_candidate_evidence": false,
             "raw_status": "fail_closed",
             "runtime_ready_candidate_evidence": false,
             "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
-            "status": "invalid_non_ancestor_downstream_snapshot_pending_recapture"
+            "status": "invalid_stale_downstream_snapshot_pending_recapture"
         },
         {
             "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",

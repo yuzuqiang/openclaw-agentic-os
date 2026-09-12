@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `7769877e3a31f08bfa1637dcf0d379af5e75f89e992033f19e7bd259701852dd`
+- Current corrected design artifact SHA-256: `56e16d0c8a898c3aaac0ffb726cd8c3d30963a29bc70a57da7acd47c93903037`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -27,9 +27,10 @@ not evidence of production OpenClaw authority.
   persistent-lifecycle recapture after PR #49 merged to `main` at
   `5908c6886d732e710631508aa0a1e365cad76989`. The current installed evidence
   slot remains pending exact-head recapture, and the prior 2026-09-11
-  downstream candidate recapture is historical rather than current because its
-  Agentic OS generator head is not an ancestor of this reviewed lineage. Its
-  historical payload kept `candidate_process_started=false`; no runtime-ready
+  downstream candidate recapture is historical rather than current because it
+  predates the current runtime-source verifier/source-contract changes and has
+  no clean exact-head recapture. Its historical payload kept
+  `candidate_process_started=false`; no runtime-ready
   persistent-lifecycle proof exists, no current-head GitHub Codex review binding
   exists, and
   historical candidate invocations and reviews must not be counted as current
@@ -538,8 +539,8 @@ evidence, not current downstream candidate proof, and has no current-head
 GitHub Codex review binding. The local downstream OpenClaw candidate remains
 clean at `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
 `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json`
-from a non-ancestor generator lineage and failed closed before starting the
-candidate. The forward evidence index now keeps the current downstream
+under an older verifier/source-contract epoch and failed closed before starting
+the candidate. The forward evidence index now keeps the current downstream
 candidate slot at `pending_clean_downstream_candidate_recapture` until a clean
 exact-head recapture exists. The helper-call `import(specifier)` sites in
 `openclaw.mjs` are now
