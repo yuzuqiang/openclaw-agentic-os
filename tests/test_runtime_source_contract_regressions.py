@@ -960,6 +960,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assert_closed(source)
 
+    def test_literal_forwarded_dynamic_imports_reject_predeclaration_escape(self) -> None:
+        source = (
+            "queueMicrotask(() => tryImport(attackerValue));"
+            "const tryImport = async (specifier) => { await import(specifier); };"
+            "await tryImport('./dist/entry.js');"
+        )
+        self.assert_closed(source)
+
     def test_literal_forwarded_dynamic_imports_reject_with_scoped_call_site(self) -> None:
         sources = (
             (

@@ -6071,7 +6071,7 @@ def _helper_parameter_is_only_dynamic_import_argument(
     return True
 
 
-def _enclosing_js_block_end(source_text: str, index: int) -> int:
+def _enclosing_js_block_range(source_text: str, index: int) -> tuple[int, int]:
     block_stack: list[int] = []
     for kind, value, start, _end in _source_tokens(source_text):
         if start >= index:
@@ -6083,9 +6083,9 @@ def _enclosing_js_block_end(source_text: str, index: int) -> int:
         elif value == "}" and block_stack:
             block_stack.pop()
     if not block_stack:
-        return len(source_text)
+        return 0, len(source_text)
     end = _matching_js_delimiter_end(source_text, block_stack[-1], "{", "}")
-    return len(source_text) if end is None else end
+    return block_stack[-1] + 1, len(source_text) if end is None else end
 
 
 def _js_statement_end(source_text: str, statement_start: int) -> int:
@@ -6114,7 +6114,7 @@ def _js_statement_end(source_text: str, statement_start: int) -> int:
     return len(source_text)
 
 
-def _for_initializer_lexical_scope_end(source_text: str, index: int) -> int | None:
+def _for_initializer_lexical_scope_range(source_text: str, index: int) -> tuple[int, int] | None:
     tokens = _source_tokens(source_text)
     for token_index, (kind, value, _start, _end) in enumerate(tokens):
         if kind != "identifier" or value != "for":
@@ -6133,7 +6133,7 @@ def _for_initializer_lexical_scope_end(source_text: str, index: int) -> int | No
         if header_end is None or not (header_start < index < header_end):
             continue
         body_start = _skip_js_trivia(source_text, header_end)
-        return _js_statement_end(source_text, body_start)
+        return header_start + 1, _js_statement_end(source_text, body_start)
     return None
 
 
@@ -6154,9 +6154,10 @@ def _literal_forwarded_dynamic_import_specifiers(
             source_text, argument, body_start, body_end
         ):
             continue
-        scope_end = _for_initializer_lexical_scope_end(
+        scope = _for_initializer_lexical_scope_range(
             source_text, match.start()
-        ) or _enclosing_js_block_end(source_text, match.start())
+        ) or _enclosing_js_block_range(source_text, match.start())
+        scope_start, scope_end = scope
         name = match.group("name")
         name_start, name_end = match.span("name")
         with_ranges = _js_with_block_ranges(source_text)
@@ -6166,9 +6167,13 @@ def _literal_forwarded_dynamic_import_specifiers(
                 continue
             if start == name_start and end == name_end:
                 continue
+            if not (scope_start <= start < scope_end):
+                continue
+            if start < name_start:
+                return None
             if body_start < start < body_end:
                 return None
-            if not (body_end <= start < scope_end):
+            if start < body_end:
                 continue
             if _index_in_ranges(start, with_ranges):
                 return None
