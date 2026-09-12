@@ -910,6 +910,33 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertEqual(ancestry_check.returncode, 0)
         self.assertEqual(drift_check.returncode, 0)
 
+    def test_design_contract_demotes_pending_installed_preflight(self) -> None:
+        root = repository_root()
+        index = json.loads(
+            (root / "docs/runtime-evidence/phase-b-20260811-evidence-index.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        current = index["current_evidence"]
+        if current["status"] != "pending_clean_generator_revision_capture":
+            self.skipTest("installed preflight evidence is no longer pending recapture")
+
+        design_contract = (
+            root / "docs/agentic-os-production-adaptation.md"
+        ).read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        stale_artifact = "phase-b-issue44-live-installed-preflight-20260911.json"
+
+        for document in (design_contract, readme):
+            self.assertIn("pending_clean_generator_revision_capture", document)
+            self.assertIn(current["path"], document)
+            self.assertIn(stale_artifact, document)
+            self.assertNotIn(
+                f"{stale_artifact}` is the current clean-generator",
+                document,
+            )
+            self.assertNotIn("now has a clean live-installed recapture", document)
+
 
 if __name__ == "__main__":
     unittest.main()

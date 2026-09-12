@@ -19,7 +19,7 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `657febfc0813591ac7495ee2c6b7c037862fecd342b25a925d2b95802059f7a2`
+- Current corrected design artifact SHA-256: `f5a2921b94a04369b9f73ac5857f659c6dc483a860c9c47535a9d2fc18b88074`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
@@ -489,10 +489,15 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `lightContext`, `client_request_id`, `idempotency_key`, `gateway_lease_id`, and
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
-Issue #44 now has a clean live-installed recapture from GitHub main
+Issue #44 has historical live-installed preflight evidence from GitHub main
 `45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` after PR #48 merged:
 `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json`.
-It still fails closed. Runtime readiness remains false: live reachability,
+It is no longer current evidence after PR #50 capability-source changes; the
+forward evidence index keeps the live-installed slot at
+`pending_clean_generator_revision_capture` through
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-current.json`
+until a clean exact-head recapture has zero capability-source drift. Runtime
+readiness remains false: live reachability,
 connected Gateway build identity, model-callable catalog availability, and
 `agenticOs.runtime.attest` readiness remain unproven, and
 `subagents.allowLease.status` live reachability was intentionally skipped to
