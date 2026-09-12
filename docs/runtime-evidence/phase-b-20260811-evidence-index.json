@@ -1,7 +1,7 @@
 {
-    "classification": "evidence_lineage_correction",
+    "classification": "current_fail_closed_evidence_after_pr50_merge",
     "current_evidence": {
-        "classification": "issue44_live_installed_source_drift_pending_clean_generator_recapture",
+        "classification": "issue44_live_installed_exact_head_preflight_recaptured_fail_closed",
         "generator_binding_requirements": {
             "bound_head_is_ancestor_of_containing_revision": true,
             "bound_tree_matches_bound_head_tree": true,
@@ -16,84 +16,97 @@
                 "src/agentic_os/heartbeat_shadow.py",
                 "src/agentic_os/__init__.py"
             ],
-            "containing_revision_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+            "containing_revision_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
             "no_capability_source_drift_after_bound_head": true,
             "script_digest_matches_bound_head_blob": true
         },
         "generator_revision": {
-            "head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+            "head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
             "script_sha256": "9f1b2d251225e41d7c2f64df4e82383529abcc6a61575cdab23b0abe1b3e9834",
-            "tree_sha": "133e960782f1fabbbb32196471a557a0a1679a93"
+            "tree_sha": "4b5686b0a7612f483d8aeb9d875cbd291de7582d"
         },
         "no_production_lease_mutation": true,
-        "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-current.json",
+        "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260912.json",
         "raw_status": "fail",
-        "reviewed_head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+        "reviewed_head_sha": null,
         "runtime_ready": false,
-        "sha256": "",
-        "status": "pending_clean_generator_revision_capture",
-        "status_reason": "The prior installed OpenClaw 2026.7.1 preflight artifact remains fail-closed historical evidence, but PR #50 changed capability source paths after its bound clean generator head. Current evidence is demoted until a clean exact-head recapture has zero capability-source drift."
+        "sha256": "c0aed881d4e171b81a9061cf094ea2a0583fc2f0f2d696acb2aa3e0a6faa566f",
+        "status": "captured_from_clean_generator_revision",
+        "status_reason": "Fresh installed OpenClaw preflight recaptured after PR #50 merged from clean generator revision 3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3. It remains fail-closed because tools.catalog was unavailable before contract validation; allowLease.status live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary. No current-head GitHub Codex review binding exists for this runtime evidence yet, so reviewed_head_sha remains unset."
     },
     "downstream_candidate_evidence": {
-        "agentic_os_head_sha": "",
-        "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
-        "classification": "issue44_phase_b_downstream_candidate_pending_exact_head_recapture",
-        "current_head_sha": "2025dd324106da6a83748ad49845570e0fa1426a",
-        "historical_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
+        "agentic_os_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+        "base_candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+        "candidate_head_sha": "1cf0507d901441514338f37b55787a9030c9e349",
+        "classification": "issue44_phase_b_downstream_candidate_exact_head_recapture_fail_closed",
+        "current_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
         "db_authority_enabled": false,
         "duplicate_acquire_identity_parity": false,
         "duplicate_release_identity_parity": false,
         "duplicate_spawn_identity_parity": false,
+        "historical_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
         "isolated_non_production_gateway": {
             "candidate_port_closed": "not_required",
             "candidate_port_opened": false,
             "candidate_process_started": false,
             "db_authority_enabled": false,
             "loopback": true,
-            "port": 20351,
+            "port": 20444,
             "production_config_mutation_attempted": false,
             "production_gateway_restart_attempted": false,
             "production_lease_mutation_attempted": false,
             "production_session_mutation_attempted": false,
-            "run_id_sha256": "7f6ac3ac6951a1f04df84fbbf15c22b27b795662e52e23371a281c19688eabd1",
-            "run_root_sha256": "23d58a98486bfd58361cfb317909bacbfa3b9dfff7efe8dca578a74ccab8d4e4",
+            "run_id_sha256": "b7e9d03fb297de408da7b891bf284564d71c4ca55a04ec1a0c8f2292275064fb",
+            "run_root_sha256": "11a783468c06de77bf893fe378d53cceab21ff3b27ae2428c265e521d60d2459",
             "status": "not_started",
-            "transition_id_sha256": "0d0118865dd3208abac97a262a0b097710144817584e53154fcf78ce38a38a99"
+            "transition_id_sha256": "890d06846ee19d361e2098c882d3b0aa5d35cd822ddeeb854b6e2575b0438cca"
         },
-        "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-pending-current.json",
+        "local_downstream_candidate_adaptation": {
+            "changed_paths": [
+                "openclaw.mjs"
+            ],
+            "commit_sha": "1cf0507d901441514338f37b55787a9030c9e349",
+            "parent_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+            "patch_sha256": "f46eb67c907e2d08fe4577bca152ebe1c9ef69f112e700f87604d6276faa466c",
+            "policy": "downstream/local only; no openclaw/openclaw write and no yuzuqiang/openclaw push",
+            "stat_sha256": "3156cfbdc8d7ec7ade857248f04d33e9dfb423d5eadb7128da37c75899e944d8",
+            "status": "local_unpushed_candidate_commit",
+            "summary": "Replaced finite launcher dynamic-import loops and generic tryImport(specifier) with direct literal import attempts for warning-filter, root-help, and entry fallbacks."
+        },
+        "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260912.json",
         "phase_c_exact_head_required_before_review": true,
         "production_authority_enabled": false,
         "runtime_ready": false,
         "runtime_ready_candidate_evidence": false,
-        "sha256": "",
-        "status": "pending_clean_downstream_candidate_recapture",
-        "status_reason": "The prior 2026-09-11 downstream candidate prelaunch artifact remains fail-closed historical evidence, but it predates the current runtime-source verifier/source-contract changes and no clean exact-head recapture has been produced from the current reviewed head. Current downstream candidate evidence is demoted until a clean exact-head recapture is produced from the current reviewed head.",
+        "sha256": "85d49c1fac62c1093a8e4d7daf358f18a076c0559095dcf3875fae8ce6234931",
+        "status": "fail_closed_runtime_source_closure_pending_phase_c",
+        "status_reason": "Fresh exact-head recapture used local downstream candidate commit 1cf0507d901441514338f37b55787a9030c9e349. The dynamic-import source-closure blocker was locally remediated, and prelaunch now fails closed on the compile-cache respawn child-process entrypoint. Missing committed dist entrypoints remain the next blocker after respawn closure.",
         "validation_receipt_bound": false
     },
     "downstream_local_remediation_boundary": {
-        "accounted_dynamic_import_locations": [],
-        "bound_verifier_head_sha": "9483719b23c3c1493d451c866a807f598abf1e91",
-        "dynamic_import_blocker_locations": [
-            "openclaw.mjs:357",
-            "openclaw.mjs:373",
-            "openclaw.mjs:769"
+        "accounted_dynamic_import_locations": [
+            "openclaw.mjs:356",
+            "openclaw.mjs:367",
+            "openclaw.mjs:381",
+            "openclaw.mjs:394",
+            "openclaw.mjs:775",
+            "openclaw.mjs:786"
         ],
+        "bound_verifier_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+        "classification": "issue44_downstream_local_incompatibility_matrix_current",
+        "dynamic_import_blocker_locations": [],
         "historical_downstream_candidate_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
-        "classification": "issue44_downstream_local_incompatibility_matrix",
-        "next_blocker_after_source_closure": "compile-cache respawn child-process closure, then missing committed dist/entry.js and dist/entry.mjs in the clean downstream candidate",
-        "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
+        "next_blocker_after_source_closure": "compile-cache respawn child-process closure, then missing committed dist/entry.js and dist/entry.mjs in the local downstream candidate",
+        "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260912.json",
         "policy": "downstream/local OpenClaw adaptation only; no openclaw/openclaw write, no production Gateway/Cron/service/DB/session/lease mutation, and no DB authority promotion without exact isolated evidence plus independent Phase C",
         "runtime_ready": false,
-        "sha256": "68a7bd6f8143fe96765665f46684f2ada2effe7641449208b73df5f04a06f604",
+        "sha256": "65cb594569191e5d86c94d24d1e6954b6319816bf6989a28cc60d32b2137e94c",
         "source_closure_blockers": [
-            "openclaw.mjs:357",
-            "openclaw.mjs:373",
-            "openclaw.mjs:769",
             "openclaw.mjs:141",
             "openclaw.mjs:266",
             "openclaw.mjs:293"
         ],
-        "status": "fail_closed_downstream_local_remediation_required"
+        "status": "fail_closed_downstream_respawn_remediation_required"
     },
     "historical_artifacts": [
         {
@@ -168,5 +181,5 @@
         }
     ],
     "mutation_policy": "historical artifacts remain byte-for-byte immutable; corrections and current evidence are recorded only through this forward sidecar",
-    "status": "pending_current_evidence"
+    "status": "current_fail_closed_runtime_evidence_pending_phase_c"
 }

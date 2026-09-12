@@ -1,56 +1,71 @@
 {
     "live_runtime_evidence": {
         "evidence_index": {
-            "current_evidence_status": "pending_clean_generator_revision_capture",
-            "downstream_candidate_status": "pending_clean_downstream_candidate_recapture",
+            "current_evidence_status": "captured_from_clean_generator_revision",
+            "downstream_candidate_status": "fail_closed_runtime_source_closure_pending_phase_c",
             "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
-            "status": "pending_current_evidence"
+            "status": "current_fail_closed_runtime_evidence_pending_phase_c"
         },
         "issue44_downstream_incompatibility_matrix": {
             "accounted_boundaries": [
-                "literal_helper_call_dynamic_import"
+                "literal_dynamic_import_launcher_fallbacks"
             ],
-            "bound_verifier_head_sha": "9483719b23c3c1493d451c866a807f598abf1e91",
             "blockers": [
-                "source_closure_computed_dynamic_import",
                 "source_closure_compile_cache_respawn_child_process",
                 "missing_committed_dist_entrypoints",
                 "live_installed_tools_catalog"
             ],
-            "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
+            "bound_verifier_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+            "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260912.json",
             "runtime_ready": false,
-            "sha256": "68a7bd6f8143fe96765665f46684f2ada2effe7641449208b73df5f04a06f604",
-            "smallest_downstream_local_increment": "local downstream OpenClaw launcher/build adaptation only; no arbitrary import(specifier), no ambient respawn spawn whitelist, no openclaw/openclaw write, and no DB authority promotion before exact isolated evidence plus Phase C",
-            "status": "fail_closed_downstream_local_remediation_required"
+            "sha256": "65cb594569191e5d86c94d24d1e6954b6319816bf6989a28cc60d32b2137e94c",
+            "smallest_downstream_local_increment": "local downstream OpenClaw launcher/build adaptation only; no ambient respawn spawn whitelist, no untracked dist output, no openclaw/openclaw write, and no DB authority promotion before exact isolated evidence plus Phase C",
+            "status": "fail_closed_downstream_respawn_remediation_required"
         },
         "issue44_downstream_persistent_lifecycle_probe": {
-            "agentic_os_head_sha": "",
+            "agentic_os_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+            "base_openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
             "candidate_process_started": false,
-            "current_head_sha": "2025dd324106da6a83748ad49845570e0fa1426a",
+            "current_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
             "db_authority_enabled": false,
             "duplicate_acquire_identity_parity": false,
             "duplicate_release_identity_parity": false,
             "duplicate_spawn_identity_parity": false,
             "historical_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
-            "isolated_non_production_gateway": true,
+            "isolated_non_production_gateway": {
+                "candidate_port_closed": "not_required",
+                "candidate_port_opened": false,
+                "candidate_process_started": false,
+                "db_authority_enabled": false,
+                "loopback": true,
+                "port": 20444,
+                "production_config_mutation_attempted": false,
+                "production_gateway_restart_attempted": false,
+                "production_lease_mutation_attempted": false,
+                "production_session_mutation_attempted": false,
+                "run_id_sha256": "b7e9d03fb297de408da7b891bf284564d71c4ca55a04ec1a0c8f2292275064fb",
+                "run_root_sha256": "11a783468c06de77bf893fe378d53cceab21ff3b27ae2428c265e521d60d2459",
+                "status": "not_started",
+                "transition_id_sha256": "890d06846ee19d361e2098c882d3b0aa5d35cd822ddeeb854b6e2575b0438cca"
+            },
             "isolated_non_production_gateway_details": {
                 "candidate_port_closed": "not_required",
                 "candidate_port_opened": false,
                 "candidate_process_started": false,
                 "db_authority_enabled": false,
                 "loopback": true,
-                "port": 20351,
+                "port": 20444,
                 "production_config_mutation_attempted": false,
                 "production_gateway_restart_attempted": false,
                 "production_lease_mutation_attempted": false,
                 "production_session_mutation_attempted": false,
-                "run_id_sha256": "7f6ac3ac6951a1f04df84fbbf15c22b27b795662e52e23371a281c19688eabd1",
-                "run_root_sha256": "23d58a98486bfd58361cfb317909bacbfa3b9dfff7efe8dca578a74ccab8d4e4",
+                "run_id_sha256": "b7e9d03fb297de408da7b891bf284564d71c4ca55a04ec1a0c8f2292275064fb",
+                "run_root_sha256": "11a783468c06de77bf893fe378d53cceab21ff3b27ae2428c265e521d60d2459",
                 "status": "not_started",
-                "transition_id_sha256": "0d0118865dd3208abac97a262a0b097710144817584e53154fcf78ce38a38a99"
+                "transition_id_sha256": "890d06846ee19d361e2098c882d3b0aa5d35cd822ddeeb854b6e2575b0438cca"
             },
-            "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
-            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-pending-current.json",
+            "openclaw_head_sha": "1cf0507d901441514338f37b55787a9030c9e349",
+            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260912.json",
             "persistent_attestation_validated": false,
             "phase_c_exact_head_required_before_review": true,
             "production_authority_enabled": false,
@@ -62,20 +77,20 @@
             "runtime_ready": false,
             "runtime_ready_blocked_until_phase_c": true,
             "runtime_ready_candidate_evidence": false,
-            "sha256": "",
-            "status": "pending_clean_downstream_candidate_recapture",
-            "status_reason": "The prior 2026-09-11 downstream candidate prelaunch artifact remains fail-closed historical evidence, but it predates the current runtime-source verifier/source-contract changes and no clean exact-head recapture has been produced from the current reviewed head. Current downstream candidate evidence is demoted until a clean exact-head recapture is produced from the current reviewed head.",
+            "sha256": "85d49c1fac62c1093a8e4d7daf358f18a076c0559095dcf3875fae8ce6234931",
+            "status": "fail_closed_runtime_source_closure_pending_phase_c",
+            "status_reason": "Fresh exact-head recapture used local downstream candidate commit 1cf0507d901441514338f37b55787a9030c9e349. The dynamic-import source-closure blocker was locally remediated, and prelaunch now fails closed on the compile-cache respawn child-process entrypoint. Missing committed dist entrypoints remain the next blocker after respawn closure.",
             "validation_receipt_bound": false
         },
         "issue44_live_installed_preflight": {
-            "agentic_os_head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+            "agentic_os_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
             "no_production_lease_mutation": true,
             "openclaw_version": "2026.7.1",
-            "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-current.json",
+            "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260912.json",
             "production_authority_enabled": false,
             "runtime_ready": false,
-            "sha256": "",
-            "status": "pending_clean_generator_revision_capture",
+            "sha256": "c0aed881d4e171b81a9061cf094ea2a0583fc2f0f2d696acb2aa3e0a6faa566f",
+            "status": "captured_from_clean_generator_revision",
             "status_rpc_live_reachability": "skipped_no_production_lease_mutation"
         },
         "local_openclaw_dependency_evidence": {
@@ -107,7 +122,7 @@
         },
         "production_behavior_proven": false,
         "runtime_ready": false,
-        "status": "pending_current_evidence"
+        "status": "current_fail_closed_runtime_evidence_pending_phase_c"
     },
     "production_authority": {
         "db_authority_enabled": false,
@@ -136,7 +151,7 @@
         },
         "current_corrected_design_artifact": {
             "path": "docs/agentic-os-production-adaptation.md",
-            "sha256": "87756d32317725b557801c4e699986f09454f1d84211063bfb094855129426c8",
+            "sha256": "4c846ea11d28aef4737c2956a7e62f3c36e4ca1e2c4d0ee557c47b01e5da350a",
             "status": "current_successor_artifact_not_pr39_acceptance"
         },
         "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",

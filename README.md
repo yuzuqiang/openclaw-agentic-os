@@ -19,22 +19,24 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `87756d32317725b557801c4e699986f09454f1d84211063bfb094855129426c8`
+- Current corrected design artifact SHA-256: `4c846ea11d28aef4737c2956a7e62f3c36e4ca1e2c4d0ee557c47b01e5da350a`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and Issue #44 downstream
-  persistent-lifecycle recapture after PR #49 merged to `main` at
-  `5908c6886d732e710631508aa0a1e365cad76989`. The current installed evidence
-  slot remains pending exact-head recapture, and the prior 2026-09-11
-  downstream candidate recapture is historical rather than current because it
-  predates the current runtime-source verifier/source-contract changes and has
-  no clean exact-head recapture. Its historical payload kept
-  `candidate_process_started=false`; no runtime-ready
-  persistent-lifecycle proof exists, no current-head GitHub Codex review binding
-  exists, and
-  historical candidate invocations and reviews must not be counted as current
-  exact-head runtime evidence:
+  persistent-lifecycle recapture after PR #50 merged to `main` at
+  `3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3`. The installed preflight was
+  freshly recaptured and remains fail-closed because `tools.catalog` was
+  unavailable while `allowLease.status` live reachability was intentionally
+  skipped. The downstream candidate was recaptured against local downstream
+  OpenClaw commit `1cf0507d901441514338f37b55787a9030c9e349`: dynamic imports
+  are now source-bound in that local candidate, but prelaunch fails closed on
+  the compile-cache respawn child-process source-closure boundary. The candidate
+  was not started (`candidate_process_started=false`), no runtime-ready
+  persistent-lifecycle proof exists, runtime readiness remains false, no
+  current-head GitHub Codex review binding exists, and historical candidate
+  invocations and reviews must not be counted as current exact-head runtime
+  evidence:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
 - Local OpenClaw dependency/evidence contract for the tsgo evidence-reuse
   adaptation (deterministic fake-Crabbox harness PASS; live Blacksmith N/A):
@@ -492,20 +494,15 @@ RPC and the Agentic OS `sessions_spawn` surface is the exact 12-field contract
 `lightContext`, `client_request_id`, `idempotency_key`, `gateway_lease_id`, and
 `metadata`). The installed singular `session_status(sessionKey)` surface is the
 canonical status contract; it is not a readiness blocker by itself.
-Issue #44 has historical live-installed preflight evidence from GitHub main
-`45bfa2b5a33f9b28f9c77765e7a1980a7aea4cb0` after PR #48 merged:
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json`.
-It is no longer current evidence after PR #50 capability-source changes; the
-forward evidence index keeps the live-installed slot at
-`pending_clean_generator_revision_capture` through
-`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-pending-current.json`
-until a clean exact-head recapture has zero capability-source drift. Runtime
-readiness remains false: live reachability,
-connected Gateway build identity, model-callable catalog availability, and
-`agenticOs.runtime.attest` readiness remain unproven, and
-`subagents.allowLease.status` live reachability was intentionally skipped to
-preserve the no-production-lease-mutation boundary. The plain-catalog path is
-deliberately offline-only: it reports
+Issue #44 now has a fresh installed preflight from GitHub main
+`3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3` after PR #50 merged:
+`docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260912.json`.
+It is current fail-closed evidence, not runtime readiness. `tools.catalog` was
+unavailable before contract validation, connected Gateway build identity,
+model-callable catalog availability, and `agenticOs.runtime.attest` readiness
+remain unproven, and `subagents.allowLease.status` live reachability was
+intentionally skipped to preserve the no-production-lease-mutation boundary.
+The plain-catalog path is deliberately offline-only: it reports
 `classification=offline_schema_validation_only` and can never set
 `runtime_ready=true`. An unsigned catalog mapping cannot mint
 `OpenClawAdapter` runtime authority. Direct construction remains disabled; the
@@ -534,44 +531,27 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-The 2026-09-11 Issue #44 downstream recapture is fail-closed historical
-evidence, not current downstream candidate proof, and has no current-head
-GitHub Codex review binding. The local downstream OpenClaw candidate remains
-clean at `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
-`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json`
-under an older verifier/source-contract epoch and failed closed before starting
-the candidate. The forward evidence index now keeps the current downstream
-candidate slot at `pending_clean_downstream_candidate_recapture` until a clean
-exact-head recapture exists. The helper-call `import(specifier)` sites in
-`openclaw.mjs` are now
-accounted only when they flow from literal helper calls whose parameter is not
-rewritten, whose body has no dynamic `with` scope, and whose direct calls stay in
-the helper declaration's lexical block; helper body self-references and helper
-call sites inside dynamic `with` scopes also fail closed. Literal-array
-`for...of` computed imports remain fail-closed because iterator semantics are
-mutable. The companion
-`docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json`
-binds the first local source-closure blocker to `openclaw.mjs:357`,
-`openclaw.mjs:373`, and `openclaw.mjs:769`, while preserving respawn lines
-`openclaw.mjs:141`, `openclaw.mjs:266`, and `openclaw.mjs:293` plus the missing
-committed `dist/entry.js` and `dist/entry.mjs` launch outputs as downstream
-blockers to recapture after dynamic-import remediation. The smallest safe
-remediation is downstream/local only: provide a source-bound OpenClaw
-launcher/build whose dynamic imports, respawn, and launch entrypoints are
-committed or otherwise
-covered by the runtime source contract. That recapture used an isolated
-non-production run root and loopback port `20351`, recorded
+The 2026-09-12 Issue #44 downstream recapture is current fail-closed evidence
+against Agentic OS head `3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3` and local
+downstream OpenClaw candidate head `1cf0507d901441514338f37b55787a9030c9e349`;
+that candidate commit is local-only and unpushed. It rewrites the finite
+launcher fallback dynamic imports in `openclaw.mjs` to direct literal imports,
+so prelaunch no longer stops on unsupported dynamic imports. The probe wrote
+`docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260912.json`
+on an isolated non-production run root and loopback port `20444`, recorded
 `candidate_process_started=false`, and records no production
-Gateway/config/Cron/session/lease mutation or restart.
-Historical candidate invocations and reviews must not be counted as current
-exact-head runtime evidence.
-
-The prior installed OpenClaw preflight JSON from the post-PR49 generator lineage
-is now treated as fail-closed historical evidence, not current proof, because
-PR #50 changed capability source paths after that artifact's bound clean
-generator head. A fresh clean exact-head installed preflight recapture with zero
-capability-source drift is required before the evidence index may return to
-`current_fail_closed_runtime_evidence_pending_phase_c`.
+Gateway/config/Cron/session/lease mutation or restart. The current blocker is
+the compile-cache respawn child-process source-closure boundary at
+`openclaw.mjs:141`, `openclaw.mjs:266`, and `openclaw.mjs:293`; it forwards
+`process.execArgv`, `import.meta.url`, `process.argv`, and environment through a
+wrapper rather than a verifier-supported literal Node entrypoint. The companion
+`docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260912.json`
+records that blocker and the next missing committed `dist/entry.js` and
+`dist/entry.mjs` launch outputs. The smallest safe remediation remains
+downstream/local only: make respawn and launch entrypoints source-bound or
+commit exact dist entrypoints; do not whitelist ambient argv/env spawning or use
+untracked build output as exact-head evidence. Historical candidate invocations
+and reviews must not be counted as current exact-head runtime evidence.
 
 The containment boundary must be launcher-owned: without it, the persistent
 lifecycle probe fails before candidate code runs because a same-UID process can
