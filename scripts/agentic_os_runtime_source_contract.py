@@ -6009,6 +6009,8 @@ def _js_with_block_ranges(source_text: str) -> list[tuple[int, int]]:
     for index, (kind, value, _start, _end) in enumerate(tokens):
         if kind != "identifier" or value != "with":
             continue
+        if _js_identifier_token_is_static_member(tokens, index):
+            continue
         cursor = index + 1
         while cursor < len(tokens) and tokens[cursor][0] == "comment":
             cursor += 1
@@ -6029,6 +6031,19 @@ def _js_with_block_ranges(source_text: str) -> list[tuple[int, int]]:
         if body_end is not None:
             ranges.append((body_index, body_end))
     return ranges
+
+
+def _js_identifier_token_is_static_member(
+    tokens: list[tuple[str, str, int, int]], index: int
+) -> bool:
+    cursor = index - 1
+    while cursor >= 0 and tokens[cursor][0] == "comment":
+        cursor -= 1
+    return (
+        cursor >= 0
+        and tokens[cursor][0] == "punctuation"
+        and tokens[cursor][1] in {".", "?."}
+    )
 
 
 def _index_in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
@@ -6088,15 +6103,159 @@ def _enclosing_js_block_range(source_text: str, index: int) -> tuple[int, int]:
     return block_stack[-1] + 1, len(source_text) if end is None else end
 
 
+def _js_statement_token_index(
+    tokens: list[tuple[str, str, int, int]], statement_start: int
+) -> int | None:
+    for index, token in enumerate(tokens):
+        if token[0] != "comment" and token[2] >= statement_start:
+            return index
+    return None
+
+
+def _next_js_code_token_index(
+    tokens: list[tuple[str, str, int, int]], index: int
+) -> int | None:
+    while index < len(tokens):
+        if tokens[index][0] != "comment":
+            return index
+        index += 1
+    return None
+
+
 def _js_statement_end(source_text: str, statement_start: int) -> int:
+    return _js_statement_end_with_tokens(
+        source_text, _source_tokens(source_text), statement_start
+    )
+
+
+def _js_statement_end_with_tokens(
+    source_text: str, tokens: list[tuple[str, str, int, int]], statement_start: int
+) -> int:
     statement_start = _skip_js_trivia(source_text, statement_start)
     if statement_start >= len(source_text):
         return len(source_text)
     if source_text[statement_start] == "{":
         block_end = _matching_js_delimiter_end(source_text, statement_start, "{", "}")
         return len(source_text) if block_end is None else block_end
+    token_index = _js_statement_token_index(tokens, statement_start)
+    if token_index is not None:
+        kind, value, _start, end = tokens[token_index]
+        if kind == "identifier" and not _js_identifier_token_is_static_member(
+            tokens, token_index
+        ):
+            if value == "if":
+                condition_index = _next_js_code_token_index(tokens, token_index + 1)
+                if (
+                    condition_index is not None
+                    and tokens[condition_index][0] == "punctuation"
+                    and tokens[condition_index][1] == "("
+                ):
+                    condition_end = _matching_js_delimiter_end(
+                        source_text, tokens[condition_index][2], "(", ")"
+                    )
+                    if condition_end is not None:
+                        body_end = _js_statement_end_with_tokens(
+                            source_text,
+                            tokens,
+                            _skip_js_trivia(source_text, condition_end),
+                        )
+                        continuation = _js_statement_token_index(
+                            tokens, _skip_js_trivia(source_text, body_end)
+                        )
+                        if (
+                            continuation is not None
+                            and tokens[continuation][0] == "identifier"
+                            and tokens[continuation][1] == "else"
+                            and not _js_identifier_token_is_static_member(tokens, continuation)
+                        ):
+                            return _js_statement_end_with_tokens(
+                                source_text,
+                                tokens,
+                                _skip_js_trivia(
+                                    source_text, tokens[continuation][3]
+                                ),
+                            )
+                        return body_end
+            if value in {"with", "while", "for"}:
+                header_index = _next_js_code_token_index(tokens, token_index + 1)
+                if (
+                    header_index is not None
+                    and tokens[header_index][0] == "punctuation"
+                    and tokens[header_index][1] == "("
+                ):
+                    header_end = _matching_js_delimiter_end(
+                        source_text, tokens[header_index][2], "(", ")"
+                    )
+                    if header_end is not None:
+                        return _js_statement_end_with_tokens(
+                            source_text, tokens, _skip_js_trivia(source_text, header_end)
+                        )
+            if value == "try":
+                body_end = _js_statement_end_with_tokens(
+                    source_text, tokens, _skip_js_trivia(source_text, end)
+                )
+                cursor = _js_statement_token_index(
+                    tokens, _skip_js_trivia(source_text, body_end)
+                )
+                while (
+                    cursor is not None
+                    and tokens[cursor][0] == "identifier"
+                    and tokens[cursor][1] in {"catch", "finally"}
+                    and not _js_identifier_token_is_static_member(tokens, cursor)
+                ):
+                    body_start = _skip_js_trivia(source_text, tokens[cursor][3])
+                    if tokens[cursor][1] == "catch":
+                        maybe_header = _js_statement_token_index(tokens, body_start)
+                        if (
+                            maybe_header is not None
+                            and tokens[maybe_header][0] == "punctuation"
+                            and tokens[maybe_header][1] == "("
+                        ):
+                            header_end = _matching_js_delimiter_end(
+                                source_text, tokens[maybe_header][2], "(", ")"
+                            )
+                            if header_end is not None:
+                                body_start = _skip_js_trivia(source_text, header_end)
+                    body_end = _js_statement_end_with_tokens(
+                        source_text, tokens, body_start
+                    )
+                    cursor = _js_statement_token_index(
+                        tokens, _skip_js_trivia(source_text, body_end)
+                    )
+                return body_end
+            if value == "do":
+                body_end = _js_statement_end_with_tokens(
+                    source_text, tokens, _skip_js_trivia(source_text, end)
+                )
+                continuation = _js_statement_token_index(
+                    tokens, _skip_js_trivia(source_text, body_end)
+                )
+                if (
+                    continuation is not None
+                    and tokens[continuation][0] == "identifier"
+                    and tokens[continuation][1] == "while"
+                    and not _js_identifier_token_is_static_member(tokens, continuation)
+                ):
+                    header_index = _next_js_code_token_index(tokens, continuation + 1)
+                    if (
+                        header_index is not None
+                        and tokens[header_index][0] == "punctuation"
+                        and tokens[header_index][1] == "("
+                    ):
+                        header_end = _matching_js_delimiter_end(
+                            source_text, tokens[header_index][2], "(", ")"
+                        )
+                        if header_end is not None:
+                            after_header = _skip_js_trivia(source_text, header_end)
+                            if (
+                                after_header < len(source_text)
+                                and source_text[after_header] == ";"
+                            ):
+                                return after_header + 1
+                            return after_header
+                return body_end
     depth = 0
-    for kind, value, start, end in _source_tokens(source_text):
+    for kind, value, start, end in tokens:
         if start < statement_start or kind != "punctuation":
             continue
         if value in {"(", "[", "{"}:
@@ -6118,6 +6277,8 @@ def _for_initializer_lexical_scope_range(source_text: str, index: int) -> tuple[
     tokens = _source_tokens(source_text)
     for token_index, (kind, value, _start, _end) in enumerate(tokens):
         if kind != "identifier" or value != "for":
+            continue
+        if _js_identifier_token_is_static_member(tokens, token_index):
             continue
         cursor = token_index + 1
         while cursor < len(tokens) and tokens[cursor][0] == "comment":
