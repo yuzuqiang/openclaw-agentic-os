@@ -7975,6 +7975,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_readme_digests_match_current_design_and_migration(self) -> None:
         readme = (repository_root() / "README.md").read_text(encoding="utf-8")
+        normalized_readme = " ".join(readme.split())
         design_digest = hashlib.sha256(
             (repository_root() / "docs/agentic-os-production-adaptation.md").read_bytes()
         ).hexdigest()
@@ -8004,17 +8005,17 @@ class MigrationTests(unittest.TestCase):
         )
         self.assertEqual(
             project_status["live_runtime_evidence"]["status"],
-            "pending_current_evidence",
+            "current_fail_closed_runtime_evidence_pending_phase_c",
         )
         self.assertEqual(project_status["production_authority"]["status"], "disabled")
         self.assertFalse(DB_AUTHORITY_ENABLED)
         self.assertIn("accepted repository state", readme)
         self.assertIn("passed exact-head Phase C", readme)
         self.assertIn("clean Codex review", readme)
-        self.assertIn("no current-head GitHub Codex review binding", readme)
+        self.assertIn("no current-head GitHub Codex review binding", normalized_readme)
         self.assertIn(
             "historical candidate invocations and reviews must not be counted",
-            readme,
+            normalized_readme,
         )
         self.assertIn(
             "docs/runtime-evidence/phase-b-revalidation-20260809.json", readme

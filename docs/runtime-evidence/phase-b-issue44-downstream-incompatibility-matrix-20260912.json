@@ -1,0 +1,108 @@
+{
+    "agentic_os_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+    "blockers": [
+        {
+            "base_candidate_locations": [
+                "openclaw.mjs:357",
+                "openclaw.mjs:373",
+                "openclaw.mjs:769"
+            ],
+            "current_local_candidate_locations": [],
+            "evidence": "Prelaunch no longer stops on unsupported dynamic import after local downstream commit 1cf0507d901441514338f37b55787a9030c9e349; it advanced to unsupported child-process Node entrypoint.",
+            "id": "source_closure_computed_dynamic_import",
+            "status": "locally_remediated_pending_phase_c"
+        },
+        {
+            "evidence": "The current verifier accepts only source-bound process entrypoints with literal script paths and optional literal argv lists; this launcher respawn forwards process.execArgv, import.meta.url, process.argv, and env through a wrapper.",
+            "id": "source_closure_compile_cache_respawn_child_process",
+            "smallest_downstream_local_increment": "Patch only downstream/local launcher respawn into a verifier-supported literal entrypoint or disable it for persistent-runner prelaunch without whitelisting ambient process argv/env spawning.",
+            "source_locations": [
+                {
+                    "line": 141,
+                    "path": "openclaw.mjs",
+                    "source": "const runRespawnedChild = (command, args, env) => {"
+                },
+                {
+                    "line": 266,
+                    "path": "openclaw.mjs",
+                    "source": "return runRespawnedChild(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), ...process.argv.slice(2)], env);"
+                },
+                {
+                    "line": 293,
+                    "path": "openclaw.mjs",
+                    "source": "return runRespawnedChild(process.execPath, [...process.execArgv, fileURLToPath(import.meta.url), ...process.argv.slice(2)], env);"
+                }
+            ],
+            "status": "blocking_prelaunch"
+        },
+        {
+            "evidence": "git ls-tree HEAD shows no committed dist entrypoints, and the dist directory is absent in the local downstream candidate worktree.",
+            "id": "missing_committed_dist_entrypoints",
+            "paths": [
+                {
+                    "exists": false,
+                    "path": "dist/warning-filter.js",
+                    "tracked": false
+                },
+                {
+                    "exists": false,
+                    "path": "dist/warning-filter.mjs",
+                    "tracked": false
+                },
+                {
+                    "exists": false,
+                    "path": "dist/entry.js",
+                    "tracked": false
+                },
+                {
+                    "exists": false,
+                    "path": "dist/entry.mjs",
+                    "tracked": false
+                },
+                {
+                    "exists": false,
+                    "path": "dist/cli/program/root-help.js",
+                    "tracked": false
+                },
+                {
+                    "exists": false,
+                    "path": "dist/cli/program/root-help.mjs",
+                    "tracked": false
+                }
+            ],
+            "smallest_downstream_local_increment": "Use committed downstream dist entrypoints or a source-mode persistent runner contract; untracked build output is not exact-head evidence.",
+            "status": "future_blocker_after_respawn_source_closure"
+        },
+        {
+            "evidence": "tools.catalog remains unavailable before contract validation, connected Gateway build identity is unproven, and allowLease.status reachability was intentionally skipped to avoid production lease mutation.",
+            "evidence_path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260912.json",
+            "id": "live_installed_tools_catalog",
+            "status": "blocking_db_authority"
+        }
+    ],
+    "bound_verifier_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+    "db_authority_enabled": false,
+    "generated_at_utc": "2026-09-12T12:15:14Z",
+    "local_downstream_candidate_adaptation": {
+        "changed_paths": [
+            "openclaw.mjs"
+        ],
+        "commit_sha": "1cf0507d901441514338f37b55787a9030c9e349",
+        "parent_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+        "patch_sha256": "f46eb67c907e2d08fe4577bca152ebe1c9ef69f112e700f87604d6276faa466c",
+        "policy": "downstream/local only; no openclaw/openclaw write and no yuzuqiang/openclaw push",
+        "stat_sha256": "3156cfbdc8d7ec7ade857248f04d33e9dfb423d5eadb7128da37c75899e944d8",
+        "status": "local_unpushed_candidate_commit",
+        "summary": "Replaced finite launcher dynamic-import loops and generic tryImport(specifier) with direct literal import attempts for warning-filter, root-help, and entry fallbacks."
+    },
+    "no_production_mutation_observed": true,
+    "openclaw_base_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+    "openclaw_local_candidate_head_sha": "1cf0507d901441514338f37b55787a9030c9e349",
+    "openclaw_local_candidate_parent_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
+    "phase_c_exact_head_required_before_review": true,
+    "production_authority_enabled": false,
+    "runtime_ready": false,
+    "safe_to_promote_runtime_ready": false,
+    "schema": "issue44_downstream_runtime_incompatibility_matrix_v2",
+    "summary": "Fresh PR #50 merge-head recapture: local downstream candidate adaptation made launcher dynamic imports source-bound, then prelaunch advanced to the compile-cache respawn child-process source-closure blocker. Committed dist entrypoints remain absent and are next after respawn closure."
+}
