@@ -72,17 +72,19 @@
     },
     "downstream_local_remediation_boundary": {
         "accounted_dynamic_import_locations": [],
+        "bound_verifier_head_sha": "9483719b23c3c1493d451c866a807f598abf1e91",
         "dynamic_import_blocker_locations": [
             "openclaw.mjs:357",
             "openclaw.mjs:373",
             "openclaw.mjs:769"
         ],
+        "historical_downstream_candidate_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
         "classification": "issue44_downstream_local_incompatibility_matrix",
         "next_blocker_after_source_closure": "compile-cache respawn child-process closure, then missing committed dist/entry.js and dist/entry.mjs in the clean downstream candidate",
         "path": "docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260911.json",
         "policy": "downstream/local OpenClaw adaptation only; no openclaw/openclaw write, no production Gateway/Cron/service/DB/session/lease mutation, and no DB authority promotion without exact isolated evidence plus independent Phase C",
         "runtime_ready": false,
-        "sha256": "4d6659fdda7716b28b1b4b19c560d1c7d61713df8985eec9fdb72eddafa8b789",
+        "sha256": "68a7bd6f8143fe96765665f46684f2ada2effe7641449208b73df5f04a06f604",
         "source_closure_blockers": [
             "openclaw.mjs:357",
             "openclaw.mjs:373",
@@ -106,6 +108,19 @@
             "runtime_ready_candidate_evidence": false,
             "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
             "status": "invalid_stale_downstream_snapshot_pending_recapture"
+        },
+        {
+            "bound_agentic_os_head_sha": "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+            "current_head_sha": "9483719b23c3c1493d451c866a807f598abf1e91",
+            "epoch_policy": "frozen historical record; current live-installed evidence is namespaced only in the pending sidecar",
+            "immutable_historical_bytes": true,
+            "interpretation": "fail-closed installed OpenClaw 2026.7.1 preflight snapshot from a stale capability-source epoch; not current evidence and pending clean exact-head recapture",
+            "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json",
+            "raw_runtime_ready": false,
+            "raw_status": "fail",
+            "runtime_ready": false,
+            "sha256": "add3eab40b6472e2b473a5e18e7df6852417578175c96a0860dd510efe5ce603",
+            "status": "historical_installed_preflight_pending_recapture"
         },
         {
             "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",

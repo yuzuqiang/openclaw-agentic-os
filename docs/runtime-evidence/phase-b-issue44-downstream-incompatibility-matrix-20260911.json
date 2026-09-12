@@ -1,8 +1,14 @@
 {
-    "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
+    "agentic_os_head_sha": "9483719b23c3c1493d451c866a807f598abf1e91",
+    "binding_correction": {
+        "bound_verifier_head_sha": "9483719b23c3c1493d451c866a807f598abf1e91",
+        "historical_downstream_candidate_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
+        "reason": "The matrix text describes the PR #50 hardened runtime-source verifier semantics, including fail-closed literal-array for-of dynamic imports and helper parameter/scope protections. It is therefore bound to the exact PR #50 verifier head instead of the older downstream candidate generator head.",
+        "status": "rebound_to_current_verifier_head"
+    },
     "blockers": [
         {
-            "evidence": "scripts/agentic_os_runtime_source_contract.py now accepts only local async helper-call dynamic imports whose parameter is not rewritten, whose body has no dynamic with scope or self-reference, and whose accepted direct literal calls remain in the helper declaration's lexical block outside dynamic with scope. Literal-array for-of dynamic import bindings remain rejected because JavaScript iterator semantics are mutable; arbitrary import(specifier) remains rejected.",
+            "evidence": "At bound verifier head 9483719b23c3c1493d451c866a807f598abf1e91, scripts/agentic_os_runtime_source_contract.py accepts only local async helper-call dynamic imports whose parameter is not rewritten, whose body has no dynamic with scope or self-reference, and whose accepted direct literal calls remain in the helper declaration's lexical block outside dynamic with scope. Literal-array for-of dynamic import bindings remain rejected because JavaScript iterator semantics are mutable; arbitrary import(specifier) remains rejected.",
             "id": "source_closure_computed_dynamic_import",
             "smallest_downstream_local_increment": "No official openclaw/openclaw write. Keep this as analyzer compatibility only until different-agent Phase C validates the exact Agentic OS head.",
             "source_locations": [
@@ -101,5 +107,5 @@
     "runtime_ready": false,
     "safe_to_promote_runtime_ready": false,
     "schema": "issue44_downstream_runtime_incompatibility_matrix_v1",
-    "summary": "Fail closed: literal-array for-of dynamic import(source variable) patterns in openclaw.mjs remain rejected because JavaScript iterator semantics are mutable. The clean downstream candidate must first rewrite or otherwise prove those dynamic imports source-bound; compile-cache respawn child-process closure and missing committed dist entrypoints remain downstream blockers to recapture after that boundary."
+    "summary": "Fail closed at bound verifier head 9483719b23c3c1493d451c866a807f598abf1e91: literal-array for-of dynamic import(source variable) patterns in openclaw.mjs remain rejected because JavaScript iterator semantics are mutable. The clean downstream candidate must first rewrite or otherwise prove those dynamic imports source-bound; compile-cache respawn child-process closure and missing committed dist entrypoints remain downstream blockers to recapture after that boundary."
 }

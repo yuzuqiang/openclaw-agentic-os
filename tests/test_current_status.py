@@ -611,6 +611,23 @@ class CurrentStatusTests(unittest.TestCase):
             hashlib.sha256(historical_script).hexdigest(),
             negative["binding_assessment"]["actual_script_sha256_at_bound_head"],
         )
+        installed_20260911 = historical[
+            "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260911.json"
+        ]
+        self.assertEqual(
+            installed_20260911["status"],
+            "historical_installed_preflight_pending_recapture",
+        )
+        self.assertEqual(installed_20260911["raw_status"], "fail")
+        self.assertFalse(installed_20260911["runtime_ready"])
+        self.assertEqual(
+            installed_20260911["bound_agentic_os_head_sha"],
+            "d482e096e90d1c0260b6aeada692354e9f2f9a65",
+        )
+        self.assertEqual(
+            installed_20260911["current_head_sha"],
+            "9483719b23c3c1493d451c866a807f598abf1e91",
+        )
         for path, record in historical.items():
             self.assertTrue(record["immutable_historical_bytes"])
             self.assertEqual(
@@ -784,6 +801,19 @@ class CurrentStatusTests(unittest.TestCase):
         matrix_path = root / matrix["path"]
         self.assertEqual(
             matrix["sha256"], hashlib.sha256(matrix_path.read_bytes()).hexdigest()
+        )
+        matrix_payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            matrix["bound_verifier_head_sha"],
+            "9483719b23c3c1493d451c866a807f598abf1e91",
+        )
+        self.assertEqual(
+            matrix_payload["agentic_os_head_sha"],
+            matrix["bound_verifier_head_sha"],
+        )
+        self.assertEqual(
+            matrix_payload["binding_correction"]["status"],
+            "rebound_to_current_verifier_head",
         )
         self.assertFalse(matrix["runtime_ready"])
         self.assertEqual(
