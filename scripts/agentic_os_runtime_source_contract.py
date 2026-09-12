@@ -6047,7 +6047,7 @@ def _js_identifier_token_is_static_member(
 
 
 def _index_in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
-    return any(start < index < end for start, end in ranges)
+    return any(start <= index < end for start, end in ranges)
 
 
 def _helper_parameter_is_only_dynamic_import_argument(

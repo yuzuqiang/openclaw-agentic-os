@@ -1747,21 +1747,29 @@ class RealGatewayProbeTests(unittest.TestCase):
     def test_persistent_runtime_source_closure_rejects_helper_call_inside_with_scope(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._write_runtime_source_fixture(
-                root,
-                {
-                    MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
-                        "const h = async (specifier) => { await import(specifier); };\n"
-                        "with (scope) { h('./runner-impl.mjs'); }\n"
-                    ),
-                    "scripts/runner-impl.mjs": "export const dynamic = true;\n",
-                },
-            )
+        cases = (
+            "with (scope) { h('./runner-impl.mjs'); }\n",
+            "with (scope) h('./runner-impl.mjs');\n",
+            "with (scope) /* comment */ h('./runner-impl.mjs');\n",
+        )
+        for invocation in cases:
+            with self.subTest(
+                invocation=invocation
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self._write_runtime_source_fixture(
+                    root,
+                    {
+                        MODULE.PERSISTENT_LIFECYCLE_RUNNER: (
+                            "const h = async (specifier) => { await import(specifier); };\n"
+                            + invocation
+                        ),
+                        "scripts/runner-impl.mjs": "export const dynamic = true;\n",
+                    },
+                )
 
-            with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
-                MODULE._persistent_runtime_source_paths(root)
+                with self.assertRaisesRegex(MODULE.ProbeError, "dynamic import"):
+                    MODULE._persistent_runtime_source_paths(root)
 
     def test_persistent_runtime_source_closure_rejects_with_if_else_helper_call(
         self,

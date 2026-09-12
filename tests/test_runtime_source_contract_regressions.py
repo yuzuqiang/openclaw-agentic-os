@@ -976,6 +976,14 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
             ),
             (
                 "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) /* comment */ tryImport('./dist/entry.js');"
+            ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
                 "with (scope) await tryImport('./dist/entry.js');"
             ),
             (
