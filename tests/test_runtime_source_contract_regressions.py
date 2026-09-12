@@ -999,6 +999,10 @@ class RuntimeSourceRegressionTests(unittest.TestCase):
                 "const tryImport = async (specifier) => { await import(specifier); };"
                 "with (scope) label: if (false) noop(); else tryImport('./dist/entry.js');"
             ),
+            (
+                "const tryImport = async (specifier) => { await import(specifier); };"
+                "with (scope) x = {a: 1}, tryImport('./dist/entry.js');"
+            ),
         )
         for source in sources:
             with self.subTest(source=source):

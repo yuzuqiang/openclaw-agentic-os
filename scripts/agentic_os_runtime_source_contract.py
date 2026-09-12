@@ -6276,8 +6276,6 @@ def _js_statement_end_with_tokens(
             if depth == 0:
                 return start
             depth -= 1
-            if value == "}" and depth == 0:
-                return end
             continue
         if value == ";" and depth == 0:
             return end
