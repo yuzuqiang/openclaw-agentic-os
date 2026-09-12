@@ -35,9 +35,11 @@
         "status_reason": "The prior installed OpenClaw 2026.7.1 preflight artifact remains fail-closed historical evidence, but PR #50 changed capability source paths after its bound clean generator head. Current evidence is demoted until a clean exact-head recapture has zero capability-source drift."
     },
     "downstream_candidate_evidence": {
-        "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
+        "agentic_os_head_sha": "",
         "candidate_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
-        "classification": "issue44_phase_b_current_downstream_fail_closed_source_closure",
+        "classification": "issue44_phase_b_downstream_candidate_pending_exact_head_recapture",
+        "current_head_sha": "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd",
+        "historical_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
         "db_authority_enabled": false,
         "duplicate_acquire_identity_parity": false,
         "duplicate_release_identity_parity": false,
@@ -58,14 +60,14 @@
             "status": "not_started",
             "transition_id_sha256": "0d0118865dd3208abac97a262a0b097710144817584e53154fcf78ce38a38a99"
         },
-        "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json",
+        "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-pending-current.json",
         "phase_c_exact_head_required_before_review": true,
         "production_authority_enabled": false,
         "runtime_ready": false,
         "runtime_ready_candidate_evidence": false,
-        "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
-        "status": "fail_closed_runtime_source_closure_pending_phase_c",
-        "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate. PR #50 review later tightened dynamic import accounting: helper-call computed imports are accepted only when the parameter is not rewritten, the helper body has no dynamic with scope, and each accepted direct call remains in the helper declaration's lexical block, while literal-array for-of computed imports remain fail-closed because JavaScript iterator semantics are mutable. The companion incompatibility matrix now preserves dynamic-import remediation as the first downstream/local blocker, with the compile-cache respawn child-process entrypoint and missing committed dist entrypoints to recapture after that source-closure boundary.",
+        "sha256": "",
+        "status": "pending_clean_downstream_candidate_recapture",
+        "status_reason": "The prior 2026-09-11 downstream candidate prelaunch artifact remains fail-closed historical evidence, but its Agentic OS generator head is not an ancestor of the current reviewed lineage and the runtime-source verifier changed after that capture. Current downstream candidate evidence is demoted until a clean exact-head recapture is produced from the current reviewed head.",
         "validation_receipt_bound": false
     },
     "downstream_local_remediation_boundary": {
@@ -92,6 +94,19 @@
         "status": "fail_closed_downstream_local_remediation_required"
     },
     "historical_artifacts": [
+        {
+            "bound_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
+            "current_head_sha": "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd",
+            "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
+            "immutable_historical_bytes": true,
+            "interpretation": "fail-closed downstream candidate prelaunch snapshot from a non-ancestor Agentic OS generator head; not current evidence and pending clean exact-head recapture",
+            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json",
+            "raw_runtime_ready_candidate_evidence": false,
+            "raw_status": "fail_closed",
+            "runtime_ready_candidate_evidence": false,
+            "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
+            "status": "invalid_non_ancestor_downstream_snapshot_pending_recapture"
+        },
         {
             "epoch_policy": "frozen historical record; invalidated only through this forward sidecar",
             "immutable_historical_bytes": true,

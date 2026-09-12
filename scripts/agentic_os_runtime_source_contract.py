@@ -6189,6 +6189,13 @@ def _js_statement_end_with_tokens(
                         return body_end
             if value in {"with", "while", "for"}:
                 header_index = _next_js_code_token_index(tokens, token_index + 1)
+                if value == "for" and (
+                    header_index is not None
+                    and tokens[header_index][0] == "identifier"
+                    and tokens[header_index][1] == "await"
+                    and not _js_identifier_token_is_static_member(tokens, header_index)
+                ):
+                    header_index = _next_js_code_token_index(tokens, header_index + 1)
                 if (
                     header_index is not None
                     and tokens[header_index][0] == "punctuation"

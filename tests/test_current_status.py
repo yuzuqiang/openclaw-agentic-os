@@ -303,38 +303,60 @@ class CurrentStatusTests(unittest.TestCase):
 
         issue44_candidate = live["issue44_downstream_persistent_lifecycle_probe"]
         issue44_candidate_path = root / issue44_candidate["path"]
-        self.assertEqual(
-            issue44_candidate["sha256"],
-            hashlib.sha256(issue44_candidate_path.read_bytes()).hexdigest(),
-        )
-        issue44_candidate_payload = json.loads(
-            issue44_candidate_path.read_text(encoding="utf-8")
-        )
-        self.assertEqual(
-            issue44_candidate["status"],
-            "fail_closed_runtime_source_closure_pending_phase_c",
-        )
-        self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
-        self.assertFalse(issue44_candidate["validation_receipt_bound"])
-        self.assertFalse(issue44_candidate["duplicate_release_identity_parity"])
-        self.assertEqual(issue44_candidate_payload["status"], "fail_closed")
-        self.assertFalse(issue44_candidate_payload["runtime_ready"])
-        self.assertFalse(issue44_candidate_payload["runtime_ready_candidate_evidence"])
-        self.assertTrue(issue44_candidate_payload["phase_c_exact_head_required_before_review"])
-        self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["candidate_process_started"])
-        self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["production_gateway_restart_attempted"])
-        self.assertEqual(
-            issue44_candidate_payload["openclaw_head_sha"],
-            issue44_candidate["openclaw_head_sha"],
-        )
-        self.assertEqual(
-            index["downstream_candidate_evidence"]["isolated_non_production_gateway"][
-                "run_root_sha256"
-            ],
-            issue44_candidate_payload["isolated_non_production_gateway"][
-                "run_root_sha256"
-            ],
-        )
+        if issue44_candidate["status"] == "pending_clean_downstream_candidate_recapture":
+            self.assertFalse(issue44_candidate_path.exists())
+            self.assertEqual(issue44_candidate["sha256"], "")
+            self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
+            self.assertFalse(issue44_candidate["validation_receipt_bound"])
+            historical_candidate = next(
+                item
+                for item in index["historical_artifacts"]
+                if item["path"]
+                == "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json"
+            )
+            historical_candidate_path = root / historical_candidate["path"]
+            self.assertTrue(historical_candidate_path.exists())
+            self.assertEqual(
+                historical_candidate["sha256"],
+                hashlib.sha256(historical_candidate_path.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                historical_candidate["status"],
+                "invalid_non_ancestor_downstream_snapshot_pending_recapture",
+            )
+        else:
+            self.assertEqual(
+                issue44_candidate["status"],
+                "fail_closed_runtime_source_closure_pending_phase_c",
+            )
+            self.assertEqual(
+                issue44_candidate["sha256"],
+                hashlib.sha256(issue44_candidate_path.read_bytes()).hexdigest(),
+            )
+            issue44_candidate_payload = json.loads(
+                issue44_candidate_path.read_text(encoding="utf-8")
+            )
+            self.assertFalse(issue44_candidate["runtime_ready_candidate_evidence"])
+            self.assertFalse(issue44_candidate["validation_receipt_bound"])
+            self.assertFalse(issue44_candidate["duplicate_release_identity_parity"])
+            self.assertEqual(issue44_candidate_payload["status"], "fail_closed")
+            self.assertFalse(issue44_candidate_payload["runtime_ready"])
+            self.assertFalse(issue44_candidate_payload["runtime_ready_candidate_evidence"])
+            self.assertTrue(issue44_candidate_payload["phase_c_exact_head_required_before_review"])
+            self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["candidate_process_started"])
+            self.assertFalse(issue44_candidate_payload["isolated_non_production_gateway"]["production_gateway_restart_attempted"])
+            self.assertEqual(
+                issue44_candidate_payload["openclaw_head_sha"],
+                issue44_candidate["openclaw_head_sha"],
+            )
+            self.assertEqual(
+                index["downstream_candidate_evidence"]["isolated_non_production_gateway"][
+                    "run_root_sha256"
+                ],
+                issue44_candidate_payload["isolated_non_production_gateway"][
+                    "run_root_sha256"
+                ],
+            )
         matrix = live["issue44_downstream_incompatibility_matrix"]
         matrix_path = root / matrix["path"]
         self.assertTrue(matrix_path.exists())
@@ -657,6 +679,12 @@ class CurrentStatusTests(unittest.TestCase):
         self.assertTrue(current["no_production_lease_mutation"])
         candidate = index["downstream_candidate_evidence"]
         candidate_path = root / candidate["path"]
+        if candidate["status"] == "pending_clean_downstream_candidate_recapture":
+            self.assertFalse(candidate_path.exists())
+            self.assertEqual(candidate["sha256"], "")
+            self.assertFalse(candidate["runtime_ready_candidate_evidence"])
+            self.assertFalse(candidate["validation_receipt_bound"])
+            return
         self.assertEqual(
             candidate["sha256"], hashlib.sha256(candidate_path.read_bytes()).hexdigest()
         )

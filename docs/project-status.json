@@ -2,7 +2,7 @@
     "live_runtime_evidence": {
         "evidence_index": {
             "current_evidence_status": "pending_clean_generator_revision_capture",
-            "downstream_candidate_status": "fail_closed_runtime_source_closure_pending_phase_c",
+            "downstream_candidate_status": "pending_clean_downstream_candidate_recapture",
             "path": "docs/runtime-evidence/phase-b-20260811-evidence-index.json",
             "status": "pending_current_evidence"
         },
@@ -23,12 +23,14 @@
             "status": "fail_closed_downstream_local_remediation_required"
         },
         "issue44_downstream_persistent_lifecycle_probe": {
-            "agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
+            "agentic_os_head_sha": "",
             "candidate_process_started": false,
+            "current_head_sha": "8fe6a044c2ecd278b76e56cf67d3c6e8d938acfd",
             "db_authority_enabled": false,
             "duplicate_acquire_identity_parity": false,
             "duplicate_release_identity_parity": false,
             "duplicate_spawn_identity_parity": false,
+            "historical_agentic_os_head_sha": "e1ddc9be1b4e8cf04e311b192fe9260added0f7b",
             "isolated_non_production_gateway": true,
             "isolated_non_production_gateway_details": {
                 "candidate_port_closed": "not_required",
@@ -47,7 +49,7 @@
                 "transition_id_sha256": "0d0118865dd3208abac97a262a0b097710144817584e53154fcf78ce38a38a99"
             },
             "openclaw_head_sha": "602cc113bc65877c501c304ef7bbb86d0313eeb6",
-            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json",
+            "path": "docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-pending-current.json",
             "persistent_attestation_validated": false,
             "phase_c_exact_head_required_before_review": true,
             "production_authority_enabled": false,
@@ -59,9 +61,9 @@
             "runtime_ready": false,
             "runtime_ready_blocked_until_phase_c": true,
             "runtime_ready_candidate_evidence": false,
-            "sha256": "284898167b5849c6d106d8c5b93f3d77668a8a4046265e7be09b31b650ad97f0",
-            "status": "fail_closed_runtime_source_closure_pending_phase_c",
-            "status_reason": "Current downstream OpenClaw head 602cc113bc65877c501c304ef7bbb86d0313eeb6 was re-probed from the post-PR49 Agentic OS generator lineage in an isolated non-production prelaunch run. The probe wrote durable fail-closed evidence and did not start the candidate. PR #50 review later tightened dynamic import accounting: helper-call computed imports are accepted only when the parameter is not rewritten, the helper body has no dynamic with scope or self-reference, and each accepted direct call remains in the helper declaration's lexical block outside dynamic with scope, while literal-array for-of computed imports remain fail-closed because JavaScript iterator semantics are mutable. The companion incompatibility matrix now preserves dynamic-import remediation as the first downstream/local blocker, with the compile-cache respawn child-process entrypoint and missing committed dist entrypoints to recapture after that source-closure boundary.",
+            "sha256": "",
+            "status": "pending_clean_downstream_candidate_recapture",
+            "status_reason": "The prior 2026-09-11 downstream candidate prelaunch artifact remains fail-closed historical evidence, but its Agentic OS generator head is not an ancestor of the current reviewed lineage and the runtime-source verifier changed after that capture. Current downstream candidate evidence is demoted until a clean exact-head recapture is produced from the current reviewed head.",
             "validation_receipt_bound": false
         },
         "issue44_live_installed_preflight": {
@@ -133,7 +135,7 @@
         },
         "current_corrected_design_artifact": {
             "path": "docs/agentic-os-production-adaptation.md",
-            "sha256": "f5a2921b94a04369b9f73ac5857f659c6dc483a860c9c47535a9d2fc18b88074",
+            "sha256": "7769877e3a31f08bfa1637dcf0d379af5e75f89e992033f19e7bd259701852dd",
             "status": "current_successor_artifact_not_pr39_acceptance"
         },
         "merge_commit_sha": "b48a7cba8c6671b5dd33a369fb4f59f57d159739",

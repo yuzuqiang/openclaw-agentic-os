@@ -19,17 +19,19 @@ not evidence of production OpenClaw authority.
 - Project status contract: [`docs/project-status.json`](docs/project-status.json)
 - Runtime source-identity boundary: [`docs/runtime-source-closure-contract.md`](docs/runtime-source-closure-contract.md)
 - Accepted-head repository design artifact SHA-256: `c2d30fdbc8b6cc55873fc76446efbb5bad2c20e0cb85f2c9bb2723b86427e997`
-- Current corrected design artifact SHA-256: `f5a2921b94a04369b9f73ac5857f659c6dc483a860c9c47535a9d2fc18b88074`
+- Current corrected design artifact SHA-256: `7769877e3a31f08bfa1637dcf0d379af5e75f89e992033f19e7bd259701852dd`
 - Accepted PR: [`yuzuqiang/openclaw-agentic-os#39`](https://github.com/yuzuqiang/openclaw-agentic-os/pull/39)
 - Historical revalidation evidence, superseded by the accepted PR #39 successor:
   [`docs/runtime-evidence/phase-b-revalidation-20260809.json`](docs/runtime-evidence/phase-b-revalidation-20260809.json)
 - Current installed-runtime evidence lineage and Issue #44 downstream
   persistent-lifecycle recapture after PR #49 merged to `main` at
   `5908c6886d732e710631508aa0a1e365cad76989`. The current installed evidence
-  remains fail-closed, and the current downstream candidate evidence is
-  fail-closed before launch on runtime source-closure rejection with
-  `candidate_process_started=false`; no runtime-ready persistent-lifecycle
-  proof exists, no current-head GitHub Codex review binding exists, and
+  slot remains pending exact-head recapture, and the prior 2026-09-11
+  downstream candidate recapture is historical rather than current because its
+  Agentic OS generator head is not an ancestor of this reviewed lineage. Its
+  historical payload kept `candidate_process_started=false`; no runtime-ready
+  persistent-lifecycle proof exists, no current-head GitHub Codex review binding
+  exists, and
   historical candidate invocations and reviews must not be counted as current
   exact-head runtime evidence:
   [`docs/runtime-evidence/phase-b-20260811-evidence-index.json`](docs/runtime-evidence/phase-b-20260811-evidence-index.json)
@@ -531,13 +533,16 @@ and marks its combined-catalog interpretation superseded because it conflated
 model-callable `tools.catalog` evidence with Gateway source declarations.
 `DB_AUTHORITY_ENABLED` remains `False`.
 
-There is current Issue #44 downstream recapture evidence, but it is not a
-runtime-ready persistent-lifecycle proof and has no current-head GitHub Codex
-review binding. The local downstream OpenClaw candidate remains clean at
-`602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
+The 2026-09-11 Issue #44 downstream recapture is fail-closed historical
+evidence, not current downstream candidate proof, and has no current-head
+GitHub Codex review binding. The local downstream OpenClaw candidate remains
+clean at `602cc113bc65877c501c304ef7bbb86d0313eeb6`; the Agentic OS probe wrote
 `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260911.json`
-from the post-PR49 generator lineage and failed closed before starting the
-candidate. The helper-call `import(specifier)` sites in `openclaw.mjs` are now
+from a non-ancestor generator lineage and failed closed before starting the
+candidate. The forward evidence index now keeps the current downstream
+candidate slot at `pending_clean_downstream_candidate_recapture` until a clean
+exact-head recapture exists. The helper-call `import(specifier)` sites in
+`openclaw.mjs` are now
 accounted only when they flow from literal helper calls whose parameter is not
 rewritten, whose body has no dynamic `with` scope, and whose direct calls stay in
 the helper declaration's lexical block; helper body self-references and helper
