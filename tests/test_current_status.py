@@ -173,6 +173,32 @@ class CurrentStatusTests(unittest.TestCase):
             with self.subTest(claim=claim):
                 self.assertIn(claim, normalized_readme_status)
 
+        current_state_boundary = design_current_status.split(
+            "## Current-State Evidence Boundary", 1
+        )[1].split("- PR #37", 1)[0]
+        normalized_current_state_boundary = re.sub(r"\s+", " ", current_state_boundary)
+        self.assertIn(
+            "phase-b-issue44-live-installed-preflight-20260912.json",
+            current_state_boundary,
+        )
+        self.assertIn(
+            "phase-b-issue44-downstream-persistent-lifecycle-20260912.json",
+            current_state_boundary,
+        )
+        self.assertIn(
+            "compile-cache respawn child-process source-closure boundary",
+            normalized_current_state_boundary,
+        )
+        self.assertIn("reviewed_head_sha` unset", normalized_current_state_boundary)
+        self.assertNotIn(
+            "pending_clean_generator_revision_capture",
+            current_state_boundary,
+        )
+        self.assertNotIn(
+            "pending_clean_downstream_candidate_recapture",
+            current_state_boundary,
+        )
+
         stale_claims = (
             "Draft PR successor",
             "current Draft remediation",
@@ -748,11 +774,12 @@ class CurrentStatusTests(unittest.TestCase):
             "no_capability_source_drift_after_bound_head"
         ]
         self.assertTrue(expected_no_source_drift)
-        reviewed_head = current["reviewed_head_sha"]
-        self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
+        self.assertIsNone(current["reviewed_head_sha"])
+        generator_head = current["generator_revision"]["head_sha"]
+        self.assertRegex(generator_head, r"^[0-9a-f]{40}$")
         self.assertEqual(
             current["generator_binding_requirements"]["containing_revision_sha"],
-            reviewed_head,
+            generator_head,
         )
         subprocess.run(
             [
@@ -761,7 +788,7 @@ class CurrentStatusTests(unittest.TestCase):
                 str(root),
                 "merge-base",
                 "--is-ancestor",
-                reviewed_head,
+                generator_head,
                 "HEAD",
             ],
             check=True,
@@ -775,7 +802,7 @@ class CurrentStatusTests(unittest.TestCase):
                 "merge-base",
                 "--is-ancestor",
                 current["generator_revision"]["head_sha"],
-                reviewed_head,
+                generator_head,
             ],
             check=True,
             capture_output=True,
@@ -1008,12 +1035,14 @@ class CurrentStatusTests(unittest.TestCase):
         )
         bound_head = binding["agentic_os_head_sha"]
         self.assertRegex(bound_head, r"^[0-9a-f]{40}$")
-        reviewed_head = current["reviewed_head_sha"]
-        self.assertRegex(reviewed_head, r"^[0-9a-f]{40}$")
-        self.assertEqual(current["reviewed_head_sha"], reviewed_head)
+        self.assertIsNone(current["reviewed_head_sha"])
+        containing_revision = current["generator_binding_requirements"][
+            "containing_revision_sha"
+        ]
+        self.assertRegex(containing_revision, r"^[0-9a-f]{40}$")
         self.assertEqual(
             current["generator_binding_requirements"]["containing_revision_sha"],
-            reviewed_head,
+            bound_head,
         )
         subprocess.run(
             [
@@ -1022,7 +1051,7 @@ class CurrentStatusTests(unittest.TestCase):
                 str(root),
                 "merge-base",
                 "--is-ancestor",
-                reviewed_head,
+                containing_revision,
                 "HEAD",
             ],
             check=True,
@@ -1036,7 +1065,7 @@ class CurrentStatusTests(unittest.TestCase):
                 "merge-base",
                 "--is-ancestor",
                 bound_head,
-                reviewed_head,
+                containing_revision,
             ],
             check=False,
             stdout=subprocess.PIPE,

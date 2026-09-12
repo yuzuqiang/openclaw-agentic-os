@@ -142,36 +142,37 @@ Current-vs-proposed truth:
   `docs/runtime-evidence/phase-b-20260811-evidence-index.json` marks its stored
   generator binding invalid and its combined-catalog interpretation
   superseded; corrections never mutate the historical artifact.
-- The 2026-09-11 Issue #44 installed-runtime evidence is fail-closed
-  historical evidence from the post-PR49 main lineage after merge commit
-  `5908c6886d732e710631508aa0a1e365cad76989` and
-  still has `runtime_ready=false`; the forward evidence index keeps the current
-  live-installed slot at `pending_clean_generator_revision_capture` until a
-  clean exact-head recapture has zero capability-source drift. Connected Gateway
-  build, model-callable catalog availability, live reachability,
-  accepted-session semantics, and attestation readiness remain unproven. The
-  2026-09-11 downstream candidate recapture at OpenClaw
-  `602cc113bc65877c501c304ef7bbb86d0313eeb6` remains fail-closed historical
-  evidence, not current downstream candidate proof: it predates the current
-  runtime-source verifier/source-contract changes, it used an isolated
-  non-production run root and loopback port `20351`, did not start the
-  candidate, and stopped before Gateway/session/lease mutation. The forward
-  index keeps the downstream candidate slot at
-  `pending_clean_downstream_candidate_recapture` until a clean exact-head
-  recapture is produced. Literal helper-call computed dynamic imports
-  are accepted only when their parameter is not rewritten, their body has no
-  dynamic `with` scope, and direct calls remain in the helper declaration's
-  lexical block, while literal-array `for...of` computed imports in `openclaw.mjs` remain rejected because
-  JavaScript iterator semantics are mutable. The incompatibility matrix binds
-  the current source-closure blocker lines and the missing committed
-  `dist/entry.(m)js` launch outputs as downstream blockers to recapture after
-  the dynamic-import boundary is remediated locally, so the next remediation
-  must stay downstream/local until exact isolated evidence proves otherwise. The
-  2026-08-26 downstream candidate snapshot passed its isolated persistent
-  lifecycle runner with authenticated validation and duplicate release identity
-  parity, but remains invalidated as current evidence because its generator
-  hashes and lifecycle-attestation requirements drifted. A different-agent
-  exact-head Phase C rerun is required before any production-runtime claim. A plain catalog
+- The 2026-09-12 Issue #44 installed-runtime evidence is the current
+  clean-generator installed OpenClaw 2026.7.1 preflight at
+  `docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260912.json`.
+  It was generated from post-PR50 main commit
+  `3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3`, remains fail-closed with
+  `runtime_ready=false`, and intentionally leaves `reviewed_head_sha` unset
+  because no current-head GitHub Codex review binding exists for this runtime
+  evidence. Connected Gateway build identity, model-callable `tools.catalog`,
+  accepted-session semantics, and attestation readiness remain unproven;
+  `subagents.allowLease.status` live reachability was skipped to preserve the
+  no-production-lease-mutation boundary. The current downstream candidate
+  recapture at
+  `docs/runtime-evidence/phase-b-issue44-downstream-persistent-lifecycle-20260912.json`
+  used local downstream OpenClaw commit
+  `1cf0507d901441514338f37b55787a9030c9e349` on top of
+  `602cc113bc65877c501c304ef7bbb86d0313eeb6`. That local-only adaptation
+  source-bound the finite launcher dynamic imports, but the candidate was not
+  started (`candidate_process_started=false`) because prelaunch now fails
+  closed on the compile-cache respawn child-process source-closure boundary.
+  The incompatibility matrix at
+  `docs/runtime-evidence/phase-b-issue44-downstream-incompatibility-matrix-20260912.json`
+  records the current runtime-source verifier/source-contract boundary:
+  dynamic-import blocker locations are empty, respawn closure is the active
+  blocker, missing committed `dist/entry.(m)js` launch outputs are next,
+  runtime readiness remains false, production authority remains disabled, and a
+  different-agent exact-head Phase C rerun is required before any Ready,
+  review, merge, or production-runtime claim. The 2026-08-26 downstream
+  candidate snapshot passed its isolated persistent lifecycle runner with
+  authenticated validation and duplicate release identity parity, but remains
+  invalidated as current evidence because its generator hashes and
+  lifecycle-attestation requirements drifted. A plain catalog
   validates only an offline declared schema; unsigned mappings cannot mint
   production adapter authority. The production adapter remains inert until a
   real transport-bound attestor exists. Cross-process release-probe input is

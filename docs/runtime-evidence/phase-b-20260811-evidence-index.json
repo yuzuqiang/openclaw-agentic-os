@@ -28,11 +28,11 @@
         "no_production_lease_mutation": true,
         "path": "docs/runtime-evidence/phase-b-issue44-live-installed-preflight-20260912.json",
         "raw_status": "fail",
-        "reviewed_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
+        "reviewed_head_sha": null,
         "runtime_ready": false,
         "sha256": "c0aed881d4e171b81a9061cf094ea2a0583fc2f0f2d696acb2aa3e0a6faa566f",
         "status": "captured_from_clean_generator_revision",
-        "status_reason": "Fresh exact-head installed OpenClaw preflight recaptured after PR #50 merged. It remains fail-closed because tools.catalog was unavailable before contract validation; allowLease.status live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary."
+        "status_reason": "Fresh installed OpenClaw preflight recaptured after PR #50 merged from clean generator revision 3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3. It remains fail-closed because tools.catalog was unavailable before contract validation; allowLease.status live reachability was intentionally skipped to preserve the no-production-lease-mutation boundary. No current-head GitHub Codex review binding exists for this runtime evidence yet, so reviewed_head_sha remains unset."
     },
     "downstream_candidate_evidence": {
         "agentic_os_head_sha": "3b11abaae1bb6c7b99e8624ec6a9e43277cec0a3",
